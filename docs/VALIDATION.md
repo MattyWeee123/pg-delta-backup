@@ -48,7 +48,8 @@ The baseline runbook therefore remains an unexecuted first team task.
 
 ## Publication status
 
-The local starter files are ready for review.
-GitHub authenticated as MattyWeee123, but the exposed connector has no repository-creation operation and the local gh CLI is not authenticated.
-The remote repository has not been created by this preparation step.
-Repository publication and team issue creation remain pending a usable destination.
+The starter is published at [MattyWeee123/pg-delta-backup](https://github.com/MattyWeee123/pg-delta-backup) on the main branch.
+The repository is public by the project lead's choice.
+The local repository tracks origin/main.
+GitHub Actions results are available on the [Actions page](https://github.com/MattyWeee123/pg-delta-backup/actions).
+The backlog remains draft issue text; GitHub issues and teammate write-access invitations have not been created.
