@@ -40,7 +40,6 @@ That demonstrates a reason to investigate rolling matching or CDC for shifted fi
 - AlloyDB Omni compatibility or HA deployment.
 - Source-side helper, live-source consistency, real transport, fsync/atomic publication or resource-bound implementation.
 - Actual network bytes, CPU overhead, disk I/O or end-to-end performance.
-- GitHub Actions execution; the workflow is prepared but has not run here.
 
 Docker is installed on this Windows host, but the Docker daemon was not reachable during inspection.
 No cloud resources were provisioned.
@@ -52,4 +51,5 @@ The starter is published at [MattyWeee123/pg-delta-backup](https://github.com/Ma
 The repository is public by the project lead's choice.
 The local repository tracks origin/main.
 GitHub Actions results are available on the [Actions page](https://github.com/MattyWeee123/pg-delta-backup/actions).
+The [publication workflow run](https://github.com/MattyWeee123/pg-delta-backup/actions/runs/36779762833) passed the experiment tests and demo on GitHub's Ubuntu runner.
 The backlog remains draft issue text; GitHub issues and teammate write-access invitations have not been created.
