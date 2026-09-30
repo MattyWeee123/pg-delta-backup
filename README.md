@@ -1,7 +1,7 @@
 # pg-delta-backup
 
 Research starter for the CMU / AlloyDB Omni collaboration.
-Status: proposed scope and implementation contracts, awaiting sponsor confirmation.
+Status: sponsor direction clarified by supplied Google Chat screenshots; implementation design remains proposed.
 This repository does not yet contain a PostgreSQL backup implementation.
 
 ## The problem
@@ -9,8 +9,10 @@ This repository does not yet contain a PostgreSQL backup implementation.
 A destination already has an older physical copy of a database cluster.
 Can we produce a correct new backup while sending substantially fewer bytes across the constrained network link by reusing matching data already there?
 
-Our proposed research question is content-based reuse without requiring WAL summaries covering the entire interval since the old copy.
-This is a hypothesis to confirm with Ben, not an established product requirement or a claim of novelty.
+The sponsor expects a benchmark under active database workload, comparing backup time, network traffic and application performance degradation across team-defined workload scales.
+The output must preserve committed data through a defined recovery point with appropriate backup/recovery guarantees.
+It need not be byte-for-byte identical to an independently captured pg_basebackup output.
+Operation without old WAL summaries remains a possible differentiating experiment, not the sponsor's established central requirement.
 PostgreSQL 17+ incremental backup, rsync, and pgBackRest are relevant existing solutions.
 We must establish when our approach is useful relative to them.
 
@@ -23,6 +25,7 @@ We must establish when our approach is useful relative to them.
 5. [Research and code map](docs/RESEARCH.md): verified sources and reading tasks.
 6. [Benchmark and restore plan](benchmarks/README.md): measure equivalent outcomes.
 7. [Issue backlog](docs/BACKLOG.md): ready-to-use work items.
+8. [Correctness and recovery contract](docs/CORRECTNESS.md): proposed measurable meaning of no data loss.
 
 ## Recommended first implementation
 
@@ -33,7 +36,8 @@ Then verify and test-restore the reconstructed backup.
 
 This first architecture saves transfer bytes on that link, but still makes a full source-side backup and reads/hashes data.
 It is not a claim of lower source I/O or a finished live-backup replacement.
-Ben must approve this first milestone and the eventual source-side integration model.
+Use this as an internal integration milestone on the path to the required active-workload benchmark.
+The team owns its milestones; source-helper permissions and final deployment constraints still need clarification.
 
 ## Run the educational experiment
 
@@ -62,7 +66,7 @@ Keep the implementation in this repository as modules with shared tests.
 Create a separate PostgreSQL fork only if Ben requires a backend patch.
 Recommended production core: Rust if a standalone helper is accepted; C if upstream PostgreSQL integration is required.
 Python is used here only for the disposable research experiment and future orchestration.
-The team and Ben have not yet approved a language.
+The team has not yet selected a language; confirm whether upstream integration imposes a constraint.
 
 ## Contribution rules
 

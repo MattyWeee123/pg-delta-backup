@@ -4,7 +4,7 @@ These are proposed issue bodies, not evidence that GitHub issues have been creat
 Assign actual people in the sync.
 P0 means the first iteration depends on the answer or result.
 
-## 01 - Confirm sponsor use case and deployment constraints
+## 01 - Record sponsor direction and resolve deployment constraints
 
 Priority: P0.
 Owner: Matt.
@@ -12,7 +12,8 @@ Dependencies: none.
 Due: Oct 1.
 
 - Review BEN-QUESTIONS.md with Ben.
-- Record basis type, target versions, source-helper permission, staging acceptance and the primary metric.
+- Record the confirmed active-workload/time/network/degradation deliverable, then resolve basis type, target versions and source-helper permission.
+- Adopt proposed scales and recovery contract as team decisions; get feedback on unresolved guarantee expectations.
 - Record repo ownership/license rules and final demo date.
 
 Done when the decision log contains answers or named blockers, with no assumptions presented as sponsor approval.
@@ -84,6 +85,7 @@ Due: Oct 7.
 - Preserve backup metadata and required WAL.
 - Run pg_verifybackup and restore a disposable copy.
 - Check deterministic data and schema.
+- Implement the independent expected-state checks in CORRECTNESS.md, including committed operations, rollbacks and atomicity.
 
 Done when the integrated demo passes G2/G3 from SPEC.md; a hash-only demo is insufficient.
 
@@ -96,6 +98,8 @@ Due: plan Oct 2; first records Oct 7.
 
 - Follow benchmarks/README.md and version the run-record format.
 - Implement full, rsync and native incremental baselines before custom comparisons.
+- Include a no-backup workload baseline and capture recovery coverage/freshness in each result.
+- Define small/medium/large and load intensity separately; exercise active writes during capture.
 - Capture both-direction traffic, end-to-end time and component costs.
 - Label unavailable values and synthetic versus actual measurements.
 
@@ -123,6 +127,7 @@ Due: Oct 21.
 
 - Compare fixed chunks with a specified CDC candidate on representative relation files.
 - Evaluate staged, streamed-helper and backend integration obligations.
+- Decide deployment permissions by Oct 2; this later issue evaluates optimization of the accepted path, not the first feasibility decision.
 - Document positive and negative results, including CPU and source I/O costs.
 
 Done when a decision record selects the next architecture with evidence and sponsor agreement.

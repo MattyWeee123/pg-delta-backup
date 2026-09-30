@@ -1,6 +1,7 @@
 # Benchmark and restore plan
 
 Status: experiment design, not measured database results.
+Sponsor direction from the supplied chats: active workload, time/network/application-impact comparison, team-defined scales and a custom correctness benchmark.
 Do not compare an already staged custom source against an end-to-end baseline without also reporting staging cost.
 
 ## Two different experiments
@@ -16,6 +17,7 @@ Use fresh destination outputs and a read-only basis for each run.
 
 ### End-to-end database experiment
 
+First measure the workload with no backup running to establish application throughput and latency without backup interference.
 Compare remote full pg_basebackup, native incremental plus combination, and source-side capture plus custom transfer.
 Start the clock at backup initiation and stop at a verified usable backup.
 Report restore/recovery time separately and also report time-to-restored-database.
@@ -26,6 +28,28 @@ Record differences in prerequisites rather than masking them.
 Native incremental output is not the same artifact as a usable full backup until it is combined.
 The old basis backup's creation is a common prerequisite and normally excluded from recurring refresh cost, but disclose its storage and initial provisioning cost.
 If a method needs additional persistent preparation, report it separately.
+The recovery comparison follows [CORRECTNESS.md](../docs/CORRECTNESS.md), not byte equality between independent captures.
+Record each backup's recovery coverage and coverage age at publication so a stale snapshot is not mistaken for a fresh faster result.
+
+## Proposed sponsor-facing scales and plots
+
+Use small approximately 1 GiB, medium approximately 10 GiB and large approximately 50 GiB actual cluster data sizes as initial proposals.
+The large case is conditional on storage and approved budget; account for multiple backup copies and retained WAL before provisioning.
+Keep database size and workload intensity as separate dimensions.
+Calibrate sustainable transaction rate without backup, then test low/medium/high offered rates at roughly 25%, 50% and 75% of that rate with fixed client/resource settings and a declared mix.
+Record achieved rate, queued/dropped/failed requests and latency so offered load is not confused with completed work.
+These are proposed experimental levels, not sponsor-defined requirements or established results.
+
+For each chosen size/load case, show backup duration, total link traffic, throughput loss and p95 latency change.
+Use the matching no-backup run as the denominator for application degradation:
+
+```text
+throughput_loss = 1 - TPS_during_backup / TPS_without_backup
+latency_increase = p95_during_backup / p95_without_backup - 1
+```
+
+Where a fixed offered rate keeps completed throughput unchanged, latency and queueing may reveal degradation that TPS does not.
+Include raw values and failed trials; report speedup only where the recovery guarantees and measurement boundaries match.
 
 ## First PostgreSQL baseline recipe
 
@@ -70,7 +94,7 @@ The commands alone do not set up a remote topology or measure its traffic.
 | Change amount | 0%, 1%, 10%, 100% of chosen row set | Record actual changed file/chunk bytes independently |
 | Basis | Valid recent backup | Older backup, corrupted basis chunk, wrong cluster, absent basis |
 | Network | Local correctness first; then two hosts/containers across a measured link | Controlled low/high bandwidth and latency |
-| Source activity | Quiescent data for a deterministic oracle | Concurrent writes and declared recovery endpoint |
+| Source activity | Quiescent fixture for initial debugging plus active-workload native baseline | Required integrated active-load comparison with declared recovery endpoint |
 | Algorithm | Full transfer, fixed 8 KiB, fixed 64 KiB, rsync | CDC with recorded min/average/max parameters |
 
 No-workload backup captures may still differ in metadata and WAL.
@@ -98,19 +122,23 @@ Prefer medians plus range for the small initial sample; do not claim significanc
 
 ## Restore oracle
 
-- First prove exact reconstructed bytes relative to B1 before booting the output.
+- For the frozen transfer component only, prove exact reconstructed bytes relative to B1 before booting the output.
 - Verify the PostgreSQL manifest and required WAL using the appropriate major-version tools.
 - Restore from a disposable copy into an isolated instance with distinct sockets/ports and no unintended upstream replication connection.
 - Confirm recovery completion, expected tables and schema, row counts, deterministic ordered data digests, and selected application-level invariants.
 - Test missing/corrupt WAL and changed output as negative controls.
 - Preserve the immutable basis and target backup fixtures for reproduction.
+- Compare committed operation outcomes against independent expected state; ensure rolled-back and in-flight transaction effects are absent.
+- Restore the self-contained package without supplementary WAL access before any separately labeled PITR-assisted comparison.
 
 For concurrent writes, use a declared recovery target or a controlled barrier that both expected-state capture and restore honor.
 Two independently captured backups need not have identical bytes or identical recovery endpoints even if taken close together.
+See CORRECTNESS.md for a common named-target test and its explicit additional WAL requirement.
 
 ## Results record
 
 Store one JSON object per run with: run_id, timestamp, git_commit, versions, image_digest, method, configuration, workload_seed, actual_db_bytes, requested_row_change_fraction, observed_chunk_change_fraction, basis_age, timings, traffic_by_direction, cpu, memory, disk_io, storage, verification_result, restore_result, errors and unavailable_metrics.
+Also record timeline, capture_end_lsn, guaranteed_recovery_cutoff, publication_time, coverage_age, oracle_kind, supplementary_wal_bytes, no_backup_reference_run, offered_rate, achieved_rate and request failures.
 Include a units object and a `measurement_kind` distinguishing synthetic payload estimates, local transfer instrumentation and real wire measurements.
 
 Do not fabricate a baseline when Docker, PostgreSQL or Omni is unavailable.

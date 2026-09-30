@@ -1,7 +1,22 @@
 # Lead briefing
 
-Prepared September 30, 2026, from the supplied project notes and primary technical sources.
-All proposed decisions below are recommendations, not decisions already agreed with Ben or the team.
+Prepared September 30, 2026, from the supplied project notes, Google Chat screenshots and primary technical sources.
+Sponsor direction below comes from those screenshots; the implementation choices and detailed correctness contract remain team proposals.
+
+## What the chats settle
+
+Ben expects a benchmark that runs a database workload while measuring backup duration, network traffic and application performance degradation.
+He expects the team to define small/medium/large scales and propose feasible mid-semester and final deliverables.
+He explicitly accepts outputs that differ physically from pg_basebackup, including when backups finish at the same time.
+The desired outcome is recovery with no lost committed data within an explicit recovery boundary, not merely a database that starts.
+The exact boundary and validation procedure still need a precise team proposal.
+
+Sam and Uttansh have already raised the key correctness questions.
+The next step is to turn that discussion into executable checks and assigned deliverables.
+Propose Sam for benchmark/validation design and Uttansh for the recovery contract, subject to their availability.
+
+Read [CORRECTNESS.md](CORRECTNESS.md) for the proposed test approach.
+Avoid claiming that the wall-clock time when a command returns is automatically the database recovery cutoff.
 
 ## What you are trying to solve
 
@@ -30,10 +45,11 @@ They identify changed relation blocks from WAL summaries and use a prior backup 
 The output requires reconstruction with earlier backups.
 See the [incremental backup documentation](https://www.postgresql.org/docs/17/continuous-archiving.html#BACKUP-INCREMENTAL-BACKUP).
 
-The proposed distinction is to discover reusable bytes by examining file contents, even when historical WAL summaries are unavailable.
+One possible distinction to investigate is discovering reusable bytes by examining file contents when historical WAL summaries are unavailable.
 We still need the WAL required to recover the newly captured backup.
 This is not a "backup without WAL" project.
-Ask Ben whether this distinction describes the intended use case.
+Do not make that hypothesis the project mission without evidence.
+Proceed with the confirmed active-workload comparison and ask only whether a particular customer use case should shape the design.
 
 Do not claim that content-based delta transfer is new: [rsync already does it](https://rsync.samba.org/tech_report/node2.html).
 [pgBackRest also provides block incremental backups](https://pgbackrest.org/configuration.html#section-repository/option-repo-block).
@@ -70,9 +86,9 @@ You do need to make the uncertainty explicit and leave with owners, evidence req
 
 Suggested opening:
 
-> We left the last meeting with broad research tasks, but not concrete outputs.
-> I want to reset that today.
-> We have a draft scope and a few assumptions to confirm with Ben.
+> Ben has given us a clear deliverable: compare our backup approach with pg_basebackup under active load and demonstrate correctness.
+> Sam and Uttansh have already clarified that byte equality is not the product requirement.
+> Today let's turn that into a measurable recovery guarantee, a baseline experiment, and implementation tasks.
 > Each of us will leave with one small deliverable, one reviewer, and a date.
 > Our first shared milestone is a backup we can restore successfully.
 
@@ -84,8 +100,8 @@ Present this packet as a proposed starting point for team review.
 | Time | Discussion | Required outcome |
 |---|---|---|
 | 0-5 min | Explain the problem using the older-copy example | Shared vocabulary |
-| 5-12 min | Native incremental, rsync, and the sponsor's use case | Identify the distinction to validate |
-| 12-22 min | Review source access, basis type, and correctness boundary | Approve the first experiment; flag Ben decisions |
+| 5-12 min | Confirmed sponsor deliverable and proposed workload scales | Agree which comparisons will be shown |
+| 12-22 min | Recovery cutoff, correctness oracle, source access and basis type | Adopt a testable first contract; flag deployment questions |
 | 22-35 min | Assign the five workstreams in PLAN.md | Actual names, reviewers, deliverables, due dates |
 | 35-42 min | Define the next demo and integration owner | One executable milestone, not five isolated documents |
 | 42-45 min | Read back decisions and blockers | Written decision record |
@@ -94,7 +110,7 @@ Present this packet as a proposed starting point for team review.
 
 - First 45 minutes: read this briefing, run the synthetic demo, and explain the problem aloud.
 - Next 45 minutes: review SPEC.md and mark anything you cannot explain.
-- Next 30 minutes: prepare the five highest-priority questions for Ben.
+- Next 30 minutes: prepare the concrete proposal and remaining deployment questions for Ben.
 - Next 45 minutes: review the proposed assignments and repository content.
 - Next 30 minutes: rehearse the opening and agenda, then stop expanding the plan.
 - Leave the remaining time for replies, setup problems, other obligations, and rest.

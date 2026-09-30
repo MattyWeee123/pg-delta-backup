@@ -1,19 +1,27 @@
-# Proposed specification v0.1
+# Proposed specification v0.2
 
-Status: review proposal, September 30, 2026.
+Status: review proposal updated from sponsor-chat evidence, September 30, 2026.
 Normative words in this document define proposed acceptance tests, not functionality already implemented.
 
 ## 1. Objective and scope
 
-Given a newly completed physical backup S and an older immutable basis B at the destination, construct a new directory O whose supported file contents and directory inventory match S, while avoiding transmission of reusable B bytes across a designated network link.
-The research hypothesis is usefulness when historical WAL summaries for B are missing or when the destination already holds useful bytes outside a managed incremental chain.
-Sponsor confirmation is required before claiming either as the final use case.
+Product objective: use an older destination copy to reduce backup transfer cost while a PostgreSQL workload remains active, preserving committed data through a declared recovery cutoff.
+Compare backup duration, network traffic and application degradation with pg_basebackup across team-defined scales.
+This direction and the absence of a byte-identity requirement come from Ben's messages in the supplied screenshots.
+The exact guarantee and test oracle are proposed in [CORRECTNESS.md](CORRECTNESS.md).
 
-MVP target: Linux, one agreed PostgreSQL 17 build, plain backups, standard local filesystem, no external tablespaces, no user-created symlinks, and frozen inputs.
+Internal transfer milestone: given a newly completed physical backup S and an older immutable basis B, construct O whose supported file contents and directory inventory match S.
+Exact reconstruction of this fixed S is a component test.
+It does not require two independently captured live backups to have identical bytes.
+Historical-WAL-summary independence is an optional research hypothesis, not a confirmed primary requirement.
+
+First transfer milestone: Linux, one agreed PostgreSQL 17 build, plain backups, standard local filesystem, no external tablespaces, no user-created symlinks, and frozen inputs.
+The integrated milestone captures backups while workload is active, then applies the frozen-input transfer path.
 AlloyDB Omni needs its own compatibility gate on Ben's specified version.
 SQL compatibility alone is not proof of interchangeable physical backup formats or recovery behavior.
 
-Out of scope for MVP: live PGDATA scanning, cross-major upgrades, arbitrary running destination directories, failover during capture, resumable partial jobs, cloud object-store output, a PostgreSQL wire-protocol extension, and full pg_basebackup option compatibility.
+Out of scope for the first transfer milestone: direct live PGDATA scanning, cross-major upgrades, arbitrary running destination directories, failover during capture, resumable partial jobs, cloud object-store output, a PostgreSQL wire-protocol extension, and full pg_basebackup option compatibility.
+An active-workload end-to-end benchmark is required for the sponsor deliverable, even though direct live-filesystem scanning is deferred.
 Unsupported cases fail explicitly.
 They must not silently produce an incomplete backup.
 
@@ -137,10 +145,10 @@ Do not trust paths received from the peer.
 | G0: ordinary bytes | Exact reconstruction for empty files, identical bytes, overwrite, append, truncate, delete, rename, reordering, and complete rewrite |
 | G1: failure handling | Corrupt literals/references, wrong basis, truncation, interrupted transfer, disk-full and invalid paths fail without publishing a complete output |
 | G2: backup integrity | Reconstructed completed backup passes matching-major pg_verifybackup with WAL parsing enabled |
-| G3: restore | Isolated PostgreSQL starts from a disposable copy, completes recovery, and matches expected SQL data and schema checks |
-| G4: live capture | Sustained write workload during standard capture; resulting backup passes G2/G3 against a well-defined recovery endpoint |
+| G3: restore | Isolated PostgreSQL reaches a declared recovery target and matches expected committed data, schema and transaction invariants; aborted/uncommitted effects are absent |
+| G4: live capture | Required sponsor milestone: sustained write workload during capture; pass G2/G3 and record capture-end, coverage and publication boundaries separately |
 | G5: target platform | Ben's exact Omni version and deployment pass agreed tests; PostgreSQL results alone are insufficient |
-| G6: usefulness | End-to-end and component measurements compared with native full/incremental and rsync under declared workloads |
+| G6: usefulness | Backup time, both-direction traffic and application degradation compared under active workload; include no-backup workload baseline, native full/incremental and transfer-level rsync comparisons |
 
 [pg_verifybackup explicitly does not replace a test restore](https://www.postgresql.org/docs/17/app-pgverifybackup.html).
 Never boot the sole retained backup or basis for a test because recovery changes its files.
@@ -157,6 +165,7 @@ No performance percentage is a sponsor-approved target yet.
 
 ## 9. Decisions pending
 
-Ben: intended use case; source-helper permission; staging acceptance; target versions; final live-source expectations; primary metric; repo/license rules.
-Team: implementation language; concrete wire encoding; memory budget; ownership; first test machine.
+Ben: destination-copy type and deployment restrictions; source-helper permission; target versions; upstream integration and repo/license constraints; any specific customer scenario or budget limit.
+Team: proposed recovery contract, workload scales, milestone dates, implementation language, wire encoding, memory budget, ownership and first test machine.
+Present the team's choices for feedback instead of asking Ben to define the plan.
 These do not block reading, the educational experiment, native backup/restore baselines, or a reviewed design.

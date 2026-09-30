@@ -2,6 +2,10 @@
 
 Date: September 30, 2026.
 
+The documentation was subsequently revised using the supplied sponsor-chat screenshots.
+CORRECTNESS.md describes a proposed oracle and recovery contract, not a tested implementation.
+No new implementation or database validation is claimed by that documentation update.
+
 ## Executed locally
 
 - Python 3.12.14 standard-library experiment.

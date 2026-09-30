@@ -1,6 +1,8 @@
 # Research and code map
 
 Checked September 30, 2026.
+The supplied Google Chat screenshots additionally establish an active-workload benchmark deliverable and logical recovery correctness instead of independent-backup byte identity.
+Missing historical WAL summaries remain one candidate scenario, not the central confirmed sponsor requirement.
 Version-specific PostgreSQL links intentionally use version 17 as a research baseline, not a claim that it is the newest version or the sponsor's chosen version.
 Pin actual binaries, container digests and source commits when experiments run.
 
@@ -84,6 +86,7 @@ Trace one full backup and one native incremental backup, with the documentation 
 12. [pgBackRest block incremental configuration](https://pgbackrest.org/configuration.html#section-repository/option-repo-block) and [user guide](https://pgbackrest.org/user-guide.html): existing block-level backup and restore features.
 13. [FastCDC, USENIX ATC 2016](https://www.usenix.org/conference/atc16/technical-sessions/presentation/xia): content-defined chunking research.
 14. [AlloyDB Omni container backup overview](https://docs.cloud.google.com/alloydb/omni/containers/17.9.0/docs/backup-overview): example versioned Omni backup guidance; Ben must select the actual target.
+15. [Backup control functions](https://www.postgresql.org/docs/17/functions-admin.html#FUNCTIONS-ADMIN-BACKUP) and [recovery targets](https://www.postgresql.org/docs/17/runtime-config-wal.html#RUNTIME-CONFIG-WAL-RECOVERY-TARGET): markers, target semantics and explicit recovery boundaries.
 
 The user-provided meeting notes establish project intent and team dates.
 They are not copied into this repository and are not authoritative documentation of PostgreSQL internals.
