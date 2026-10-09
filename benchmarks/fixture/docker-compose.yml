@@ -1,8 +1,7 @@
 # Disposable PostgreSQL 17 cluster for benchmark runs. Synthetic data only.
 #
-# UNVALIDATED: written while the Docker daemon was unreachable on the authoring
-# host. Whoever first brings this up must confirm it and record the result in
-# docs/VALIDATION.md. See benchmarks/README.md "Running the v0.1 runner".
+# Sam validated the original PostgreSQL fixture locally. The consolidated
+# configuration adds the shared runner and bounded resources. See VALIDATION.md.
 #
 # Never point this at, or restore into, a cluster holding real data.
 #
@@ -11,8 +10,10 @@
 
 services:
   postgres:
-    image: postgres:17
-    container_name: pg-delta-bench
+    image: ${PG_IMAGE:-public.ecr.aws/docker/library/postgres:17}
+    cpus: ${POSTGRES_CPUS:-2}
+    mem_limit: ${POSTGRES_MEMORY:-2g}
+    shm_size: 256mb
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your shell}
       # Data checksums are required by benchmarks/README.md step 2 and let
@@ -29,7 +30,7 @@ services:
       - -c
       - summarize_wal=on
       # pg_basebackup --wal-method=stream opens a second connection, so the
-      # default of one sender would deadlock a streaming backup.
+      # fixture explicitly allows enough senders for capture and WAL streaming.
       - -c
       - max_wal_senders=10
       - -c
@@ -46,7 +47,29 @@ services:
       timeout: 5s
       retries: 10
 
+  runner:
+    profiles: [tools]
+    build:
+      context: ../..
+      dockerfile: benchmarks/Dockerfile
+      target: cli
+      args:
+        PG_IMAGE: ${PG_IMAGE:-public.ecr.aws/docker/library/postgres:17}
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your shell}
+      BENCH_IMAGE_DIGEST: ${PG_IMAGE:-unresolved-tag}
+      GITHUB_SHA: ${BENCH_COMMIT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    cpus: 1
+    mem_limit: 1g
+    volumes:
+      - backups:/results
+    command: [--host, postgres, --user, postgres, --out, /results]
+
 volumes:
   # Named rather than bind-mounted: a bind mount on a Windows host filesystem
   # would make the measured I/O unrepresentative.
   pgdata:
+  backups:

@@ -16,13 +16,15 @@ import random
 import re
 import shlex
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 import time
 import traceback
 import uuid
+
+from benchmarks.backup import (atomic_json, basebackup_command, directory_bytes,
+                               run_backup, run_command)
 
 
 TOOLS = ("postgres", "initdb", "pg_ctl", "psql", "pg_basebackup",
@@ -35,31 +37,12 @@ def controlled_env():
     return {key: value for key, value in os.environ.items() if not key.startswith("PG")}
 
 
-def atomic_json(path: Path, value: object) -> None:
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w") as stream:
-        json.dump(value, stream, indent=2, allow_nan=False)
-        stream.write("\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    temporary.replace(path)
-    descriptor = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def sha256(path: Path) -> str:
     result = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             result.update(chunk)
     return result.hexdigest()
-
-
-def directory_bytes(path: Path) -> int:
-    return sum(p.stat().st_size for p in path.rglob("*") if p.is_file())
 
 
 def percentile(values: list[float], fraction: float) -> float | None:
@@ -152,24 +135,17 @@ class Trial:
         self.counter += 1
         prefix = self.output / f"{self.counter:03d}-{name}"
         argv = [self.tools.get(name, name), *map(str, arguments)]
-        before = time.perf_counter()
-        with prefix.with_suffix(".out").open("wb") as out, prefix.with_suffix(".err").open("wb") as err:
-            process = subprocess.Popen(argv, stdin=subprocess.PIPE if sql else subprocess.DEVNULL,
-                                       stdout=out, stderr=err, start_new_session=True, env=controlled_env())
-            try:
-                process.communicate(input=sql.encode() if sql else None, timeout=timeout)
-            except subprocess.TimeoutExpired:
-                os.killpg(process.pid, signal.SIGKILL)
-                process.wait()
-                raise
-        elapsed = time.perf_counter() - before
-        record = {"argv": argv, "seconds": elapsed, "returncode": process.returncode,
+        phase = run_command(argv, prefix.with_suffix('.out'), timeout,
+                            stderr_path=prefix.with_suffix('.err'), input_text=sql,
+                            env=controlled_env())
+        record = {"argv": argv, "seconds": phase['duration_seconds'],
+                  "returncode": phase['exit_code'], "error": phase['error'],
                   "stdout": prefix.with_suffix(".out").name,
                   "stderr": prefix.with_suffix(".err").name}
         self.commands.append(record)
         atomic_json(self.output / "commands.json", self.commands)
-        if check and process.returncode:
-            raise RuntimeError(f"{name} failed ({process.returncode}): "
+        if check and (record['returncode'] != 0 or record['error']):
+            raise RuntimeError(f"{name} failed ({record['returncode']}): "
                                + prefix.with_suffix(".err").read_text()[-3000:])
         return record, prefix.with_suffix(".out")
 
@@ -238,17 +214,20 @@ VACUUM ANALYZE bench.accounts;
 """)
 
     def backup(self, output, basis=None):
-        argv = ["-h", self.socket, "-p", "5432", "-U", "bench", "-D", output, "-Fp", "-X", "stream",
-                "--checkpoint=fast", "--manifest-checksums=SHA256"]
-        if basis:
-            argv.append("--incremental=" + str(basis / "backup_manifest"))
-        record, _ = self.command("pg_basebackup", argv)
+        argv = basebackup_command(self.tools['pg_basebackup'], output,
+                                  host=self.socket, port=5432, user='bench', basis=basis)
+        record, _ = self.command("pg_basebackup", argv[1:])
         shutil.copyfile(output / "backup_manifest", self.output / (output.name + "-manifest.json"))
         return record["seconds"]
 
     def verify(self, path, *, check=True):
         record, _ = self.command("pg_verifybackup", [path], check=check)
         return record
+
+    def backup_phase(self, stage, argv):
+        record, _ = self.command(Path(argv[0]).name, argv[1:], check=False)
+        return {'exit_code': record['returncode'], 'duration_seconds': record['seconds'],
+                'error': record['error'], 'stdout': record['stdout'], 'stderr': record['stderr']}
 
     def change(self):
         changed = max(1, int(self.args.rows * self.args.change_fraction))
@@ -391,7 +370,7 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
     trial.setup()
     basis = trial.root / "basis"
     trial.backup(basis)
-    trial.verify(basis)
+    basis_check = trial.verify(basis)
     basis_manifest_sha = sha256(basis / "backup_manifest")
     trial.change()
     record = {"method": method, "mode": mode, "status": "running",
@@ -410,28 +389,40 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
     start = time.perf_counter()
     start_wall = time.time()
     output = trial.root / "output"
-    if method == "full":
-        record["capture_seconds"] = trial.backup(output)
-        record["combine_seconds"] = 0.0
-        record["capture_bytes"] = directory_bytes(output)
-    elif method == "incremental":
-        increment = trial.root / "increment"
-        record["capture_seconds"] = trial.backup(increment, basis)
-        record["increment_input_verification_seconds"] = trial.verify(increment)["seconds"]
-        record["capture_bytes"] = directory_bytes(increment)
-        command, _ = trial.command("pg_combinebackup", ["--manifest-checksums=SHA256", "--copy",
-                                  "-o", output, basis, increment])
-        record["combine_seconds"] = command["seconds"]
-        shutil.copyfile(output / "backup_manifest", trial.output / "output-manifest.json")
+    if method in ('full', 'incremental'):
+        backup_result, code = run_backup(
+            'pg_basebackup_' + method, run_id=trial.output.name, output=output,
+            tools=trial.tools, execute=trial.backup_phase, host=trial.socket, user='bench',
+            basis=basis if method == 'incremental' else None,
+            increment=trial.root / 'increment' if method == 'incremental' else None,
+            basis_verification={'exit_code': basis_check['returncode'],
+                'duration_seconds': basis_check['seconds'], 'error': basis_check['error'],
+                'stdout': basis_check['stdout'], 'stderr': basis_check['stderr']}
+                if method == 'incremental' else None)
+        record['backup_result'] = backup_result
+        atomic_json(trial.output / 'backup-result.json', backup_result)
+        if code:
+            raise RuntimeError('Shared backup adapter rejected trial: ' + backup_result['status'])
+        record['capture_seconds'] = backup_result['backup']['duration_seconds']
+        record['combine_seconds'] = (backup_result['combination']['duration_seconds']
+                                     if backup_result['combination'] else 0.0)
+        if backup_result['increment_verification']:
+            record['increment_input_verification_seconds'] = backup_result['increment_verification']['duration_seconds']
+        record['capture_bytes'] = backup_result['backup_file_bytes']
+        record['output_bytes'] = backup_result['output_file_bytes']
+        record['method_seconds'] = backup_result['method_seconds']
+        record['verification_seconds'] = backup_result['verification']['duration_seconds']
+        record['verified_backup_seconds'] = backup_result['time_to_verified_seconds']
+        for name in ('output', 'increment'):
+            manifest = trial.root / name / 'backup_manifest'
+            if manifest.is_file():
+                shutil.copyfile(manifest, trial.output / (name + '-manifest.json'))
     elif method == "no_backup":
         trial.finish_workload()
     else:
         raise ValueError("Unknown method")
-    record["method_seconds"] = time.perf_counter() - start
-    if method != "no_backup":
-        record["verification_seconds"] = trial.verify(output)["seconds"]
-        record["verified_backup_seconds"] = time.perf_counter() - start
-        record["output_bytes"] = directory_bytes(output)
+    if method == 'no_backup':
+        record['method_seconds'] = time.perf_counter() - start
     end_wall = time.time()
     if mode == "active":
         if method != "no_backup":
@@ -520,7 +511,7 @@ def main(argv=None):
     args.output = args.output.resolve()
     args.output.mkdir(parents=True)
     version = subprocess.check_output([tools["postgres"], "--version"], text=True).strip()
-    bundle = {"schema_version": 1, "status": "running", "scope": "native baseline smoke",
+    bundle = {"schema_version": 2, "status": "running", "scope": "native baseline smoke",
         "performance_claim": "descriptive local measurements; not a controlled cross-host performance baseline",
         "postgres_version": version, "python_version": platform.python_version(),
         "platform": platform.platform(), "cpu_count": os.cpu_count(),
