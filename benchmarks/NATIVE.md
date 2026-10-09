@@ -28,7 +28,7 @@ python -m benchmarks.report_native results/native-first/results.json \
 
 The output path must not exist. Use a different path for each attempt. Do not run multiple benchmark jobs concurrently on the same machine. All database authentication is confined to private Unix-socket directories; TCP listening is disabled. Caller libpq environment settings are removed. Source and restore connections check the actual data-directory identity.
 
-For Docker, resolve `postgres:17` to a digest, build with `--build-arg PG_IMAGE=<digest>`, and run benchmarks/Dockerfile as its non-root postgres user. The Actions workflow records the resolved digest before building and uses `--network none`, two CPUs, 2 GiB memory, and 256 MiB shared memory. Preserve the digest for reproduction; the mutable tag is only the initial resolver. The exact Python and PostgreSQL versions are recorded too.
+For Docker, resolve `public.ecr.aws/docker/library/postgres:17` (the Docker Official Image in ECR Public) to a digest, build with `--build-arg PG_IMAGE=<digest>`, and run benchmarks/Dockerfile as its non-root postgres user. The Actions workflow records the resolved digest before building and uses `--network none`, two CPUs, 2 GiB memory, and 256 MiB shared memory. Preserve the digest for reproduction; the mutable tag is only the initial resolver. The exact Python and PostgreSQL versions are recorded too.
 
 ## Meaning of correctness
 
