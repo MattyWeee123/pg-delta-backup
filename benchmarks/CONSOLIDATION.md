@@ -9,7 +9,7 @@ Sam's `benchmark-harness-v0.1` commit `ff8b85e` is preserved as a parent of the 
 | `python -m benchmarks.benchmark` | Run one full or incremental backup against an existing disposable fixture; retain logs and results | Shared capture, input verification, combination, final verification, timers and v2 backup record |
 | `python -m benchmarks.native_baseline` | Create small isolated databases, run the randomized matrix, and test actual recovery | The same adapters and record, plus controlled fixtures, pgbench, restore oracles and negative controls |
 
-Both paths default to plain format, streamed WAL, SHA256 manifests, a fast checkpoint and normal PostgreSQL synchronization. The CLI permits an explicit checksum/checkpoint choice, recorded with the run; comparisons must match those choices. `--format tar` is now rejected because this PG17 verification path expects an unpacked plain backup. There is no custom backup or transfer engine in either path.
+Both paths default to plain format, streamed WAL, SHA256 manifests, a fast checkpoint and normal PostgreSQL synchronization. The CLI permits an explicit checksum/checkpoint choice, recorded with the run; comparisons must match those choices. Disabling file checksums (`NONE`) is rejected, and every listed basis file must have a checksum. PostgreSQL can otherwise accept a manifest without file checksums, which cannot detect same-size data corruption. `--format tar` is now rejected because this PG17 verification path expects an unpacked plain backup. There is no custom backup or transfer engine in either path.
 
 The shared adapter supports `pg_basebackup_full` and `pg_basebackup_incremental`. Incremental requires a complete immutable B0, verifies it as preparation, captures I1, verifies I1, combines B0+I1 with `--copy`, then verifies the resulting full package. A failing phase stops the pipeline. The native suite passes the actual B0 verification result obtained before workload launch; the standalone CLI performs that prerequisite itself. Chained incremental bases are outside this CLI's initial contract.
 
@@ -72,3 +72,29 @@ No cloud provisioning is part of this consolidation. GCP can host the future con
 ## Completion still required
 
 The combined code is a working integration foundation. It is not the completed baseline release: finish the HammerDB recovery oracle and workload coordination, matched no-backup windows, network/resource observers, calibrated scales and repeated controlled runs. See [BASELINE-GATE.md](BASELINE-GATE.md). Candidate optimization follows that release.
+
+## Where to implement the proposed tool
+
+This decision concerns the eventual delta algorithm, not the Python experiment runner. A binary or executable is simply a program that can be launched, such as `pg_basebackup`. That existing client is itself a separate executable built from PostgreSQL's source tree, so using PostgreSQL code and shipping a separate executable are not mutually exclusive.
+
+| Choice | Meaning | Tradeoff |
+|---|---|---|
+| Standalone helper | A new command uses standard PostgreSQL backup interfaces, then selects and transfers reusable/new data. | Easy to compare and iterate without a custom database server; a staged implementation incurs capture, local disk and hashing costs. |
+| Modify the PostgreSQL client | Change `pg_basebackup` or reuse its implementation. | Reuses existing client plumbing; filtering bytes after they crossed the measured link cannot save that transfer. |
+| Modify PostgreSQL server/protocol | Add selection or transfer behavior where the server produces the backup. | Can avoid earlier work or transfer, but requires a custom server build and broader recovery/protocol testing. |
+
+Engineering recommendation: first prototype a standalone helper against completed, immutable backups captured on the source side. Reuse standard capture/recovery tools and include staging costs in end-to-end results. Compare against full transfer and rsync before inventing new transport infrastructure. Revisit server integration if the measured bottleneck or agreed deployment target justifies it. This is a recommendation, not a finalized team decision.
+
+```mermaid
+flowchart LR
+  DB[(Source PostgreSQL)] --> C[Standard local backup capture]
+  C --> S[Frozen new backup]
+  S --> D[Proposed delta sender]
+  D -->|measured link| R[Receiver reconstructs backup]
+  B[Older destination backup] --> R
+  R --> V[Verify and test restore]
+```
+
+This diagram is a proposed implementation, not a completed feature. Source-side placement matters: capturing a full backup across the same constrained link before deduplicating it would defeat the intended network savings. PostgreSQL's backup protocol handles the running database; ordinary synchronization of changing live PGDATA is not a substitute. See [pg_basebackup](https://www.postgresql.org/docs/17/app-pgbasebackup.html) and the [replication protocol](https://www.postgresql.org/docs/17/protocol-replication.html).
+
+Self-review on October 9 covered shared phase order, failure propagation, timing boundaries, restore verdicts, basis/output isolation, packaging and CI evidence. It found and fixed the checksum-disabled integrity loophole above. Unit regression cases cover the CLI/shared API and imported bases; the real PostgreSQL CLI smoke also checks that an unchecksummed basis is rejected before capture. Active-cutoff correctness, transport accounting and controlled performance remain the explicit release gaps described above.

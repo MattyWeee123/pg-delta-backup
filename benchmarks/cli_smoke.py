@@ -7,7 +7,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 
-from benchmarks.backup import atomic_json
+from benchmarks.backup import atomic_json, basebackup_command
 from benchmarks.native_baseline import Trial, preflight
 
 
@@ -48,7 +48,25 @@ def main():
             restored = trial.restore(run / 'backup', 'cli-' + method, expected)
             results.append({'method': method, 'backup_result': result, 'restore': restored})
             basis = run / 'backup'
-        atomic_json(args.output / 'cli-results.json', {'status': 'pass', 'trials': results})
+        # PostgreSQL permits a manifest without file checksums. Its verifier can
+        # accept that backup; our benchmark must reject it as an integrity basis.
+        unchecked = root / 'unchecked-basis'
+        capture = basebackup_command(tools['pg_basebackup'], unchecked,
+            host=trial.socket, port=5432, user='bench', checksum='NONE')
+        trial.command('pg_basebackup', capture[1:])
+        trial.verify(unchecked)
+        shutil.copyfile(unchecked / 'backup_manifest', args.output / 'unchecked-basis-manifest.json')
+        outcome, stdout = trial.command('python', [
+            '-m', 'benchmarks.benchmark', '--host', str(trial.socket), '--user', 'bench',
+            '--out', str(root / 'runs'), '--method', 'pg_basebackup_incremental',
+            '--basis', str(unchecked)], check=False)
+        rejected = json.loads(stdout.read_text())
+        if (outcome['returncode'] != 4 or rejected['status'] != 'FAIL_BASIS'
+                or rejected['backup'] is not None or rejected['integrity_verified']):
+            raise RuntimeError('Unchecksummed basis was not rejected before capture')
+        atomic_json(args.output / 'cli-results.json', {
+            'status': 'pass', 'trials': results,
+            'negative_controls': {'unchecksummed_basis': rejected}})
     finally:
         trial.cleanup()
         shutil.rmtree(root)

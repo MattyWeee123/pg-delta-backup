@@ -14,6 +14,7 @@ import subprocess
 import time
 
 EXIT_OK, EXIT_INVALID_INPUT, EXIT_IO_FAILURE, EXIT_VERIFICATION_FAILURE = 0, 2, 3, 4
+CHECKSUM_ALGORITHMS = ('CRC32C', 'SHA224', 'SHA256', 'SHA384', 'SHA512')
 RESULT_KEYS = (
     'schema_version', 'run_id', 'method', 'backup', 'verification',
     'basis_verification', 'increment_verification', 'combination',
@@ -120,6 +121,22 @@ def successful(phase):
     return phase is not None and phase['exit_code'] == 0 and phase['error'] is None
 
 
+def require_file_checksums(basis):
+    """Reject bases whose verification cannot detect same-size file corruption.
+
+pg_verifybackup remains responsible for manifest validity, checksum values and
+WAL. This additional policy requires checksum coverage on every listed file.
+"""
+    manifest = json.loads((Path(basis) / 'backup_manifest').read_text(encoding='utf-8'))
+    files = manifest.get('Files') if isinstance(manifest, dict) else None
+    if not isinstance(files, list) or not files or any(
+        not isinstance(entry, dict)
+        or entry.get('Checksum-Algorithm') not in CHECKSUM_ALGORITHMS
+        or not entry.get('Checksum') for entry in files
+    ):
+        raise ValueError('Basis requires file checksums on every manifest entry')
+
+
 def classify(backup, verification):
     if not successful(backup):
         return 'FAIL_BACKUP', EXIT_IO_FAILURE
@@ -168,6 +185,8 @@ short-circuit; their outcome never becomes a successful performance sample.
 """
     if method not in ('pg_basebackup_full', 'pg_basebackup_incremental'):
         raise ValueError('Unknown backup method')
+    if checksum not in CHECKSUM_ALGORITHMS:
+        raise ValueError('File checksums are required for verified benchmark results')
     if method == 'pg_basebackup_incremental' and (basis is None or increment is None):
         raise ValueError('Incremental requires a verified basis and a fresh increment path')
     if method == 'pg_basebackup_full' and (basis is not None or increment is not None):
@@ -178,6 +197,15 @@ short-circuit; their outcome never becomes a successful performance sample.
     if basis is not None:
         if basis_check is None:
             basis_check = execute('basis_verification', verify_command(tools['pg_verifybackup'], basis))
+        if successful(basis_check):
+            policy_start = time.perf_counter()
+            try:
+                require_file_checksums(basis)
+            except (OSError, ValueError) as exc:
+                basis_check = {**basis_check, 'exit_code': EXIT_VERIFICATION_FAILURE,
+                               'error': str(exc)}
+            basis_check = {**basis_check, 'duration_seconds': basis_check['duration_seconds']
+                           + time.perf_counter() - policy_start}
         if not successful(basis_check):
             return build_result(run_id, method, None, None, None,
                                 basis_verification=basis_check,
