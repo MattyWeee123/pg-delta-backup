@@ -2,6 +2,22 @@
 
 Latest update: October 9, 2026. The controlled performance baseline remains incomplete.
 
+## Consolidation validation, October 9
+
+Sam’s commit `ff8b85e` is preserved in merge `f2d57d1`. Shared adapters and schema v2
+were validated at PR head `09425e0` in [run 37994167624](https://github.com/MattyWeee123/pg-delta-backup/actions/runs/37994167624):
+62 unit/configuration tests passed without skips, all 15 native matrix trials passed,
+and the public CLI completed full and incremental captures followed by two successful
+exact-data restores. Compose configuration validation also passed. The subsequently
+added workflow step exercises the packaged Compose CLI and exports its evidence.
+The current PR checks report that later step’s status.
+
+[Preserved consolidation evidence](../benchmarks/evidence/2026-10-09-consolidated/report.md)
+contains the raw records and checksum inventory. Backup records from both frontends
+use schema v2; historical v1 artifacts below remain unchanged. HammerDB Tcl
+configuration was checked with stub commands, not a real new HammerDB workload run.
+Sam’s historical workload measurements remain separately attributed below.
+
 ## Native PostgreSQL validation added October 9
 
 The complete [workflow run 37991303022](https://github.com/MattyWeee123/pg-delta-backup/actions/runs/37991303022) passed for PR head `633782b84a17b8cd9d49595a109a11c6c71fed6e`, including tests, all database trials, evidence upload and report generation. Actions checked out synthetic merge commit `285a896075e742c0d8acfcd5fc9677e370d5fa28`, which is the commit recorded in results.json; this does not mean the PR was merged. Its `native-baseline-evidence` artifact contains the raw run records, commands, manifests, transaction logs and restore-state digests. A durable [report and raw evidence export](../benchmarks/evidence/2026-10-09-native-smoke/report.md) are checked into this branch; the raw ZIP contains all 1,455 evidence files and their SHA-256 inventory. This preserves the evidence beyond the workflow artifact's three-day retention period.
@@ -51,7 +67,11 @@ These percentages must not be presented as database backup or network benchmark 
 The one-byte prefix insertion counterexample loses fixed-chunk reuse on this random data.
 That demonstrates a reason to investigate rolling matching or CDC for shifted files, not a conclusion about PostgreSQL relation files.
 
-## Benchmark runner v0.1, October 9, 2026
+## Sam’s historical v0.1 and HammerDB experiments, October 9, 2026
+
+These are Sam’s reported local results from commit `ff8b85e`. The branch contained
+summary tables and selected samples but no complete raw result bundles. They were
+not independently reproduced on that laptop during consolidation.
 
 Added `benchmarks/benchmark.py` and `tests/test_benchmark.py`.
 
@@ -145,19 +165,20 @@ exceeds many effects worth measuring. TPROC-C figures are not audited TPC-C resu
 be published as `tpmC`. No latency percentiles were extracted. Full caveats are in
 `benchmarks/workloads/hammerdb/README.md`.
 
-### Still not established by this change
+### Limits of Sam’s experiments
 
 - **No restore test.** Gate G3 is unmet. `pg_verifybackup` passing is why the status is
   `PASS_MANIFEST_ONLY`; no cluster was booted from any of these backups.
 - **No network measurement.** `network_bytes` is null in all three runs. Both containers shared a
   Docker bridge network; no constrained link was measured.
-- **No workload during capture.** The cluster was idle. Gate G4 is unmet.
+- **Active workload was exercised** in the HammerDB runs above; the earlier pgbench fixture
+  capture was idle. A repeated, controlled application-impact baseline remains incomplete.
 - **Single runs, no repetitions.** `benchmarks/README.md` requires at least three repetitions
   after a warm-up before any result is reported. The durations above are one sample each on one
   host and must not be cited as a baseline.
-- **`git_commit` was unavailable** in the containerized runs because `git` is not installed in the
-  `postgres:17` image. The field degraded to a reason string as designed, but provenance for a
-  container run is currently incomplete.
+- **Provenance remains partial for those historical runs.** Later runs recorded the main-branch
+  SHA `8d67adf`, which does not identify the subsequently committed runner/workload changes by
+  itself. Retain exact source state and raw evidence for new measurements.
 
 ## Not executed at the September 30 checkpoint
 

@@ -4,6 +4,7 @@ on:
     paths:
       - 'benchmarks/**/*.py'
       - 'benchmarks/Dockerfile'
+      - '.dockerignore'
       - 'benchmarks/fixture/**'
       - 'benchmarks/workloads/**/*.tcl'
       - 'tests/**'
@@ -55,6 +56,27 @@ jobs:
           if test -d results/native/run; then
             sudo chown -R "$(id -u):$(id -g)" results/native/run
           fi
+      - name: Check packaged Compose CLI and preserve its evidence
+        env:
+          POSTGRES_PASSWORD: disposable-ci-placeholder
+          POSTGRES_PORT: '0'
+        run: |
+          export PG_IMAGE="$BENCH_IMAGE_DIGEST"
+          export BENCH_COMMIT="$GITHUB_SHA"
+          trap 'docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml down --volumes' EXIT
+          docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml up -d --wait postgres
+          docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml build runner
+          docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml run --rm runner > results/native/run/compose-cli.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path('results/native/run/compose-cli.json').read_text())
+          assert result['status'] == 'PASS_MANIFEST_ONLY', result
+          assert result['schema_version'] == 2 and not result['restore_tested']
+          PY
+          docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml run --rm --entrypoint sh runner \
+            -c 'cd /results && tar --exclude=backup --exclude=increment -czf - .' \
+            > results/native/run/compose-evidence.tar.gz
       - name: Retain small evidence bundle
         if: always()
         uses: actions/upload-artifact@v4

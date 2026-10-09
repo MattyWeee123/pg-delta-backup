@@ -51,75 +51,62 @@ latency_increase = p95_during_backup / p95_without_backup - 1
 Where a fixed offered rate keeps completed throughput unchanged, latency and queueing may reveal degradation that TPS does not.
 Include raw values and failed trials; report speedup only where the recovery guarantees and measurement boundaries match.
 
-## Running the v0.1 runner
+## Running the consolidated CLI
 
-`benchmark.py` implements the narrowest useful slice of this methodology: it runs one backup
-method, times it, verifies the output against its manifest, and writes a JSON run record.
-Design notes are in [the runner design](../docs/specs/2026-10-09-benchmark-runner-design.md).
+Both the configurable CLI and the [native recovery suite](NATIVE.md) use the same backup adapters and result schema. See [the consolidation and tool decisions](CONSOLIDATION.md). Sam's HammerDB workload is retained in [workloads/hammerdb](workloads/hammerdb/README.md).
 
-It does **not** test restore, measure network traffic, generate workload, or produce any of the
-comparative numbers described above. A successful run records `PASS_MANIFEST_ONLY`, never `PASS`,
-because gate G3 in [SPEC.md](../docs/SPEC.md) is unmet. `network_bytes` is always `null`.
+The CLI captures a full backup, or a native incremental followed by reconstruction. It verifies manifests and required WAL; its success status is `PASS_MANIFEST_ONLY`. It does not itself restore the database or orchestrate HammerDB. The native suite adds those fixture-specific recovery tests.
 
-Bring up the disposable fixture, then store the password in `.pgpass` rather than passing it on a
-command line:
+For an existing disposable Linux fixture with matching PostgreSQL 17 tools on PATH:
+
+```sh
+python -m benchmarks.benchmark --host 127.0.0.1 --port 5432 --user postgres --out benchmarks/runs
+# After the chosen workload changes the database, use the full run's immutable backup:
+python -m benchmarks.benchmark --host 127.0.0.1 --port 5432 --user postgres \
+  --out benchmarks/runs --method pg_basebackup_incremental \
+  --basis benchmarks/runs/FULL_RUN_ID/backup
+```
+
+Authentication uses the existing `.pgpass`/`PGPASSFILE` or password environment, never a password argument. The legacy `python benchmarks/benchmark.py` entrypoint also works. `--source-pgdata` optionally checks source/output overlap. Each invocation creates a unique directory; incremental capture goes in `increment/` and its reconstructed output goes in `backup/`.
+
+For the packaged Compose fixture, choose a throwaway password and resolve the base image before building:
 
 ```sh
 export POSTGRES_PASSWORD='choose-a-throwaway-password'
-docker compose -f benchmarks/fixture/docker-compose.yml up -d
-printf '127.0.0.1:5432:*:postgres:%s\n' "$POSTGRES_PASSWORD" > ~/.pgpass
-chmod 600 ~/.pgpass
+docker pull public.ecr.aws/docker/library/postgres:17
+export PG_IMAGE=$(docker image inspect public.ecr.aws/docker/library/postgres:17 --format '{{index .RepoDigests 0}}')
+export BENCH_COMMIT=$(git rev-parse HEAD)
+docker compose -f benchmarks/fixture/docker-compose.yml up -d --wait postgres
+docker compose -f benchmarks/fixture/docker-compose.yml build runner
+docker compose -f benchmarks/fixture/docker-compose.yml run --rm runner
 ```
+
+This uses a disposable database volume and a separate backup volume on the same host. It is a development fixture, not an isolated source/destination hardware topology. Results appear in stdout and persist under `/results/RUN_ID` in the backup volume. To run incremental, use the full run ID printed by the first command:
 
 ```sh
-python benchmarks/benchmark.py \
-  --host 127.0.0.1 --port 5432 --user postgres \
-  --out benchmarks/runs
+docker compose -f benchmarks/fixture/docker-compose.yml run --rm runner \
+  --host postgres --user postgres --out /results \
+  --method pg_basebackup_incremental --basis /results/FULL_RUN_ID/backup
 ```
 
-Output lands in `benchmarks/runs/<run-id>/` as `backup/`, `pg_basebackup.log`,
-`pg_verifybackup.log`, `versions.txt` and `result.json`. The directory is gitignored; copy any run
-you intend to cite into a tracked location.
+Preserve evidence outside the container. This exports logs, records and provenance while excluding the large database copies:
 
-| Flag | Default | Why it matters |
+```sh
+mkdir -p results/fixture
+docker compose -f benchmarks/fixture/docker-compose.yml run --rm --entrypoint sh runner \
+  -c 'cd /results && tar --exclude=backup --exclude=increment -czf - .' \
+  > results/fixture/evidence.tar.gz
+```
+
+`docker compose -f benchmarks/fixture/docker-compose.yml down` stops the lab while retaining its volumes. Adding `--volumes` deletes the disposable database and backup volumes; export required evidence first.
+
+| Setting | Shared default | Meaning |
 |---|---|---|
-| `--manifest-checksums` | `CRC32C` | CRC32C is faster; step 4 below specifies SHA256, so the two are not directly comparable until one is changed |
-| `--checkpoint` | `fast` | PostgreSQL defaults to `spread`, whose server-paced delay falls inside the measured duration |
-| `--source-pgdata` | unset | When given, refuses an output path that overlaps the source data directory |
-| `--timeout` | `3600` | A timed-out command records `exit_code: null` plus an error, never a clean exit |
-
-Exit codes follow the CLI contract in [SPEC.md](../docs/SPEC.md) section 3: 0 success, 2
-invalid or unsupported input, 3 I/O failure, 4 verification failure. The status field is
-`PASS_MANIFEST_ONLY`, `FAIL_BACKUP` or `FAIL_VERIFY`.
-
-Provenance that the ten-key record has no field for (tool versions, git commit, platform,
-checksum algorithm, checkpoint mode) is written to `versions.txt` in the same run directory, so
-step 1 below is satisfied without expanding the v0.1 schema.
-
-### Reproducing a run without host PostgreSQL binaries
-
-If the host has no PostgreSQL 17 client tools, run the runner inside a container on the fixture
-network. This is also the more representative path, since SPEC section 1 targets Linux:
-
-```sh
-docker run --rm --network fixture_default \
-  -v "$PWD":/repo:ro -v bench-runs:/runs -w /repo \
-  -e DEBIAN_FRONTEND=noninteractive postgres:17 bash -c '
-    apt-get update -qq && apt-get install -y -qq python3 git
-    printf "postgres:5432:*:postgres:$POSTGRES_PASSWORD\n" > /root/.pgpass
-    chmod 600 /root/.pgpass
-    python3 benchmarks/benchmark.py --host postgres --user postgres --out /runs'
-```
-
-Install `git` as shown, otherwise `versions.txt` records `git_commit: unavailable` and the run
-loses its provenance. On Git Bash for Windows, prefix the command with `MSYS_NO_PATHCONV=1` so
-container paths are not rewritten to host paths.
-
-The fixture and the runner have both been executed against a real PostgreSQL 17.11 cluster; see
-[VALIDATION.md](../docs/VALIDATION.md) for the transcript, including the corrupted-backup and
-unreachable-server negative controls. Those runs are single samples on one host and are not a
-baseline: this document requires at least three repetitions after a warm-up before any number is
-reported.
+| Manifest checksums | SHA256 | Same for capture and combined output; Sam's historical v0.1 default was CRC32C. Old timings are not directly comparable. |
+| Checkpoint | fast | Explicit policy for both methods; do not compare against spread without labeling the difference. |
+| Format | plain | Tar is rejected by this verification path. |
+| CLI timeout | 3600 seconds per command | Failure preserves logs and cannot receive a successful verified time. |
+| Result schema | v2 | Common backup record, with separate incremental phases and explicit manifest-only status. |
 
 ## First PostgreSQL baseline recipe
 

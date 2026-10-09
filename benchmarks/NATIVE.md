@@ -4,6 +4,10 @@ This runner creates real PostgreSQL 17 clusters, takes full and incremental back
 
 The first complete successful run is preserved in the [October 9 smoke report](evidence/2026-10-09-native-smoke/report.md), with results.json, provenance and compressed raw evidence alongside it.
 
+The suite now calls the same `benchmarks/backup.py` adapters and v2 backup record as
+Sam’s configurable CLI. CI also invokes that public CLI for full and incremental
+captures and restores both outputs. See [the consolidation guide](CONSOLIDATION.md).
+
 ## What the treatments mean
 
 - **Full:** copy a new complete physical backup with streamed WAL.
