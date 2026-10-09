@@ -59,13 +59,28 @@ The demo compares whole-file transfer with fixed-size chunk reuse on determinist
 It proves byte reconstruction for its fixtures only.
 It does not benchmark PostgreSQL, network transfer, live consistency, or durable backup publication.
 
+## Run the benchmark runner
+
+`benchmarks/benchmark.py` is the measurement harness: it runs one backup method, times it, verifies
+the output with `pg_verifybackup`, and writes a JSON run record.
+It needs PostgreSQL 17 client utilities and a disposable test cluster; see
+[the benchmark plan](benchmarks/README.md#running-the-v01-runner) for the fixture and flags.
+
+```sh
+python benchmarks/benchmark.py --host 127.0.0.1 --port 5432 --user postgres --out benchmarks/runs
+```
+
+A successful run records `PASS_MANIFEST_ONLY`, not `PASS`: the runner has no restore gate, so
+`restore_tested` is always false and `network_bytes` is always null.
+Workload generation, native incremental backups, and the custom delta method are not implemented.
+
 ## Repository layout
 
 ```text
 docs/          Briefing, specification, decisions, plan, issue backlog
 experiments/   Small reproducible research experiments
 tests/         Executable checks for the experiments
-benchmarks/    Baseline and restore methodology
+benchmarks/    Methodology, the measurement runner, and a disposable cluster fixture
 .github/       CI and issue/PR templates
 ```
 
