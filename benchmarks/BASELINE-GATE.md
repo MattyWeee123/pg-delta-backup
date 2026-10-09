@@ -4,7 +4,7 @@
 
 The project lead supplied Ben Tran's meeting comment on October 9, 2026. It asks the team to define an active-workload benchmark comparing pg_basebackup against the team's eventual tool on backup time, network traffic, and application performance degradation across team-defined scales. It also asks for a concrete week-by-week plan. This is project context, not an instruction to modify the linked meeting document or contact teammates.
 
-The comment supports the existing repository direction. It does not prescribe GCP, a managed AlloyDB instance, a specific workload, or numerical scale definitions. Those are engineering decisions. The native runner is the first executable step, not completion of that deliverable.
+The comment supports the existing repository direction. It does not prescribe GCP, a managed AlloyDB instance, a specific workload, or numerical scale definitions. Those are engineering decisions. The native runner and Sam’s HammerDB workload are now consolidated around shared backup adapters. This is an executable foundation, not completion of that deliverable. See [the shared architecture and existing-tool decisions](CONSOLIDATION.md).
 
 The research question is whether reusing an older backup at the destination reduces the cost of producing a correct new backup. A smaller output alone does not answer that question: reading, hashing, capture, transfer, reconstruction, verification and database interference all have costs.
 
@@ -34,7 +34,7 @@ The smoke runner records local durations, file sizes and transaction logs. It de
 
 ## Workload and scale proposal
 
-Start with the deterministic account-transfer fixture because every committed transaction has a simple invariant: balances change but their total stays constant. An audit row in the same transaction, reconciled against external successful transaction logs, adds another check. This is a synthetic OLTP-like workload, not TPC-C and not a NOPM benchmark. Later add a declared read/write mix and localized versus distributed changes to avoid tuning for a single convenient fixture.
+Start with the deterministic account-transfer fixture because every committed transaction has a simple invariant: balances change but their total stays constant. An audit row in the same transaction, reconciled against external successful transaction logs, adds another check. This is a synthetic OLTP-like workload, not TPC-C and not a NOPM benchmark. Sam’s HammerDB TPROC-C scripts now provide the richer application workload. Add their recovery oracle and matched observation windows, and retain localized versus distributed change cases to avoid tuning for one convenient fixture.
 
 Keep size, change amount and application load separate. Initial scale proposals are approximately 1 GiB, 10 GiB and 50 GiB of measured cluster data. These are not sponsor requirements; the 50 GiB case is conditional on space and budget. The present 20,000-row fixture is much smaller and is labeled smoke, not small-scale performance.
 

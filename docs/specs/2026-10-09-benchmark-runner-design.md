@@ -1,7 +1,11 @@
 # Benchmark runner v0.1 design
 
 Date: October 9, 2026.
-Status: approved design, implemented in this change.
+Status: historical v0.1 design from Sam’s branch. The implemented successor is
+[the consolidated v2 runner](../../benchmarks/CONSOLIDATION.md). The ten-field
+record, CRC32C default and original validation limits below describe that earlier
+checkpoint; current code adds incremental reconstruction and shares its adapters
+with the native recovery suite.
 Scope: the measurement harness only. No delta-backup algorithm is designed or implemented here.
 
 ## Why this exists first

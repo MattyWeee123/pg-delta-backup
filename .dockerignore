@@ -1,0 +1,12 @@
+.git
+.env
+.claude
+**/__pycache__
+**/*.pyc
+benchmarks/runs
+benchmarks/evidence
+runs
+results
+data
+scratch
+target

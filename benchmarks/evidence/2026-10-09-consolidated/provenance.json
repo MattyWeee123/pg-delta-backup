@@ -1,0 +1,13 @@
+{
+  "run_url": "https://github.com/MattyWeee123/pg-delta-backup/actions/runs/37994167624",
+  "pr_head": "09425e0a88717e894998f7014d2ec58575f84b91",
+  "checkout_merge_commit": "5afd894848ee22164ebd6a5dedcfd36148569e15",
+  "status": "success",
+  "unit_tests_passed": 62,
+  "matrix_trials_passed": 15,
+  "cli_capture_and_restore_paths_passed": 2,
+  "compose_configuration": "validated",
+  "compose_runtime": "not exercised in this evidence bundle; added to subsequent workflow",
+  "raw_files": 1592,
+  "zip_sha256": "58dc04fb7ff48ab7a8c020ad29402cc7957ff83f1510ecb1b2389bca56939ea1"
+}

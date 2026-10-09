@@ -4,8 +4,10 @@ Research starter for the CMU / AlloyDB Omni collaboration.
 Status: sponsor direction clarified by supplied Google Chat screenshots; implementation design remains proposed.
 This repository does not yet contain a PostgreSQL backup implementation.
 
-A native PostgreSQL benchmark runner is now available for full/incremental backup,
-verification, and isolated restore tests. See [the native runner](benchmarks/NATIVE.md).
+The consolidated benchmark provides a configurable full/incremental CLI, Sam’s
+HammerDB workload, and a disposable recovery suite, using shared backup adapters.
+See [the consolidated architecture](benchmarks/CONSOLIDATION.md) and
+[the native recovery suite](benchmarks/NATIVE.md).
 Its initial local smoke measurements are not the controlled performance baseline;
 the custom delta-transfer executable is still unimplemented.
 See [what the benchmark must establish](benchmarks/BASELINE-GATE.md) for the
@@ -61,10 +63,10 @@ It does not benchmark PostgreSQL, network transfer, live consistency, or durable
 
 ## Run the benchmark runner
 
-`benchmarks/benchmark.py` is the measurement harness: it runs one backup method, times it, verifies
-the output with `pg_verifybackup`, and writes a JSON run record.
+`benchmarks/benchmark.py` is the measurement harness: it runs full backup or native incremental plus reconstruction, verifies
+the output with `pg_verifybackup`, and writes a shared v2 JSON run record.
 It needs PostgreSQL 17 client utilities and a disposable test cluster; see
-[the benchmark plan](benchmarks/README.md#running-the-v01-runner) for the fixture and flags.
+[the benchmark plan](benchmarks/README.md#running-the-consolidated-cli) for the fixture and flags.
 
 ```sh
 python benchmarks/benchmark.py --host 127.0.0.1 --port 5432 --user postgres --out benchmarks/runs
@@ -72,7 +74,8 @@ python benchmarks/benchmark.py --host 127.0.0.1 --port 5432 --user postgres --ou
 
 A successful run records `PASS_MANIFEST_ONLY`, not `PASS`: the runner has no restore gate, so
 `restore_tested` is always false and `network_bytes` is always null.
-Workload generation, native incremental backups, and the custom delta method are not implemented.
+HammerDB supplies the larger workload; the native suite uses pgbench for small
+recovery fixtures. The custom delta method remains unimplemented.
 
 ## Repository layout
 

@@ -37,7 +37,7 @@ services:
       - max_replication_slots=10
     ports:
       # Bound to loopback so the fixture is not reachable from the network.
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
       - pgdata:/var/lib/postgresql/data
