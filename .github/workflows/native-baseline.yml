@@ -21,8 +21,8 @@ jobs:
         run: python -m unittest discover -s tests -v
       - name: Resolve PostgreSQL image and build runner
         run: |
-          docker pull postgres:17
-          PG_IMAGE=$(docker image inspect postgres:17 --format '{{index .RepoDigests 0}}')
+          docker pull public.ecr.aws/docker/library/postgres:17
+          PG_IMAGE=$(docker image inspect public.ecr.aws/docker/library/postgres:17 --format '{{index .RepoDigests 0}}')
           echo "BENCH_IMAGE_DIGEST=$PG_IMAGE" >> "$GITHUB_ENV"
           docker build --build-arg PG_IMAGE="$PG_IMAGE" -f benchmarks/Dockerfile -t pg-native-bench .
           mkdir -p results/native

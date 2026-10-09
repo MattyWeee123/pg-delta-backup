@@ -1,4 +1,4 @@
-ARG PG_IMAGE=postgres:17
+ARG PG_IMAGE=public.ecr.aws/docker/library/postgres:17
 FROM ${PG_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends python3 \
     && rm -rf /var/lib/apt/lists/*
