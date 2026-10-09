@@ -1,6 +1,6 @@
 # Benchmark and restore plan
 
-Status: experiment design, not measured database results.
+Status: overall experiment design. The [native runner](NATIVE.md) now executes a limited real PostgreSQL smoke matrix; the controlled baseline release is still incomplete. See the [baseline release gate](BASELINE-GATE.md) for the distinction.
 Sponsor direction from the supplied chats: active workload, time/network/application-impact comparison, team-defined scales and a custom correctness benchmark.
 Do not compare an already staged custom source against an end-to-end baseline without also reporting staging cost.
 
@@ -64,7 +64,7 @@ Paths refer to the chosen test environment; do not run them against personal or 
 4. Capture B0 using plain pg_basebackup with streamed WAL and SHA-256 manifest checksums.
 5. Verify B0 with matching-major pg_verifybackup, preserving WAL parsing, then restore a disposable copy and check data.
 6. Apply a reproducible change workload, quiesce writes for the initial comparison, record expected SQL data, and capture B1 plus a native incremental I1 referencing B0's manifest.
-7. Combine B0 and I1 into a fresh directory, verify it, restore a copy, and compare the expected data.
+7. Verify I1, combine B0 and I1 into a fresh directory with the declared checksum policy, verify it, restore a copy, and compare the expected data.
 8. Use the immutable B0 and B1 as inputs to transfer-only experiments.
 9. Extend to sustained concurrent writes only after defining a common recovery endpoint and oracle; comparing arbitrary "latest" queries on a moving source is invalid.
 
@@ -76,7 +76,8 @@ pg_verifybackup "$B0"
 # Apply the deterministic changes here, then capture new backups.
 pg_basebackup -h "$PGHOST" -U "$PGUSER" -D "$B1" -Fp -X stream --manifest-checksums=SHA256
 pg_basebackup -h "$PGHOST" -U "$PGUSER" -D "$I1" -Fp -X stream --incremental="$B0/backup_manifest" --manifest-checksums=SHA256
-pg_combinebackup -o "$COMBINED" "$B0" "$I1"
+pg_verifybackup "$I1"
+pg_combinebackup --copy --manifest-checksums=SHA256 -o "$COMBINED" "$B0" "$I1"
 pg_verifybackup "$COMBINED"
 ```
 
