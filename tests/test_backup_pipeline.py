@@ -1,11 +1,14 @@
 """Contract tests for the shared phase boundary, not performance thresholds."""
 from pathlib import Path
+from contextlib import redirect_stderr
+from io import StringIO
+import json
 import tempfile
 import unittest
 from unittest import mock
 
 from benchmarks.backup import run_backup
-from benchmarks.benchmark import assert_no_overlap, connection_env
+from benchmarks.benchmark import assert_no_overlap, connection_env, parse_args
 
 
 class SharedPipelineTests(unittest.TestCase):
@@ -13,6 +16,9 @@ class SharedPipelineTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
+        (self.root / 'basis').mkdir()
+        (self.root / 'basis' / 'backup_manifest').write_text(json.dumps({
+            'Files': [{'Path': 'base.dat', 'Checksum-Algorithm': 'SHA256', 'Checksum': 'ab'}]}))
         self.tools = {name: name for name in ('pg_basebackup', 'pg_verifybackup', 'pg_combinebackup')}
 
     def pipeline(self, *, incremental=True, failing=None):
@@ -71,6 +77,27 @@ class SharedPipelineTests(unittest.TestCase):
                 run_backup(method, run_id='bad', output=self.root / 'out', tools=self.tools,
                            execute=execute, host='fixture', basis=basis, increment=increment)
         execute.assert_not_called()
+
+    def test_checksum_none_cannot_be_requested_through_cli_or_shared_api(self):
+        with redirect_stderr(StringIO()), self.assertRaises(SystemExit):
+            parse_args(['--manifest-checksums', 'NONE'])
+        execute = mock.Mock()
+        with self.assertRaises(ValueError):
+            run_backup('pg_basebackup_full', run_id='bad', output=self.root / 'out',
+                       tools=self.tools, execute=execute, host='fixture', checksum='NONE')
+        execute.assert_not_called()
+
+    def test_unchecksummed_or_invalid_basis_never_becomes_verified_output(self):
+        for manifest in ({'Files': [{'Path': 'base.dat', 'Size': 10}]},
+                         {'Files': []}, {'Files': [None]}, None):
+            with self.subTest(manifest=manifest):
+                (self.root / 'basis' / 'backup_manifest').write_text(json.dumps(manifest))
+                result, code, calls = self.pipeline()
+                self.assertEqual(code, 4)
+                self.assertEqual(result['status'], 'FAIL_BASIS')
+                self.assertEqual([s for s, _ in calls], ['basis_verification'])
+                self.assertFalse(result['integrity_verified'])
+                self.assertIsNone(result['time_to_verified_seconds'])
 
     def test_supplied_failed_basis_proof_cannot_bypass_validation(self):
         execute = mock.Mock()

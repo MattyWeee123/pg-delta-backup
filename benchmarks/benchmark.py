@@ -23,12 +23,9 @@ if __package__ in (None, ''):
 
 from benchmarks.backup import (
     EXIT_OK, EXIT_INVALID_INPUT, EXIT_IO_FAILURE, EXIT_VERIFICATION_FAILURE,
-    RESULT_KEYS, atomic_json, basebackup_command, build_result, classify,
+    RESULT_KEYS, CHECKSUM_ALGORITHMS, atomic_json, basebackup_command, build_result, classify,
     directory_bytes, run_backup, run_command, verify_command as verification_argv,
 )
-
-CHECKSUM_ALGORITHMS = ('NONE', 'CRC32C', 'SHA224', 'SHA256', 'SHA384', 'SHA512')
-
 
 def pg_basebackup_full(args, backup_dir):
     return basebackup_command(args.pg_basebackup, backup_dir, host=args.host,
