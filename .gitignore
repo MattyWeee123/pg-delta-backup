@@ -5,5 +5,9 @@ __pycache__/
 data/
 scratch/
 results/raw/
+results/native*/
+benchmarks/runs/
+runs/
 *.log
 target/
+.claude/

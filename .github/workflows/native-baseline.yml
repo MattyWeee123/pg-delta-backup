@@ -1,0 +1,93 @@
+name: Native PostgreSQL baseline smoke
+on:
+  pull_request:
+    paths:
+      - 'benchmarks/**/*.py'
+      - 'benchmarks/Dockerfile'
+      - '.dockerignore'
+      - 'benchmarks/fixture/**'
+      - 'benchmarks/workloads/**/*.tcl'
+      - 'tests/**'
+      - '.github/workflows/native-baseline.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-baseline-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  native-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Validate Compose configuration
+        env:
+          POSTGRES_PASSWORD: disposable-ci-placeholder
+        run: docker compose -f benchmarks/fixture/docker-compose.yml config --quiet
+      - name: Resolve PostgreSQL image and build runner
+        run: |
+          docker pull public.ecr.aws/docker/library/postgres:17
+          PG_IMAGE=$(docker image inspect public.ecr.aws/docker/library/postgres:17 --format '{{index .RepoDigests 0}}')
+          echo "BENCH_IMAGE_DIGEST=$PG_IMAGE" >> "$GITHUB_ENV"
+          docker build --build-arg PG_IMAGE="$PG_IMAGE" -f benchmarks/Dockerfile -t pg-native-bench .
+          mkdir -p results/native
+          sudo chown 999:999 results/native
+      - name: Run real backup and restore trials
+        run: |
+          docker run --rm --network none --cpus=2 --memory=2g --shm-size=256m \
+            -e BENCH_IMAGE_DIGEST -e GITHUB_SHA \
+            -v "$PWD/results/native:/results" pg-native-bench \
+            --output /results/run --rows 20000 --repeats 3 --duration 8 --rate 100
+      - name: Check consolidated CLI full and incremental restores
+        run: |
+          docker run --rm --network none --cpus=2 --memory=2g --shm-size=256m \
+            -e BENCH_IMAGE_DIGEST -e GITHUB_SHA \
+            -v "$PWD/results/native:/results" --entrypoint python3 pg-native-bench \
+            -m benchmarks.cli_smoke --output /results/run/cli-smoke
+      - name: Make container evidence readable to the host runner
+        if: always()
+        run: |
+          if test -d results/native/run; then
+            sudo chown -R "$(id -u):$(id -g)" results/native/run
+          fi
+      - name: Check packaged Compose CLI and preserve its evidence
+        env:
+          POSTGRES_PASSWORD: disposable-ci-placeholder
+          POSTGRES_PORT: '0'
+        run: |
+          export PG_IMAGE="$BENCH_IMAGE_DIGEST"
+          export BENCH_COMMIT="$GITHUB_SHA"
+          trap 'docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml down --volumes' EXIT
+          docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml up -d --wait postgres
+          docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml build runner
+          docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml run --rm runner > results/native/run/compose-cli.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          result = json.loads(Path('results/native/run/compose-cli.json').read_text())
+          assert result['status'] == 'PASS_MANIFEST_ONLY', result
+          assert result['schema_version'] == 2 and not result['restore_tested']
+          PY
+          docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml run --rm --entrypoint sh runner \
+            -c 'cd /results && tar --exclude=backup --exclude=increment -czf - .' \
+            > results/native/run/compose-evidence.tar.gz
+      - name: Retain small evidence bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-baseline-evidence
+          path: results/native/run
+          retention-days: 3
+          if-no-files-found: warn
+      - name: Summarize measurements
+        if: always()
+        run: |
+          if test -f results/native/run/results.json; then
+            python -m benchmarks.report_native results/native/run/results.json --output "$GITHUB_STEP_SUMMARY"
+          fi
