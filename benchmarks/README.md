@@ -51,6 +51,76 @@ latency_increase = p95_during_backup / p95_without_backup - 1
 Where a fixed offered rate keeps completed throughput unchanged, latency and queueing may reveal degradation that TPS does not.
 Include raw values and failed trials; report speedup only where the recovery guarantees and measurement boundaries match.
 
+## Running the v0.1 runner
+
+`benchmark.py` implements the narrowest useful slice of this methodology: it runs one backup
+method, times it, verifies the output against its manifest, and writes a JSON run record.
+Design notes are in [the runner design](../docs/specs/2026-10-09-benchmark-runner-design.md).
+
+It does **not** test restore, measure network traffic, generate workload, or produce any of the
+comparative numbers described above. A successful run records `PASS_MANIFEST_ONLY`, never `PASS`,
+because gate G3 in [SPEC.md](../docs/SPEC.md) is unmet. `network_bytes` is always `null`.
+
+Bring up the disposable fixture, then store the password in `.pgpass` rather than passing it on a
+command line:
+
+```sh
+export POSTGRES_PASSWORD='choose-a-throwaway-password'
+docker compose -f benchmarks/fixture/docker-compose.yml up -d
+printf '127.0.0.1:5432:*:postgres:%s\n' "$POSTGRES_PASSWORD" > ~/.pgpass
+chmod 600 ~/.pgpass
+```
+
+```sh
+python benchmarks/benchmark.py \
+  --host 127.0.0.1 --port 5432 --user postgres \
+  --out benchmarks/runs
+```
+
+Output lands in `benchmarks/runs/<run-id>/` as `backup/`, `pg_basebackup.log`,
+`pg_verifybackup.log`, `versions.txt` and `result.json`. The directory is gitignored; copy any run
+you intend to cite into a tracked location.
+
+| Flag | Default | Why it matters |
+|---|---|---|
+| `--manifest-checksums` | `CRC32C` | CRC32C is faster; step 4 below specifies SHA256, so the two are not directly comparable until one is changed |
+| `--checkpoint` | `fast` | PostgreSQL defaults to `spread`, whose server-paced delay falls inside the measured duration |
+| `--source-pgdata` | unset | When given, refuses an output path that overlaps the source data directory |
+| `--timeout` | `3600` | A timed-out command records `exit_code: null` plus an error, never a clean exit |
+
+Exit codes follow the CLI contract in [SPEC.md](../docs/SPEC.md) section 3: 0 success, 2
+invalid or unsupported input, 3 I/O failure, 4 verification failure. The status field is
+`PASS_MANIFEST_ONLY`, `FAIL_BACKUP` or `FAIL_VERIFY`.
+
+Provenance that the ten-key record has no field for (tool versions, git commit, platform,
+checksum algorithm, checkpoint mode) is written to `versions.txt` in the same run directory, so
+step 1 below is satisfied without expanding the v0.1 schema.
+
+### Reproducing a run without host PostgreSQL binaries
+
+If the host has no PostgreSQL 17 client tools, run the runner inside a container on the fixture
+network. This is also the more representative path, since SPEC section 1 targets Linux:
+
+```sh
+docker run --rm --network fixture_default \
+  -v "$PWD":/repo:ro -v bench-runs:/runs -w /repo \
+  -e DEBIAN_FRONTEND=noninteractive postgres:17 bash -c '
+    apt-get update -qq && apt-get install -y -qq python3 git
+    printf "postgres:5432:*:postgres:$POSTGRES_PASSWORD\n" > /root/.pgpass
+    chmod 600 /root/.pgpass
+    python3 benchmarks/benchmark.py --host postgres --user postgres --out /runs'
+```
+
+Install `git` as shown, otherwise `versions.txt` records `git_commit: unavailable` and the run
+loses its provenance. On Git Bash for Windows, prefix the command with `MSYS_NO_PATHCONV=1` so
+container paths are not rewritten to host paths.
+
+The fixture and the runner have both been executed against a real PostgreSQL 17.11 cluster; see
+[VALIDATION.md](../docs/VALIDATION.md) for the transcript, including the corrupted-backup and
+unreachable-server negative controls. Those runs are single samples on one host and are not a
+baseline: this document requires at least three repetitions after a warm-up before any number is
+reported.
+
 ## First PostgreSQL baseline recipe
 
 Use a fresh disposable Linux/container test environment, standard PostgreSQL 17 binaries and synthetic data only.
