@@ -4,6 +4,11 @@ Research starter for the CMU / AlloyDB Omni collaboration.
 Status: sponsor direction clarified by supplied Google Chat screenshots; implementation design remains proposed.
 This repository does not yet contain a PostgreSQL backup implementation.
 
+A native PostgreSQL benchmark runner is now available for full/incremental backup,
+verification, and isolated restore tests. See [the native runner](benchmarks/NATIVE.md).
+Its initial local smoke measurements are not the controlled performance baseline;
+the custom delta-transfer executable is still unimplemented.
+
 ## The problem
 
 A destination already has an older physical copy of a database cluster.
