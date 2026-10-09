@@ -33,6 +33,12 @@ jobs:
             -e BENCH_IMAGE_DIGEST -e GITHUB_SHA \
             -v "$PWD/results/native:/results" pg-native-bench \
             --output /results/run --rows 20000 --repeats 3 --duration 8 --rate 100
+      - name: Make container evidence readable to the host runner
+        if: always()
+        run: |
+          if test -d results/native/run; then
+            sudo chown -R "$(id -u):$(id -g)" results/native/run
+          fi
       - name: Retain small evidence bundle
         if: always()
         uses: actions/upload-artifact@v4
