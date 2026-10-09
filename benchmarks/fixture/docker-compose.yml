@@ -1,0 +1,52 @@
+# Disposable PostgreSQL 17 cluster for benchmark runs. Synthetic data only.
+#
+# UNVALIDATED: written while the Docker daemon was unreachable on the authoring
+# host. Whoever first brings this up must confirm it and record the result in
+# docs/VALIDATION.md. See benchmarks/README.md "Running the v0.1 runner".
+#
+# Never point this at, or restore into, a cluster holding real data.
+#
+#   export POSTGRES_PASSWORD='choose-a-throwaway-password'
+#   docker compose -f benchmarks/fixture/docker-compose.yml up -d
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: pg-delta-bench
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in your shell}
+      # Data checksums are required by benchmarks/README.md step 2 and let
+      # verification detect block corruption rather than silently accepting it.
+      POSTGRES_INITDB_ARGS: --data-checksums
+    command:
+      - postgres
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
+      - -c
+      - wal_level=replica
+      # summarize_wal is PostgreSQL 17+ and is a prerequisite for the native
+      # incremental baseline this runner will add in v0.2.
+      - -c
+      - summarize_wal=on
+      # pg_basebackup --wal-method=stream opens a second connection, so the
+      # default of one sender would deadlock a streaming backup.
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    ports:
+      # Bound to loopback so the fixture is not reachable from the network.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  # Named rather than bind-mounted: a bind mount on a Windows host filesystem
+  # would make the measured I/O unrepresentative.
+  pgdata:
