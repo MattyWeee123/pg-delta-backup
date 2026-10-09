@@ -179,7 +179,7 @@ class CommandBuilderTests(unittest.TestCase):
         self.assertIn('--wal-method', command)
         self.assertIn('stream', command)
         self.assertIn('--manifest-checksums', command)
-        self.assertIn('CRC32C', command)
+        self.assertIn('SHA256', command)
 
     def test_never_prompts_and_carries_no_password(self):
         _, command = self.build()
@@ -189,9 +189,9 @@ class CommandBuilderTests(unittest.TestCase):
         self.assertNotIn('pgpassword', joined)
 
     def test_manifest_checksums_is_selectable(self):
-        _, command = self.build('--manifest-checksums', 'SHA256')
-        self.assertIn('SHA256', command)
-        self.assertNotIn('CRC32C', command)
+        _, command = self.build('--manifest-checksums', 'CRC32C')
+        self.assertIn('CRC32C', command)
+        self.assertNotIn('SHA256', command)
 
     def test_verify_command_targets_the_backup_directory(self):
         args, _ = self.build()
@@ -330,7 +330,7 @@ class MainTests(unittest.TestCase):
         for name in ('pg_basebackup.log', 'pg_verifybackup.log', 'versions.txt'):
             self.assertTrue((run / name).exists(), f'{name} missing')
         versions = (run / 'versions.txt').read_text(encoding='utf-8')
-        self.assertIn('manifest_checksums: CRC32C', versions)
+        self.assertIn('manifest_checksums: SHA256', versions)
         self.assertIn('checkpoint: fast', versions)
 
     def test_versions_records_pgpassword_presence_without_the_value(self):

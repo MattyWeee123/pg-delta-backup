@@ -2,12 +2,18 @@ name: Native PostgreSQL baseline smoke
 on:
   pull_request:
     paths:
-      - 'benchmarks/**'
-      - 'tests/test_native_baseline.py'
+      - 'benchmarks/**/*.py'
+      - 'benchmarks/Dockerfile'
+      - 'benchmarks/fixture/**'
+      - 'benchmarks/workloads/**/*.tcl'
+      - 'tests/**'
       - '.github/workflows/native-baseline.yml'
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: native-baseline-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   native-baseline:
     runs-on: ubuntu-24.04
@@ -19,6 +25,10 @@ jobs:
           python-version: '3.12'
       - name: Unit tests
         run: python -m unittest discover -s tests -v
+      - name: Validate Compose configuration
+        env:
+          POSTGRES_PASSWORD: disposable-ci-placeholder
+        run: docker compose -f benchmarks/fixture/docker-compose.yml config --quiet
       - name: Resolve PostgreSQL image and build runner
         run: |
           docker pull public.ecr.aws/docker/library/postgres:17
@@ -33,6 +43,12 @@ jobs:
             -e BENCH_IMAGE_DIGEST -e GITHUB_SHA \
             -v "$PWD/results/native:/results" pg-native-bench \
             --output /results/run --rows 20000 --repeats 3 --duration 8 --rate 100
+      - name: Check consolidated CLI full and incremental restores
+        run: |
+          docker run --rm --network none --cpus=2 --memory=2g --shm-size=256m \
+            -e BENCH_IMAGE_DIGEST -e GITHUB_SHA \
+            -v "$PWD/results/native:/results" --entrypoint python3 pg-native-bench \
+            -m benchmarks.cli_smoke --output /results/run/cli-smoke
       - name: Make container evidence readable to the host runner
         if: always()
         run: |
