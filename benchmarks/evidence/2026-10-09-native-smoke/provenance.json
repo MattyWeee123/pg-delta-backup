@@ -1,0 +1,24 @@
+{
+  "run_url": "https://github.com/MattyWeee123/pg-delta-backup/actions/runs/37991303022",
+  "run_id": 37991303022,
+  "workflow_status": "success",
+  "artifact_name": "native-baseline-evidence",
+  "pr_head": "633782b84a17b8cd9d49595a109a11c6c71fed6e",
+  "checkout_merge_commit": "285a896075e742c0d8acfcd5fc9677e370d5fa28",
+  "raw_file_count": 1455,
+  "raw_file_bytes": 7691690,
+  "zip_sha256": "ed4ee2aa82d0a8573857c485f93485d5e05da470d0132eb977dade7b1eb1f517",
+  "zip_bytes": 1673776,
+  "unit_tests_passed": 20,
+  "native_trials_passed": 15,
+  "post_download_validation": [
+    "aggregate and per-trial JSON agree",
+    "all five treatment cells have three repetitions",
+    "raw transaction logs reproduce backup-window metrics",
+    "successful transaction logs match source ledger counts",
+    "quiescent package and active PITR states match their source exports",
+    "negative-control stderr confirms checksum mismatch and missing WAL"
+  ],
+  "performance_scope": "Tiny local native smoke; no controlled scale, wire-byte or application-degradation conclusions",
+  "raw_artifact_is_synthetic": true
+}

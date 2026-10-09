@@ -2,6 +2,8 @@
 
 This runner creates real PostgreSQL 17 clusters, takes full and incremental backups, combines incrementals, verifies required files/WAL, and boots isolated disposable restores. It establishes a working native comparison before custom optimization. It currently produces **local smoke measurements**, not the complete controlled performance baseline described in README.md.
 
+The first complete successful run is preserved in the [October 9 smoke report](evidence/2026-10-09-native-smoke/report.md), with results.json, provenance and compressed raw evidence alongside it.
+
 ## What the treatments mean
 
 - **Full:** copy a new complete physical backup with streamed WAL.
