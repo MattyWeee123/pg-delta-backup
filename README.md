@@ -8,6 +8,8 @@ A native PostgreSQL benchmark runner is now available for full/incremental backu
 verification, and isolated restore tests. See [the native runner](benchmarks/NATIVE.md).
 Its initial local smoke measurements are not the controlled performance baseline;
 the custom delta-transfer executable is still unimplemented.
+See [what the benchmark must establish](benchmarks/BASELINE-GATE.md) for the
+comparisons, scale choices, remaining work, and role of GCP.
 
 ## The problem
 
@@ -83,4 +85,5 @@ No open-source license is selected until the collaboration's ownership and contr
 ## Validation status
 
 See [local validation](docs/VALIDATION.md) for what was actually run.
-PostgreSQL/AlloyDB integration and performance results are not yet established.
+Native PostgreSQL smoke integration has run. Controlled performance results and
+AlloyDB Omni compatibility are not yet established.
