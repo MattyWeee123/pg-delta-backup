@@ -70,6 +70,23 @@ Run the workload twice under identical settings: once alone for the denominator,
 `benchmarks/benchmark.py` executing inside the measurement window. Start the backup only after
 `Rampup complete` appears in the log, or it lands in the ramp-up and is excluded from the result.
 
+For local diagnosis, start the host-side resource observer before each HammerDB run, using a new
+output path per run. The default Compose project is `fixture`; replace it if `docker compose -p`
+was used. Leave it running through the backup and workload recovery period:
+
+```sh
+python3 -m benchmarks.observe_docker --project fixture \
+  --duration 240 --interval 1 --output results/hammerdb/resources-run-A.jsonl
+```
+
+Run that command in a separate terminal. It discovers the `postgres` and temporary `runner`
+containers by Compose labels and records timestamped Docker CPU percentage, memory usage and
+cumulative block I/O counters. The observer does not calculate workload degradation or exact
+device-level I/O. Docker Desktop observations include its Linux VM and shared-host effects.
+The CLI's phase records separately sample the backup process tree inside the runner container;
+they cannot see the source server process tree in the other container. Keep the raw Docker and
+CLI samples together, and compare their timestamps with HammerDB's timestamped logs.
+
 **Read the timestamped series, not just the aggregate.** `docker logs -t` prefixes each TPM
 sample with a timestamp; correlate those against the backup's start and end. A 30-second backup
 inside a 120-second window dilutes roughly fourfold in the aggregate NOPM, which can mask a short disturbance. The examples below report aggregate loss and much deeper

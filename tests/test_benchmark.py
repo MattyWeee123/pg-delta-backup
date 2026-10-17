@@ -102,6 +102,14 @@ class RunCommandTests(unittest.TestCase):
         self.assertGreaterEqual(result['duration_seconds'], 0.0)
         self.assertIn('hello benchmark', log.read_text(encoding='utf-8'))
 
+    def test_resource_observation_has_evidence_or_unavailable_reason(self):
+        result = run_command(python_command('import time; time.sleep(.3)'),
+                             self.directory / 'observed.log', 60,
+                             monitor_resources=True)
+        self.assertEqual(result['exit_code'], 0)
+        resources = result['resources']
+        self.assertTrue(resources['unavailable_reason'] or resources['samples'])
+
     def test_logs_the_command_line(self):
         log = self.directory / 'out.log'
         run_command(python_command('pass'), log, 60)

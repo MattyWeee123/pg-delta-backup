@@ -13,6 +13,8 @@ import signal
 import subprocess
 import time
 
+from benchmarks.resources import ResourceSampler
+
 EXIT_OK, EXIT_INVALID_INPUT, EXIT_IO_FAILURE, EXIT_VERIFICATION_FAILURE = 0, 2, 3, 4
 CHECKSUM_ALGORITHMS = ('CRC32C', 'SHA224', 'SHA256', 'SHA384', 'SHA512')
 RESULT_KEYS = (
@@ -41,14 +43,15 @@ def atomic_json(path, value):
             os.close(descriptor)
 
 
-def run_command(command, log_path, timeout, *, stderr_path=None, input_text=None, env=None):
+def run_command(command, log_path, timeout, *, stderr_path=None, input_text=None,
+                env=None, monitor_resources=False):
     """Capture a bounded command; terminate its process group on POSIX timeout.
 
 Timings include command launch and waiting, not just server execution. Native
 database integration runs on Linux. Windows stub tests terminate the child.
 """
     start = time.perf_counter()
-    exit_code = error = None
+    exit_code = error = resources = None
     with ExitStack() as stack:
         out = stack.enter_context(Path(log_path).open('w', encoding='utf-8'))
         err = (stack.enter_context(Path(stderr_path).open('w', encoding='utf-8'))
@@ -62,6 +65,11 @@ database integration runs on Linux. Windows stub tests terminate the child.
                 list(map(str, command)), stdout=out, stderr=err,
                 stdin=subprocess.PIPE if input_text is not None else subprocess.DEVNULL,
                 start_new_session=os.name != 'nt', env=env)
+            sampler = None
+            if monitor_resources:
+                sampler = ResourceSampler({'runner': process.pid},
+                    Path(log_path).with_suffix('.resources.jsonl'))
+                sampler.start()
             try:
                 process.communicate(input=input_text.encode() if input_text is not None else None,
                                     timeout=timeout)
@@ -73,12 +81,19 @@ database integration runs on Linux. Windows stub tests terminate the child.
                     process.kill()
                 process.communicate()
                 error = f'command timed out after {timeout} seconds'
+            finally:
+                if sampler:
+                    resources = sampler.stop()
         except (OSError, subprocess.SubprocessError) as exc:
             error = str(exc) or exc.__class__.__name__
         if error:
             (err if stderr_path else out).write('\nERROR: ' + error + '\n')
-    return {'exit_code': exit_code, 'duration_seconds': time.perf_counter() - start,
-            'error': error}
+    result = {'exit_code': exit_code, 'duration_seconds': time.perf_counter() - start,
+              'error': error}
+    if monitor_resources:
+        result['resources'] = resources or {
+            'unavailable_reason': error or 'process did not start'}
+    return result
 
 
 def directory_bytes(path):

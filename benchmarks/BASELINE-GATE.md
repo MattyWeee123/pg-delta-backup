@@ -30,7 +30,7 @@ The current active test checks package-only startup and balance conservation, th
 
 Performance measurements answer a different question. Collect capture time, time to a verified usable backup, restore time, measured traffic in both directions, completed transactions per second, latency percentiles, queueing and failures. Source/destination CPU, disk activity, memory and scratch space help explain bottlenecks. Stored file bytes are not wire bytes. Never replace unavailable measurements with zero.
 
-The smoke runner records local durations, file sizes and transaction logs. It deliberately has no performance pass threshold on a hosted CI machine. Fifteen small successful trials establish that these paths execute; they do not establish a speedup or quantify application degradation.
+The smoke runner records local durations, file sizes, transaction logs, sampled process resources and PostgreSQL statistics. A host-side observer can also sample the Compose source and runner containers. It deliberately has no performance pass threshold on a hosted CI machine. Fifteen small successful historical trials establish that backup paths execute; they do not establish a speedup or quantify application degradation. The new resource observers still require validation on the intended measurement host.
 
 ## Workload and scale proposal
 
