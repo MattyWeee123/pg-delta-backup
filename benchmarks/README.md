@@ -1,6 +1,6 @@
 # Benchmark and restore plan
 
-Status: experiment design, not measured database results.
+Status: overall experiment design. The [native runner](NATIVE.md) now executes a limited real PostgreSQL smoke matrix; the controlled baseline release is still incomplete. See the [baseline release gate](BASELINE-GATE.md) for the distinction.
 Sponsor direction from the supplied chats: active workload, time/network/application-impact comparison, team-defined scales and a custom correctness benchmark.
 Do not compare an already staged custom source against an end-to-end baseline without also reporting staging cost.
 
@@ -51,6 +51,63 @@ latency_increase = p95_during_backup / p95_without_backup - 1
 Where a fixed offered rate keeps completed throughput unchanged, latency and queueing may reveal degradation that TPS does not.
 Include raw values and failed trials; report speedup only where the recovery guarantees and measurement boundaries match.
 
+## Running the consolidated CLI
+
+Both the configurable CLI and the [native recovery suite](NATIVE.md) use the same backup adapters and result schema. See [the consolidation and tool decisions](CONSOLIDATION.md). Sam's HammerDB workload is retained in [workloads/hammerdb](workloads/hammerdb/README.md).
+
+The CLI captures a full backup, or a native incremental followed by reconstruction. It verifies manifests and required WAL; its success status is `PASS_MANIFEST_ONLY`. It does not itself restore the database or orchestrate HammerDB. The native suite adds those fixture-specific recovery tests.
+
+For an existing disposable Linux fixture with matching PostgreSQL 17 tools on PATH:
+
+```sh
+python -m benchmarks.benchmark --host 127.0.0.1 --port 5432 --user postgres --out benchmarks/runs
+# After the chosen workload changes the database, use the full run's immutable backup:
+python -m benchmarks.benchmark --host 127.0.0.1 --port 5432 --user postgres \
+  --out benchmarks/runs --method pg_basebackup_incremental \
+  --basis benchmarks/runs/FULL_RUN_ID/backup
+```
+
+Authentication uses the existing `.pgpass`/`PGPASSFILE` or password environment, never a password argument. The legacy `python benchmarks/benchmark.py` entrypoint also works. `--source-pgdata` optionally checks source/output overlap. Each invocation creates a unique directory; incremental capture goes in `increment/` and its reconstructed output goes in `backup/`.
+
+For the packaged Compose fixture, choose a throwaway password and resolve the base image before building:
+
+```sh
+export POSTGRES_PASSWORD='choose-a-throwaway-password'
+docker pull public.ecr.aws/docker/library/postgres:17
+export PG_IMAGE=$(docker image inspect public.ecr.aws/docker/library/postgres:17 --format '{{index .RepoDigests 0}}')
+export BENCH_COMMIT=$(git rev-parse HEAD)
+docker compose -f benchmarks/fixture/docker-compose.yml up -d --wait postgres
+docker compose -f benchmarks/fixture/docker-compose.yml build runner
+docker compose -f benchmarks/fixture/docker-compose.yml run --rm runner
+```
+
+This uses a disposable database volume and a separate backup volume on the same host. It is a development fixture, not an isolated source/destination hardware topology. Results appear in stdout and persist under `/results/RUN_ID` in the backup volume. To run incremental, use the full run ID printed by the first command:
+
+```sh
+docker compose -f benchmarks/fixture/docker-compose.yml run --rm runner \
+  --host postgres --user postgres --out /results \
+  --method pg_basebackup_incremental --basis /results/FULL_RUN_ID/backup
+```
+
+Preserve evidence outside the container. This exports logs, records and provenance while excluding the large database copies:
+
+```sh
+mkdir -p results/fixture
+docker compose -f benchmarks/fixture/docker-compose.yml run --rm --entrypoint sh runner \
+  -c 'cd /results && tar --exclude=backup --exclude=increment -czf - .' \
+  > results/fixture/evidence.tar.gz
+```
+
+`docker compose -f benchmarks/fixture/docker-compose.yml down` stops the lab while retaining its volumes. Adding `--volumes` deletes the disposable database and backup volumes; export required evidence first.
+
+| Setting | Shared default | Meaning |
+|---|---|---|
+| Manifest checksums | SHA256 | Same for capture and combined output; Sam's historical v0.1 default was CRC32C. Old timings are not directly comparable. |
+| Checkpoint | fast | Explicit policy for both methods; do not compare against spread without labeling the difference. |
+| Format | plain | Tar is rejected by this verification path. |
+| CLI timeout | 3600 seconds per command | Failure preserves logs and cannot receive a successful verified time. |
+| Result schema | v2 | Common backup record, with separate incremental phases and explicit manifest-only status. |
+
 ## First PostgreSQL baseline recipe
 
 Use a fresh disposable Linux/container test environment, standard PostgreSQL 17 binaries and synthetic data only.
@@ -64,7 +121,7 @@ Paths refer to the chosen test environment; do not run them against personal or 
 4. Capture B0 using plain pg_basebackup with streamed WAL and SHA-256 manifest checksums.
 5. Verify B0 with matching-major pg_verifybackup, preserving WAL parsing, then restore a disposable copy and check data.
 6. Apply a reproducible change workload, quiesce writes for the initial comparison, record expected SQL data, and capture B1 plus a native incremental I1 referencing B0's manifest.
-7. Combine B0 and I1 into a fresh directory, verify it, restore a copy, and compare the expected data.
+7. Verify I1, combine B0 and I1 into a fresh directory with the declared checksum policy, verify it, restore a copy, and compare the expected data.
 8. Use the immutable B0 and B1 as inputs to transfer-only experiments.
 9. Extend to sustained concurrent writes only after defining a common recovery endpoint and oracle; comparing arbitrary "latest" queries on a moving source is invalid.
 
@@ -76,7 +133,8 @@ pg_verifybackup "$B0"
 # Apply the deterministic changes here, then capture new backups.
 pg_basebackup -h "$PGHOST" -U "$PGUSER" -D "$B1" -Fp -X stream --manifest-checksums=SHA256
 pg_basebackup -h "$PGHOST" -U "$PGUSER" -D "$I1" -Fp -X stream --incremental="$B0/backup_manifest" --manifest-checksums=SHA256
-pg_combinebackup -o "$COMBINED" "$B0" "$I1"
+pg_verifybackup "$I1"
+pg_combinebackup --copy --manifest-checksums=SHA256 -o "$COMBINED" "$B0" "$I1"
 pg_verifybackup "$COMBINED"
 ```
 
