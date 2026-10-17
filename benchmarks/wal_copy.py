@@ -22,11 +22,15 @@ def copy_wal(mode, source: Path, destination: Path):
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, destination)
-        directory = os.open(destination.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        # Directory fsync is POSIX-only; Windows cannot open a directory
+        # read-only. Same guard as atomic_json in backup.py. Measured runs are
+        # Linux, so archive durability is unchanged there.
+        if os.name != "nt":
+            directory = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         Path(temporary).unlink(missing_ok=True)
     return 0
