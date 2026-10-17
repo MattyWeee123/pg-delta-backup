@@ -25,6 +25,7 @@ import uuid
 
 from benchmarks.backup import (atomic_json, basebackup_command, directory_bytes,
                                run_backup, run_command)
+from benchmarks.resources import ResourceSampler
 
 
 TOOLS = ("postgres", "initdb", "pg_ctl", "psql", "pg_basebackup",
@@ -96,6 +97,30 @@ def same_state(expected: dict, actual: dict) -> bool:
     return expected == actual
 
 
+def stats_delta(before: dict, after: dict) -> dict:
+    """Subtract PostgreSQL cumulative counters, retaining pg_stat_io dimensions."""
+    for section in ('checkpointer', 'wal'):
+        if before[section].get('stats_reset') != after[section].get('stats_reset'):
+            return {'unavailable_reason': f'pg_stat_{section} counters reset during observation'}
+    def fields(old, new):
+        return {key: value - old[key] for key, value in new.items()
+                if key in old and type(value) in (int, float)
+                and type(old[key]) in (int, float)}
+
+    old_io = {(row['backend_type'], row['object'], row['context']): row
+              for row in before['io']}
+    for row in after['io']:
+        key = (row['backend_type'], row['object'], row['context'])
+        if key in old_io and row.get('stats_reset') != old_io[key].get('stats_reset'):
+            return {'unavailable_reason': 'pg_stat_io counters reset during observation'}
+    return {'checkpointer': fields(before['checkpointer'], after['checkpointer']),
+            'wal': fields(before['wal'], after['wal']),
+            'io': [{**{key: row[key] for key in ('backend_type', 'object', 'context')},
+                    **fields(old_io[(row['backend_type'], row['object'], row['context'])], row)}
+                   for row in after['io']
+                   if (row['backend_type'], row['object'], row['context']) in old_io]}
+
+
 def preflight(bin_dir: str | None) -> dict[str, str]:
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         raise ValueError("Run as an unprivileged user; initdb refuses root")
@@ -128,20 +153,24 @@ class Trial:
         self.started: list[Path] = []
         self.workload = None
         self.workload_files = None
+        self.source_sampler = None
         self.commands = []
         self.counter = 0
 
-    def command(self, name, arguments=(), *, sql=None, check=True, timeout=120):
+    def command(self, name, arguments=(), *, sql=None, check=True, timeout=120,
+                monitor_resources=False):
         self.counter += 1
         prefix = self.output / f"{self.counter:03d}-{name}"
         argv = [self.tools.get(name, name), *map(str, arguments)]
         phase = run_command(argv, prefix.with_suffix('.out'), timeout,
                             stderr_path=prefix.with_suffix('.err'), input_text=sql,
-                            env=controlled_env())
+                            env=controlled_env(), monitor_resources=monitor_resources)
         record = {"argv": argv, "seconds": phase['duration_seconds'],
                   "returncode": phase['exit_code'], "error": phase['error'],
                   "stdout": prefix.with_suffix(".out").name,
                   "stderr": prefix.with_suffix(".err").name}
+        if monitor_resources:
+            record['resources'] = phase['resources']
         self.commands.append(record)
         atomic_json(self.output / "commands.json", self.commands)
         if check and (record['returncode'] != 0 or record['error']):
@@ -153,6 +182,13 @@ class Trial:
         _, path = self.command("psql", ["-X", "-qAt", "-v", "ON_ERROR_STOP=1",
                               "-h", socket or self.socket, "-p", "5432", "-U", "bench", "-d", "postgres"], sql=statement)
         return path.read_text().strip()
+
+    def pg_stats(self):
+        return json.loads(self.sql("""SELECT json_build_object(
+  'checkpointer', (SELECT row_to_json(c) FROM pg_stat_checkpointer c),
+  'wal', (SELECT row_to_json(w) FROM pg_stat_wal w),
+  'io', (SELECT json_agg(row_to_json(i)) FROM pg_stat_io i)
+)::text;"""))
 
     def start(self, data, socket, target=None):
         socket.mkdir(exist_ok=True)
@@ -225,9 +261,11 @@ VACUUM ANALYZE bench.accounts;
         return record
 
     def backup_phase(self, stage, argv):
-        record, _ = self.command(Path(argv[0]).name, argv[1:], check=False)
+        record, _ = self.command(Path(argv[0]).name, argv[1:], check=False,
+                                 monitor_resources=True)
         return {'exit_code': record['returncode'], 'duration_seconds': record['seconds'],
-                'error': record['error'], 'stdout': record['stdout'], 'stderr': record['stderr']}
+                'error': record['error'], 'stdout': record['stdout'], 'stderr': record['stderr'],
+                'resources': record['resources']}
 
     def change(self):
         changed = max(1, int(self.args.rows * self.args.change_fraction))
@@ -352,6 +390,9 @@ COMMIT;
         return target, lsn
 
     def cleanup(self):
+        if self.source_sampler:
+            self.source_sampler.stop()
+            self.source_sampler = None
         if self.workload and self.workload.poll() is None:
             self.workload.terminate()
             try:
@@ -376,9 +417,7 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
     record = {"method": method, "mode": mode, "status": "running",
               "measurement_kind": "local_native_backup", "wire_bytes": None,
               "unavailable_metrics": {"wire_bytes": "Unix socket transfer on one host",
-               "source_cpu_seconds": "server process monitoring not implemented",
-               "disk_io_bytes": "device I/O monitoring not implemented",
-               "peak_rss_bytes": "process-group monitoring not implemented"}}
+               "device_io_bytes": "device I/O monitoring not implemented"}}
     record["database_bytes"] = int(trial.sql("SELECT pg_database_size('postgres');"))
     record["system_identifier"] = trial.sql("SELECT system_identifier FROM pg_control_system();")
     record["basis_bytes"] = directory_bytes(basis)
@@ -386,6 +425,12 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
         trial.launch_workload()
     else:
         expected = trial.state(trial.socket, "expected")
+    stats_before = trial.pg_stats()
+    source_pid = int((trial.source / 'postmaster.pid').read_text().splitlines()[0])
+    source_sampler = ResourceSampler({'source': source_pid},
+                                     trial.output / 'source-resources.jsonl')
+    trial.source_sampler = source_sampler
+    source_sampler.start()
     start = time.perf_counter()
     start_wall = time.time()
     output = trial.root / "output"
@@ -424,6 +469,14 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
     if method == 'no_backup':
         record['method_seconds'] = time.perf_counter() - start
     end_wall = time.time()
+    record['source_resources'] = source_sampler.stop()
+    trial.source_sampler = None
+    stats_after = trial.pg_stats()
+    record['postgres_stats'] = {'before': stats_before, 'after': stats_after,
+                                'delta': stats_delta(stats_before, stats_after),
+                                'scope': 'measured backup or no-backup interval'}
+    if record['source_resources']['unavailable_reason']:
+        record['unavailable_metrics']['source_resources'] = record['source_resources']['unavailable_reason']
     if mode == "active":
         if method != "no_backup":
             # Workload must stay active through the measured backup interval.

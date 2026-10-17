@@ -31,6 +31,8 @@ Sam's original ten-field v0.1 record is extended deliberately, with `schema_vers
 | `integrity_verified`, `restore_tested`, `status` | Explicit distinction between manifest integrity and separately tested recovery |
 | `network_bytes`, `unavailable_metrics` | Null plus reason until a transport observer exists |
 
+Each executed CLI phase also has a `resources` observation when Linux `/proc` is available, with a sibling `.resources.jsonl` sample series. The CLI sees its own backup/verification process tree, not the PostgreSQL server in a separate container or host. The native suite additionally samples its owned source server and records PostgreSQL cumulative-statistics deltas. The host-side [Compose resource observer](observe_docker.py) samples both Compose services during HammerDB experiments. These sources have different scopes and must not be merged into one wire-byte or device-I/O figure.
+
 Timings include command launch and waiting. At the smoke database's short durations, orchestration overhead is material. These measurements are not a performance acceptance threshold. Execution logs and atomically published JSON survive failures; POSIX command timeouts kill the process group. The CLI refuses source/basis/output overlap, including symlink aliases. Auth/TLS environment settings are preserved while implicit libpq routing settings are removed.
 
 ## HammerDB and pgbench have different jobs

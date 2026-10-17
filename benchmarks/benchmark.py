@@ -164,7 +164,8 @@ def main(argv=None):
     def execute(stage, command):
         logs = {'backup': 'pg_basebackup.log', 'verification': 'pg_verifybackup.log'}
         path = run_dir / logs.get(stage, stage + '.log')
-        phase = run_command(command, path, args.timeout, env=connection_env())
+        phase = run_command(command, path, args.timeout, env=connection_env(),
+                            monitor_resources=True)
         commands.append({'phase': stage, 'argv': list(map(str, command)),
                          'log': path.name, **phase})
         atomic_json(run_dir / 'commands.json', commands)
