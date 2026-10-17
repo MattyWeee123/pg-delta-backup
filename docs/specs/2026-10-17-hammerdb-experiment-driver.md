@@ -146,17 +146,127 @@ entrypoints. Degradation figures are null plus a reason when a pair is rejected,
 
 ## Milestones
 
-Each milestone ends with tests passing and a push to the feature branch.
+Branch is `benchmark-harness-v0.1`, fast-forwarded onto Etash's `c1d21b8`. Each milestone ends
+with the full suite passing and a push.
 
-| | Deliverable | Verification |
-|---|---|---|
-| **M1** | Branch created. Latency source confirmed. TPM series parser and latency parser, pure functions. | Unit tests over captured sample log text, including the October 9 series |
-| **M2** | Window alignment, the three window computations, degradation math, record assembly. | Table-driven tests: aligned windows, rejected pair, missing samples, divide-by-zero guard |
-| **M3** | Orchestration: container lifecycle, matched pair, randomization, `run_backup` and `observe_docker` wiring, evidence layout. | Tests against stub `docker`/HammerDB; no real containers |
-| **M4** | Validated pilot run against the fixture, evidence committed, README section appended, `VALIDATION.md` updated. | A real matched pair completes and produces a populated `results.json` |
-| **M5** | PR opened, stacked on PR #2, with a comment on #2 describing the split. | Reviewer can run the documented command |
+### M0: unblock the base branch — done
 
-M1 to M3 need no PostgreSQL and no Docker; M4 does.
+Pushed as `7193112`.
+
+- `wal_copy.py`: guard the directory fsync behind `os.name != "nt"`, matching `atomic_json`.
+  Windows went from 70/71 to 71/71.
+- `.github/workflows/native-baseline.yml`: try three mirrors of the same Docker Official Image
+  with bounded retries, record the serving registry in `BENCH_IMAGE_SOURCE`, fail explicitly when
+  none answer. Fixes a `toomanyrequests` quota failure that was not a code regression.
+
+### M1: confirm the latency source, then write the parsers
+
+**M1.0 Retire the latency risk first.** Everything else in M1 is cheap; this is the only unknown.
+Bring the fixture up, run a short HammerDB job **without `--rm`** so the container survives,
+`docker cp /tmp/hdbxtprofile.log` out and inspect it. If unusable, try the jobs database
+(`jobs <jobid> timing`). Capture whichever works verbatim as a test fixture. If neither parses,
+p95 is reported as unavailable with a reason and the raw artifact is retained; it is never
+invented.
+
+**M1.1 `parse_tpm_series(log_text)`.** Consumes `docker logs -t` output and returns samples,
+markers and the aggregate.
+
+- `<rfc3339> NNNN PostgreSQL tpm` to `(timestamp, tpm)`
+- `Rampup complete` and `Test complete` markers
+- `TEST RESULT : System achieved <N> NOPM from <M> PostgreSQL TPM`
+- Unparseable lines are counted, not silently dropped, so format drift is detectable
+- A missing marker is an explicit error, never a zero
+
+**Sampling semantics, which the window maths depends on:** the transaction counter reports work
+over the preceding interval, so a sample stamped `T` describes roughly `(T-10, T]`. A sample is
+attributed to a window when its timestamp falls in `(start, end]`. At a ten-second cadence this
+leaves up to one sample of edge uncertainty, which is recorded with the result rather than hidden.
+
+**M1.2 `parse_latency_profile(text)`.** Per-transaction percentiles plus overall p95, or an
+explicit unavailable reason.
+
+**M1.3 Tests** in `tests/test_hammerdb_experiment.py`, using the real captured October 9 series:
+empty log, ramp-up only, truncated run with no `Test complete`, leading `0 PostgreSQL tpm`,
+malformed timestamp, missing `TEST RESULT`.
+
+### M2: window alignment and degradation
+
+**M2.1** `Window(start, end)` with `duration_seconds`, and `samples_in(series, window)` using the
+`(start, end]` rule above.
+
+**M2.2** The three windows, never collapsed into one figure:
+
+| Window | Span |
+|---|---|
+| `whole_window` | `Rampup complete` to `Test complete` |
+| `analysis_window` | backup capture start to final verification end, clamped to `whole_window` |
+| `recovery_window` | end of `analysis_window` to `Test complete` |
+
+**M2.3** Matched control window: take the treatment's analysis-window offset from its own
+`Rampup complete` plus its duration, and apply the same offset and duration to the control's
+`Rampup complete`.
+
+**M2.4** Degradation, following `benchmarks/README.md`:
+
+```text
+throughput_loss = 1 - mean_tpm(treatment, analysis) / mean_tpm(control, matched)
+latency_increase = p95(treatment) / p95(control) - 1
+```
+
+Guards, all returning null plus a reason rather than a number: control mean of zero, fewer than
+two samples in either window (matching the existing "fewer than two live samples" convention),
+missing latency data.
+
+**M2.5** Pair rejection when the analysis window is not wholly inside the whole window, mirroring
+how `native_baseline` rejects a trial whose backup outlives the workload.
+
+**M2.6** Record assembly: `schema_version: 2`, embedding the `run_backup` record under
+`backup_result`, with `network_bytes` null and a reason in `unavailable_metrics`.
+
+**M2.7** Tests: table-driven over aligned pairs, rejected pairs, zero-denominator, single-sample
+windows, and a control shorter than the treatment.
+
+### M3: orchestration
+
+**M3.1** Container lifecycle: start detached without `--rm` so the profile can be copied out;
+`wait_for(container, pattern, timeout)` polling the log; `collect` pulling `docker logs -t`, the
+profile, then removing the container. A wait that times out fails the trial.
+
+**M3.2** Trial runners. Control: start, wait for ramp-up, wait for completion, collect. Backup:
+the same, with `backup.run_backup` invoked at a declared offset into the window.
+
+**M3.3** Matched pair, `--repeats` repetitions, order randomized per repetition by a seeded
+`random.Random`; the seed is recorded so an ordering is reproducible.
+
+**M3.4** `observe_docker` started per trial into the trial directory.
+
+**M3.5** Evidence layout written with `backup.atomic_json`.
+
+**M3.6** `argparse` CLI: `--output --repeats --warehouses --vu --rampup --duration
+--backup-offset --seed --method --image`. Refuses an existing output directory, as
+`native_baseline` does.
+
+**M3.7** Tests against a stub `docker` executable, as `tests/test_benchmark.py` already does. No
+real containers.
+
+### M4: pilot run
+
+Needs Docker and the fixture.
+
+1. Bring up the fixture; confirm or rebuild the 10-warehouse schema.
+2. Build the shared CLI image (`--target cli`).
+3. Smoke at `--repeats 1 --duration 3`, then the pilot at `--repeats 3`.
+4. Commit evidence **excluding backup directories**, which are over a gigabyte each; follow the
+   existing `tar --exclude=backup --exclude=increment` practice.
+5. Append the README section; update `VALIDATION.md` with what ran and what it does not establish.
+
+### M5: integration
+
+Open the PR against `codex/benchmark-resource-metrics`, not `main`, so it does not appear to
+re-propose Matt's and Etash's commits. Comment on PR #2 describing the split so nobody duplicates
+the workload lane.
+
+M0 to M3 need neither PostgreSQL nor Docker, except M1.0. M4 needs both.
 
 ## What this does not establish
 
