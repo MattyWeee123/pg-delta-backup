@@ -4,6 +4,15 @@ Research starter for the CMU / AlloyDB Omni collaboration.
 Status: sponsor direction clarified by supplied Google Chat screenshots; implementation design remains proposed.
 This repository does not yet contain a PostgreSQL backup implementation.
 
+The consolidated benchmark provides a configurable full/incremental CLI, Sam’s
+HammerDB workload, and a disposable recovery suite, using shared backup adapters.
+See [the consolidated architecture](benchmarks/CONSOLIDATION.md) and
+[the native recovery suite](benchmarks/NATIVE.md).
+Its initial local smoke measurements are not the controlled performance baseline;
+the custom delta-transfer executable is still unimplemented.
+See [what the benchmark must establish](benchmarks/BASELINE-GATE.md) for the
+comparisons, scale choices, remaining work, and role of GCP.
+
 ## The problem
 
 A destination already has an older physical copy of a database cluster.
@@ -52,13 +61,29 @@ The demo compares whole-file transfer with fixed-size chunk reuse on determinist
 It proves byte reconstruction for its fixtures only.
 It does not benchmark PostgreSQL, network transfer, live consistency, or durable backup publication.
 
+## Run the benchmark runner
+
+`benchmarks/benchmark.py` is the measurement harness: it runs full backup or native incremental plus reconstruction, verifies
+the output with `pg_verifybackup`, and writes a shared v2 JSON run record.
+It needs PostgreSQL 17 client utilities and a disposable test cluster; see
+[the benchmark plan](benchmarks/README.md#running-the-consolidated-cli) for the fixture and flags.
+
+```sh
+python benchmarks/benchmark.py --host 127.0.0.1 --port 5432 --user postgres --out benchmarks/runs
+```
+
+A successful run records `PASS_MANIFEST_ONLY`, not `PASS`: the runner has no restore gate, so
+`restore_tested` is always false and `network_bytes` is always null.
+HammerDB supplies the larger workload; the native suite uses pgbench for small
+recovery fixtures. The custom delta method remains unimplemented.
+
 ## Repository layout
 
 ```text
 docs/          Briefing, specification, decisions, plan, issue backlog
 experiments/   Small reproducible research experiments
 tests/         Executable checks for the experiments
-benchmarks/    Baseline and restore methodology
+benchmarks/    Methodology, the measurement runner, and a disposable cluster fixture
 .github/       CI and issue/PR templates
 ```
 
@@ -78,4 +103,5 @@ No open-source license is selected until the collaboration's ownership and contr
 ## Validation status
 
 See [local validation](docs/VALIDATION.md) for what was actually run.
-PostgreSQL/AlloyDB integration and performance results are not yet established.
+Native PostgreSQL smoke integration has run. Controlled performance results and
+AlloyDB Omni compatibility are not yet established.
