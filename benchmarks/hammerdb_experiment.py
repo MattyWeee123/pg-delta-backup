@@ -27,7 +27,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 # HammerDB writes naive local timestamps; the official image runs UTC, which
 # the time profile header states explicitly. Parsing as UTC keeps these
@@ -177,6 +177,213 @@ def read_log(path):
     """
     with open(path, encoding='utf-8', errors='replace', newline='') as stream:
         return stream.read()
+
+
+# --- windows and degradation -------------------------------------------------
+
+# Matches the existing convention that a command with fewer than two live
+# samples reports its measurements as null rather than as a number.
+MIN_SAMPLES = 2
+
+
+@dataclass(frozen=True)
+class Window:
+    """A half-open measurement interval, exclusive of start, inclusive of end."""
+
+    start: datetime
+    end: datetime
+
+    @property
+    def duration_seconds(self):
+        return (self.end - self.start).total_seconds()
+
+    def contains(self, other):
+        return self.start <= other.start and other.end <= self.end
+
+    def as_dict(self):
+        return {
+            'start': self.start.isoformat(),
+            'end': self.end.isoformat(),
+            'duration_seconds': round(self.duration_seconds, 3),
+        }
+
+
+def samples_in(series, window):
+    """Samples attributed to a window.
+
+    A counter sample timestamped T reports work over the interval preceding T,
+    so attribution uses (start, end]. The cadence is not fixed, so the caller
+    is given the sample count and observed span rather than an assumed one.
+    """
+    return [s for s in series if window.start < s.at <= window.end]
+
+
+def window_stats(series, window):
+    """Mean throughput over a window, or an explicit reason it is unavailable.
+
+    The mean is a plain average of counter samples, not time weighted. With an
+    irregular cadence that is an approximation, so the sample count and the
+    observed span are reported alongside it.
+    """
+    selected = samples_in(series, window)
+    stats = {
+        'window': window.as_dict(),
+        'samples': len(selected),
+        'mean_tpm': None,
+        'min_tpm': None,
+        'max_tpm': None,
+        'observed_span_seconds': None,
+        'unavailable': None,
+    }
+    if len(selected) < MIN_SAMPLES:
+        stats['unavailable'] = (
+            f'fewer than {MIN_SAMPLES} counter samples in window')
+        return stats
+    values = [s.tpm for s in selected]
+    stats.update(
+        mean_tpm=round(sum(values) / len(values), 1),
+        min_tpm=min(values),
+        max_tpm=max(values),
+        observed_span_seconds=round(
+            (selected[-1].at - selected[0].at).total_seconds(), 3),
+    )
+    return stats
+
+
+def analysis_window(capture_started_at, verified_at):
+    """The interval the backup actually occupied, capture through verification."""
+    return Window(capture_started_at, verified_at)
+
+
+def recovery_window(analysis, whole):
+    """From the end of the backup to the end of the measurement window.
+
+    Throughput stayed depressed after capture finished in the October 9 runs,
+    which no whole-window or analysis-window figure exposes.
+    """
+    if analysis.end >= whole.end:
+        return None
+    return Window(analysis.end, whole.end)
+
+
+def matched_window(control_whole, treatment_whole, treatment_analysis):
+    """The control interval matching the treatment's backup position.
+
+    Degradation must not compare a window containing a backup against a whole
+    control run: the aggregate then varies with how much of the window the
+    backup happened to occupy. The control is measured at the same offset from
+    its own ramp-up, for the same duration.
+    """
+    offset = (treatment_analysis.start - treatment_whole.start).total_seconds()
+    duration = treatment_analysis.duration_seconds
+    start = control_whole.start + timedelta(seconds=offset)
+    return Window(start, start + timedelta(seconds=duration))
+
+
+def throughput_loss(control_stats, treatment_stats):
+    """Fractional throughput loss, or None with a reason.
+
+    Follows benchmarks/README.md:
+        throughput_loss = 1 - tpm_during_backup / tpm_without_backup
+    """
+    for label, stats in (('control', control_stats), ('backup', treatment_stats)):
+        if stats['unavailable'] is not None:
+            return None, f'{label}: {stats["unavailable"]}'
+    control = control_stats['mean_tpm']
+    if not control:
+        return None, 'control mean throughput is zero'
+    return round(1 - treatment_stats['mean_tpm'] / control, 4), None
+
+
+def latency_change(control_latency, treatment_latency):
+    """Fractional p95 change, or None with a reason.
+
+    Whole-run only. HammerDB records no time dimension for latency, so this
+    cannot be matched to the backup window the way throughput is, and it
+    includes ramp-up for both runs.
+    """
+    control = control_latency.get('p95_ms')
+    treatment = treatment_latency.get('p95_ms')
+    if control is None or treatment is None:
+        return None, 'p95 unavailable for at least one trial'
+    if not control:
+        return None, 'control p95 is zero'
+    return round(treatment / control - 1, 4), None
+
+
+def build_pair_record(*, pair_id, repetition, order, control, treatment,
+                      backup_result, capture_started_at, verified_at):
+    """Assemble one matched-pair result.
+
+    `control` and `treatment` each carry `series`, `latency`, `aggregate` and
+    a `whole` Window. A pair whose backup does not fit inside the treatment's
+    measurement window is rejected rather than reported, mirroring how the
+    native suite rejects a trial whose backup outlives its workload.
+    """
+    analysis = analysis_window(capture_started_at, verified_at)
+    treatment_whole = treatment['whole']
+    control_whole = control['whole']
+    rejection = None
+    if not treatment_whole.contains(analysis):
+        rejection = (
+            'backup did not run entirely inside the measurement window; '
+            f'backup {analysis.as_dict()} vs window {treatment_whole.as_dict()}')
+
+    matched = matched_window(control_whole, treatment_whole, analysis)
+    if rejection is None and not control_whole.contains(matched):
+        rejection = (
+            'matched control window falls outside the control measurement '
+            'window; the control run is shorter than the treatment')
+
+    treatment_analysis = window_stats(treatment['series'], analysis)
+    control_matched = window_stats(control['series'], matched)
+    recovery = recovery_window(analysis, treatment_whole)
+
+    loss, loss_reason = (None, rejection) if rejection else throughput_loss(
+        control_matched, treatment_analysis)
+    increase, increase_reason = (None, rejection) if rejection else latency_change(
+        control['latency'], treatment['latency'])
+
+    unavailable = {'network_bytes': 'transport observer not implemented'}
+    if loss_reason:
+        unavailable['throughput_loss'] = loss_reason
+    if increase_reason:
+        unavailable['latency_increase'] = increase_reason
+
+    return {
+        'schema_version': 2,
+        'pair_id': pair_id,
+        'repetition': repetition,
+        'trial_order': list(order),
+        'accepted': rejection is None,
+        'rejection_reason': rejection,
+        'control': {
+            'whole_window': window_stats(control['series'], control_whole),
+            'matched_window': control_matched,
+            'aggregate': control['aggregate'],
+            'latency': control['latency'],
+        },
+        'backup': {
+            'whole_window': window_stats(treatment['series'], treatment_whole),
+            'analysis_window': treatment_analysis,
+            'recovery_window': (
+                window_stats(treatment['series'], recovery) if recovery else None),
+            'aggregate': treatment['aggregate'],
+            'latency': treatment['latency'],
+        },
+        'throughput_loss_fraction': loss,
+        'latency': {
+            # Named so no reader mistakes this for a window-aligned figure.
+            'scope': 'whole_run',
+            'increase_fraction': increase,
+            'note': ('HammerDB records no time dimension for latency, so this '
+                     'covers each whole run including ramp-up and is not '
+                     'matched to the backup window'),
+        },
+        'backup_result': backup_result,
+        'network_bytes': None,
+        'unavailable_metrics': unavailable,
+    }
 
 
 def _leading_timestamp(line):
