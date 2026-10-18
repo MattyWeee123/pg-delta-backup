@@ -15,11 +15,11 @@ agreement; it is the single source of truth for what remains.
 | M1 | Measurement readers | **done** | `78bc271` |
 | M2 | Windows and degradation | **done** | `a85ccb4` |
 | M2.5 | Cross-check and fixes | **done** | this commit |
-| M3 | Orchestration | not started | |
+| M3 | Orchestration | **done** | this commit |
 | M4 | Pilot run | not started | |
 | M5 | PR and handoff | not started | |
 
-Tests: 118 passing, 47 of them in `tests/test_hammerdb_experiment.py`.
+Tests: 130 passing, 59 of them in `tests/test_hammerdb_experiment.py`.
 
 ### Deliberately out of scope
 
@@ -308,6 +308,19 @@ the same, with `backup.run_backup` invoked at a declared offset into the window.
 
 **M3.7** Tests against a stub `docker` executable, as `tests/test_benchmark.py` already does. No
 real containers.
+
+### M3 findings
+
+Three defects surfaced only because the orchestration was exercised against a
+stub docker rather than reviewed:
+
+* `run_backup` returns `(record, exit_code)`. Assigning the tuple straight to
+  `backup_result` would have embedded a tuple in every pair record.
+* Capturing `docker logs` with `text=True` applies universal-newline
+  translation, stripping HammerDB's carriage returns before the evidence file
+  is written. The log is now captured and written as bytes.
+* The resource observer was terminated but never reaped, leaking a process per
+  trial.
 
 ### M4: pilot run
 

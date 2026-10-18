@@ -24,11 +24,20 @@ benchmarks/CONSOLIDATION.md.
 
 from __future__ import annotations
 
+import argparse
+import json
+import random
 import re
 import sqlite3
+import subprocess
+import sys
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from benchmarks.backup import atomic_json, run_backup, run_command
 
 # HammerDB writes naive local timestamps; the official image runs UTC, which
 # the time profile header states explicitly. Parsing as UTC keeps these
@@ -385,6 +394,370 @@ def build_pair_record(*, pair_id, repetition, order, control, treatment,
         'network_bytes': None,
         'unavailable_metrics': unavailable,
     }
+
+
+# --- orchestration -----------------------------------------------------------
+
+EXIT_OK = 0
+EXIT_INVALID_INPUT = 2
+EXIT_TRIAL_FAILED = 3
+
+CONTROL = 'control'
+BACKUP = 'backup'
+
+
+class TrialError(RuntimeError):
+    """A trial could not be completed, so it must not become a measurement."""
+
+
+def _docker(args, *, docker_bin='docker', timeout=120, check=True, text=True):
+    """Run one docker command and return its completed process.
+
+    text=False is required when the output must stay byte-faithful: capturing
+    as text applies universal-newline translation, which rewrites HammerDB's
+    carriage returns before the bytes ever reach a file.
+    """
+    done = subprocess.run([docker_bin, *[str(a) for a in args]],
+                          capture_output=True, text=text, timeout=timeout,
+                          check=False)
+    if check and done.returncode != 0:
+        detail = done.stderr or done.stdout or b''
+        if isinstance(detail, bytes):
+            detail = detail.decode('utf-8', 'replace')
+        raise TrialError(
+            f'docker {" ".join(str(a) for a in args[:2])} failed: '
+            f'{detail.strip()[:400]}')
+    return done
+
+
+def start_workload(*, name, image, network, host, password, settings,
+                   script='/hdb/run_timed.tcl', scripts_dir, docker_bin='docker'):
+    """Start a detached TPROC-C run.
+
+    Deliberately not --rm: the jobs database holding the counter series and
+    the latency percentiles has to be copied out after the process exits.
+    """
+    environment = {
+        'PGBENCH_HOST': host,
+        'PGBENCH_PASS': password,
+        'TPCC_VU': settings['vu'],
+        'TPCC_RAMPUP': settings['rampup'],
+        'TPCC_DURATION': settings['duration'],
+    }
+    arguments = ['run', '-d', '--name', name, '--network', network]
+    for key, value in environment.items():
+        arguments += ['-e', f'{key}={value}']
+    arguments += ['-v', f'{scripts_dir}:/hdb:ro', image,
+                  './hammerdbcli', 'auto', script]
+    _docker(arguments, docker_bin=docker_bin)
+    return name
+
+
+def wait_for_marker(name, marker, *, timeout, poll=2.0, docker_bin='docker',
+                    sleep=time.sleep):
+    """Block until a marker appears in the container log.
+
+    A timeout raises rather than returning, so a mistimed run fails the trial
+    instead of silently producing a window that never contained the workload.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        done = _docker(['logs', name], docker_bin=docker_bin, check=False)
+        if marker in (done.stdout or '') or marker in (done.stderr or ''):
+            return True
+        if time.monotonic() >= deadline:
+            raise TrialError(
+                f'marker {marker!r} did not appear in {name} within {timeout}s')
+        sleep(poll)
+
+
+def wait_for_exit(name, *, timeout, poll=2.0, docker_bin='docker',
+                  sleep=time.sleep):
+    """Block until the container stops."""
+    deadline = time.monotonic() + timeout
+    while True:
+        done = _docker(['inspect', '-f', '{{.State.Running}}', name],
+                       docker_bin=docker_bin, check=False)
+        if (done.stdout or '').strip() == 'false':
+            return True
+        if time.monotonic() >= deadline:
+            raise TrialError(f'{name} did not finish within {timeout}s')
+        sleep(poll)
+
+
+def collect_workload(name, directory, *, docker_bin='docker'):
+    """Save the log and jobs database, then remove the container."""
+    directory.mkdir(parents=True, exist_ok=True)
+    log_path = directory / 'hammerdb.log'
+    # Captured as bytes and written as bytes: text mode would translate
+    # HammerDB's carriage returns away before the evidence is stored.
+    done = _docker(['logs', '-t', name], docker_bin=docker_bin, check=False,
+                   text=False)
+    log_path.write_bytes((done.stdout or b'') + (done.stderr or b''))
+    database = directory / 'hammer.DB'
+    _docker(['cp', f'{name}:/tmp/hammer.DB', str(database)],
+            docker_bin=docker_bin)
+    _docker(['rm', '-f', name], docker_bin=docker_bin, check=False)
+    return log_path, database
+
+
+def make_executor(container, directory, timeout, *, docker_bin='docker'):
+    """An `execute` for run_backup that runs phases inside a container.
+
+    Also records wall-clock bounds per phase. run_backup measures durations
+    with perf_counter, which cannot be aligned against workload timestamps.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    phases = {}
+
+    def execute(phase, command):
+        started = datetime.now(timezone.utc)
+        result = run_command(
+            [docker_bin, 'exec', container, *[str(part) for part in command]],
+            directory / f'{phase}.log', timeout)
+        phases[phase] = {'started_at': started,
+                         'ended_at': datetime.now(timezone.utc)}
+        return result
+
+    return execute, phases
+
+
+def start_observer(project, output, duration, *, python=None):
+    """Sample container resources for the trial, using Etash's observer."""
+    command = [python or sys.executable, '-m', 'benchmarks.observe_docker',
+               '--project', project, '--output', str(output),
+               '--duration', str(duration)]
+    try:
+        return subprocess.Popen(command, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL)
+    except OSError:
+        # Resource sampling is diagnostic; losing it must not fail a trial.
+        return None
+
+
+def read_trial(log_path, database):
+    """Turn one collected trial into the inputs the window maths needs."""
+    log_text = read_log(log_path)
+    markers = parse_log_markers(log_text)
+    if markers['rampup_complete'] is None or markers['test_complete'] is None:
+        raise TrialError(
+            f'{log_path.name} has no complete measurement window: {markers}')
+    return {
+        'series': read_tpm_series(database),
+        'latency': read_latency(database),
+        'aggregate': parse_test_result(log_text),
+        'whole': Window(markers['rampup_complete'], markers['test_complete']),
+        'jobid': read_jobid(database),
+    }
+
+
+def run_trial(treatment, *, options, directory, sleep=time.sleep):
+    """Run one TPROC-C trial, optionally with a backup inside its window."""
+    directory.mkdir(parents=True, exist_ok=True)
+    name = f'hdb-{treatment}-{uuid.uuid4().hex[:8]}'
+    window_seconds = (options.rampup + options.duration) * 60
+    observer = start_observer(
+        options.compose_project, directory / 'resources-docker.jsonl',
+        window_seconds + options.observer_margin)
+    backup_result = capture_started_at = verified_at = None
+    try:
+        start_workload(
+            name=name, image=options.hammerdb_image, network=options.network,
+            host=options.pg_host, password=options.pg_password,
+            settings={'vu': options.vu, 'rampup': options.rampup,
+                      'duration': options.duration},
+            scripts_dir=options.scripts_dir, docker_bin=options.docker)
+        wait_for_marker(name, RAMPUP_COMPLETE,
+                        timeout=options.rampup * 60 + options.marker_margin,
+                        docker_bin=options.docker, sleep=sleep)
+        if treatment == BACKUP:
+            if options.backup_offset:
+                sleep(options.backup_offset)
+            execute, phases = make_executor(
+                options.runner_container, directory / 'backup-phases',
+                options.timeout, docker_bin=options.docker)
+            # run_backup returns (record, exit_code); the record alone is the
+            # shared v2 artifact that the pair record embeds.
+            backup_result, backup_exit = run_backup(
+                options.method,
+                run_id=f'{name}-backup', output=options.backup_output,
+                tools=options.tools, execute=execute, host=options.pg_host,
+                port=options.pg_port, user=options.pg_user,
+                checksum=options.checksum, checkpoint=options.checkpoint)
+            atomic_json(directory / 'backup-result.json',
+                        {**backup_result, 'exit_code': backup_exit})
+            if 'backup' not in phases:
+                raise TrialError('backup phase never executed')
+            capture_started_at = phases['backup']['started_at']
+            # Fall back to the last phase that ran when verification was
+            # skipped, so a failed backup still bounds a window.
+            last = phases.get('verification') or phases[max(
+                phases, key=lambda key: phases[key]['ended_at'])]
+            verified_at = last['ended_at']
+        wait_for_exit(name, timeout=window_seconds + options.marker_margin,
+                      docker_bin=options.docker, sleep=sleep)
+        log_path, database = collect_workload(
+            name, directory, docker_bin=options.docker)
+    finally:
+        if observer is not None:
+            observer.terminate()
+            try:
+                # Reap it; an unwaited child leaks a process and a warning.
+                observer.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                observer.kill()
+                observer.wait(timeout=10)
+        _docker(['rm', '-f', name], docker_bin=options.docker, check=False)
+    trial = read_trial(log_path, database)
+    trial.update(treatment=treatment, backup_result=backup_result,
+                 capture_started_at=capture_started_at, verified_at=verified_at)
+    return trial
+
+
+def run_pair(repetition, *, options, directory, order, sleep=time.sleep):
+    """Run a control and a backup trial, then compare aligned windows."""
+    trials = {}
+    for treatment in order:
+        trials[treatment] = run_trial(
+            treatment, options=options,
+            directory=directory / f'{repetition}-{treatment}', sleep=sleep)
+    treatment = trials[BACKUP]
+    return build_pair_record(
+        pair_id=f'{directory.name}-{repetition}', repetition=repetition,
+        order=order, control=trials[CONTROL], treatment=treatment,
+        backup_result=treatment['backup_result'],
+        capture_started_at=treatment['capture_started_at'],
+        verified_at=treatment['verified_at'])
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description='Measure TPROC-C degradation during a PostgreSQL backup.',
+        epilog='Produces a measurement instrument, not a citable baseline. '
+               'Use a disposable fixture only.')
+    parser.add_argument('--output', type=Path, required=True,
+                        help='new directory for results; must not exist')
+    parser.add_argument('--repeats', type=int, default=3)
+    parser.add_argument('--seed', type=int, default=None,
+                        help='trial-order seed; recorded so order is reproducible')
+    parser.add_argument('--vu', type=int, default=8)
+    parser.add_argument('--rampup', type=int, default=1, help='minutes')
+    parser.add_argument('--duration', type=int, default=3, help='minutes')
+    parser.add_argument('--warehouses', type=int, default=10,
+                        help='recorded for provenance; the schema is prebuilt')
+    parser.add_argument('--backup-offset', type=float, default=0,
+                        help='seconds after ramp-up before the backup starts')
+    parser.add_argument('--method', default='pg_basebackup_full',
+                        choices=('pg_basebackup_full',))
+    parser.add_argument('--checksum', default='SHA256')
+    parser.add_argument('--checkpoint', default='fast', choices=('fast', 'spread'))
+    parser.add_argument('--pg-host', default='postgres')
+    parser.add_argument('--pg-port', type=int, default=5432)
+    parser.add_argument('--pg-user', default='postgres')
+    parser.add_argument('--pg-password', default=None,
+                        help='defaults to POSTGRES_PASSWORD in the environment')
+    parser.add_argument('--network', default='fixture_default')
+    parser.add_argument('--compose-project', default='fixture')
+    parser.add_argument('--hammerdb-image', default='tpcorg/hammerdb:latest')
+    parser.add_argument('--runner-container', default='pg-delta-runner',
+                        help='running container holding the PostgreSQL 17 tools')
+    parser.add_argument('--backup-output', default='/results/hammerdb-backup')
+    parser.add_argument('--scripts-dir', default=None,
+                        help='host path mounted at /hdb')
+    parser.add_argument('--timeout', type=float, default=3600)
+    parser.add_argument('--marker-margin', type=float, default=180,
+                        help='extra seconds to wait for a log marker')
+    parser.add_argument('--observer-margin', type=float, default=60)
+    parser.add_argument('--docker', default='docker')
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    import os
+    options = parse_args(argv)
+    options.pg_password = options.pg_password or os.environ.get('POSTGRES_PASSWORD')
+    options.tools = {
+        'pg_basebackup': 'pg_basebackup',
+        'pg_verifybackup': 'pg_verifybackup',
+        'pg_combinebackup': 'pg_combinebackup',
+    }
+    if options.scripts_dir is None:
+        options.scripts_dir = str(
+            (Path(__file__).resolve().parent / 'workloads' / 'hammerdb'))
+    try:
+        if not options.pg_password:
+            raise ValueError(
+                'POSTGRES_PASSWORD is not set; refusing to run with an empty '
+                'password')
+        if options.output.exists():
+            raise ValueError(
+                f'{options.output} already exists; use a new directory per run')
+        if options.repeats < 1:
+            raise ValueError('--repeats must be at least 1')
+    except ValueError as exc:
+        print(f'error: {exc}', file=sys.stderr)
+        return EXIT_INVALID_INPUT
+
+    options.output.mkdir(parents=True)
+    seed = options.seed if options.seed is not None else random.randrange(2 ** 32)
+    chooser = random.Random(seed)
+    atomic_json(options.output / 'provenance.json', {
+        'started_at': datetime.now(timezone.utc).isoformat(),
+        'seed': seed,
+        'settings': {
+            key: getattr(options, key)
+            for key in ('repeats', 'vu', 'rampup', 'duration', 'warehouses',
+                        'backup_offset', 'method', 'checksum', 'checkpoint',
+                        'network', 'compose_project', 'hammerdb_image')
+        },
+        'note': 'single-host smoke measurement; not a baseline',
+    })
+
+    pairs, failures = [], []
+    for repetition in range(1, options.repeats + 1):
+        # Randomised so a systematic warm-up effect cannot favour one treatment.
+        order = [CONTROL, BACKUP]
+        chooser.shuffle(order)
+        try:
+            pairs.append(run_pair(repetition, options=options,
+                                  directory=options.output, order=tuple(order)))
+        except (TrialError, OSError, sqlite3.Error) as exc:
+            failures.append({'repetition': repetition, 'error': str(exc)})
+
+    accepted = [p for p in pairs if p['accepted']]
+    losses = [p['throughput_loss_fraction'] for p in accepted
+              if p['throughput_loss_fraction'] is not None]
+    results = {
+        'schema_version': 2,
+        'seed': seed,
+        'repeats_requested': options.repeats,
+        'pairs': pairs,
+        'failures': failures,
+        'accepted_pairs': len(accepted),
+        # A median of a handful of runs is descriptive only; the spread is
+        # reported alongside it and no significance is claimed.
+        'median_throughput_loss': (
+            sorted(losses)[len(losses) // 2] if losses else None),
+        'throughput_loss_range': (
+            [min(losses), max(losses)] if losses else None),
+        'network_bytes': None,
+        'unavailable_metrics': {
+            'network_bytes': 'transport observer not implemented',
+            'window_aligned_latency':
+                'HammerDB records no time dimension for latency',
+        },
+    }
+    atomic_json(options.output / 'results.json', results)
+    print(json.dumps({key: results[key] for key in (
+        'seed', 'accepted_pairs', 'median_throughput_loss',
+        'throughput_loss_range')}, indent=2))
+    if failures or not accepted:
+        return EXIT_TRIAL_FAILED
+    return EXIT_OK
+
+
+if __name__ == '__main__':
+    sys.exit(main())
 
 
 # docker logs -t emits RFC3339 with nanosecond precision, which datetime
