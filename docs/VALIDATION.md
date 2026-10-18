@@ -1,6 +1,49 @@
 # Validation performed
 
-Latest update: October 9, 2026. The controlled performance baseline remains incomplete.
+Latest update: October 17, 2026. The controlled performance baseline remains incomplete.
+
+## HammerDB degradation driver, October 17, 2026
+
+Added `benchmarks/hammerdb_experiment.py`, its tests and `tests/stub_docker.py`, plus two fixes
+to existing files: a Windows guard on the directory fsync in `wal_copy.py`, and a registry
+fallback in the native baseline workflow after `public.ecr.aws` began returning
+`toomanyrequests` on shared runners. That workflow failure was a registry quota, not a code
+regression: the same workflow passed on October 9 and the resource metrics commit changed no
+workflow or Dockerfile.
+
+Executed locally: 133 unit tests pass, twice in succession without flakiness. They cover the
+jobs-database readers, log parsing, window arithmetic, degradation guards, and orchestration
+against a stub docker CLI. No PostgreSQL, HammerDB or Docker is required for them.
+
+Executed against the real fixture, PostgreSQL 17.11, 10 warehouse TPROC-C schema of 1,231 MB,
+8 virtual users, driven from WSL because the shared adapters rewrite container paths on a
+Windows host:
+
+| Run | Window | Backup span | Outcome |
+|---|---|---|---|
+| 2 minute | 123.8 s | 174.0 s | rejected by the window guard |
+| 6 minute | 363.7 s | 398.5 s | rejected by the window guard |
+| 11 minute | 674.5 s | 328.4 s | **accepted** |
+
+The accepted pair measured a 71.4% throughput loss over aligned 328.4 s windows, 33 control
+samples against 32 backup samples, with the control taken at the same offset from its own
+ramp-up. The same data compared whole-window gives 57.6%, because 346 s of that window had no
+backup running. Throughput remained 40.6% below the control across the 36 samples after capture
+finished. Whole-run p95 rose from 57.9 ms to 154.0 ms. The backup passed verification with
+capture 232.7 s, verification 95.6 s and 2,015,067,325 output bytes.
+
+[Preserved pilot evidence](../benchmarks/evidence/2026-10-17-hammerdb-pilot/report.md) contains
+the record, provenance, raw bundle with a checksum inventory, and the two rejected runs.
+
+A separate observation: an otherwise identical 6 minute run measured a control of 8,708 tpm, while
+one with a test suite running concurrently on the same host measured 4,318 tpm. Unrelated host
+load halved the measurement.
+
+These are single runs on a shared laptop and are **not a baseline**. No repetitions, no resource
+isolation, no warm-up exclusion, no calibrated offered load. Latency is whole-run because
+HammerDB records no time dimension for it. `network_bytes` remains null with a reason. Nothing
+was restored: the status is `PASS_MANIFEST_ONLY`, gate G3 is unmet, and no TPROC-C recovery
+oracle exists. TPROC-C results are not audited TPC-C and must never be published as `tpmC`.
 
 ## Consolidation validation, October 9
 

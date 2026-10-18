@@ -11,3 +11,4 @@ runs/
 *.log
 target/
 .claude/
+results/hammerdb*/
