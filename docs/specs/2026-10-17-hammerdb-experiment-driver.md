@@ -2,7 +2,44 @@
 
 Date: October 17, 2026.
 Owner: workloads and measurement role.
-Status: proposed plan, not implemented.
+Branch: `benchmark-harness-v0.1`, based on Etash's `c1d21b8`.
+
+## Status
+
+Updated as each milestone lands. Keep this table and the milestone sections in
+agreement; it is the single source of truth for what remains.
+
+| | Milestone | State | Commit |
+|---|---|---|---|
+| M0 | Unblock the base branch | **done** | `7193112` |
+| M1 | Measurement readers | **done** | `78bc271` |
+| M2 | Windows and degradation | **done** | `a85ccb4` |
+| M2.5 | Cross-check and fixes | **done** | this commit |
+| M3 | Orchestration | not started | |
+| M4 | Pilot run | not started | |
+| M5 | PR and handoff | not started | |
+
+Tests: 118 passing, 47 of them in `tests/test_hammerdb_experiment.py`.
+
+### Deliberately out of scope
+
+Named here so they are not mistaken for oversights. Each needs its own branch.
+
+| | Why it is deferred |
+|---|---|
+| G6 workload calibration | Needs many long runs on a quiet host; results from this laptop would be discarded |
+| G7 HammerDB recovery oracle | Needs an expected-state export for the TPROC-C schema and a declared recovery point; `CONSOLIDATION.md` states that importing the scripts does not provide this |
+| Window-aligned latency | Impossible from HammerDB's instrumentation; see M1 findings |
+| Network byte accounting | No transport observer exists; `network_bytes` stays null with a reason |
+| rsync and transfer baselines | Belongs to the transfer owner |
+
+### Open risks
+
+| Risk | State |
+|---|---|
+| PR #2 moves under us | Base `c1d21b8` confirmed current at time of writing; rebase if it changes |
+| Pilot numbers are not citable | Expected. M4 produces an instrument, not a baseline |
+| `--format tar` rejected upstream | Driver uses plain format only; no action needed |
 
 ## Problem
 
@@ -225,6 +262,29 @@ how `native_baseline` rejects a trial whose backup outlives the workload.
 
 **M2.7** Tests: table-driven over aligned pairs, rejected pairs, zero-denominator, single-sample
 windows, and a control shorter than the treatment.
+
+### M2.5: cross-check — done
+
+A review of M0 to M2 before building on them found two real defects, both now
+fixed with regression tests.
+
+**Timestamp parsing discarded the zone.** The nanosecond-truncation path
+collected every digit in the remainder of the string, which swept up the
+offset's digits as well, rebuilt the text without a zone, and relied on the
+"assume UTC" fallback. `+05:30` was silently read as UTC, a five and a half
+hour error in any derived window. Replaced with an explicit RFC3339 pattern
+that separates fraction from offset. It works today only because
+`docker logs -t` always emits UTC.
+
+**A '#' in an evidence path opened a different database.** Interpolating a
+path into a `file:` URI leaves `#` acting as a fragment delimiter, so SQLite
+silently opened something else and the tables appeared missing. All readers
+now go through `Path.as_uri()`, which percent-encodes it.
+
+Also confirmed: no file belonging to Matt or Etash is modified apart from the
+two M0 fixes; the October 9 replay still reproduces the published 65.1%
+whole-window figure exactly; and the `wal_copy` guard is on the branch actually
+taken on Windows.
 
 ### M3: orchestration
 
