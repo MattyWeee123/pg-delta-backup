@@ -182,6 +182,25 @@ class JobsDatabaseTests(unittest.TestCase):
         read_latency(self.database)
         self.assertEqual(Path(self.database).read_bytes(), before)
 
+    def test_path_containing_a_uri_delimiter_is_handled(self):
+        """A '#' in an evidence path must not redirect SQLite elsewhere.
+
+        Interpolating a path into a file: URI leaves '#' acting as a fragment
+        delimiter, so SQLite opens a different database and the tables appear
+        to be missing.
+        """
+        awkward = Path(self.temp.name) / 'run#1 and 2'
+        awkward.mkdir()
+        database = make_jobs_db(awkward / 'hammer.DB')
+        self.assertEqual(len(read_tpm_series(database)), len(COUNTER_ROWS))
+        self.assertEqual(read_jobid(database), JOBID)
+
+    def test_reader_refuses_to_create_a_missing_database(self):
+        missing = Path(self.temp.name) / 'absent.DB'
+        with self.assertRaises(sqlite3.OperationalError):
+            read_tpm_series(missing)
+        self.assertFalse(missing.exists())
+
 
 class LogParsingTests(unittest.TestCase):
     def test_test_result_is_parsed(self):
@@ -209,6 +228,36 @@ class LogParsingTests(unittest.TestCase):
     def test_empty_log_yields_no_markers(self):
         self.assertEqual(parse_log_markers(''),
                          {'rampup_complete': None, 'test_complete': None})
+
+    def test_nanosecond_precision_is_truncated_not_mangled(self):
+        from benchmarks.hammerdb_experiment import _leading_timestamp
+        parsed = _leading_timestamp('2026-10-17T21:19:57.756031072Z')
+        self.assertEqual(parsed.microsecond, 756031)
+        self.assertEqual(parsed.tzinfo, timezone.utc)
+
+    def test_non_utc_offset_is_preserved_not_silently_relabelled(self):
+        """Collecting 'all digits' from the fraction also eats the offset.
+
+        That rebuilt the string without a zone, so +05:30 was silently read
+        as UTC: a five and a half hour error in any derived window.
+        """
+        from benchmarks.hammerdb_experiment import _leading_timestamp
+        shifted = _leading_timestamp('2026-10-17T21:19:57.756031072+05:30')
+        utc = _leading_timestamp('2026-10-17T21:19:57.756031072Z')
+        self.assertNotEqual(shifted, utc)
+        self.assertEqual((utc - shifted).total_seconds(), 5.5 * 3600)
+
+    def test_short_and_absent_fractions_parse(self):
+        from benchmarks.hammerdb_experiment import _leading_timestamp
+        self.assertEqual(
+            _leading_timestamp('2026-10-17T21:19:57.5Z').microsecond, 500000)
+        self.assertEqual(
+            _leading_timestamp('2026-10-17T21:19:57Z').microsecond, 0)
+
+    def test_non_timestamp_text_is_rejected(self):
+        from benchmarks.hammerdb_experiment import _leading_timestamp
+        for text in ['', 'Vuser', '2026-10-17', 'not-a-time', '12345']:
+            self.assertIsNone(_leading_timestamp(text), text)
 
     def test_untimestamped_lines_are_ignored(self):
         self.assertIsNone(

@@ -28,6 +28,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 # HammerDB writes naive local timestamps; the official image runs UTC, which
 # the time profile header states explicitly. Parsing as UTC keeps these
@@ -65,7 +66,7 @@ def read_tpm_series(database, jobid=None):
         query += ' AND jobid = ?'
         parameters = (jobid,)
     query += ' ORDER BY timestamp'
-    connection = sqlite3.connect(f'file:{database}?mode=ro', uri=True)
+    connection = _readonly(database)
     try:
         rows = connection.execute(query, parameters).fetchall()
     finally:
@@ -86,7 +87,7 @@ def read_latency(database, jobid=None):
     if jobid is not None:
         query += ' AND jobid = ?'
         parameters = (jobid,)
-    connection = sqlite3.connect(f'file:{database}?mode=ro', uri=True)
+    connection = _readonly(database)
     try:
         rows = connection.execute(query, parameters).fetchall()
     finally:
@@ -120,7 +121,7 @@ def read_latency(database, jobid=None):
 
 def read_jobid(database):
     """The single job recorded by one run, or None when absent or ambiguous."""
-    connection = sqlite3.connect(f'file:{database}?mode=ro', uri=True)
+    connection = _readonly(database)
     try:
         rows = connection.execute('SELECT jobid FROM JOBMAIN').fetchall()
     finally:
@@ -386,20 +387,43 @@ def build_pair_record(*, pair_id, repetition, order, control, treatment,
     }
 
 
+# docker logs -t emits RFC3339 with nanosecond precision, which datetime
+# cannot represent. The fraction and the offset must be separated explicitly:
+# collecting "all digits" also sweeps up the offset's digits and silently
+# discards the zone, which turns +05:30 into UTC.
+RFC3339 = re.compile(
+    r'(?P<base>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})'
+    r'(?:\.(?P<fraction>\d+))?'
+    r'(?P<offset>Z|[+-]\d{2}:?\d{2})?$')
+
+
 def _leading_timestamp(line):
     """Parse the RFC3339 prefix that ``docker logs -t`` prepends."""
     head = line.split(' ', 1)[0]
-    if not head:
+    match = RFC3339.match(head) if head else None
+    if match is None:
         return None
-    text = head.replace('Z', '+00:00')
-    # Python before 3.11 rejects more than six fractional digits.
-    if '.' in text:
-        base, _, rest = text.partition('.')
-        digits = ''.join(part for part in rest if part.isdigit())[:6]
-        offset = rest[len(''.join(part for part in rest if part.isdigit())):]
-        text = f'{base}.{digits}{offset}'
+    text = match.group('base')
+    if match.group('fraction'):
+        # Truncate toward zero; microseconds is the most datetime can hold.
+        text += '.' + match.group('fraction')[:6].ljust(6, '0')
+    offset = match.group('offset')
+    if offset and offset != 'Z':
+        text += offset
     try:
         parsed = datetime.fromisoformat(text)
     except ValueError:
         return None
+    # A log without a zone is assumed UTC, which is what docker emits.
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _readonly(database):
+    """A read-only connection that cannot be fooled by characters in the path.
+
+    Formatting a path into a URI leaves '#' acting as a fragment delimiter, so
+    SQLite would silently open a different database. Path.as_uri percent-
+    encodes it.
+    """
+    uri = Path(database).resolve().as_uri() + '?mode=ro'
+    return sqlite3.connect(uri, uri=True)
