@@ -18,6 +18,14 @@ latency, so a window-aligned percentile cannot be derived from its
 instrumentation. Latency comparisons are therefore labelled whole-run and are
 not matched to the backup window the way throughput is.
 
+Run this on Linux. The driver passes container paths such as
+``/results/<trial>`` to the shared backup adapters, which wrap them in
+``pathlib.Path``. On Windows that rewrites them with backslashes and the
+container command fails. Orchestrating a Linux fixture from a Windows host is
+therefore unsupported; use WSL, a Linux host, or a container with access to
+the docker socket. The parsing and arithmetic in this module are platform
+independent and their tests run anywhere.
+
 This module does not test restore and does not certify TPROC-C recovery. See
 benchmarks/CONSOLIDATION.md.
 """
@@ -149,6 +157,48 @@ def parse_test_result(log_text):
     if match is None:
         return None
     return {'nopm': int(match.group('nopm')), 'tpm': int(match.group('tpm'))}
+
+
+# docker logs -t emits RFC3339 with nanosecond precision, which datetime
+# cannot represent. The fraction and the offset must be separated explicitly:
+# collecting "all digits" also sweeps up the offset's digits and silently
+# discards the zone, which turns +05:30 into UTC.
+RFC3339 = re.compile(
+    r'(?P<base>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})'
+    r'(?:\.(?P<fraction>\d+))?'
+    r'(?P<offset>Z|[+-]\d{2}:?\d{2})?$')
+
+
+def _leading_timestamp(line):
+    """Parse the RFC3339 prefix that ``docker logs -t`` prepends."""
+    head = line.split(' ', 1)[0]
+    match = RFC3339.match(head) if head else None
+    if match is None:
+        return None
+    text = match.group('base')
+    if match.group('fraction'):
+        # Truncate toward zero; microseconds is the most datetime can hold.
+        text += '.' + match.group('fraction')[:6].ljust(6, '0')
+    offset = match.group('offset')
+    if offset and offset != 'Z':
+        text += offset
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    # A log without a zone is assumed UTC, which is what docker emits.
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _readonly(database):
+    """A read-only connection that cannot be fooled by characters in the path.
+
+    Formatting a path into a URI leaves '#' acting as a fragment delimiter, so
+    SQLite would silently open a different database. Path.as_uri percent-
+    encodes it.
+    """
+    uri = Path(database).resolve().as_uri() + '?mode=ro'
+    return sqlite3.connect(uri, uri=True)
 
 
 def parse_log_markers(log_text):
@@ -322,7 +372,8 @@ def latency_change(control_latency, treatment_latency):
 
 
 def build_pair_record(*, pair_id, repetition, order, control, treatment,
-                      backup_result, capture_started_at, verified_at):
+                      backup_result, capture_started_at, verified_at,
+                      backup_output_bytes=None):
     """Assemble one matched-pair result.
 
     `control` and `treatment` each carry `series`, `latency`, `aggregate` and
@@ -380,6 +431,9 @@ def build_pair_record(*, pair_id, repetition, order, control, treatment,
                 window_stats(treatment['series'], recovery) if recovery else None),
             'aggregate': treatment['aggregate'],
             'latency': treatment['latency'],
+            # Measured inside the container; the shared record cannot see a
+            # remotely executed capture and reports null for it.
+            'output_bytes_observed': backup_output_bytes,
         },
         'throughput_loss_fraction': loss,
         'latency': {
@@ -501,6 +555,22 @@ def collect_workload(name, directory, *, docker_bin='docker'):
     return log_path, database
 
 
+def container_bytes(container, path, *, docker_bin='docker'):
+    """Apparent size of a captured backup, measured inside the container.
+
+    run_backup calls directory_bytes on the host. When the capture is executed
+    remotely through docker exec that path does not exist locally, so the
+    shared record honestly reports null. This fills the gap without modifying
+    the shared adapter. Apparent file length, not allocated disk space.
+    """
+    done = _docker(['exec', container, 'du', '-sb', str(path)],
+                   docker_bin=docker_bin, check=False)
+    first = (done.stdout or '').split()
+    if done.returncode != 0 or not first or not first[0].isdigit():
+        return None
+    return int(first[0])
+
+
 def make_executor(container, directory, timeout, *, docker_bin='docker'):
     """An `execute` for run_backup that runs phases inside a container.
 
@@ -560,6 +630,7 @@ def run_trial(treatment, *, options, directory, sleep=time.sleep):
         options.compose_project, directory / 'resources-docker.jsonl',
         window_seconds + options.observer_margin)
     backup_result = capture_started_at = verified_at = None
+    backup_output_bytes = None
     try:
         start_workload(
             name=name, image=options.hammerdb_image, network=options.network,
@@ -578,14 +649,21 @@ def run_trial(treatment, *, options, directory, sleep=time.sleep):
                 options.timeout, docker_bin=options.docker)
             # run_backup returns (record, exit_code); the record alone is the
             # shared v2 artifact that the pair record embeds.
+            # A fresh path per trial: pg_basebackup refuses a non-empty
+            # destination, so a shared path would fail every repetition
+            # after the first.
+            destination = f"{str(options.backup_output).rstrip('/')}/{name}"
             backup_result, backup_exit = run_backup(
                 options.method,
-                run_id=f'{name}-backup', output=options.backup_output,
+                run_id=f'{name}-backup', output=destination,
                 tools=options.tools, execute=execute, host=options.pg_host,
                 port=options.pg_port, user=options.pg_user,
                 checksum=options.checksum, checkpoint=options.checkpoint)
+            backup_output_bytes = container_bytes(
+                options.runner_container, destination, docker_bin=options.docker)
             atomic_json(directory / 'backup-result.json',
-                        {**backup_result, 'exit_code': backup_exit})
+                        {**backup_result, 'exit_code': backup_exit,
+                         'backup_output_bytes_observed': backup_output_bytes})
             if 'backup' not in phases:
                 raise TrialError('backup phase never executed')
             capture_started_at = phases['backup']['started_at']
@@ -610,7 +688,8 @@ def run_trial(treatment, *, options, directory, sleep=time.sleep):
         _docker(['rm', '-f', name], docker_bin=options.docker, check=False)
     trial = read_trial(log_path, database)
     trial.update(treatment=treatment, backup_result=backup_result,
-                 capture_started_at=capture_started_at, verified_at=verified_at)
+                 capture_started_at=capture_started_at, verified_at=verified_at,
+                 backup_output_bytes=backup_output_bytes)
     return trial
 
 
@@ -627,7 +706,8 @@ def run_pair(repetition, *, options, directory, order, sleep=time.sleep):
         order=order, control=trials[CONTROL], treatment=treatment,
         backup_result=treatment['backup_result'],
         capture_started_at=treatment['capture_started_at'],
-        verified_at=treatment['verified_at'])
+        verified_at=treatment['verified_at'],
+        backup_output_bytes=treatment.get('backup_output_bytes'))
 
 
 def parse_args(argv=None):
@@ -758,45 +838,3 @@ def main(argv=None):
 
 if __name__ == '__main__':
     sys.exit(main())
-
-
-# docker logs -t emits RFC3339 with nanosecond precision, which datetime
-# cannot represent. The fraction and the offset must be separated explicitly:
-# collecting "all digits" also sweeps up the offset's digits and silently
-# discards the zone, which turns +05:30 into UTC.
-RFC3339 = re.compile(
-    r'(?P<base>\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2})'
-    r'(?:\.(?P<fraction>\d+))?'
-    r'(?P<offset>Z|[+-]\d{2}:?\d{2})?$')
-
-
-def _leading_timestamp(line):
-    """Parse the RFC3339 prefix that ``docker logs -t`` prepends."""
-    head = line.split(' ', 1)[0]
-    match = RFC3339.match(head) if head else None
-    if match is None:
-        return None
-    text = match.group('base')
-    if match.group('fraction'):
-        # Truncate toward zero; microseconds is the most datetime can hold.
-        text += '.' + match.group('fraction')[:6].ljust(6, '0')
-    offset = match.group('offset')
-    if offset and offset != 'Z':
-        text += offset
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    # A log without a zone is assumed UTC, which is what docker emits.
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
-
-
-def _readonly(database):
-    """A read-only connection that cannot be fooled by characters in the path.
-
-    Formatting a path into a URI leaves '#' acting as a fragment delimiter, so
-    SQLite would silently open a different database. Path.as_uri percent-
-    encodes it.
-    """
-    uri = Path(database).resolve().as_uri() + '?mode=ro'
-    return sqlite3.connect(uri, uri=True)

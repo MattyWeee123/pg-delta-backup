@@ -591,6 +591,29 @@ class StubDockerTests(unittest.TestCase):
             Window(trial['capture_started_at'], trial['verified_at'])))
         self.assertTrue((self.root / 'bkp' / 'backup-result.json').exists())
 
+    def test_each_backup_trial_uses_a_fresh_destination(self):
+        """pg_basebackup refuses a non-empty directory.
+
+        A shared output path would fail every repetition after the first.
+        """
+        destinations = []
+        for index in range(2):
+            run_trial('backup', options=self.options(),
+                      directory=self.root / f'rep{index}', sleep=lambda _: None)
+        for line in (self.state / 'exec.log').read_text().splitlines():
+            if '--pgdata' in line:
+                parts = line.split()
+                destinations.append(parts[parts.index('--pgdata') + 1])
+        self.assertEqual(len(destinations), 2)
+        self.assertNotEqual(destinations[0], destinations[1])
+        # Separator style is host dependent: backup.py wraps the destination
+        # in Path, which rewrites it on Windows. The driver is documented as
+        # Linux only for exactly that reason, so compare normalised.
+        normalised = [d.replace('\\', '/') for d in destinations]
+        self.assertTrue(all(d.startswith('/results/out/') for d in normalised),
+                        normalised)
+        self.assertEqual(len({Path(d).name for d in normalised}), 2)
+
     def test_failed_docker_run_raises_rather_than_measuring(self):
         import os
         with mock.patch.dict(os.environ, {'STUB_FAIL': 'run'}):
@@ -628,6 +651,37 @@ class CliTests(unittest.TestCase):
     def test_zero_repeats_is_refused(self):
         self.assertEqual(
             self.run_main('--repeats', '0', env={'POSTGRES_PASSWORD': 'p'}), 2)
+
+    def test_module_runs_as_main(self):
+        """Executing as __main__ must reach every definition it uses.
+
+        Importing the module defines everything before anything runs, so a
+        helper placed after the __main__ guard still resolves in tests while
+        failing with NameError in the only path that matters in production.
+        """
+        import subprocess
+        import sys as _sys
+        done = subprocess.run(
+            [_sys.executable, '-m', 'benchmarks.hammerdb_experiment', '--help'],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).resolve().parent.parent), timeout=120)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertNotIn('NameError', done.stderr)
+        self.assertIn('--output', done.stdout)
+
+    def test_guards_reject_bad_input_when_run_as_main(self):
+        import os
+        import subprocess
+        import sys as _sys
+        environment = {k: v for k, v in os.environ.items()
+                       if k != 'POSTGRES_PASSWORD'}
+        done = subprocess.run(
+            [_sys.executable, '-m', 'benchmarks.hammerdb_experiment',
+             '--output', str(self.root / 'never')],
+            capture_output=True, text=True, env=environment,
+            cwd=str(Path(__file__).resolve().parent.parent), timeout=120)
+        self.assertEqual(done.returncode, 2, done.stderr)
+        self.assertNotIn('Traceback', done.stderr)
 
     def test_seeded_order_is_reproducible(self):
         import random as _random
