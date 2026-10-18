@@ -17,7 +17,7 @@ agreement; it is the single source of truth for what remains.
 | M2.5 | Cross-check and fixes | **done** | this commit |
 | M3 | Orchestration | **done** | this commit |
 | M4 | Pilot run | **done** | this commit |
-| M5 | PR and handoff | next | |
+| M5 | PR and handoff | **done** | PR #3 |
 
 Tests: 133 passing, 62 of them in `tests/test_hammerdb_experiment.py`.
 
@@ -348,6 +348,15 @@ finished, across 36 samples.
 An unplanned observation worth keeping: running the test suite concurrently with a
 pilot halved the measured control throughput, 8,708 tpm against 4,318 tpm. Pilots
 need a quiet host.
+
+### M5 outcome
+
+[PR #3](https://github.com/MattyWeee123/pg-delta-backup/pull/3) opened against
+`main`, mergeable, all three checks green. `native-baseline` ran 4m28s rather than
+failing in nine seconds: the log shows `public.ecr.aws` exhausting all three
+attempts with `toomanyrequests` and the job then resolving the image from
+`mirror.gcr.io`. The registry fallback is validated in production CI, against the
+same failure still present on `main`.
 
 ### M5: integration
 
