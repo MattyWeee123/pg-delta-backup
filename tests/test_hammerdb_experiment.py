@@ -10,11 +10,20 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 from benchmarks.hammerdb_experiment import (
     Sample,
+    TrialError,
     Window,
     build_pair_record,
+    collect_workload,
+    main,
+    make_executor,
+    read_trial,
+    run_trial,
+    start_workload,
+    wait_for_marker,
     latency_change,
     matched_window,
     parse_log_markers,
@@ -451,6 +460,189 @@ class PairRecordTests(unittest.TestCase):
     def test_embeds_the_shared_backup_record(self):
         record = build_pair_record(**self.pair())
         self.assertEqual(record['backup_result']['schema_version'], 2)
+
+
+class StubDockerTests(unittest.TestCase):
+    """Orchestration against a stand-in docker CLI. No containers are started."""
+
+    def setUp(self):
+        import os
+        import sys as _sys
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / 'state'
+        template = make_jobs_db(self.root / 'template.DB')
+        launcher = self.root / ('docker.cmd' if os.name == 'nt' else 'docker')
+        script = Path(__file__).resolve().parent / 'stub_docker.py'
+        if os.name == 'nt':
+            launcher.write_text(
+                f'@echo off\r\n"{_sys.executable}" "{script}" %*\r\n',
+                encoding='utf-8')
+        else:
+            launcher.write_text(
+                f'#!/bin/sh\nexec "{_sys.executable}" "{script}" "$@"\n',
+                encoding='utf-8')
+            launcher.chmod(0o755)
+        self.docker = str(launcher)
+        self.environment = {
+            'STUB_STATE': str(self.state),
+            'STUB_JOBS_DB': str(template),
+            'STUB_WINDOW': '2.0',
+            'STUB_CADENCE': '0.02',
+            'STUB_EXEC_MS': '120',
+        }
+        patcher = mock.patch.dict(os.environ, self.environment)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def options(self, **overrides):
+        from types import SimpleNamespace
+        base = dict(
+            vu=2, rampup=0, duration=0, backup_offset=0,
+            method='pg_basebackup_full', checksum='SHA256', checkpoint='fast',
+            pg_host='postgres', pg_port=5432, pg_user='postgres',
+            pg_password='secret', network='net', compose_project='fixture',
+            hammerdb_image='img', runner_container='runner',
+            backup_output='/results/out', scripts_dir=str(self.root),
+            timeout=60, marker_margin=30, observer_margin=5,
+            docker=self.docker,
+            tools={'pg_basebackup': 'pg_basebackup',
+                   'pg_verifybackup': 'pg_verifybackup',
+                   'pg_combinebackup': 'pg_combinebackup'})
+        base.update(overrides)
+        return SimpleNamespace(**base)
+
+    def test_start_workload_passes_settings_and_mounts_scripts(self):
+        start_workload(name='c1', image='img', network='net', host='postgres',
+                       password='secret',
+                       settings={'vu': 4, 'rampup': 1, 'duration': 2},
+                       scripts_dir=str(self.root), docker_bin=self.docker)
+        args = (self.state / 'c1.args').read_text().splitlines()
+        self.assertIn('-d', args)
+        self.assertNotIn('--rm', args)  # the jobs DB must survive the run
+        self.assertIn('TPCC_VU=4', args)
+        self.assertIn('TPCC_RAMPUP=1', args)
+        self.assertIn('PGBENCH_PASS=secret', args)
+        self.assertIn('./hammerdbcli', args)
+
+    def test_wait_for_marker_finds_and_times_out(self):
+        start_workload(name='c2', image='i', network='n', host='h',
+                       password='p', settings={'vu': 1, 'rampup': 0, 'duration': 0},
+                       scripts_dir=str(self.root), docker_bin=self.docker)
+        self.assertTrue(wait_for_marker('c2', 'Rampup complete', timeout=5,
+                                        docker_bin=self.docker, sleep=lambda _: None))
+        with self.assertRaises(TrialError):
+            wait_for_marker('c2', 'never appears', timeout=0.05,
+                            docker_bin=self.docker, sleep=lambda _: None)
+
+    def test_collect_writes_evidence_and_preserves_carriage_returns(self):
+        start_workload(name='c3', image='i', network='n', host='h',
+                       password='p', settings={'vu': 1, 'rampup': 0, 'duration': 0},
+                       scripts_dir=str(self.root), docker_bin=self.docker)
+        directory = self.root / 'trial'
+        log_path, database = collect_workload('c3', directory,
+                                              docker_bin=self.docker)
+        self.assertTrue(log_path.exists() and database.exists())
+        self.assertIn('\r', log_path.read_bytes().decode())
+        self.assertTrue(read_tpm_series(database))
+
+    def test_executor_prefixes_docker_exec_and_records_wall_clock(self):
+        execute, phases = make_executor('runner', self.root / 'phases', 30,
+                                        docker_bin=self.docker)
+        before = datetime.now(timezone.utc)
+        result = execute('backup', ['pg_basebackup', '--pgdata', '/x'])
+        self.assertEqual(result['exit_code'], 0)
+        self.assertIn('backup', phases)
+        self.assertLessEqual(before, phases['backup']['started_at'])
+        self.assertLessEqual(phases['backup']['started_at'],
+                             phases['backup']['ended_at'])
+        logged = (self.state / 'exec.log').read_text()
+        self.assertIn('exec runner pg_basebackup', logged)
+
+    def test_read_trial_rejects_an_incomplete_window(self):
+        directory = self.root / 'bad'
+        directory.mkdir()
+        (directory / 'hammerdb.log').write_text('no markers here\n')
+        with self.assertRaises(TrialError):
+            read_trial(directory / 'hammerdb.log', self.database_template())
+
+    def database_template(self):
+        return make_jobs_db(self.root / 'another.DB')
+
+    def test_control_trial_produces_a_usable_window(self):
+        trial = run_trial('control', options=self.options(),
+                          directory=self.root / 'ctl', sleep=lambda _: None)
+        self.assertEqual(trial['treatment'], 'control')
+        self.assertIsNone(trial['backup_result'])
+        self.assertGreater(len(trial['series']), 2)
+        self.assertAlmostEqual(trial['whole'].duration_seconds, 2.0, places=1)
+        self.assertEqual(trial['aggregate'], {'nopm': 9000, 'tpm': 21000})
+
+    def test_backup_trial_records_phase_boundaries_inside_the_window(self):
+        trial = run_trial('backup', options=self.options(),
+                          directory=self.root / 'bkp', sleep=lambda _: None)
+        self.assertIsNotNone(trial['backup_result'])
+        self.assertEqual(trial['backup_result']['schema_version'], 2)
+        self.assertIsNotNone(trial['capture_started_at'])
+        self.assertLess(trial['capture_started_at'], trial['verified_at'])
+        # The backup must sit inside the measured window, or the pair is void.
+        self.assertTrue(trial['whole'].contains(
+            Window(trial['capture_started_at'], trial['verified_at'])))
+        self.assertTrue((self.root / 'bkp' / 'backup-result.json').exists())
+
+    def test_failed_docker_run_raises_rather_than_measuring(self):
+        import os
+        with mock.patch.dict(os.environ, {'STUB_FAIL': 'run'}):
+            with self.assertRaises(TrialError):
+                run_trial('control', options=self.options(),
+                          directory=self.root / 'fail', sleep=lambda _: None)
+
+
+class CliTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def run_main(self, *extra, env=None):
+        import os
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+        with mock.patch.dict(os.environ, env or {}, clear=False):
+            with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+                return main(['--output', str(self.root / 'run'), *extra])
+
+    def test_missing_password_is_refused(self):
+        import os
+        environment = {k: v for k, v in os.environ.items()
+                       if k != 'POSTGRES_PASSWORD'}
+        with mock.patch.dict(os.environ, environment, clear=True):
+            self.assertEqual(self.run_main(), 2)
+        self.assertFalse((self.root / 'run').exists())
+
+    def test_existing_output_is_refused(self):
+        (self.root / 'run').mkdir()
+        self.assertEqual(self.run_main(env={'POSTGRES_PASSWORD': 'p'}), 2)
+
+    def test_zero_repeats_is_refused(self):
+        self.assertEqual(
+            self.run_main('--repeats', '0', env={'POSTGRES_PASSWORD': 'p'}), 2)
+
+    def test_seeded_order_is_reproducible(self):
+        import random as _random
+        first = _random.Random(7)
+        second = _random.Random(7)
+        orders = []
+        for chooser in (first, second):
+            sequence = []
+            for _ in range(5):
+                order = ['control', 'backup']
+                chooser.shuffle(order)
+                sequence.append(tuple(order))
+            orders.append(sequence)
+        self.assertEqual(orders[0], orders[1])
+        self.assertGreater(len(set(orders[0])), 1)
 
 
 if __name__ == '__main__':
