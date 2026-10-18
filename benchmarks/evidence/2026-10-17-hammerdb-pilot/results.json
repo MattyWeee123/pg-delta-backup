@@ -1,0 +1,233 @@
+{
+  "schema_version": 2,
+  "seed": 116458667,
+  "repeats_requested": 1,
+  "pairs": [
+    {
+      "schema_version": 2,
+      "pair_id": "hammerdb-final-1",
+      "repetition": 1,
+      "trial_order": [
+        "backup",
+        "control"
+      ],
+      "accepted": true,
+      "rejection_reason": null,
+      "control": {
+        "whole_window": {
+          "window": {
+            "start": "2026-10-18T02:13:07.030060+00:00",
+            "end": "2026-10-18T02:24:21.572883+00:00",
+            "duration_seconds": 674.543
+          },
+          "samples": 67,
+          "mean_tpm": 20093.4,
+          "min_tpm": 732,
+          "max_tpm": 41826,
+          "observed_span_seconds": 662.0,
+          "unavailable": null
+        },
+        "matched_window": {
+          "window": {
+            "start": "2026-10-18T02:13:07.884677+00:00",
+            "end": "2026-10-18T02:18:36.272237+00:00",
+            "duration_seconds": 328.388
+          },
+          "samples": 33,
+          "mean_tpm": 18979.3,
+          "min_tpm": 732,
+          "max_tpm": 39720,
+          "observed_span_seconds": 321.0,
+          "unavailable": null
+        },
+        "aggregate": {
+          "nopm": 8930,
+          "tpm": 20626
+        },
+        "latency": {
+          "scope": "whole_run",
+          "elapsed_ms": 740008.5,
+          "procedures": {
+            "NEWORD": {
+              "calls": 105250,
+              "avg_ms": 26.158,
+              "p50_ms": 14.157,
+              "p95_ms": 57.859,
+              "p99_ms": 189.758
+            },
+            "PAYMENT": {
+              "calls": 105757,
+              "avg_ms": 24.675,
+              "p50_ms": 9.183,
+              "p95_ms": 56.917,
+              "p99_ms": 239.118
+            },
+            "DELIVERY": {
+              "calls": 10541,
+              "avg_ms": 36.584,
+              "p50_ms": 23.654,
+              "p95_ms": 75.676,
+              "p99_ms": 279.338
+            },
+            "SLEV": {
+              "calls": 10729,
+              "avg_ms": 7.792,
+              "p50_ms": 3.315,
+              "p95_ms": 9.811,
+              "p99_ms": 36.348
+            },
+            "OSTAT": {
+              "calls": 10443,
+              "avg_ms": 5.348,
+              "p50_ms": 2.917,
+              "p95_ms": 13.275,
+              "p99_ms": 40.139
+            }
+          },
+          "primary_procedure": "NEWORD",
+          "p95_ms": 57.859
+        }
+      },
+      "backup": {
+        "whole_window": {
+          "window": {
+            "start": "2026-10-18T01:59:58.525272+00:00",
+            "end": "2026-10-18T02:11:31.975685+00:00",
+            "duration_seconds": 693.45
+          },
+          "samples": 68,
+          "mean_tpm": 8528.7,
+          "min_tpm": 114,
+          "max_tpm": 30570,
+          "observed_span_seconds": 673.0,
+          "unavailable": null
+        },
+        "analysis_window": {
+          "window": {
+            "start": "2026-10-18T01:59:59.379889+00:00",
+            "end": "2026-10-18T02:05:27.767449+00:00",
+            "duration_seconds": 328.388
+          },
+          "samples": 32,
+          "mean_tpm": 5432.6,
+          "min_tpm": 132,
+          "max_tpm": 23694,
+          "observed_span_seconds": 313.0,
+          "unavailable": null
+        },
+        "recovery_window": {
+          "window": {
+            "start": "2026-10-18T02:05:27.767449+00:00",
+            "end": "2026-10-18T02:11:31.975685+00:00",
+            "duration_seconds": 364.208
+          },
+          "samples": 36,
+          "mean_tpm": 11280.8,
+          "min_tpm": 114,
+          "max_tpm": 30570,
+          "observed_span_seconds": 350.0,
+          "unavailable": null
+        },
+        "aggregate": {
+          "nopm": 3939,
+          "tpm": 9052
+        },
+        "latency": {
+          "scope": "whole_run",
+          "elapsed_ms": 756736.5,
+          "procedures": {
+            "PAYMENT": {
+              "calls": 46019,
+              "avg_ms": 61.806,
+              "p50_ms": 20.432,
+              "p95_ms": 151.077,
+              "p99_ms": 873.509
+            },
+            "NEWORD": {
+              "calls": 46205,
+              "avg_ms": 61.087,
+              "p50_ms": 23.334,
+              "p95_ms": 153.987,
+              "p99_ms": 764.264
+            },
+            "DELIVERY": {
+              "calls": 4500,
+              "avg_ms": 73.548,
+              "p50_ms": 32.198,
+              "p95_ms": 185.394,
+              "p99_ms": 843.224
+            },
+            "OSTAT": {
+              "calls": 4451,
+              "avg_ms": 6.223,
+              "p50_ms": 2.599,
+              "p95_ms": 15.527,
+              "p99_ms": 60.123
+            },
+            "SLEV": {
+              "calls": 4553,
+              "avg_ms": 5.546,
+              "p50_ms": 3.092,
+              "p95_ms": 12.44,
+              "p99_ms": 52.329
+            }
+          },
+          "primary_procedure": "NEWORD",
+          "p95_ms": 153.987
+        },
+        "output_bytes_observed": 2015067325
+      },
+      "throughput_loss_fraction": 0.7138,
+      "latency": {
+        "scope": "whole_run",
+        "increase_fraction": 1.6614,
+        "note": "HammerDB records no time dimension for latency, so this covers each whole run including ramp-up and is not matched to the backup window"
+      },
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "hdb-backup-f2cb1c12-backup",
+        "method": "pg_basebackup_full",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 232.71182152599795,
+          "error": null
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 95.6458716720008,
+          "error": null
+        },
+        "basis_verification": null,
+        "increment_verification": null,
+        "combination": null,
+        "backup_file_bytes": null,
+        "output_file_bytes": null,
+        "method_seconds": 232.75476780100144,
+        "time_to_verified_seconds": 328.44481428600193,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "network_bytes": null,
+      "unavailable_metrics": {
+        "network_bytes": "transport observer not implemented"
+      }
+    }
+  ],
+  "failures": [],
+  "accepted_pairs": 1,
+  "median_throughput_loss": 0.7138,
+  "throughput_loss_range": [
+    0.7138,
+    0.7138
+  ],
+  "network_bytes": null,
+  "unavailable_metrics": {
+    "network_bytes": "transport observer not implemented",
+    "window_aligned_latency": "HammerDB records no time dimension for latency"
+  }
+}

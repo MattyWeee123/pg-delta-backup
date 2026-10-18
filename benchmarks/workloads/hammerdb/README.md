@@ -178,3 +178,70 @@ latency is unavailable, not zero. Do not call an arbitrary time-profile statisti
 checking that version’s format and retaining enough raw observations. Keep run settings,
 image digests, backup result JSON and observation boundaries with these files. Automated matched
 window analysis and an exact recovery checker for the HammerDB schema remain to be implemented.
+
+## Automated matched-pair driver
+
+`benchmarks/hammerdb_experiment.py` replaces the manual procedure above. One command runs a
+control trial and a backup trial, aligns their windows and writes a schema v2 record. It is the
+automation that this document previously listed as remaining work.
+
+**Run it on Linux.** The driver passes container paths to the shared backup adapters, which wrap
+them in `pathlib.Path`; on Windows that rewrites them with backslashes and the container command
+fails. Use WSL or a Linux host. The parsing and arithmetic are platform independent and their
+tests run anywhere.
+
+Prepare a long-lived container holding the PostgreSQL 17 tools, which the driver drives through
+`docker exec`:
+
+```sh
+docker run -d --name pg-delta-exec --network fixture_default \
+  -v bench-runs:/results --entrypoint sleep pg-delta-runner infinity
+docker exec pg-delta-exec sh -c \
+  'printf "postgres:5432:*:postgres:%s\n" "$POSTGRES_PASSWORD" > /root/.pgpass && chmod 600 /root/.pgpass'
+```
+
+```sh
+POSTGRES_PASSWORD=... python3 -m benchmarks.hammerdb_experiment \
+  --output results/hammerdb-pilot --repeats 3 \
+  --vu 8 --rampup 1 --duration 6 \
+  --network fixture_default --compose-project fixture \
+  --runner-container pg-delta-exec --backup-output /results/hdb
+```
+
+### What it measures
+
+Degradation is computed over the interval the backup actually occupied, from capture start to
+final verification, and the control is measured at the **same offset from its own ramp-up for the
+same duration**. Comparing a window containing a backup against a whole control run makes the
+answer depend on how much of the window the backup happened to fill, which is why the October 9
+figures moved from 34% to 65% without the backup changing.
+
+Three windows are reported and never collapsed into one number: `whole_window`,
+`analysis_window` and `recovery_window`. Each carries its sample count and observed span, because
+the counter cadence is not fixed.
+
+**Choose a duration longer than the backup.** A pair whose backup does not fit entirely inside the
+measurement window is rejected, not reported. A 1.2 GB cluster took 174 s to capture and verify,
+so a two minute window was correctly rejected and six minutes was used instead.
+
+### Measurement sources and their limits
+
+| Source | Used for |
+|---|---|
+| `JOBTCOUNT` in HammerDB's jobs database | Timestamped counter series; structured, so no log scraping |
+| `JOBTIMING` summary rows | Latency percentiles per stored procedure |
+| `docker logs -t` | Window markers, the NOPM result line, retained raw evidence |
+| `observe_docker` | Container CPU, memory and block I/O, started automatically per trial |
+| `run_backup` | The shared v2 backup record, embedded in the pair record |
+
+**Latency is whole-run, not window-aligned.** `JOBTIMING` percentiles cover a virtual user's
+entire elapsed time including ramp-up, and HammerDB's schema has no time dimension for latency.
+A window-aligned percentile cannot be derived from its instrumentation, so the record labels the
+scope `whole_run`. Deriving one would require changes to HammerDB's Tcl driver.
+
+**Captured bytes are measured inside the container.** `run_backup` calls `directory_bytes` on the
+host, which cannot see a capture written through `docker exec`, so the shared record reports null.
+The driver records `output_bytes_observed` separately rather than modifying the shared adapter.
+
+`network_bytes` stays null with a reason. Nothing here tests restore; the status remains
+`PASS_MANIFEST_ONLY` and a TPROC-C recovery oracle is still unimplemented.

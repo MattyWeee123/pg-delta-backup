@@ -16,10 +16,10 @@ agreement; it is the single source of truth for what remains.
 | M2 | Windows and degradation | **done** | `a85ccb4` |
 | M2.5 | Cross-check and fixes | **done** | this commit |
 | M3 | Orchestration | **done** | this commit |
-| M4 | Pilot run | not started | |
-| M5 | PR and handoff | not started | |
+| M4 | Pilot run | **done** | this commit |
+| M5 | PR and handoff | next | |
 
-Tests: 130 passing, 59 of them in `tests/test_hammerdb_experiment.py`.
+Tests: 133 passing, 62 of them in `tests/test_hammerdb_experiment.py`.
 
 ### Deliberately out of scope
 
@@ -37,7 +37,7 @@ Named here so they are not mistaken for oversights. Each needs its own branch.
 
 | Risk | State |
 |---|---|
-| PR #2 moves under us | Base `c1d21b8` confirmed current at time of writing; rebase if it changes |
+| PR #2 moves under us | **Resolved.** PR #1 and PR #2 both merged to `main` (`bd61775`) on October 17. Our branch merged `main` cleanly with zero conflicts; the M5 PR now targets `main`. Neither M0 fix reached `main`, so they remain needed. |
 | Pilot numbers are not citable | Expected. M4 produces an instrument, not a baseline |
 | `--format tar` rejected upstream | Driver uses plain format only; no action needed |
 
@@ -332,6 +332,22 @@ Needs Docker and the fixture.
 4. Commit evidence **excluding backup directories**, which are over a gigabyte each; follow the
    existing `tar --exclude=backup --exclude=increment` practice.
 5. Append the README section; update `VALIDATION.md` with what ran and what it does not establish.
+
+### M4 findings
+
+Three runs. The first two were rejected by the window guard because the backup
+outlived the measurement window, at 174 s against 124 s and 398 s against 364 s.
+That is the intended behaviour and it establishes the minimum usable window for a
+1.2 GB cluster. The third, with an 11 minute window, was accepted.
+
+The accepted pair measured 71.4% throughput loss over aligned 328.4 s windows,
+against 57.6% for the same data compared whole-window. The gap is the dilution the
+driver exists to remove. Throughput stayed 40.6% below the control after capture
+finished, across 36 samples.
+
+An unplanned observation worth keeping: running the test suite concurrently with a
+pilot halved the measured control throughput, 8,708 tpm against 4,318 tpm. Pilots
+need a quiet host.
 
 ### M5: integration
 
