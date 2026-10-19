@@ -32,9 +32,33 @@ jobs:
         run: docker compose -f benchmarks/fixture/docker-compose.yml config --quiet
       - name: Resolve PostgreSQL image and build runner
         run: |
-          docker pull public.ecr.aws/docker/library/postgres:17
-          PG_IMAGE=$(docker image inspect public.ecr.aws/docker/library/postgres:17 --format '{{index .RepoDigests 0}}')
+          # Shared runners exhaust anonymous registry quotas; a single source
+          # makes an unrelated quota failure look like a code failure. Try
+          # mirrors in order and record which one served the image. All three
+          # are mirrors of the same Docker Official Image, so the sha256 is
+          # identical and only the repository prefix differs.
+          PG_REF=""
+          for candidate in \
+            public.ecr.aws/docker/library/postgres:17 \
+            mirror.gcr.io/library/postgres:17 \
+            docker.io/library/postgres:17 ; do
+            for attempt in 1 2 3; do
+              if docker pull "$candidate"; then
+                PG_REF="$candidate"
+                break 2
+              fi
+              echo "pull failed: $candidate (attempt $attempt)"
+              sleep $(( attempt * 10 ))
+            done
+          done
+          if test -z "$PG_REF"; then
+            echo "::error::no configured registry served postgres:17"
+            exit 1
+          fi
+          echo "Resolved postgres:17 from $PG_REF"
+          PG_IMAGE=$(docker image inspect "$PG_REF" --format '{{index .RepoDigests 0}}')
           echo "BENCH_IMAGE_DIGEST=$PG_IMAGE" >> "$GITHUB_ENV"
+          echo "BENCH_IMAGE_SOURCE=$PG_REF" >> "$GITHUB_ENV"
           docker build --build-arg PG_IMAGE="$PG_IMAGE" -f benchmarks/Dockerfile -t pg-native-bench .
           mkdir -p results/native
           sudo chown 999:999 results/native
