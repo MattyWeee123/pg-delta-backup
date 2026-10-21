@@ -1,7 +1,8 @@
 # Initial backlog
 
-These are proposed issue bodies, not evidence that GitHub issues have been created.
-Assign actual people in the sync.
+These items became GitHub issues on October 21, 2026, with their status at that date;
+track progress there, not here. Item 01 is #4, and items 02–10 are #5–#13 in order.
+Owners are unassigned except Matt on #4; assign actual people in the sync.
 P0 means the first iteration depends on the answer or result.
 
 ## 01 - Record sponsor direction and resolve deployment constraints

@@ -1,6 +1,8 @@
 # HammerDB degradation driver: handoff
 
 Written October 18, 2026, for whoever picks this up next.
+Updated October 21, 2026: PR #3 merged to `main`; status, environment and
+infrastructure notes below reflect that.
 Author of the work: Sam (workloads and measurement role).
 Companion document: [the plan and milestone log](2026-10-17-hammerdb-experiment-driver.md).
 
@@ -38,8 +40,8 @@ explicitly not delivered; see section 8.
 
 | | |
 |---|---|
-| Branch | `benchmark-harness-v0.1` |
-| PR | [#3](https://github.com/MattyWeee123/pg-delta-backup/pull/3) → `main`, OPEN, MERGEABLE |
+| Branch | `benchmark-harness-v0.1`, deleted after merge; every commit below is on `main` |
+| PR | [#3](https://github.com/MattyWeee123/pg-delta-backup/pull/3) → `main`, merged October 19 as `82726b4` |
 | Size | +2,522 / −8 across 14 files |
 | Tests | 133 pass (62 in this module's suite), stable across repeated runs |
 | CI | All three checks green, including `native-baseline` at 4m28s |
@@ -68,8 +70,8 @@ cleanly with zero conflicts.
 
 ### M0 — unblock the base branch
 
-Two fixes to files owned by others. **Both are still absent from `main`**, so this PR
-fixes them there.
+Two fixes to files owned by others. Both were absent from `main` when this work
+started; PR #3 landed them there.
 
 **`benchmarks/wal_copy.py`** opened the destination directory read-only to `fsync` it
 after `os.replace`. That is POSIX-only; Windows cannot open a directory that way, so
@@ -191,7 +193,9 @@ Windows rewrites a container path `/results/x` into `\results\x` and the command
 fails. Use WSL or a Linux host. The parsing and arithmetic are platform independent
 and their tests run anywhere.
 
-### Environment currently left running on Sam's machine
+### Environment Sam left running, as of October 18
+
+Check with Sam before relying on it; it may since have been torn down.
 
 | | |
 |---|---|
@@ -200,7 +204,8 @@ and their tests run anywhere.
 | `fixture_pgdata` | Volume holding the 10-warehouse TPROC-C schema, ~1.2 GB |
 | `bench-runs` | Volume holding backup outputs from the pilots |
 
-Password used for the disposable fixture: `bench-throwaway-pw-20261009`.
+The fixture's password is not recorded here. Ask Sam for it, or rebuild from scratch
+below with your own throwaway password.
 
 ### From scratch
 
@@ -372,8 +377,9 @@ TPROC-C is not audited TPC-C. Never publish these as `tpmC`.
 
 Steps 1 and 2 want a dedicated machine. That is a *resource isolation* need, not a
 cloud need; a spare Linux box qualifies. See the earlier analysis in
-`BASELINE-GATE.md` on environment and cost, and note that
-`docs/BEN-QUESTIONS.md` still lists cloud budget as an open P1 question.
+`BASELINE-GATE.md` on environment and cost. The team's GCP credits were funded on
+October 16, per the sponsor, so a GCP VM is now an option; the budget and approved
+instance sizes in `docs/BEN-QUESTIONS.md` are still unconfirmed.
 
 ---
 
