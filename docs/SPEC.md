@@ -1,6 +1,6 @@
-# Proposed specification v0.2
+# Proposed specification v0.3
 
-Status: review proposal updated from sponsor-chat evidence, September 30, 2026.
+Status: review proposal, September 30, 2026; updated October 22, 2026 with [the state-of-the-art research](research/state-of-the-art.md).
 Normative words in this document define proposed acceptance tests, not functionality already implemented.
 
 ## 1. Objective and scope
@@ -13,7 +13,9 @@ The exact guarantee and test oracle are proposed in [CORRECTNESS.md](CORRECTNESS
 Internal transfer milestone: given a newly completed physical backup S and an older immutable basis B, construct O whose supported file contents and directory inventory match S.
 Exact reconstruction of this fixed S is a component test.
 It does not require two independently captured live backups to have identical bytes.
-Historical-WAL-summary independence is an optional research hypothesis, not a confirmed primary requirement.
+Working without WAL summaries or a shared history is the project's intended niche: the research found no existing tool that refreshes such a copy from a live server while verifying reused data by hash.
+Ben's confirmation of the target scenario is still pending ([BEN-QUESTIONS.md](BEN-QUESTIONS.md)).
+Where native incremental or `pg_rewind` prerequisites hold, the tool should hand off to them rather than compete.
 
 First transfer milestone: Linux, one agreed PostgreSQL 17 build, plain backups, standard local filesystem, no external tablespaces, no user-created symlinks, and frozen inputs.
 The integrated milestone captures backups while workload is active, then applies the frozen-input transfer path.
@@ -22,6 +24,7 @@ SQL compatibility alone is not proof of interchangeable physical backup formats 
 
 Out of scope for the first transfer milestone: direct live PGDATA scanning, cross-major upgrades, arbitrary running destination directories, failover during capture, resumable partial jobs, cloud object-store output, a PostgreSQL wire-protocol extension, and full pg_basebackup option compatibility.
 An active-workload end-to-end benchmark is required for the sponsor deliverable, even though direct live-filesystem scanning is deferred.
+Direct reading inside `pg_backup_start` / `pg_backup_stop` is the v1 target (section 2).
 Unsupported cases fail explicitly.
 They must not silently produce an incomplete backup.
 
@@ -59,6 +62,13 @@ Later integration choices require a decision record:
 A destination-only wrapper around a normal full BASE_BACKUP stream cannot remove bytes that already crossed the link.
 This is an architectural inference from the [replication protocol](https://www.postgresql.org/docs/17/protocol-replication.html), not a claim that PostgreSQL has no incremental mode.
 
+Research update, October 22:
+
+- **Agents on both hosts are required** in every design: one beside the source data, one beside the old copy. Only hashes and differing pages cross the network.
+- **v0 is the source-side staged backup; v1 is direct reading in backup mode.** v1 brackets the run with `pg_backup_start` / `pg_backup_stop`, streams WAL from the start to the stop LSN as `pg_basebackup -X stream` does, writes `backup_label` and `tablespace_map` exactly, and relies on WAL replay to repair torn pages.
+- **Read source pages only after `pg_backup_start` returns.** A page changed between an earlier read and the start checkpoint would never be replayed.
+- **The backend/protocol patch option is dropped.** It's not needed for the niche and doesn't fit the timeline.
+
 ## 3. Proposed user interface
 
 The following commands are contracts to implement, not commands currently provided:
@@ -82,7 +92,8 @@ Logs must not contain credentials or connection strings with passwords.
 
 - S is complete and immutable for the whole operation, including WAL and backup metadata.
 - B is read-only to the tool and must remain immutable to other writers.
-- Require the same cluster system identifier, major version, block size and compatible checksum state in the first PostgreSQL-specific milestone.
+- Require the same cluster system identifier, major version, catalog version, block and segment size, and checksum state in the first PostgreSQL-specific milestone. Check that the old copy's redo timeline lies in the source's timeline history, and record both minor versions (PG17 incremental backups before 17.11/18.6 could silently miss visibility-map changes).
+- Mirror `BASE_BACKUP`'s file exclusion list. Delete destination files absent from the source, and truncate oversize files before comparing blocks.
 - Preserve the original source backup_manifest, backup_label, control file, and required WAL bytes for exact reconstruction.
 - O is a new output path; refuse an existing output and any overlap or aliasing among S, B, O, and staging.
 - Do not overwrite or hard-link mutable output files to B.
@@ -100,10 +111,14 @@ MVP may restart from scratch; resumability is a separate design.
 
 ## 5. Chunking and matching contract
 
-Start with fixed 8 KiB chunks on relation data for the usual PostgreSQL page size; parameterize and validate the actual build's block size.
-Compare 64 KiB fixed chunks and content-defined chunks later.
-The initial matcher may use a per-file index keyed by `(length, SHA-256(bytes))`, returning a basis offset for a match.
-Do not use a weak rolling hash alone to authorize reuse.
+Use fixed 8 KiB chunks aligned to PostgreSQL pages; parameterize and validate the actual build's block size.
+Content-defined chunking is ruled out: relation pages are replaced in place and never shift within a file, so CDC adds CPU cost and splits pages across chunks for no benefit.
+Compare positionally: page *i* of a file against page *i* of the same file in the basis. A content-addressed index isn't needed.
+Organize page hashes into a hash tree per segment (segment, then 1 MiB nodes, then 8 KiB pages), descending only where nodes differ. That cuts metadata from about 2 MiB to about 16 KiB per unchanged 1 GiB segment. The node size is a parameter to measure.
+Use a keyed cryptographic hash with a random per-run key (BLAKE3, or BLAKE2b from Python's standard library). Never use CRC32C or the 16-bit page checksum to authorize reuse: table contents are user-controlled.
+Page LSNs and WAL summaries may add pages to the send set early, but must never cause a page to be skipped unchecked. LSN-based skipping fails in at least nine documented situations, including hint bits, the FSM and VM forks, `FILE_COPY` database creation, `pg_checksums --enable`, `pg_upgrade` and failover.
+Always hash or copy the FSM and VM forks and non-relation files whole.
+When a node's mismatch rate is high (start near 50%), stop descending and send the region whole.
 Do not infer equality from modification times or file lengths.
 
 On receipt, a reused block is re-read and validated against the expected content digest before being written.
@@ -148,7 +163,7 @@ Do not trust paths received from the peer.
 | G3: restore | Isolated PostgreSQL reaches a declared recovery target and matches expected committed data, schema and transaction invariants; aborted/uncommitted effects are absent |
 | G4: live capture | Required sponsor milestone: sustained write workload during capture; pass G2/G3 and record capture-end, coverage and publication boundaries separately |
 | G5: target platform | Ben's exact Omni version and deployment pass agreed tests; PostgreSQL results alone are insufficient |
-| G6: usefulness | Backup time, both-direction traffic and application degradation compared under active workload; include no-backup workload baseline, native full/incremental and transfer-level rsync comparisons |
+| G6: usefulness | Backup time, both-direction traffic and application degradation compared under active workload; include no-backup workload baseline, native full/incremental, rsync (`--checksum --no-whole-file --inplace --block-size=8192`), `pg_probackup catchup`, WAL-G catchup and pgBackRest delta restore; vary link bandwidth to find the crossover |
 
 [pg_verifybackup explicitly does not replace a test restore](https://www.postgresql.org/docs/17/app-pgverifybackup.html).
 Never boot the sole retained backup or basis for a test because recovery changes its files.
@@ -165,7 +180,7 @@ No performance percentage is a sponsor-approved target yet.
 
 ## 9. Decisions pending
 
-Ben: destination-copy type and deployment restrictions; source-helper permission; target versions; upstream integration and repo/license constraints; any specific customer scenario or budget limit.
-Team: proposed recovery contract, workload scales, milestone dates, implementation language, wire encoding, memory budget, ownership and first test machine.
+Ben: the real scenario behind the project, and whether a source-side program and scratch disk are allowed ([BEN-QUESTIONS.md](BEN-QUESTIONS.md)).
+Team: implementation language (Python proposed for v0), owners, wire encoding, hash-tree node size and high-churn threshold (to be measured).
 Present the team's choices for feedback instead of asking Ben to define the plan.
-These do not block reading, the educational experiment, native backup/restore baselines, or a reviewed design.
+Settled by research (October 22): page-aligned fixed chunks, hash tree, keyed hash, LSNs as hints only, agents on both hosts, and no backend patch.

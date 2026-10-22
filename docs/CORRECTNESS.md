@@ -95,6 +95,24 @@ Do not claim that a finite set of SQL queries proves equality for every possible
 Explicitly define supported schema/features, canonical encodings and limitations.
 [pg_verifybackup requires complementary restore testing](https://www.postgresql.org/docs/17/app-pgverifybackup.html).
 
+## What the research adds
+
+Updated October 22, 2026 from [the state-of-the-art research](research/state-of-the-art.md).
+
+- **Verification proves integrity, not freshness.** A stale page from an older state still carries a valid page checksum, and `pg_verifybackup` checks files against the manifest, not against the source's current state. PostgreSQL's own incremental backup silently omitted changed visibility-map pages until 17.11/18.6 (August 2026), and the checks above didn't catch it. A post-refresh re-hash against the source's hash tree, plus restore and data comparison, is required.
+- **Gate on identity before reusing anything.** Compare system identifier, major and catalog version, block and segment size, and checksum state. Check that the old copy's redo timeline lies in the source's history. After `pg_upgrade` the timeline restarts at 1, so the system identifier is what tells clusters apart.
+- **If page LSNs are ever used as a hint, the threshold is the old copy's redo point**, not its end or replay position. Every page at or above it must be sent.
+- **Turn each documented failure into a regression test:**
+  - hint-bit-only changes on a cluster without checksums
+  - VACUUM truncating a table over 1 GiB
+  - a database recreated with `STRATEGY FILE_COPY`
+  - `ALTER DATABASE SET TABLESPACE`
+  - `pg_checksums --enable` between refreshes
+  - an ex-primary that wrote WAL after failover
+  - `pg_upgrade --link`
+  - unlogged tables
+  - a run killed midway, after which the destination must refuse to start
+
 ## Suggested ownership
 
 Propose Uttansh for the recovery contract and Sam for benchmark/oracle design, with the backup and transfer owners implementing checks together.

@@ -1,50 +1,59 @@
-# Remaining questions and proposal for Ben
+# Questions for Ben and Sumaithri
 
-Updated September 30, 2026 after the supplied Google Chat screenshots.
+Updated October 22, 2026. The [September 30 version](archive/2026-09-30-ben-questions.md) is archived.
+
+Ben asked the team to define the plan and only ask when needed, so we state our assumptions and ask only questions whose answers would change what we build.
 
 ## Already answered in the chats
 
 - Benchmark while a database workload is active.
-- Compare time, network traffic and performance degradation against pg_basebackup.
-- Define workload scales and feasible mid-semester/final deliverables as a team.
-- Provide recovery correctness and no data loss; merely starting PostgreSQL is insufficient.
-- Do not require byte identity with a separate pg_basebackup capture, even if finish times match.
-- Build a project-specific correctness benchmark; Sam offered to research validation.
+- Compare time, network traffic and performance degradation against `pg_basebackup`.
+- Users must see no data loss; merely starting PostgreSQL is not enough.
+- Byte identity with a separate `pg_basebackup` capture is not required.
+- A working proof of concept on PostgreSQL is enough; any language is fine (C only for an upstream contribution).
+- Most real-world backups aren't taken with `pg_basebackup` (Ben, October 2).
 
-Ben endorsed the direction of logical equivalence and appropriate recovery guarantees.
-The screenshots do not establish a precise recovery cutoff, oracle implementation, source deployment model or target software version.
+## Our assumptions (tell us if any are wrong)
 
-## Choices for the team to propose
+1. A standalone tool, not a PostgreSQL patch.
+2. PostgreSQL 17 or 18 for the proof of concept; AlloyDB Omni if time allows.
+3. "No data loss" means the restored copy passes `pg_verifybackup`, starts, and its data matches the source at the backup's end point.
+4. Where PostgreSQL's own incremental backup applies, we hand off to it; our tool targets old copies it can't use.
+5. We build our own chunking and transfer engine and benchmark rsync, `pg_probackup catchup` and WAL-G catchup as baselines.
 
-Use CORRECTNESS.md to define recovery coverage and freshness.
-Propose approximately 1 GiB, 10 GiB and conditionally 50 GiB data sets, recording actual size and adapting to the approved budget.
-Report all three requested outcomes: backup duration, traffic and application degradation.
-Use a frozen-copy reconstruction as an internal milestone toward the active-workload demonstration.
-The team can begin the native baseline and correctness harness now.
+## Ask Ben
 
-## Questions that still change the design
+1. **Which real situation prompted this project?** Replicas that fell behind, old primaries after failover, copies from disk snapshots or other backup tools, or something else? Roughly how large are the databases, and how fast is the link between source and destination?
+2. **May the tool run a program on the source machine, and is temporary disk space there equal to the database size acceptable?** v0 takes a normal backup locally on the source, then sends only the differences. If scratch space isn't allowed, we go straight to reading the live data directory in backup mode.
 
-| Priority | Question | Why the answer matters | Proposed temporary default |
-|---|---|---|---|
-| P0 | What customer operation are we optimizing: refresh an old backup, reseed a stopped replica, recover a diverged node, or something else? What exactly exists at the destination? | Defines input validity, required history, and whether native incremental or pg_rewind already fits | An immutable completed backup from the same cluster |
-| P1 | Is there a customer scenario where native incremental prerequisites are unavailable, or another differentiator we should test? | Shapes the comparison without redefining the confirmed deliverable | Treat history-independent content matching as one hypothesis |
-| P0 | May we run a helper on the source host or sidecar? Are server patches allowed, and are there source scratch-storage limits? | Determines where matching can run and whether source staging is deployable | Stage a standard backup for the internal experiment; confirm deployment constraints |
-| P0 | Which exact PostgreSQL major/minor/build and AlloyDB Omni deployment/version must we support? Is the target Omni or the managed AlloyDB service? | Determines available APIs, binaries, permissions, and compatibility tests | PostgreSQL 17 research baseline; confirm Omni independently |
-| P0 | For the required live-workload experiment, should we support primary only, or also standby capture, failover and tablespaces? | Defines supported capture cases | Primary first; reject unsupported cases |
-| P1 | Does an explicit recovery cutoff plus reported freshness match the intended no-data-loss guarantee, or is a stronger completion-time guarantee required? | Distinguishes captured database state from later command completion | Preserve committed transactional state through the declared cutoff |
-| P1 | Is upstream PostgreSQL contribution expected this semester? | Determines whether C/backend work is required | Team selects a standalone language unless integration imposes a constraint |
-| P1 | What repo owner, visibility, license, CLA requirements, and source-sharing restrictions apply? Can we publish sponsor-derived specifications? | Needed before public release or an upstream submission | Private team repo, no license selected, no original meeting-note upload |
-| P1 | What are the cloud budget, approved instance sizes, reviewer availability, and exact demo date? | Defines experiment scale and schedule | Small synthetic data; no cloud provisioning until budget is known |
+## Ask the AlloyDB team (from the research)
 
-## Draft message for Matt to review and send
+1. Does Omni's data directory contain files or page formats beyond vanilla PostgreSQL?
+2. Could the Omni operator keep a failed primary's volume for our tool to refresh, instead of deleting it? That would be the most compelling demo.
+3. How does Omni's encryption treat page contents? Hashing raw bytes should still work, but we'd like to confirm.
 
-Ben, we have translated the chat discussion into a proposed benchmark and correctness contract.
-We will measure backup duration, traffic and workload degradation across defined scales, and validate committed data at a recorded recovery point rather than compare independent backups byte for byte.
-We will include a no-backup workload run and relevant existing incremental/delta baselines.
+## Ask Sumaithri
 
-Our first internal milestone uses standard source-side capture followed by delta reconstruction from an older immutable backup.
-We will include capture and staging costs in the end-to-end measurements and progress to the active-workload demonstration.
-The deployment questions are whether a source-side helper is allowed, what the destination copy consists of, and which PostgreSQL/Omni versions we should target.
-Please flag any customer or guarantee expectations that change our proposed recovery cutoff, scales or milestones, along with repository/licensing and budget constraints.
+- Is there a formal mid-semester deliverable and date, or is the late-November / early-December demo the main milestone?
 
-This is a draft only; no message has been sent.
+## Draft post for the Chat space
+
+Not sent yet. Review with the team first.
+
+> Hi Ben and Sumaithri, here's where the delta backup project stands and our plan.
+>
+> **Where we are:** the measurement setup is built and merged: backup and restore correctness checks, CPU and disk usage, and live-database slowdown under a HammerDB workload. First result: running a backup cut throughput by roughly 57–71% (a single laptop run; repeats on GCP next). We also surveyed existing tools: none refreshes an arbitrary older copy directly from a live server while verifying reused data by hash, which is the niche we're targeting. The tool itself starts this week.
+>
+> **Plan to code freeze (around November 13):**
+> - Week of October 26: first working version on one machine. Rebuild a new backup from an old copy plus only the changed 8 KiB pages; report bytes saved at different change rates.
+> - Week of November 2: run between two GCP machines over a throttled link; compare bytes and time against full `pg_basebackup`, native incremental, rsync and the existing catchup tools.
+> - Week of November 9: tricky cases (wrong database, a copy that diverged after failover, shrunken tables), correctness under active load, final charts.
+> - Demo: refresh time vs. link speed, and bytes sent, at about 1, 10 and 50 GB.
+>
+> **Our assumptions (tell us if any are wrong):** standalone tool; PostgreSQL 17/18 for the proof of concept, Omni if time allows; "no data loss" means the restored copy passes `pg_verifybackup`, starts, and matches the source at the backup's end point; when native incremental applies we hand off to it; we build our own chunking and transfer engine and benchmark rsync and the catchup tools as baselines.
+>
+> **Two questions for Ben:**
+> 1. Which real situation prompted this: replicas that fell behind, old primaries after failover, copies from disk snapshots or other backup tools, or something else? Roughly how large are the databases, and how fast is the link between source and destination?
+> 2. May our tool run a program on the source machine, and is temporary disk space there equal to the database size acceptable?
+>
+> **Sumaithri:** is there a formal mid-semester deliverable and date, or is the late-November / early-December demo the main milestone?

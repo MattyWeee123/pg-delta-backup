@@ -1,5 +1,7 @@
 # Lead briefing
 
+> **Archived October 22, 2026.** Prep notes for the September 30 sync. For the current picture see [the README](../../README.md) and [the research summary](../research/state-of-the-art.md).
+
 Prepared September 30, 2026, from the supplied project notes, Google Chat screenshots and primary technical sources.
 Sponsor direction below comes from those screenshots; the implementation choices and detailed correctness contract remain team proposals.
 
@@ -15,7 +17,7 @@ Sam and Uttansh have already raised the key correctness questions.
 The next step is to turn that discussion into executable checks and assigned deliverables.
 Propose Sam for benchmark/validation design and Uttansh for the recovery contract, subject to their availability.
 
-Read [CORRECTNESS.md](CORRECTNESS.md) for the proposed test approach.
+Read [CORRECTNESS.md](../CORRECTNESS.md) for the proposed test approach.
 Avoid claiming that the wall-clock time when a command returns is automatically the database recovery cutoff.
 
 ## What you are trying to solve

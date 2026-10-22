@@ -1,97 +1,78 @@
 # pg-delta-backup
 
-Research starter for the CMU / AlloyDB Omni collaboration.
-Status: sponsor direction clarified by supplied Google Chat screenshots; implementation design remains proposed.
-This repository does not yet contain a PostgreSQL backup implementation.
+A CMU student project with Google's AlloyDB team: a tool that brings an older physical copy of a PostgreSQL cluster up to date by sending only the pages that changed, verifying every reused page by hash.
 
-The consolidated benchmark provides a configurable full/incremental CLI, Sam’s
-HammerDB workload, and a disposable recovery suite, using shared backup adapters.
-See [the consolidated architecture](benchmarks/CONSOLIDATION.md) and
-[the native recovery suite](benchmarks/NATIVE.md).
-Its initial local smoke measurements are not the controlled performance baseline;
-the custom delta-transfer executable is still unimplemented.
-See [what the benchmark must establish](benchmarks/BASELINE-GATE.md) for the
-comparisons, scale choices, remaining work, and role of GCP.
+**Status, October 22, 2026**
+- **Measurement harness: built.** Backup and restore checks, resource sampling, and the HammerDB slowdown driver.
+- **Tool: not started.** v0 is next ([plan](docs/PLAN.md)).
+- **Research: done.** [What already exists and where the gap is](docs/research/state-of-the-art.md).
 
-## The problem
+## The problem and our niche
 
-A destination already has an older physical copy of a database cluster.
-Can we produce a correct new backup while sending substantially fewer bytes across the constrained network link by reusing matching data already there?
+A destination already holds an older copy of a database cluster. `pg_basebackup` ignores it and re-sends everything.
 
-The sponsor expects a benchmark under active database workload, comparing backup time, network traffic and application performance degradation across team-defined workload scales.
-The output must preserve committed data through a defined recovery point with appropriate backup/recovery guarantees.
-It need not be byte-for-byte identical to an independently captured pg_basebackup output.
-Operation without old WAL summaries remains a possible differentiating experiment, not the sponsor's established central requirement.
-PostgreSQL 17+ incremental backup, rsync, and pgBackRest are relevant existing solutions.
-We must establish when our approach is useful relative to them.
+Existing tools reuse the old copy only while a shared history holds:
+- PostgreSQL 17+ incremental backup needs the old backup's manifest and unbroken WAL summaries.
+- `pg_rewind` needs the old copy's WAL back to a failover.
+- `pg_probackup catchup` and WAL-G catchup trust page LSNs and file times on the same timeline.
+- pgBackRest verifies by hash, but only restores from its own repository.
+
+Our niche is the copy whose history is lost: a standby whose WAL was recycled, an ex-primary after failover, a restored disk snapshot. We refresh it straight from the live server, verify every reused page by hash, and need no repository, manifest or shared timeline. Where PostgreSQL's own tools apply, we hand off to them.
+
+**What we don't claim:** to be a backup system, to read less than native incremental when its prerequisites hold, or to beat a parallel full copy on a very fast LAN. The benchmark reports the link speed where the tool starts to win.
 
 ## Start here
 
-1. [Lead briefing](docs/LEAD-BRIEF.md): understand the problem and prepare for the next sync.
-2. [Questions for Ben](docs/BEN-QUESTIONS.md): resolve the architecture-changing assumptions.
-3. [Specification](docs/SPEC.md): scope, interfaces, safety properties, and acceptance criteria.
-4. [Plan and assignments](docs/PLAN.md): first 48 hours, first week, and milestones.
-5. [Research and code map](docs/RESEARCH.md): verified sources and reading tasks.
-6. [Benchmark and restore plan](benchmarks/README.md): measure equivalent outcomes.
-7. [Issue backlog](docs/BACKLOG.md): ready-to-use work items.
-8. [Correctness and recovery contract](docs/CORRECTNESS.md): proposed measurable meaning of no data loss.
+1. [Research summary](docs/research/state-of-the-art.md): existing tools, correctness pitfalls, design implications.
+2. [Plan](docs/PLAN.md): workstreams, dependencies, schedule to the November 13 freeze.
+3. [Specification](docs/SPEC.md): architecture, design decisions, correctness gates.
+4. [Correctness contract](docs/CORRECTNESS.md): what "no data loss" means and how we test it.
+5. [Questions for Ben and Sumaithri](docs/BEN-QUESTIONS.md): our assumptions and the few open questions.
+6. [References](docs/REFERENCES.md): curated reading list.
+7. [Benchmark harness](benchmarks/README.md) and [native recovery suite](benchmarks/NATIVE.md).
+8. [Validation log](docs/VALIDATION.md): what has actually been run.
 
-## Recommended first implementation
+Work items are GitHub issues #4 to #13. Older planning docs are in [docs/archive](docs/archive/).
 
-Use completed, immutable plain-format `pg_basebackup` outputs as inputs to a delta-transfer experiment.
-Capture the new backup on the source side of the constrained network link.
-Reconstruct into a new destination directory using old destination chunks plus newly transmitted bytes.
-Then verify and test-restore the reconstructed backup.
+## Run the tests and the benchmark runner
 
-This first architecture saves transfer bytes on that link, but still makes a full source-side backup and reads/hashes data.
-It is not a claim of lower source I/O or a finished live-backup replacement.
-Use this as an internal integration milestone on the path to the required active-workload benchmark.
-The team owns its milestones; source-helper permissions and final deployment constraints still need clarification.
-
-## Run the educational experiment
-
-Python 3.10+; no third-party dependencies, database, or network required:
+Python 3.10+:
 
 ```sh
-python experiments/chunk_demo.py
 python -m unittest discover -s tests -v
 ```
 
-The demo compares whole-file transfer with fixed-size chunk reuse on deterministic synthetic bytes.
-It proves byte reconstruction for its fixtures only.
-It does not benchmark PostgreSQL, network transfer, live consistency, or durable backup publication.
-
-## Run the benchmark runner
-
-`benchmarks/benchmark.py` is the measurement harness: it runs full backup or native incremental plus reconstruction, verifies
-the output with `pg_verifybackup`, and writes a shared v2 JSON run record.
-It needs PostgreSQL 17 client utilities and a disposable test cluster; see
-[the benchmark plan](benchmarks/README.md#running-the-consolidated-cli) for the fixture and flags.
+`benchmarks/benchmark.py` runs a full backup, or native incremental plus reconstruction. It verifies the output with `pg_verifybackup` and writes a shared v2 JSON run record. It needs PostgreSQL 17 client utilities and a disposable test cluster; see [the benchmark plan](benchmarks/README.md#running-the-consolidated-cli) for the fixture and flags.
 
 ```sh
 python benchmarks/benchmark.py --host 127.0.0.1 --port 5432 --user postgres --out benchmarks/runs
 ```
 
-A successful run records `PASS_MANIFEST_ONLY`, not `PASS`: the runner has no restore gate, so
-`restore_tested` is always false and `network_bytes` is always null.
-HammerDB supplies the larger workload; the native suite uses pgbench for small
-recovery fixtures. The custom delta method remains unimplemented.
+A successful run records `PASS_MANIFEST_ONLY`, not `PASS`: this runner has no restore gate, and `network_bytes` is null until network measurement exists.
+The native suite performs real restores; HammerDB supplies the larger workload.
+
+`experiments/chunk_demo.py` is a toy model of the engine on synthetic bytes. It doesn't touch PostgreSQL or a network.
 
 ## Repository layout
 
 ```text
-docs/          Briefing, specification, decisions, plan, issue backlog
-experiments/   Small reproducible research experiments
-tests/         Executable checks for the experiments
-benchmarks/    Methodology, the measurement runner, and a disposable cluster fixture
-.github/       CI and issue/PR templates
+docs/            Plan, spec, correctness contract, sponsor questions, references
+docs/research/   State-of-the-art research and its source notes
+docs/references/ Open-licensed papers (others are linked in REFERENCES.md)
+docs/specs/      Design and handoff records for the measurement harness
+docs/archive/    Superseded planning documents
+benchmarks/      Measurement harness, fixture, workloads and recorded evidence
+experiments/     Toy model of chunk reuse
+tests/           Unit and contract tests
+.github/         CI and issue/PR templates
 ```
 
-Keep the implementation in this repository as modules with shared tests.
-Create a separate PostgreSQL fork only if Ben requires a backend patch.
-Recommended production core: Rust if a standalone helper is accepted; C if upstream PostgreSQL integration is required.
-Python is used here only for the disposable research experiment and future orchestration.
-The team has not yet selected a language; confirm whether upstream integration imposes a constraint.
+## Language
+
+Not decided yet; the team confirms at the next sync.
+The proposal is Python for v0: it plugs into the existing harness, and hashing runs as compiled code through `hashlib`.
+Rust remains an option for the hashing core if measurements show it's the bottleneck.
+C would only be needed for a PostgreSQL patch, which is out of scope.
 
 ## Contribution rules
 
@@ -99,9 +80,3 @@ Every issue has one owner, a reviewer, an artifact, and a falsifiable completion
 Research ends in a short decision note, an experiment, or a PR, not only a reading list.
 Do not use real customer data, commit credentials, or treat a successful hash check as proof of database recovery.
 No open-source license is selected until the collaboration's ownership and contribution terms are confirmed.
-
-## Validation status
-
-See [local validation](docs/VALIDATION.md) for what was actually run.
-Native PostgreSQL smoke integration has run. Controlled performance results and
-AlloyDB Omni compatibility are not yet established.

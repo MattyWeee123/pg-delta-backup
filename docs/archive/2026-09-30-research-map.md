@@ -1,5 +1,7 @@
 # Research and code map
 
+> **Archived October 22, 2026.** Superseded by [the state-of-the-art research](../research/state-of-the-art.md) and [the reference list](../REFERENCES.md).
+
 Checked September 30, 2026.
 The supplied Google Chat screenshots additionally establish an active-workload benchmark deliverable and logical recovery correctness instead of independent-backup byte identity.
 Missing historical WAL summaries remain one candidate scenario, not the central confirmed sponsor requirement.

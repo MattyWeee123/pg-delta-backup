@@ -378,8 +378,8 @@ TPROC-C is not audited TPC-C. Never publish these as `tpmC`.
 Steps 1 and 2 want a dedicated machine. That is a *resource isolation* need, not a
 cloud need; a spare Linux box qualifies. See the earlier analysis in
 `BASELINE-GATE.md` on environment and cost. The team's GCP credits were funded on
-October 16, per the sponsor, so a GCP VM is now an option; the budget and approved
-instance sizes in `docs/BEN-QUESTIONS.md` are still unconfirmed.
+October 16, per the sponsor, so a GCP VM is now an option; the credit amount and
+approved instance sizes are still unconfirmed.
 
 ---
 

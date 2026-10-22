@@ -15,8 +15,12 @@ The research question is whether reusing an older backup at the destination redu
 | Active workload, no measured backup | What is normal application throughput and latency? | Smoke control exists; matched-window degradation calculation remains pending. |
 | Full pg_basebackup | What does the standard complete backup cost? | Local capture, verification and isolated restore run. |
 | Native incremental plus pg_combinebackup | How well does PostgreSQL's existing block-change solution do? | Local capture, input verification, combination, final verification and restore run. |
-| Full transfer and rsync of the same frozen backup | Is a custom transfer algorithm better than copying everything or an existing delta tool? | Planned; must use separate measured transport processes and immutable inputs. |
+| Full transfer and rsync of the same frozen backup | Is a custom transfer algorithm better than copying everything or an existing delta tool? | Planned; must use separate measured transport processes and immutable inputs. Use `rsync --checksum --no-whole-file --inplace --block-size=8192`. |
+| `pg_probackup catchup -b DELTA` and WAL-G `catchup-send` / `catchup-receive` | How do the closest live-source competitors, which trust page LSNs and file times, compare? | Planned (added October 22 from [the research](../docs/research/state-of-the-art.md)). |
+| pgBackRest backup, then `restore --delta` | How does hash-verified restore from a repository (two hops) compare? | Planned (added October 22). |
 | Source capture plus the custom tool | Does our complete approach improve Ben's metrics? | Not implemented. Source staging belongs inside the end-to-end cost. |
+
+Run each comparison at several link speeds (roughly 100 Mbps, 1 Gbps, 10 Gbps and an unthrottled LAN). The research predicts the tool wins on slow or costly links and loses to a parallel full copy on very fast ones, so the result to report is the crossover point.
 
 PostgreSQL 17's incremental backup needs an earlier backup and WAL summaries. Its incremental artifact must be combined before it can be restored. Include that reconstruction work in a comparison of usable backups; retain capture-only timing as a separate diagnostic. See [PostgreSQL's documentation](https://www.postgresql.org/docs/17/app-pgbasebackup.html).
 
