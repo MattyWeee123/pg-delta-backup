@@ -283,9 +283,12 @@ CONCURRENT_PHASE = 'prep_capture'
 # pgdelta's counterpart: its receiver starts on dest, and prefetches B0 while it
 # waits for the sender, at the same time as the capture of S on source.
 RECEIVER_PHASE = 'receiver_capture'
-# pgdelta_direct*: no capture to start beside, so the receiver's start is a timed phase of its
-# own, before the transfer.
-DIRECT_RECEIVER_PHASE = 'receiver_start'
+# pgdelta_direct*: no capture to start beside, so the receiver's start and the transfer are one
+# timed phase, one counter window, with no untimed gap between them in which the receiver would
+# prefetch B0 off the clock. Its steps, one after the other: receiver_start (from the launch until
+# the receiver listens), then transfer (the sender, until both ends exit).
+DIRECT_PHASE = 'receiver_transfer'
+DIRECT_RECEIVER_STEP = 'receiver_start'
 # pgbackrest_*: the one timed phase, on dest.
 RESTORE_PHASE = 'restore'
 SPEED_ORDERS = ('shuffle', 'alternate', 'ascending')
@@ -1062,13 +1065,15 @@ def _get(value, *keys):
 
 
 def phase_seconds(record: dict, name: str):
-    """Wall seconds of a timed phase, or of a part of a concurrent phase (prep, capture)."""
+    """Wall seconds of a timed phase, of a part of a concurrent phase (prep, capture), or of a
+    step of a sequential one (pgdelta_direct*'s receiver_start and transfer)."""
     phases = record.get('phases') or {}
     if name in phases:
         return _get(phases, name, 'wall_seconds')
     for phase in phases.values():
-        if name in (phase.get('parts') or {}):
-            return _get(phase, 'parts', name, 'wall_seconds')
+        for kind in ('parts', 'steps'):
+            if name in (phase.get(kind) or {}):
+                return _get(phase, kind, name, 'wall_seconds')
     return None
 
 
@@ -1116,9 +1121,9 @@ def summary_row(record: dict) -> dict:
         'capture_s': phase_seconds(record, 'capture'),
         'prep_capture_s': phase_seconds(record, CONCURRENT_PHASE),
         # pgdelta only: from launching the receiver until it listened (a part of receiver_capture
-        # for the staged methods, a timed phase of its own for pgdelta_direct*), and the pair's wall.
+        # for the staged methods, the first step of pgdelta_direct*'s one phase), and the pair's wall.
         'receiver_start_s': (phase_seconds(record, 'receiver') if phase_seconds(record, 'receiver')
-                             is not None else phase_seconds(record, DIRECT_RECEIVER_PHASE)),
+                             is not None else phase_seconds(record, DIRECT_RECEIVER_STEP)),
         'receiver_capture_s': phase_seconds(record, RECEIVER_PHASE),
         'transfer_s': phase_seconds(record, 'transfer'),
         'combine_s': phase_seconds(record, 'combine'),
@@ -1358,9 +1363,9 @@ def prefetch_untimed(phases: dict, prefetch) -> dict | None:
     it, so total_s can understate by about `untimed_seconds`. No other method
     runs anything in that gap: rsync's copy of B0 ends inside prep_capture.
 
-    pgdelta_direct* has no capture: its first phase is receiver_start, which
-    ends as soon as the receiver listens, so its prefetch reads in the gap
-    until the sender connects, nearly always for the whole gap.
+    pgdelta_direct* has no gap: its receiver start and transfer are one timed
+    phase, the sender starting as soon as the receiver listens, so this is
+    None for it.
 
     Both clocks are pgd-dest's: the phases' started_utc/ended_utc are the
     orchestrator's time.time(), and the prefetch's started_utc/ended_utc the
@@ -1368,7 +1373,7 @@ def prefetch_untimed(phases: dict, prefetch) -> dict | None:
     prefetch's average read rate. None if the run lacks either phase or the
     prefetch has no wall-clock times (it did not run, or an older pgdelta).
     """
-    first = phases.get(RECEIVER_PHASE) or phases.get(DIRECT_RECEIVER_PHASE)
+    first = phases.get(RECEIVER_PHASE)
     second = phases.get('transfer')
     if not first or not second or not isinstance(prefetch, dict):
         return None

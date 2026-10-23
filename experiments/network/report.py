@@ -31,8 +31,8 @@ The optional methods of T3, T8a and T11 are in the same tables. What their
 - T3's staged methods (pgdelta_gapfill_seq, pgdelta_seq, pgdelta_fsync_wb,
   pgdelta_fsync_worker, pgdelta_inplace): as pgdelta, with serial rows too.
   pgdelta_inplace patches B, a copy of B0 made before the timers (untimed);
-- pgdelta_direct*: receiver start + transfer, with no capture; the source
-  was stopped before the timers (untimed);
+- pgdelta_direct*: receiver start + transfer, one timed phase with no
+  capture; the source was stopped before the timers (untimed);
 - pgbackrest_*: the restore alone; the backup is counted as already paid.
 
 After the totals, a table of median timed phases per method and speed shows
@@ -41,9 +41,9 @@ where each method's time goes, with pgdelta's own timers for its write phase
 
 pgdelta runs whose prefetch read B0 between its two timed phases, off the
 clock (`prefetch_untimed_s` > 0), are listed with that time and an estimate
-of the bytes; their `total_s` can understate by about that time. For
-pgdelta_direct* that is nearly every run: its receiver listens at once and
-prefetches until the sender connects.
+of the bytes; their `total_s` can understate by about that time.
+pgdelta_direct* has no such gap: its receiver start and transfer are one
+timed phase.
 
 Ratios are computed from the medians and rounded only for display; "faster"
 compares the medians themselves.

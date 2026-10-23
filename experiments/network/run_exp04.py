@@ -45,7 +45,7 @@ Optional methods for T3, T8a and T11 (named in --methods; see the README):
                    drop (untimed), with --in-place
     pgdelta_direct, pgdelta_direct_inplace
                    T8a: the source cluster is stopped cleanly before the cache drop
-                   (untimed); receiver_start (dest), then pgdelta send
+                   (untimed); one timed phase: receiver_start (dest), then at once pgdelta send
                    --source-kind datadir on the stopped data directory (transfer);
                    the source is restarted afterwards, untimed, whatever happened
     pgbackrest_zst, pgbackrest_none, pgbackrest_block
@@ -799,26 +799,36 @@ class Orchestrator:
                                    'and rusage cover its whole life'}, sender]
 
     def run_pgdelta_direct(self, method, paths) -> dict:
-        """T8a: no capture. The receiver starts (timed, until it listens), then the transfer.
+        """T8a: no capture. One timed phase: the receiver starts, and the transfer follows at once.
 
-        The source cluster was stopped cleanly before the cache drop (prepare), so the
-        sender reads its data directory directly and cold (--source-kind datadir).
+        The source cluster was stopped cleanly before the cache drop (prepare), so the sender
+        reads its data directory directly and cold (--source-kind datadir). With no capture to
+        overlap, the receiver's start and the transfer are one span on one counter window: the
+        sender starts as soon as the receiver listens, with no untimed gap in which the receiver
+        would prefetch B0 off the clock. Each step's wall and start offset are in `steps`.
         """
         holder: dict = {}
+        steps: dict = {}
+
+        def body():
+            origin = time.perf_counter()
+            commands = self.start_receiver(method, paths, holder)
+            steps[measure.DIRECT_RECEIVER_STEP] = {'host': 'dest', 'offset_seconds': 0.0,
+                                                   'wall_seconds': round(time.perf_counter() - origin, 3)}
+            if commands:  # the receiver exited, or never listened: no transfer
+                return commands
+            started = time.perf_counter()
+            commands = self.pgdelta_transfer(method, paths, holder['receiver'], measure.DIRECT_PHASE)
+            steps['transfer'] = {'host': 'source', 'offset_seconds': round(started - origin, 3),
+                                 'wall_seconds': round(time.perf_counter() - started, 3)}
+            return commands
+
         try:
-            phase = self.timed_phase(measure.DIRECT_RECEIVER_PHASE,
-                                     lambda: self.start_receiver(method, paths, holder))
-            phases = {measure.DIRECT_RECEIVER_PHASE: phase}
+            phase = self.timed_phase(measure.DIRECT_PHASE, body)
+            phase['steps'] = steps
             receiver = holder['receiver']
-            # The phase ends when the receiver's log says "listening on"; it keeps running, and
-            # prefetches B0 in the untimed gap before the transfer (prefetch_untimed measures it).
             phase['receiver'] = {'argv': receiver.argv, 'log': str(receiver.log_path)}
-            if phase['failures']:
-                return phases
-            phases['transfer'] = self.timed_phase(
-                'transfer',
-                lambda: self.pgdelta_transfer(method, paths, receiver, measure.DIRECT_RECEIVER_PHASE))
-            return phases
+            return {measure.DIRECT_PHASE: phase}
         except BaseException:
             receiver = holder.get('receiver')
             if receiver is not None and receiver.result is None:
@@ -1902,10 +1912,11 @@ class Orchestrator:
                           'wall_seconds_less_remote_overhead (total_no_ssh_s) takes out '
                           'outer minus inner wall of each where it is on the critical path. '
                           'T3, T8a and T11 methods: pgdelta_inplace and pgbackrest_* patch B, a copy '
-                          'of B0 made before the cache drop and not timed; pgdelta_direct* is '
-                          'receiver_start + transfer, after a clean stop of the source that is not '
-                          'timed; pgbackrest_* is the restore alone, its backup counted as already '
-                          'paid',
+                          'of B0 made before the cache drop and not timed; pgdelta_direct* is one '
+                          'phase, receiver_transfer, whose steps receiver_start and transfer follow '
+                          'each other with no untimed gap, after a clean stop of the source that is '
+                          'not timed; pgbackrest_* is the restore alone, its backup counted as '
+                          'already paid',
                 'wire_bytes': '/proc/net/dev of the internal interface on both VMs, read just '
                               'before and after each phase; source->dest is the source tx '
                               'counter, dest->source the dest tx counter',

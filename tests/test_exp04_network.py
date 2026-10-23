@@ -2263,7 +2263,11 @@ class NewMethodRuns(unittest.TestCase):
         orchestrator = self.orchestrator()
         record = self.run_method(orchestrator, 'pgdelta_direct', SlowStart)
         self.assertEqual(record['status'], 'pass', record.get('traceback'))
-        self.assertEqual(list(record['phases']), ['receiver_start', 'transfer'])
+        # One timed phase: the receiver's start, then the transfer at once, with no untimed gap.
+        self.assertEqual(list(record['phases']), ['receiver_transfer'])
+        self.assertEqual(record['phases']['receiver_transfer']['steps'],
+                         {'receiver_start': {'host': 'dest', 'offset_seconds': 0.0, 'wall_seconds': 1.5},
+                          'transfer': {'host': 'source', 'offset_seconds': 1.5, 'wall_seconds': 2.06}})
         kinds = self.kinds(orchestrator)
         self.assertNotIn(('source', 'pg_basebackup'), kinds)
         self.assertNotIn(('dest', 'cp'), kinds)  # a new copy O: nothing to copy first
@@ -2280,17 +2284,63 @@ class NewMethodRuns(unittest.TestCase):
         self.assertEqual(receive[receive.index('--output') + 1], str(orchestrator.outputs / 'pgdelta_direct'))
         self.assertEqual(receive[receive.index('--fsync') + 1], 'main')
         self.assertNotIn('--in-place', receive)
-        # The receiver's record (its whole life) is in the transfer, as for the staged methods.
-        transfer = record['phases']['transfer']['commands']
+        # The receiver's record (its whole life) is in the phase, after it exited.
+        transfer = record['phases']['receiver_transfer']['commands']
         self.assertEqual([command['host'] for command in transfer], ['dest', 'source'])
-        self.assertIn('receiver_start', transfer[0]['role'])
+        self.assertIn('receiver_transfer', transfer[0]['role'])
         row = measure.summary_row(record)
         self.assertEqual((row['receiver_start_s'], row['transfer_s'], row['total_s']), (1.5, 2.06, 3.56))
+        self.assertEqual(row['ssh_overhead_s'], 0.06)
         self.assertIsNone(row['capture_s'])
         self.assertIsNone(row['serial_total_s'])
-        self.assertEqual(row['counter_windows'], 2)
+        self.assertEqual(row['counter_windows'], 1)
+        self.assertIsNone(record['prefetch_untimed'])
+        self.assertIsNone(row['untimed_gap_s'])
         self.assertIn('source_restart', record)
         self.assertIsNone(orchestrator.source_down)
+
+    def test_pgdelta_direct_starts_the_sender_as_soon_as_the_receiver_listens(self):
+        class Snapshots(StubOrchestrator):
+            def snapshot_source(self):
+                self.events.append('snapshot')
+                return super().snapshot_source()
+
+            def snapshot_dest(self):
+                self.events.append('snapshot')
+                return super().snapshot_dest()
+
+            def start_receiver(self, method, paths, holder):
+                commands = super().start_receiver(method, paths, holder)
+                self.events.append('listening')
+                return commands
+
+        for method in measure.PGDELTA_DIRECT_METHODS:
+            with self.subTest(method=method):
+                orchestrator = self.orchestrator(Snapshots)
+                record = self.run_method(orchestrator, method)
+                self.assertEqual(record['status'], 'pass', record.get('traceback'))
+                kinds = self.kinds(orchestrator)
+                listening = kinds.index('listening')
+                send = kinds.index(('source', 'python3'))
+                # No counter read (an SSH call to the source) between the two: the receiver can't
+                # prefetch B0 off the clock while the sender is not yet started.
+                self.assertEqual(kinds[listening:send], ['listening'])
+                self.assertEqual(kinds.count('snapshot'), 4)  # one window: both VMs before and after
+
+    def test_a_direct_receiver_that_never_listens_fails_without_a_transfer(self):
+        class Silent(FakeChild):
+            LOG = ''
+            EXIT = 1
+
+        orchestrator = self.orchestrator()
+        record = self.run_method(orchestrator, 'pgdelta_direct', Silent)
+        self.assertEqual(record['status'], 'error')
+        self.assertEqual(self.sends(orchestrator), [])
+        phase = record['phases']['receiver_transfer']
+        self.assertEqual(list(phase['steps']), ['receiver_start'])
+        [failure] = phase['failures']
+        self.assertTrue(failure.startswith('dest: ') and failure.endswith(' exited 1'), failure)
+        self.assertIn(('source_script', 'start'), self.kinds(orchestrator))
 
     def test_pgdelta_direct_inplace_copies_b0_and_stops_the_source_first(self):
         orchestrator = self.orchestrator()
