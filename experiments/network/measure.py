@@ -887,11 +887,18 @@ def compare_logical(expected: dict, actual: dict) -> tuple[bool, list[str]]:
 
 # One stanza per variant, named after its method, each with its own repository on the
 # source. What differs between them: compression, and block incremental with bundling.
+# pgbackrest_none is uncompressed on the network too (EXP-08): with compress-type=none and the
+# repository on another host, pgBackRest compresses what it sends at compress-level-network
+# (default 3) unless that is 0. The zst variants send their files as stored, and pgBackRest
+# ignores the network level for them.
 PGBACKREST_VARIANTS = {
     'pgbackrest_zst': {'compress-type': 'zst'},
-    'pgbackrest_none': {'compress-type': 'none'},
+    'pgbackrest_none': {'compress-type': 'none', 'compress-level-network': '0'},
     'pgbackrest_block': {'compress-type': 'zst', 'repo1-bundle': 'y', 'repo1-block': 'y'},
 }
+# The variant options that act on dest, where the restore and the recovery's archive-get run and
+# reach the repository over SSH: they go in dest's stanza sections too.
+PGBACKREST_DEST_OPTIONS = ('compress-level-network',)
 PGBACKREST_PROCESS_MAX = 4
 PGBACKREST_LOG_LEVELS = {'log-level-console': 'info', 'log-level-file': 'detail'}
 
@@ -943,9 +950,14 @@ def pgbackrest_dest_config(work, stanzas, *, source_ip, ssh_user) -> str:
     sections = {'global': {**pgbackrest_common(work), 'cmd-ssh': paths['ssh'], 'repo1-host': source_ip,
                            'repo1-host-user': ssh_user, 'repo1-host-config': paths['config']}}
     for stanza in stanzas:
-        sections[stanza] = {'repo1-path': pgbackrest_repo(work, stanza)}
+        sections[stanza] = {'repo1-path': pgbackrest_repo(work, stanza), **pgbackrest_dest_options(stanza)}
     return _ini(['# EXP-04 (T11): pgBackRest on pgd-dest, restoring from the repositories on',
                  '# pgd-source over SSH. pg1-path is given on each restore command line.'], sections)
+
+
+def pgbackrest_dest_options(stanza: str) -> dict:
+    """The variant's options that dest's own pgBackRest commands use (PGBACKREST_DEST_OPTIONS)."""
+    return {key: value for key, value in PGBACKREST_VARIANTS[stanza].items() if key in PGBACKREST_DEST_OPTIONS}
 
 
 def pgbackrest_ssh_config(source_ip: str, user: str, key: str) -> str:

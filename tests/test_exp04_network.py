@@ -2592,7 +2592,9 @@ class NewMethodRuns(unittest.TestCase):
         orchestrator = self.orchestrator()
         self.assertEqual(orchestrator.method_flags('pgdelta_fsync_wb'),
                          {command: list(args) for command, args in measure.PGDELTA_ARGS['pgdelta_fsync_wb'].items()})
-        self.assertEqual(orchestrator.method_flags('pgbackrest_none')['stanza'], {'compress-type': 'none'})
+        self.assertEqual(orchestrator.method_flags('pgbackrest_none')['stanza'],
+                         {'compress-type': 'none', 'compress-level-network': '0'})
+        self.assertEqual(orchestrator.method_flags('pgbackrest_none')['dest_stanza'], {'compress-level-network': '0'})
         self.assertEqual(orchestrator.method_flags('pgbackrest_none')['restore'], ['--delta', '--process-max=4'])
         self.assertIn('--fsync', orchestrator.method_flags('rsync_8k')['rsync'])
         self.assertEqual(orchestrator.method_flags('full'), {'pg_basebackup': ['--manifest-checksums', 'SHA256']})
@@ -3085,7 +3087,8 @@ class PgBackRestConfig(unittest.TestCase):
         self.assertEqual(dict(config['pgbackrest_zst']),
                          {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_zst', 'compress-type': 'zst'})
         self.assertEqual(dict(config['pgbackrest_none']),
-                         {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_none', 'compress-type': 'none'})
+                         {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_none', 'compress-type': 'none',
+                          'compress-level-network': '0'})
         self.assertEqual(dict(config['pgbackrest_block']),
                          {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_block', 'compress-type': 'zst',
                           'repo1-bundle': 'y', 'repo1-block': 'y'})
@@ -3110,6 +3113,19 @@ class PgBackRestConfig(unittest.TestCase):
         wrapper = measure.pgbackrest_ssh_wrapper('/data/exp04/pgbackrest/ssh_config')
         self.assertTrue(wrapper.startswith('#!/bin/sh\n'))
         self.assertTrue(wrapper.endswith('exec ssh -F /data/exp04/pgbackrest/ssh_config "$@"\n'))
+
+    def test_pgbackrest_none_is_uncompressed_on_the_network_too(self):
+        # With compress-type=none and a remote repository, pgBackRest compresses what it sends
+        # (compress-level-network, default 3) unless the level is 0 where the command runs: dest.
+        config = self.parse(measure.pgbackrest_dest_config(self.work, measure.PGBACKREST_METHODS,
+                                                           source_ip='10.0.0.12', ssh_user='bench'))
+        self.assertEqual(dict(config['pgbackrest_none']), {'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_none',
+                                                           'compress-level-network': '0'})
+        for stanza in ('pgbackrest_zst', 'pgbackrest_block'):
+            self.assertNotIn('compress-level-network', config[stanza])
+        self.assertNotIn('compress-level-network', config['global'])
+        self.assertEqual(measure.pgbackrest_dest_options('pgbackrest_none'), {'compress-level-network': '0'})
+        self.assertEqual(measure.pgbackrest_dest_options('pgbackrest_zst'), {})
 
     def test_archive_and_restore_commands(self):
         self.assertEqual(measure.pgbackrest_archive_command('/usr/bin/pgbackrest', '/c', ['pgbackrest_zst']),

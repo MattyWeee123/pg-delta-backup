@@ -1506,7 +1506,8 @@ class Orchestrator:
             detail, kept = '', None
         return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None,
                 'scope': 'pgBackRest reports no network byte counts; the wire columns are the only '
-                         'byte measure (its SSH is encrypted, with compression off)',
+                         "byte measure (its SSH is encrypted, with SSH's compression off; pgbackrest_none "
+                         "also turns pgBackRest's own network compression off, compress-level-network=0)",
                 'flags': self.method_flags(method),
                 'restore': measure.parse_pgbackrest_restore(console + '\n' + detail),
                 'backup': ((self.pgbackrest or {}).get('backups') or {}).get(method),
@@ -1562,6 +1563,7 @@ class Orchestrator:
         if method in measure.PGBACKREST_METHODS:
             return {'restore': ['--delta', f'--process-max={measure.PGBACKREST_PROCESS_MAX}'],
                     'stanza': dict(measure.PGBACKREST_VARIANTS[method]),
+                    'dest_stanza': measure.pgbackrest_dest_options(method),
                     'backup': ['--type=full', 'start-fast=y',
                                f'process-max={measure.PGBACKREST_PROCESS_MAX}']}
         if method in measure.RSYNC_METHODS:
