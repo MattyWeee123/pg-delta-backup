@@ -150,12 +150,12 @@ What is sent follows PostgreSQL 17's base-backup exclusions (`src/backend/backup
 | `directory_contents` | the contents of `pg_stat_tmp`, `pg_replslot`, `pg_dynshmem`, `pg_notify`, `pg_serial`, `pg_snapshots` and `pg_subtrans`; the directories themselves are sent, empty |
 | `named_files` | `postgresql.auto.conf.tmp`, `current_logfiles.tmp`, `backup_label`, `tablespace_map`, `backup_manifest`, `postmaster.pid`, `postmaster.opts`, and every name starting with `pg_internal.init` |
 | `temporary` | files and directories whose names start with `pgsql_tmp` |
-| `temporary_relations` | in a database directory (`base/<oid>`), temporary relation files (`t<backend>_<relfilenode>...`) |
-| `unlogged_relations` | in a database directory, every fork of an unlogged relation except its `_init` fork; a relation is unlogged when `<relfilenode>_init` exists beside it |
+| `temporary_relations` | in a database directory (`base/<oid>`) only, temporary relation files (`t<backend>_<relfilenode>...`) |
+| `unlogged_relations` | in a database directory and in `global/` (PostgreSQL 17's `sendDir` treats both as relation directories), every fork of an unlogged relation except its `_init` fork; a relation is unlogged when `<relfilenode>_init` exists beside it |
 | `macos` | `.DS_Store` |
 | `wal` | everything in `pg_wal/` but the segment named by `Latest checkpoint's REDO WAL file`, which after a clean shutdown holds the shutdown checkpoint record; `pg_wal/archive_status/` and `pg_wal/summaries/` are sent empty |
 
-So the output starts without recovery: PostgreSQL finds the shutdown checkpoint in the one segment, and rebuilds or clears what was left out at startup. **One addition to `pg_basebackup`'s rules:** `pg_basebackup` can leave out an unlogged relation's main fork because its output always goes through recovery, which ends by copying each init fork over its main fork. A copy that starts without recovery would find no main fork and fail on the first read ("could not open file"). So for each init fork `<relfilenode>_init[.N]`, the main fork `<relfilenode>[.N]` is sent with the init fork's bytes, which is exactly what that reset leaves: the relation exists and is empty. The real main fork, its other segments and its other forks are still left out.
+So the output starts without recovery: PostgreSQL finds the shutdown checkpoint in the one segment, and rebuilds or clears what was left out at startup. **One addition to `pg_basebackup`'s rules:** `pg_basebackup` can leave out an unlogged relation's main fork because its output always goes through recovery, which ends by copying each init fork over its main fork. A copy that starts without recovery would find no main fork and fail on the first read ("could not open file"). So for each init fork `<relfilenode>_init[.N]`, the main fork `<relfilenode>[.N]` is sent with the init fork's bytes, which is exactly what that reset leaves: the relation exists and is empty. The real main fork, its other segments and its other forks are still left out. PostgreSQL's reset covers `base/` and tablespaces, not `global/`; pgdelta resets a main fork there too, so no relation of the copy is ever unreadable. Shared catalogs can't be unlogged, so that never happens in practice.
 
 Symlinks among what is sent are refused, as for a backup (a `pg_wal` on another disk, tablespaces). Symlinks inside what is left out don't matter.
 
@@ -166,7 +166,7 @@ python -m pgdelta.datadir list D --pg-controldata .../pg_controldata            
 python -m pgdelta.datadir list D --pg-controldata .../pg_controldata --sources  # [[path, path read], ...]
 ```
 
-`list` prints the relative paths of the files sent, as a JSON list in the order they're sent, and exits 2 on the same refusals. With `--sources` it prints `[path, path read]` pairs, which differ only for the reset main forks: hash the second path on the source side to compare with the copy.
+`list` prints the relative paths of the files sent, as a JSON list in the order they're sent, and exits 2 on the same refusals. **The contract:** for every path plain `list` prints, `D/<path>` holds the bytes the copy holds at `<path>`, so a harness can hash `D/<path>` for each and compare with the copy. A reset main fork breaks that (the copy holds the init fork's bytes), so when D has an unlogged relation plain `list` prints nothing and exits 2, pointing at `--sources`. With `--sources` it prints `[path, path read]` pairs, which differ only for the reset main forks: hash `D/<path read>` and compare it with the copy's `<path>`. A harness that may meet unlogged relations should always use `--sources`.
 
 The sender's statistics record `source_kind` and `source_excluded`: the files, directories and bytes left out, in total and under `by_rule`, and `unlogged_main_forks_reset`.
 

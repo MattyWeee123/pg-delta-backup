@@ -13,11 +13,12 @@ as sendDir applies them:
 - "named_files": postgresql.auto.conf.tmp, current_logfiles.tmp,
   backup_label, tablespace_map, backup_manifest, postmaster.pid,
   postmaster.opts, and every file whose name starts with pg_internal.init;
-- "unlogged_relations": in a database directory (base/<oid>), every fork
-  of an unlogged relation except its _init fork; a relation is unlogged
-  when <relfilenode>_init exists beside it;
-- "temporary_relations": in a database directory, temporary relation files
-  (t<backend>_<relfilenode>...);
+- "unlogged_relations": in a relation directory (a database directory
+  base/<oid>, or global/, which PostgreSQL 17's sendDir also treats as
+  one), every fork of an unlogged relation except its _init fork; a
+  relation is unlogged when <relfilenode>_init exists beside it;
+- "temporary_relations": in a database directory only, temporary relation
+  files (t<backend>_<relfilenode>...);
 - "directory_contents": the contents of pg_stat_tmp, pg_replslot,
   pg_dynshmem, pg_notify, pg_serial, pg_snapshots and pg_subtrans; the
   directories themselves are kept, empty;
@@ -35,14 +36,19 @@ as it is: absent, the relation is unreadable ("could not open file"). So
 for each init fork <relfilenode>_init[.segment] the main fork
 <relfilenode>[.segment] is sent with the init fork's bytes, which is what
 that reset leaves: the relation exists and is empty. Selection.sources maps
-those listed paths to the file actually read.
+those listed paths to the file actually read. PostgreSQL's reset covers
+base/ and tablespaces, not global/, but the main fork is reset there as
+well, so no relation of the copy is ever unreadable; shared catalogs
+cannot be unlogged, so it never happens in practice.
 
 Symlinks (a pg_wal on another disk, tablespaces) are refused, as for a
 backup source. select() returns the inventory the sender lists and what was
 excluded; `python -m pgdelta.datadir list DIR --pg-controldata PATH` prints
 the selected files' relative paths as JSON, so a harness can hash exactly
-the files pgdelta sends (`--sources` prints [path, path read] pairs, which
-differ for the reset main forks).
+the files pgdelta sends. That list is printed only when each listed path's
+bytes in DIR are what the copy holds; with a reset main fork it exits 2,
+and `--sources` must be used: it prints [path, path read] pairs, of which
+the second path is the one to hash.
 """
 from __future__ import annotations
 
@@ -78,6 +84,7 @@ RULES = ('temporary', 'macos', 'named_files', 'unlogged_relations', 'temporary_r
 _RELATION = re.compile(r'([1-9][0-9]*)(?:_(fsm|vm|init))?(?:\.[1-9][0-9]*)?')
 _TEMPORARY_RELATION = re.compile(r't[0-9]+_[0-9]+(?:_(?:fsm|vm|init))?(?:\.[0-9]+)?')
 _DATABASE_DIRECTORY = re.compile(r'base/[0-9]+')
+GLOBAL_DIRECTORY = 'global'
 _WAL_FILE_NAME = re.compile(r'[0-9A-F]{24}')
 _MAX_OID = (1 << 32) - 1
 
@@ -117,20 +124,25 @@ def _relation(name):
     return match.group(1), match.group(2), name[match.end(2) if match.group(2) else len(match.group(1)):]
 
 
-def _named_rule(name, is_directory, database, names):
-    """The rule that leaves out the entry `name` of a directory, or None (basebackup.c's sendDir order)."""
+def _named_rule(name, is_directory, relations, database, names):
+    """The rule that leaves out the entry `name` of a directory, or None (basebackup.c's sendDir order).
+
+    relations: the directory holds relation files (sendDir's isRelationDir:
+    base/<oid> or global); database: it is a database directory (base/<oid>,
+    sendDir's OidIsValid(dboid)), where temporary relations are left out too.
+    """
     if name.startswith(TEMPORARY_PREFIX):
         return 'temporary'
     if name in MACOS_FILES:
         return 'macos'
     if name in EXCLUDED_FILES or name.startswith(EXCLUDED_PREFIXES):
         return 'named_files'
-    if database and not is_directory:
+    if relations and not is_directory:
         relation = _relation(name)
         if relation and relation[1] != 'init' and f'{relation[0]}_init' in names:
             return 'unlogged_relations'
-        if _TEMPORARY_RELATION.fullmatch(name):
-            return 'temporary_relations'
+    if database and not is_directory and _TEMPORARY_RELATION.fullmatch(name):
+        return 'temporary_relations'
     return None
 
 
@@ -227,11 +239,12 @@ def select(datadir, pg_controldata):
         children = _children(root / relative if relative else root)
         names = {entry.name for entry in children}
         database = bool(_DATABASE_DIRECTORY.fullmatch(relative))
+        relations = database or relative == GLOBAL_DIRECTORY
         for entry in children:
             path = f'{relative}/{entry.name}' if relative else entry.name
             info = _stat(entry)
             is_directory = stat.S_ISDIR(info.st_mode)
-            rule = _named_rule(entry.name, is_directory, database, names)
+            rule = _named_rule(entry.name, is_directory, relations, database, names)
             if rule:
                 exclude(rule, entry.path, info)
             elif is_directory and entry.name in EXCLUDED_DIRECTORY_CONTENTS:
@@ -256,7 +269,7 @@ def select(datadir, pg_controldata):
             elif stat.S_ISREG(info.st_mode):
                 mode = stat.S_IMODE(info.st_mode) & MODE_MASK
                 inventory.files.append(FileEntry(path, info.st_size, mode))
-                relation = _relation(entry.name) if database else None
+                relation = _relation(entry.name) if relations else None
                 if relation and relation[1] == 'init':
                     # What recovery's reset of unlogged relations would leave: the init fork as main fork.
                     main = f'{relative}/{relation[0]}{relation[2]}'
@@ -308,7 +321,9 @@ def main(argv=None):
     listing.add_argument('--pg-controldata', required=True, metavar='PATH')
     listing.add_argument('--sources', action='store_true',
                          help='print [path, path read] pairs instead: they differ for the main fork of an '
-                              'unlogged relation, which is sent with its init fork\'s bytes')
+                              'unlogged relation, which is sent with its init fork\'s bytes. Without it, '
+                              'list refuses (exit 2) a directory holding such a fork, since hashing DIR/path '
+                              'would not give what the copy holds')
     args = parser.parse_args(argv)
     try:
         selection = select(args.datadir, args.pg_controldata)
@@ -316,6 +331,13 @@ def main(argv=None):
         print(f'pgdelta: error: {exc}', file=sys.stderr, flush=True)
         return exc.exit_code
     files = [entry.path for entry in selection.inventory.files]
+    if selection.sources and not args.sources:
+        reset = sorted(selection.sources)
+        print(f'pgdelta: error: {args.datadir} has {len(reset)} main fork(s) of unlogged relations '
+              f'({", ".join(reset[:3])}{" ..." if len(reset) > 3 else ""}) that the copy holds with their init '
+              f'forks\' bytes, so hashing {args.datadir}/<path> for each listed path would not give what the copy '
+              f'holds; use --sources and hash the second path of each pair', file=sys.stderr, flush=True)
+        return InvalidInput.exit_code
     json.dump([[path, selection.source_path(path)] for path in files] if args.sources else files,
               sys.stdout, indent=1)
     sys.stdout.write('\n')

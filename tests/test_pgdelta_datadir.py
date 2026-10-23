@@ -56,7 +56,10 @@ def stub_controldata(directory, text=SAMPLE, stderr=''):
 TREE = {
     'PG_VERSION': None, 'postgresql.conf': None, 'postgresql.auto.conf': None, 'current_logfiles': None,
     'global/pg_control': None, 'global/1262': None,
-    'global/16385': None, 'global/16385_init': None,  # not a database directory: no unlogged rule
+    # PostgreSQL 17's sendDir treats global/ as a relation directory too: the unlogged rule applies there,
+    # but the temporary-relation rule only in a database directory.
+    'global/16385': 'unlogged_relations', 'global/16385_fsm': 'unlogged_relations', 'global/16385_init': None,
+    'global/t3_16390': None,
     'global/pg_internal.init': 'named_files', 'global/pg_internal.init.4242': 'named_files',
     'base/1/1259': None, 'base/5/PG_VERSION': None,
     'base/5/16384': None, 'base/5/16384_fsm': None, 'base/5/16384_vm': None,  # logged relation
@@ -83,7 +86,8 @@ TREE = {
 }
 EMPTY_DIRECTORIES = ('pg_tblspc', 'pg_twophase', 'pg_commit_ts')
 # Main forks of unlogged relations, sent with their init forks' bytes (what recovery's reset leaves).
-RESET = {'base/5/16385': 'base/5/16385_init', 'base/5/16390': 'base/5/16390_init'}
+RESET = {'base/5/16385': 'base/5/16385_init', 'base/5/16390': 'base/5/16390_init',
+         'global/16385': 'global/16385_init'}
 # Directories excluded with everything in them: (rule, files inside).
 EXCLUDED_DIRECTORIES = {'base/pgsql_tmp': 'temporary', 'pg_replslot/slot': 'directory_contents',
                         'pg_wal/other': 'wal'}
@@ -189,16 +193,36 @@ class SelectionTests(DatadirTestCase):
                          expected_files())
 
     def test_list_command_prints_the_selected_files_as_json(self):
-        result = list_selection(self.datadir, '--pg-controldata', self.stub)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), expected_files())
         pairs = list_selection(self.datadir, '--pg-controldata', self.stub, '--sources')
         self.assertEqual(pairs.returncode, 0, pairs.stderr)
         self.assertEqual(json.loads(pairs.stdout), [[path, RESET.get(path, path)] for path in expected_files()])
         (self.datadir / 'postmaster.pid').write_text('1\n')
+        for extra in ((), ('--sources',)):
+            refused = list_selection(self.datadir, '--pg-controldata', self.stub, *extra)
+            self.assertEqual(refused.returncode, 2)
+            self.assertIn('postmaster.pid', refused.stderr)
+
+    def test_plain_list_names_files_whose_bytes_the_copy_holds_or_refuses(self):
+        # A harness hashes DIR/<path> for each path plain `list` prints and compares that with the copy. The
+        # main fork of an unlogged relation is sent with its init fork's bytes, so with one plain `list`
+        # refuses (exit 2) and points at --sources rather than print a list that cannot be hashed so.
         refused = list_selection(self.datadir, '--pg-controldata', self.stub)
-        self.assertEqual(refused.returncode, 2)
-        self.assertIn('postmaster.pid', refused.stderr)
+        self.assertEqual((refused.returncode, refused.stdout), (2, ''))
+        self.assertIn('--sources', refused.stderr)
+        self.assertIn('base/5/16385', refused.stderr)
+        for path in [path for path in TREE if path.endswith('_init')]:
+            os.unlink(self.datadir / path)
+        listing = list_selection(self.datadir, '--pg-controldata', self.stub)
+        self.assertEqual(listing.returncode, 0, listing.stderr)
+        listed = json.loads(listing.stdout)
+        self.assertEqual(listed, [entry.path for entry in select(self.datadir, self.stub).inventory.files])
+        write_tree(self.basis, {})
+        outcome = transfer(self.datadir, self.basis, self.output, source_kind='datadir', pg_controldata=self.stub)
+        self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+        self.assertEqual(sorted(path.relative_to(self.output).as_posix() for path in self.output.rglob('*')
+                                if path.is_file()), sorted(listed))
+        for path in listed:
+            self.assertEqual((self.output / path).read_bytes(), (self.datadir / path).read_bytes(), path)
 
 
 class TransferTests(DatadirTestCase):
@@ -375,6 +399,11 @@ class RealClusterTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assert_holds_the_selection(basis)
         self.assert_starts_clean(basis)
+
+    def test_plain_list_refuses_a_cluster_with_an_unlogged_table(self):
+        refused = list_selection(self.datadir, '--pg-controldata', CONTROLDATA)
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn('--sources', refused.stderr)
 
     def test_running_or_crashed_cluster_is_refused(self):
         crashed = self.fresh_basis('crashed')
