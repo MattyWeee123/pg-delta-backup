@@ -41,6 +41,8 @@ unchanged pages are already in place. After every file is verified, what
 the source lacks is deleted and the source's pg_control is renamed into
 place: that rename is the commit. A failure before it leaves B blocked
 (never rolled back), to be refreshed again or replaced by a full copy.
+Only a PostgreSQL copy with no hard-linked file, that the identity gate
+reuses, is refreshed in place, by one run at a time.
 
 Where files are fsynced (`fsync`, pgdelta.flush): in the main loop
 ("main", default), there with early write-back on Linux ("writeback"), or
@@ -290,9 +292,10 @@ def _prepare_in_place(basis, identity, pg_controldata, reuse_any_basis, local_so
         if os.path.lexists(basis / 'postmaster.pid'):
             raise InvalidInput(f'basis {basis} contains postmaster.pid; a server may be running on it')
         inventory = require_plain(scan(basis), 'basis')
-        inplace.check_links(basis, inventory)
         marker = inplace.read_marker(basis)
         inplace.check_basis(basis, marker)
+        inplace.check_postgresql(basis, inventory, marker)
+        inplace.check_links(basis, inventory)
         if identity is None:
             identity = _basis_identity(basis, pg_controldata, marker)
     except BaseException:
@@ -578,6 +581,12 @@ class _Receiver:
             inplace.check_source(self.files, self.directories)
         self.reuse, self.reason = gate(self.source_identity, self.setup.identity, self.setup.reuse_any_basis)
         self.mode = 'reuse' if self.reuse else 'full'
+        if self.in_place and not self.reuse:
+            # S's pages would go into B itself: a B of another cluster, or of unknown identity, is not overwritten.
+            raise InvalidInput(f'an in-place refresh writes into B, so B must pass the identity check that reuse '
+                               f'needs, and it does not ({self.reason}); this run left B as it was. Give '
+                               f'--pg-controldata on both ends, or --reuse-any-basis if B is an older copy of '
+                               f'this cluster')
         basis_map = self.setup.inventory.file_map()
         # In place, the source's pg_control has no basis: it is always sent whole (see pgdelta.inplace).
         self.basis_files = {index: basis_map[entry.path].size

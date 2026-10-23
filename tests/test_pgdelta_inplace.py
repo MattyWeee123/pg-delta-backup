@@ -60,6 +60,13 @@ def flip(blob, *offsets):
     return bytes(blob)
 
 
+def pg_shapes(source, basis):
+    """build_shapes, plus the PG_VERSION that an in-place refresh needs in B (and S keeps for a rerun)."""
+    build_shapes(source, basis)
+    write_tree(source, {'PG_VERSION': b'17\n'})
+    write_tree(basis, {'PG_VERSION': b'17\n'})
+
+
 def add_type_changes(source, basis):
     """Paths whose type differs: a directory of B becomes a file, a file of B a directory, and B-only trees."""
     rng = random.Random(77)
@@ -81,9 +88,10 @@ class InPlaceTestCase(unittest.TestCase):
         old = rng.randbytes(12 * PAGE)
         new = bytearray(old)
         new[5 * PAGE] ^= 1
-        write_tree(self.source, {'base/1/rel': bytes(new), 'base/1/added': rng.randbytes(3 * PAGE),
-                                 CONTROL_FILE: rng.randbytes(PAGE)})
-        write_tree(self.basis, {'base/1/rel': old, 'stale': b'x', CONTROL_FILE: rng.randbytes(PAGE)})
+        write_tree(self.source, {'PG_VERSION': b'17\n', 'base/1/rel': bytes(new),
+                                 'base/1/added': rng.randbytes(3 * PAGE), CONTROL_FILE: rng.randbytes(PAGE)})
+        write_tree(self.basis, {'PG_VERSION': b'17\n', 'base/1/rel': old, 'stale': b'x',
+                                CONTROL_FILE: rng.randbytes(PAGE)})
 
     def assert_refreshed(self, outcome, basis=None):
         basis = basis or self.basis
@@ -114,7 +122,7 @@ class InPlaceTestCase(unittest.TestCase):
 class ShapeTests(InPlaceTestCase):
     def test_every_shape_and_engine_setting_ends_byte_identical_to_s(self):
         template = self.root / 'B-template'
-        build_shapes(self.source, template)
+        pg_shapes(self.source, template)
         add_type_changes(self.source, template)
         expected_sent = differing_pages(self.source, template)
         results = {}
@@ -137,16 +145,32 @@ class ShapeTests(InPlaceTestCase):
                 self.assertEqual(result, results[first])
         settle(self)
 
-    def test_full_mode_in_place_sends_every_page(self):
-        build_shapes(self.source, self.basis)
-        outcome = transfer(self.source, self.basis, None, reuse_any_basis=False,
-                           receiver_options={'in_place': True})
+    def test_a_basis_the_gate_would_not_reuse_is_refused_untouched(self):
+        # In place S's pages go into B itself, so a B of another cluster, or of unknown identity, would be
+        # overwritten: an in-place refresh runs only in reuse mode.
+        pg_shapes(self.source, self.basis)
+        before = snapshot(self.basis)
+        cases = {
+            'unknown identity': {},
+            'another cluster': {'source_identity': IDENTITY,
+                                'basis_identity': dict(IDENTITY, system_identifier='8')},
+        }
+        for label, identities in cases.items():
+            with self.subTest(case=label):
+                outcome = transfer(self.source, self.basis, None, reuse_any_basis=False,
+                                   receiver_options={'in_place': True}, **identities)
+                self.assertIsInstance(outcome.receiver_error, InvalidInput)
+                self.assertIn('--reuse-any-basis', str(outcome.receiver_error))
+                self.assertEqual(outcome.sender_error.exit_code, 2)
+                self.assertNotIn('blocked from starting', str(outcome.sender_error))
+                self.assertEqual(snapshot(self.basis), before)
+                self.assertFalse(os.path.lexists(receipt_path(self.basis)))
+        outcome = transfer(self.source, self.basis, None, reuse_any_basis=True, receiver_options={'in_place': True})
         self.assert_refreshed(outcome)
-        self.assertEqual(outcome.sender['mode'], 'full')
-        self.assertEqual(outcome.sender['pages']['sent'], total_pages(self.source))
+        self.assertEqual(outcome.sender['mode'], 'reuse')
 
     def test_a_second_run_on_a_refreshed_b_sends_only_pg_control(self):
-        build_shapes(self.source, self.basis)
+        pg_shapes(self.source, self.basis)
         self.assert_refreshed(transfer(self.source, self.basis, None, receiver_options={'in_place': True}))
         outcome = transfer(self.source, self.basis, None, receiver_options={'in_place': True})
         self.assert_refreshed(outcome)
@@ -160,9 +184,10 @@ class ShapeTests(InPlaceTestCase):
         old = rng.randbytes(4 * PAGE)
         new = bytearray(old)
         new[PAGE] ^= 1
-        write_tree(self.source, {'base/ro': bytes(new), 'base/keep': old, CONTROL_FILE: bytes(PAGE)},
+        write_tree(self.source, {'PG_VERSION': b'17\n', 'base/ro': bytes(new), 'base/keep': old,
+                                 CONTROL_FILE: bytes(PAGE)},
                    modes={'base/ro': 0o440, 'base/keep': 0o400, 'base': 0o750})
-        write_tree(self.basis, {'base/ro': old, 'base/keep': old, CONTROL_FILE: bytes(PAGE)},
+        write_tree(self.basis, {'PG_VERSION': b'17\n', 'base/ro': old, 'base/keep': old, CONTROL_FILE: bytes(PAGE)},
                    modes={'base/ro': 0o400, 'base/keep': 0o600})
         os.chmod(self.basis / 'base', 0o500)
         self.addCleanup(os.chmod, self.basis / 'base', 0o700)
@@ -170,7 +195,7 @@ class ShapeTests(InPlaceTestCase):
         self.assert_refreshed(outcome)
 
     def test_mid_run_b_holds_the_marker_and_no_pg_control(self):
-        build_shapes(self.source, self.basis)
+        pg_shapes(self.source, self.basis)
         basis, seen = self.basis, []
 
         class Watching(Channel):
@@ -199,7 +224,7 @@ class ShapeTests(InPlaceTestCase):
 
 class FailureTests(InPlaceTestCase):
     def test_a_failure_leaves_b_blocked_and_a_rerun_completes_it(self):
-        build_shapes(self.source, self.basis)
+        pg_shapes(self.source, self.basis)
         receipt_path(self.basis).write_text('{"status": "committed"}\n')  # from an earlier refresh
         outcome = transfer(self.source, self.basis, None, sender_class=CorruptingChannel,
                            receiver_options={'in_place': True})
@@ -219,7 +244,7 @@ class FailureTests(InPlaceTestCase):
         self.assertFalse(rerun.receiver['in_place_tree']['control_renamed'])  # already renamed
 
     def test_a_rerun_takes_b_identity_from_the_marker(self):
-        build_shapes(self.source, self.basis)
+        pg_shapes(self.source, self.basis)
         failed = transfer(self.source, self.basis, None, sender_class=CorruptingChannel, reuse_any_basis=False,
                           source_identity=IDENTITY, basis_identity=IDENTITY, receiver_options={'in_place': True})
         self.assertIsInstance(failed.receiver_error, VerificationError)
@@ -268,6 +293,27 @@ class FailureTests(InPlaceTestCase):
                 self.assertNotIn('blocked from starting', str(outcome.sender_error))
                 self.assertEqual(snapshot(self.basis), before)
                 self.assertFalse(os.path.lexists(receipt_path(self.basis)))
+
+    def test_a_directory_that_is_not_a_postgresql_copy_is_refused_untouched(self):
+        self.small_trees()
+        cases = {
+            'no PostgreSQL file': {'docs/thesis.tex': b'chapter 1', 'photos/a.jpg': b'jpeg'},
+            'no pg_control': {'PG_VERSION': b'17\n', 'base/1/rel': b'x'},
+            'no PG_VERSION': {CONTROL_FILE: bytes(PAGE), 'base/1/rel': b'x'},
+        }
+        for label, files in cases.items():
+            with self.subTest(case=label):
+                other = self.root / label.replace(' ', '_')
+                write_tree(other, files)
+                before = snapshot(other)
+                outcome = transfer(self.source, other, None, receiver_options={'in_place': True})
+                self.assertIsInstance(outcome.receiver_error, InvalidInput)
+                self.assertIn('not a copy of a PostgreSQL data directory', str(outcome.receiver_error))
+                self.assertEqual(outcome.sender_error.exit_code, 2)
+                result = run('local', '--source', self.source, '--basis', other, '--in-place', '--reuse-any-basis')
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('not a copy of a PostgreSQL data directory', result.stderr)
+                self.assertEqual(snapshot(other), before)
 
     def test_prepare_refuses_what_it_cannot_tell_apart(self):
         self.small_trees()
@@ -455,7 +501,7 @@ class OrderGuardTests(InPlaceTestCase):
         """Run `script(channel, replies)` as a hand-written sender against an in-place receiver."""
         rng = random.Random(92)
         old = rng.randbytes(8 * PAGE)
-        write_tree(self.basis, {'base/f': old})
+        write_tree(self.basis, {'PG_VERSION': b'17\n', 'base/f': old, CONTROL_FILE: bytes(PAGE)})
         self.old = old
         send_channel, receive_channel = channel_pair()
         outcome = Outcome()
@@ -527,9 +573,9 @@ class OrderGuardTests(InPlaceTestCase):
         # Every in-place run above passes the guard; here many files are planned ahead of the one written.
         files = {f'base/{number:03d}': random.Random(number).randbytes((number % 5 + 1) * PAGE)
                  for number in range(40)}
-        write_tree(self.basis, files)
+        write_tree(self.basis, dict(files, **{'PG_VERSION': b'17\n', CONTROL_FILE: bytes(PAGE)}))
         changed = {path: data[:-1] + bytes([data[-1] ^ 1]) for path, data in files.items()}
-        write_tree(self.source, dict(changed, **{CONTROL_FILE: bytes(PAGE)}))
+        write_tree(self.source, dict(changed, **{'PG_VERSION': b'17\n', CONTROL_FILE: bytes(PAGE)}))
         for jobs in (1, 3):
             outcome = transfer(self.source, self.basis, None, jobs=jobs, receiver_jobs=jobs, window=8,
                                receiver_options={'in_place': True})
@@ -540,7 +586,7 @@ class OrderGuardTests(InPlaceTestCase):
 
 class CliTests(InPlaceTestCase):
     def test_local_in_place_refreshes_b_and_says_so(self):
-        build_shapes(self.source, self.basis)
+        pg_shapes(self.source, self.basis)
         stats_path = self.root / 'stats.json'
         result = run('local', '--source', self.source, '--basis', self.basis, '--in-place', '--reuse-any-basis',
                      '--fsync', 'worker', '--stats-json', stats_path)
@@ -556,7 +602,7 @@ class CliTests(InPlaceTestCase):
         self.assertEqual(json.loads(receipt_path(self.basis).read_text())['status'], 'committed')
 
     def test_tcp_receive_in_place(self):
-        build_shapes(self.source, self.basis)
+        pg_shapes(self.source, self.basis)
         receiver = subprocess.Popen(
             python_command('receive', '--basis', self.basis, '--in-place', '--listen', '127.0.0.1:0',
                            '--reuse-any-basis', '--jobs', '2', '--fsync', 'writeback'),
@@ -588,7 +634,7 @@ class CliTests(InPlaceTestCase):
         self.assertFalse(os.path.lexists(self.basis / MARKER))
 
     def test_failed_local_run_exits_with_its_code_and_says_b_is_incomplete(self):
-        build_shapes(self.source, self.basis)
+        pg_shapes(self.source, self.basis)
         script = textwrap.dedent("""
             import sys
             from pgdelta import cli, protocol

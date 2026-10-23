@@ -145,6 +145,24 @@ def check_basis(basis, marker):
                            f'refusing to choose between them; {incomplete_note(basis)}')
 
 
+def check_postgresql(basis, inventory, marker):
+    """B must be a copy of a PostgreSQL data directory (PG_VERSION and global/pg_control), or blocked by pgdelta.
+
+    An in-place refresh deletes whatever the source does not list, so a
+    mistyped --basis (a home directory, say) must never get that far. A B
+    an earlier run blocked has no global/pg_control; its marker vouches for
+    it instead.
+    """
+    if marker is not None:
+        return
+    paths = {entry.path for entry in inventory.files}
+    missing = [name for name in ('PG_VERSION', CONTROL_FILE) if name not in paths]
+    if missing:
+        raise InvalidInput(f'basis {basis} is not a copy of a PostgreSQL data directory (it has no '
+                           f'{" and no ".join(missing)}, and no {MARKER}): an in-place refresh deletes what the '
+                           f'source lacks, so it refuses this directory; B is untouched')
+
+
 def check_links(basis, inventory):
     """Refuse a B with a file that has another hard link: writing it in place would change that name too.
 

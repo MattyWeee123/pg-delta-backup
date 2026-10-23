@@ -25,6 +25,7 @@ from pgdelta.receiver import receipt_path
 
 from pgdelta_support import comparable, snapshot, staging_dirs, transfer, write_tree
 from test_pgdelta_engine import settle
+from test_pgdelta_inplace import pg_shapes
 from test_pgdelta_parallel import build_shapes
 
 KEY = bytes(range(32))
@@ -48,7 +49,7 @@ class FsyncTestCase(unittest.TestCase):
 class ModeTests(FsyncTestCase):
     def test_every_mode_gives_the_same_output_and_statistics(self):
         template = self.root / 'B-template'
-        build_shapes(self.source, template)
+        pg_shapes(self.source, template)
         results = {}
         for in_place in (False, True):
             for fsync in flush.FSYNC_MODES:
@@ -169,7 +170,7 @@ class WorkerTests(FsyncTestCase):
         settle(self)
 
     def test_fsync_error_in_place_leaves_b_blocked(self):
-        build_shapes(self.source, self.basis)
+        pg_shapes(self.source, self.basis)
         with mock.patch.object(flush.os, 'fsync', self.failing_fsync()):
             outcome = transfer(self.source, self.basis, None, **options('worker', in_place=True))
         self.assertIsInstance(outcome.receiver_error, TransferError)

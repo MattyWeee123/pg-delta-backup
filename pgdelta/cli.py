@@ -167,7 +167,8 @@ def _target_options(parser):
                              '(a marker file, and global/pg_control renamed), patched with the changed '
                              'pages, verified, and unblocked only when every file matches: a failed run '
                              'leaves B unstartable until a rerun completes or B is replaced by a full copy. '
-                             '--rebuild has no effect')
+                             'B must be a PostgreSQL copy that the identity gate reuses (same cluster, or '
+                             '--reuse-any-basis), with no hard-linked files. --rebuild has no effect')
 
 
 def _source_kind_option(parser):
