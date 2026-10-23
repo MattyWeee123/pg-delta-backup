@@ -41,7 +41,11 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 - No instances or disks remain.
 - The audit log shows both VMs created at 10:08 UTC on October 22 and deleted at 00:07 UTC on October 23, so they ran 14.0 hours.
 - At list prices that's about 15–16 USD: two `n2-standard-8` at about 0.39 USD/hour each, plus 4 local SSDs each at about 0.16 USD/hour.
-- The exact billed figure needs the console's billing page. The browser pane's Google session had expired there, and signing in is Matt's to do.
+- **Read from the console's billing reports** (Matt signed in; checked October 23 at about 00:45 UTC):
+  - Usage processed so far for October 8–22 is $2.72: N2 core $1.16, N2 RAM $0.76, local SSD $0.72, disks $0.04, networking $0.03.
+  - All of it was covered by the sponsored credits, so **$0.00 has been charged.**
+  - That is only about 2.5 of the 28 VM-hours. Google posts usage with a delay of up to a day or so, so the rest of October 22 hasn't appeared yet.
+  - The list-price estimate above (about 15–16 USD of usage) stands until it posts, and the credits are expected to cover it as well.
 
 **Where the project stands:**
 - **pgdelta v0 is correct and sends the minimum page data.** That's evidence from 756 runs between two machines plus the tricky-copy experiment.
