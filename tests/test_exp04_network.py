@@ -2158,7 +2158,8 @@ class NewMethodRuns(unittest.TestCase):
         self.assertEqual(record['status'], 'pass', record.get('traceback'))
         b = str(orchestrator.outputs / 'pgdelta_inplace')
         dest = [event[1] for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'dest']
-        self.assertEqual(dest[:2], [['cp', '-a', str(orchestrator.b0), b], ['sync', '-f', b]])
+        # Never a reflink clone: on XFS cp's default would make B share every block with B0.
+        self.assertEqual(dest[:2], [['cp', '-a', '--reflink=never', str(orchestrator.b0), b], ['sync', '-f', b]])
         kinds = self.kinds(orchestrator)
         self.assertLess(kinds.index(('dest', 'sync')), kinds.index('drop_caches'))
         self.assertLess(kinds.index('drop_caches'), kinds.index(('source', 'pg_basebackup')))
@@ -2188,6 +2189,31 @@ class NewMethodRuns(unittest.TestCase):
         self.assertEqual(record['status'], 'error')
         self.assertIn('copy of B0', record['error'])
         self.assertNotIn('drop_caches', self.kinds(orchestrator))
+
+    def test_a_copy_of_b0_that_shares_blocks_fails_the_run_before_the_cache_drop(self):
+        for method in measure.BASIS_COPY_METHODS:
+            with self.subTest(method=method):
+                orchestrator = self.orchestrator()
+                orchestrator.pgbackrest = {'backups': {}}
+                shared = {'supported': True, 'error': None, 'files': 990, 'shared_files': 990,
+                          'shared_bytes': 2_100_000_000, 'examples': ['base/5/16384']}
+                with mock.patch.object(run_exp04.measure, 'shared_extents', return_value=shared) as check:
+                    record = self.run_method(orchestrator, method)
+                check.assert_called_once_with(orchestrator.outputs / method)
+                self.assertEqual(record['status'], 'error')
+                self.assertIn('shares disk blocks', record['error'])
+                self.assertNotIn('drop_caches', self.kinds(orchestrator))
+
+    def test_the_copy_of_b0_records_that_it_shares_no_blocks(self):
+        orchestrator = self.orchestrator()
+        unshared = {'supported': True, 'error': None, 'files': 990, 'shared_files': 0, 'shared_bytes': 0,
+                    'examples': []}
+        with mock.patch.object(run_exp04.measure, 'shared_extents', return_value=unshared):
+            record = self.run_method(orchestrator, 'pgdelta_inplace')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        [step] = record['preparation']['steps']
+        self.assertEqual(step['shared_extents'], unshared)
+        self.assertIn('--reflink=never', step['what'])
 
     # T8a: no capture; the source is stopped cleanly first and restarted whatever happens.
 
@@ -2701,6 +2727,83 @@ class OutputVerification(unittest.TestCase):
                                         '= reflink=1 bigtime=1 inobtcount=1'), True)
         self.assertIs(agent.xfs_reflink('= reflink=0'), False)
         self.assertIsNone(agent.xfs_reflink(None))
+
+
+def fiemap_reply(*extents):
+    """An FS_IOC_FIEMAP reply buffer holding (logical, length, flags) extents."""
+    buffer = bytearray(measure.FIEMAP_HEADER.size + len(extents) * measure.FIEMAP_EXTENT.size)
+    measure.FIEMAP_HEADER.pack_into(buffer, 0, 0, 0, 0, len(extents), len(extents), 0)
+    for index, (logical, length, flags) in enumerate(extents):
+        measure.FIEMAP_EXTENT.pack_into(buffer, measure.FIEMAP_HEADER.size + index * measure.FIEMAP_EXTENT.size,
+                                        logical, 4096 * index, length, 0, 0, flags, 0, 0, 0)
+    return buffer
+
+
+class SharedExtents(unittest.TestCase):
+    """FIEMAP's shared flag: whether a copy is a reflink clone (XFS) or real bytes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / 'base').mkdir()
+        (self.root / 'base' / '16384').write_bytes(b'x' * 100)
+        (self.root / 'PG_VERSION').write_bytes(b'17\n')
+
+    def test_layout_and_parse(self):
+        # The structures' sizes match the ioctl number's size field (0x20) and the kernel's 56-byte extent.
+        self.assertEqual(measure.FIEMAP_HEADER.size, 32)
+        self.assertEqual(measure.FIEMAP_EXTENT.size, 56)
+        self.assertEqual((measure.FS_IOC_FIEMAP >> 16) & 0x3fff, measure.FIEMAP_HEADER.size)
+        reply = fiemap_reply((0, 65536, measure.FIEMAP_EXTENT_SHARED), (65536, 4096, measure.FIEMAP_EXTENT_LAST))
+        self.assertEqual(measure.parse_fiemap(reply), [(0, 65536, 0x2000), (65536, 4096, 0x1)])
+
+    def test_shared_bytes_follow_the_flag_across_batches(self):
+        replies = [fiemap_reply((0, 8192, measure.FIEMAP_EXTENT_SHARED), (8192, 8192, 0)),
+                   fiemap_reply((16384, 4096, measure.FIEMAP_EXTENT_SHARED | measure.FIEMAP_EXTENT_LAST))]
+        starts = []
+
+        def ioctl(fd, request, buffer):
+            self.assertEqual(request, measure.FS_IOC_FIEMAP)
+            starts.append(measure.FIEMAP_HEADER.unpack_from(buffer, 0)[0])
+            reply = replies.pop(0)
+            buffer[:len(reply)] = reply
+            return 0
+
+        with mock.patch.object(measure.fcntl, 'ioctl', ioctl):
+            self.assertEqual(measure.shared_extent_bytes(self.root / 'PG_VERSION'), 12288)
+        self.assertEqual(starts, [0, 16384])  # the second call starts where the first batch ended
+
+    def test_a_tree_that_shares_blocks_and_one_that_does_not(self):
+        def clone(fd, request, buffer):
+            buffer[:] = fiemap_reply((0, 4096, measure.FIEMAP_EXTENT_SHARED | measure.FIEMAP_EXTENT_LAST)) \
+                + bytes(len(buffer) - measure.FIEMAP_HEADER.size - measure.FIEMAP_EXTENT.size)
+            return 0
+
+        def copy(fd, request, buffer):
+            buffer[:measure.FIEMAP_HEADER.size + measure.FIEMAP_EXTENT.size] = fiemap_reply(
+                (0, 4096, measure.FIEMAP_EXTENT_LAST))
+            return 0
+
+        with mock.patch.object(measure.fcntl, 'ioctl', clone):
+            found = measure.shared_extents(self.root)
+        self.assertEqual(found, {'supported': True, 'error': None, 'files': 2, 'shared_files': 2,
+                                 'shared_bytes': 8192, 'examples': ['PG_VERSION', 'base/16384']})
+        with mock.patch.object(measure.fcntl, 'ioctl', copy):
+            self.assertEqual(measure.shared_extents(self.root)['shared_files'], 0)
+
+    def test_without_fiemap_nothing_is_claimed(self):
+        with mock.patch.object(measure.fcntl, 'ioctl', side_effect=OSError(95, 'Operation not supported')):
+            found = measure.shared_extents(self.root)
+        self.assertIs(found['supported'], False)
+        self.assertIsNone(found['shared_files'])
+        self.assertIn('not supported', found['error'])
+        self.assertIsNone(measure.shared_extents(self.root / 'missing')['supported'])
+
+    def test_the_csv_reports_the_outputs_shared_bytes(self):
+        record = {'verification': {'shared_extents': {'shared_bytes': 2_000_000_000}}}
+        self.assertEqual(measure.summary_row(record)['output_shared_bytes'], 2_000_000_000)
+        self.assertIsNone(measure.summary_row({})['output_shared_bytes'])
 
 
 class LogicalDigest(unittest.TestCase):

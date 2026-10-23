@@ -99,7 +99,8 @@ These were added on October 23, 2026, after the owner's decisions that closed T1
 `pgdelta`, run in the same invocation, is each T3 arm's baseline: copy-then-patch, pipelined, fsync in the main loop, a new O.
 
 **Untimed set-up, before the cache drop.** It is recorded in each run's `preparation`, and its wall time is the CSV's `untimed_setup_s`.
-- **The in-place methods and pgBackRest patch B, a copy of B0.** The copy is `cp -a B0 B`, then `sync -f B`, into the method's output path. B stands in for the old copy that a real refresh already has, and B0 stays untouched for the next method, as before. B is cold when the timers start.
+- **The in-place methods and pgBackRest patch B, a copy of B0.** The copy is `cp -a --reflink=never B0 B`, then `sync -f B`, into the method's output path. B stands in for the old copy that a real refresh already has, and B0 stays untouched for the next method, as before. B is cold when the timers start.
+  - **B shares no block with B0.** Since coreutils 9.0 (Debian 12 has 9.1), `cp` defaults to `--reflink=auto`, which on dest's XFS would make B a clone of B0: every page then written into B would be a copy-on-write unshare of one of B0's blocks, which a real old copy doesn't pay. So the copy says `--reflink=never` ([EXP-10](../../docs/experiments/EXP-10-write-path.md)), and FIEMAP (`measure.shared_extents`) then checks that no extent of B is flagged shared; one that is fails the run before the cache drop. The check is in the step's `shared_extents`.
 - **pgdelta_direct\* stops the source cluster cleanly** with `source_cluster.py stop-clean`: `pg_ctl stop -m fast`, after which `pg_controldata` must say `shut down`. The cache drop comes after it, so the sender reads the source's files cold.
 
 **T3: staged like pgdelta.** The receiver starts beside the capture of S, prefetches B0 while it waits, and then comes the transfer. Totals, serial bounds and records are pgdelta's.
@@ -151,6 +152,8 @@ These were added on October 23, 2026, after the owner's decisions that closed T1
 **Different speeds per method.** T3's arms run unthrottled only, while T8a's run at 2, 5 Gbit/s and unthrottled. `--method-speeds METHODS=SPEEDS` (repeatable; methods joined with `+`) limits the named methods to some of `--speeds`; the others run at every speed, and a speed left with no method is skipped. `run.json` records `method_speeds` and `methods_by_speed`. Separate invocations work too, but each builds its own trial and B0.
 
 **ext4 or XFS** (T3 (d)): dest's `/data` is ext4 unless [`infra/gcp/reformat_dest_xfs.sh`](../../infra/gcp/README.md) has made it XFS with reflinks, which destroys everything on it. `run.json` records each VM's `data_mount` and, on XFS, `data_reflink`. Run the same T3 methods before and after.
+- **What clones on XFS, and what doesn't.** rsync's timed prep keeps `cp -a`'s default, so on XFS it clones B0, as T3 (d) means it to; pgdelta's copy-then-patch clones through `copy_file_range`. The untimed copies of B0 for the in-place methods and pgBackRest never clone (above).
+- **Which kind of copy each output is** is measured, not assumed: every verification records the output's `shared_extents` from FIEMAP after the run (CSV `output_shared_bytes`, the bytes in extents shared with another file, which can only be B0). It is 0 on ext4, and empty where FIEMAP isn't available.
 
 ## Measurements
 
@@ -301,7 +304,7 @@ The T3, T8a and T11 methods add:
   - `pgbackrest`: null, or the configurations, SSH set-up and archive command of a pgBackRest run;
   - per VM in `environment`: `pgbackrest` (its version) and `data_reflink`.
 - **in `trials/<trial>.json`:** `pgbackrest` (the set-up's results and the backups' sizes) and `logical_check` (the source's digest and each pgBackRest run's match).
-- **in each run record:** `preparation` (the untimed set-up's commands), `source_restart` (pgdelta_direct\*), and in `verification`: `in_place_leftovers`, `output_start`, `logical`, `logical_match`.
+- **in each run record:** `preparation` (the untimed set-up's commands, and for a copy of B0 its `shared_extents`), `source_restart` (pgdelta_direct\*), and in `verification`: `in_place_leftovers`, `output_start`, `logical`, `logical_match`, and for every method `shared_extents`.
 - **in the logs on dest:** `<method>-setup-copy.log` and `-setup-sync.log`, `<method>-restore.log` and `-pgbackrest-restore-file.log`, and `<method>-output-server.log`, `-output-start.log`, `-output-recovery.log`, `-output-query.log` and `-output-stop-*.log`.
 - **in the logs on the source:** `pgbackrest-<stanza>-*.log`, and `cluster/start-*/server.log` after each restart.
 
@@ -325,7 +328,7 @@ CSV columns:
 - pgdelta only: `untimed_gap_s` (between `receiver_capture`, or pgdelta_direct\*'s `receiver_start`, and the transfer, untimed), `prefetch_untimed_s` (how long the prefetch read B0 in that gap, off the clock) and `prefetch_untimed_bytes_est` (the bytes, at the prefetch's average rate); `hash_basis_s` (the receiver hashing B0 for the sender, inside the transfer);
 - pgdelta only, its own timers inside the transfer: `rebuild_s` (the write phase), `fsync_s` (of which flushing O's files), `fsync_wait_s` (the main loop waiting for flushes done elsewhere, when pgdelta reports it) and `verify_wait_s`; and the modes it reported: `in_place`, `fsync_mode`, `source_kind` (empty before pgdelta reports them);
 - `wire_s2d_bytes`, `wire_d2s_bytes` and the receive-side cross-checks;
-- `tool_s2d_bytes`, `tool_d2s_bytes`, `output_bytes`, `output_minus_wal_padding_bytes`, `capture_bytes`;
+- `tool_s2d_bytes`, `tool_d2s_bytes`, `output_bytes`, `output_minus_wal_padding_bytes`, `output_shared_bytes` (the output's bytes in extents it shares with another file after the run, from FIEMAP: a clone of B0 on XFS), `capture_bytes`;
 - `wal_bytes`, `wal_stream_bytes`, `wal_padding_bytes`;
 - `cpu_source_s`, `cpu_dest_s` (end to end), `prep_capture_cpu_dest_s` (rsync only), `receiver_capture_cpu_dest_s` (pgdelta only), `counter_windows`;
 - `proc_cpu_source_s`, `proc_cpu_dest_s`, `peak_rss_source_kb`, `peak_rss_dest_kb` and `proc_scope` (not comparable across methods; see **Per process**);
@@ -516,7 +519,7 @@ The 0.5 Gbit/s and uniform unthrottled ratios are within 0.01 of the previous ru
 - **Archiving runs in the background in a pgBackRest run.** Every staged capture ends a WAL segment that the source pushes to every stanza, during whatever runs next; that CPU is in `cpu_source_s`. Hence T11 in its own run.
 - **pgBackRest runs pass or fail only at the end of their trial,** when the source's digest is taken. `--stop-on-error` doesn't stop on a digest mismatch, and a trial that ends early leaves its pgBackRest runs `pending`.
 - **pgdelta_direct\* reads B0 partly off the clock.** Its prefetch runs in the untimed gap between its two phases (see T8a above), as `prefetch_untimed_s` records.
-- **In place, the copy of B0 is not timed.** That is the point of patching in place: B already exists. B is a fresh `cp -a` of B0, synced and then evicted from the page cache, not a copy that has aged on disk.
+- **In place, the copy of B0 is not timed.** That is the point of patching in place: B already exists. B is a fresh `cp -a --reflink=never` of B0, synced and then evicted from the page cache, not a copy that has aged on disk.
 
 ## Tests
 
@@ -554,6 +557,7 @@ The 0.5 Gbit/s and uniform unthrottled ratios are within 0.01 of the previous ru
   - every new method is optional; each new pgdelta method's send and receive flags, exactly; the pre-run check asks for each selected method's options and for `pgdelta.datadir`, and refuses without them; switches compared on what a method pins; the modes found wherever pgdelta's statistics keep them;
   - the pinned flags parsed by pgdelta's own command line, for the new methods only once pgdelta has their options (skipped until then);
   - `--method-speeds`: parsing, refusals, and the methods each speed runs in a trial;
+  - the copy of B0 for the in-place methods and pgBackRest with `cp -a --reflink=never`, and a copy that FIEMAP finds sharing blocks failing the run before the cache drop; FIEMAP itself (the structures' sizes against the ioctl number, batches, the shared flag, a filesystem without FIEMAP) and the CSV's `output_shared_bytes`;
   - stubbed runs: T3's methods staged with their flags; `pgdelta_inplace`'s copy of B0 before the cache drop, its receiver with `--basis B --in-place` and no `--output`, and its untimed set-up outside `total_s`; a failed copy stops the run before the cache drop; `pgdelta_direct`'s clean stop before the cache drop, its two timed phases, its sender's `--source-kind datadir --source` on the data directory, and the restart after the verification; the restart after a failed transfer and after a failed stop; a trial that stops when the source won't restart;
   - pgBackRest: the restore's command line and its copy of B0 before the cache drop; the set-up only in runs that select it, before B0, and the backups after the workload; the set-up's commands on both VMs (configuration, archive command through `source_cluster.py archive`, `stanza-create` and `check` per stanza, `info` from dest); the backups and their sizes; the configuration texts, parsed; the restore log and `info` JSON parsed; pending runs that pass or fail against the source's digest at the end of the trial, with their record and the CSV rewritten;
   - verification: the output's start command line; waiting for recovery; the server stopped whatever happens; a direct output against the selected files (a changed page, an extra file, a selected file the source lacks); in-place leftovers, staged and direct; `files_digest`, `parse_datadir_list` and the agent's `datadir-digest`; the logical digest's query and comparison;

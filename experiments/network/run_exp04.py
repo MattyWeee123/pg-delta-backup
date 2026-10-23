@@ -125,6 +125,10 @@ DEFAULT_SPEEDS = '0.1,0.25,0.5,1,2,5,10,unthrottled'
 # EXP-04's rsync writes O durably, as pg_basebackup, pg_combinebackup and
 # pgdelta do; benchmarks/methods.py's local EXP-02 options are left as they are.
 RSYNC_EXTRA_OPTIONS = ('--fsync',)
+# The in-place methods' and pgBackRest's B never shares blocks with B0 (EXP-10: on XFS the copy
+# uses --reflink=never). rsync's timed prep keeps cp's default, which clones on XFS: T3 (d)
+# measures that clone, and each output's shared extents are recorded in its verification.
+BASIS_COPY_REFLINK = '--reflink=never'
 # /bin/true under GNU time must report well under this, or the peak-RSS
 # figures would not be the tools' own (see measure.GNU_TIME_FORMAT).
 RSS_PROBE_LIMIT_KB = 16 * 1024
@@ -137,8 +141,8 @@ CACHE_POLICY = ("sync; echo 3 > /proc/sys/vm/drop_caches on both VMs, once, befo
                 "pgdelta's receiver starts at the same time as its capture after that one drop, "
                 'and reads B0 into the page cache while it waits for the sender '
                 '(--prefetch-basis on), as a real refresh would. The in-place methods and '
-                "pgBackRest patch B, a copy of B0 made (cp -a; sync -f) before the drop, so B starts "
-                'cold; pgdelta_direct* stops the source cluster cleanly before the drop, so the '
+                "pgBackRest patch B, a copy of B0 made (cp -a --reflink=never; sync -f) before the drop, so B "
+                'starts cold and shares no block with B0; pgdelta_direct* stops the source cluster cleanly before the drop, so the '
                 "sender reads the source's data directory cold")
 os.environ['PATH'] = os.environ.get('PATH', '/usr/bin:/bin') + ':/usr/sbin:/sbin'
 
@@ -940,16 +944,29 @@ class Orchestrator:
                 'wall_seconds': round(time.perf_counter() - started, 3)}
 
     def copy_basis(self, method, paths) -> dict:
-        """B, a durable copy of B0 that the method patches, made before the cache drop (untimed)."""
+        """B, a durable copy of B0 that the method patches, made before the cache drop (untimed).
+
+        A real old copy shares no blocks with anything, so B must not either: --reflink=never,
+        since cp's default (--reflink=auto since coreutils 9.0) clones on dest's XFS, and every
+        page then written into B would be a copy-on-write unshare of a block of B0. FIEMAP
+        checks the result; a B that shares blocks fails the run before the cache drop.
+        """
         output = paths['output']
-        copy = self.local_command(['cp', '-a', self.b0, output], f'{method}-setup-copy.log')
+        copy = self.local_command(['cp', '-a', BASIS_COPY_REFLINK, self.b0, output],
+                                  f'{method}-setup-copy.log')
         if copy['exit_code'] != 0:
             raise CommandError(f'the copy of B0 to {output} failed: {failed([copy])}')
         sync = self.local_command(['sync', '-f', output], f'{method}-setup-sync.log')
         if sync['exit_code'] != 0:
             raise CommandError(f'sync -f {output} failed: {failed([sync])}')
-        return {'what': 'copy B0 to B (cp -a, then sync -f), the copy the method patches',
-                'commands': [copy, sync]}
+        sharing = measure.shared_extents(output)
+        if sharing['shared_files']:
+            raise CommandError(f'the copy of B0 to {output} shares disk blocks with another file despite '
+                               f'{BASIS_COPY_REFLINK}: {sharing["shared_files"]} files, '
+                               f'{sharing["shared_bytes"]} bytes (for example {sharing["examples"][:3]})')
+        return {'what': f'copy B0 to B (cp -a {BASIS_COPY_REFLINK}, then sync -f), the copy the method '
+                        'patches; FIEMAP finds no block of B shared with another file',
+                'commands': [copy, sync], 'shared_extents': sharing}
 
     def restart_source(self) -> dict:
         """Start the source cluster again after pgdelta_direct*'s clean stop (untimed)."""
@@ -1009,6 +1026,8 @@ class Orchestrator:
             result['wal'] = measure.wal_summary(wal_files, manifest)
         except (ValueError, KeyError, TypeError) as exc:
             result['wal'] = {'wal_bytes': sum(wal_files.values()), 'error': str(exc)}
+        # Which kind of copy O is: on XFS, rsync's cp -a and pgdelta's copy_file_range clone B0.
+        result['shared_extents'] = measure.shared_extents(output)
         after = measure.tree_stat(self.b0)
         result['basis_changes'] = measure.stat_changes(self.b0_stat, after)
         result['verified'] = (check['exit_code'] == 0 and not result['basis_changes']
@@ -1045,6 +1064,7 @@ class Orchestrator:
                   'wal': measure.wal_summary(measure.wal_files_from_digest(digest), None)}
         if method in measure.IN_PLACE_METHODS:
             result['in_place_leftovers'] = measure.in_place_leftovers(digest)
+        result['shared_extents'] = measure.shared_extents(output)
         # Only now, with the files compared: starting the output changes it.
         result['output_start'] = self.check_output(method, output, recovery=False)
         result['basis_changes'] = measure.stat_changes(self.b0_stat, measure.tree_stat(self.b0))
@@ -1062,7 +1082,7 @@ class Orchestrator:
         set hint bits and change its pages under the other methods.
         """
         output = Path(paths['output'])
-        result = {'output_bytes': tree_bytes(output)}
+        result = {'output_bytes': tree_bytes(output), 'shared_extents': measure.shared_extents(output)}
         result['output_start'] = self.check_output(method, output, recovery=True,
                                                    query=measure.logical_digest_sql())
         if result['output_start']['ok']:

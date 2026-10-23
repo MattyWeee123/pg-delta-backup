@@ -7,6 +7,7 @@ tests exercise them on fixed text.
 from __future__ import annotations
 
 import csv
+import fcntl
 import hashlib
 import json
 import math
@@ -15,6 +16,7 @@ from pathlib import Path
 import random
 import re
 import stat
+import struct
 
 NETDEV_FIELDS = ('rx_bytes', 'rx_packets', 'rx_errs', 'rx_drop', 'rx_fifo', 'rx_frame',
                  'rx_compressed', 'rx_multicast', 'tx_bytes', 'tx_packets', 'tx_errs',
@@ -568,6 +570,82 @@ def parse_datadir_list(text: str) -> list[str]:
     return value
 
 
+# --- shared extents (reflink clones) ----------------------------------------------
+
+# FS_IOC_FIEMAP maps a file's extents and flags each one whose blocks another file shares too:
+# a reflink clone on XFS. Since coreutils 9.0 (Debian 12 ships 9.1) cp defaults to
+# --reflink=auto, and copy_file_range clones as well, so on dest's XFS a plain `cp -a B0 B`
+# makes B share every block with B0. ext4 has no reflinks and never sets the flag.
+FS_IOC_FIEMAP = 0xC020660B  # _IOWR('f', 11, struct fiemap)
+FIEMAP_MAX_OFFSET = (1 << 64) - 1
+FIEMAP_FLAG_SYNC = 0x1
+FIEMAP_EXTENT_LAST = 0x1
+FIEMAP_EXTENT_SHARED = 0x2000
+# struct fiemap: fm_start, fm_length, fm_flags, fm_mapped_extents, fm_extent_count, fm_reserved.
+FIEMAP_HEADER = struct.Struct('=QQIIII')
+# struct fiemap_extent: fe_logical, fe_physical, fe_length, fe_reserved64[2], fe_flags, fe_reserved[3].
+FIEMAP_EXTENT = struct.Struct('=QQQQQIIII')
+FIEMAP_BATCH = 256
+
+
+def parse_fiemap(buffer) -> list[tuple[int, int, int]]:
+    """(logical offset, length, flags) of each extent an FS_IOC_FIEMAP call filled in."""
+    mapped = FIEMAP_HEADER.unpack_from(buffer, 0)[3]
+    extents = []
+    for index in range(mapped):
+        logical, _, length, _, _, flags, _, _, _ = FIEMAP_EXTENT.unpack_from(
+            buffer, FIEMAP_HEADER.size + index * FIEMAP_EXTENT.size)
+        extents.append((logical, length, flags))
+    return extents
+
+
+def shared_extent_bytes(path) -> int:
+    """Bytes of `path` in extents that share their blocks with another file; OSError without FIEMAP."""
+    shared, start = 0, 0
+    with open(path, 'rb') as stream:
+        while True:
+            request = bytearray(FIEMAP_HEADER.size + FIEMAP_BATCH * FIEMAP_EXTENT.size)
+            FIEMAP_HEADER.pack_into(request, 0, start, FIEMAP_MAX_OFFSET - start, FIEMAP_FLAG_SYNC, 0,
+                                    FIEMAP_BATCH, 0)
+            fcntl.ioctl(stream.fileno(), FS_IOC_FIEMAP, request)
+            extents = parse_fiemap(request)
+            shared += sum(length for _, length, flags in extents if flags & FIEMAP_EXTENT_SHARED)
+            if not extents or extents[-1][2] & FIEMAP_EXTENT_LAST:
+                return shared
+            start = extents[-1][0] + extents[-1][1]
+
+
+def shared_extents(root, limit: int = 20) -> dict:
+    """How much of the regular files below root shares disk blocks with other files (FIEMAP).
+
+    A copy made with `cp --reflink=never` must share nothing; one made with cp's default or
+    copy_file_range on XFS shares the blocks of whatever it was cloned from, B0 here.
+    `supported` is False where FIEMAP isn't available (macOS, some filesystems), and None
+    when there was no file to ask about.
+    """
+    checked = shared_files = shared = 0
+    examples = []
+    for directory, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            path = Path(directory) / name
+            if path.is_symlink() or not path.is_file():
+                continue
+            try:
+                count = shared_extent_bytes(path)
+            except OSError as exc:
+                return {'supported': False, 'error': f'{type(exc).__name__}: {exc}', 'files': checked,
+                        'shared_files': None, 'shared_bytes': None, 'examples': examples}
+            checked += 1
+            if count:
+                shared_files += 1
+                shared += count
+                if len(examples) < limit:
+                    examples.append(path.relative_to(root).as_posix())
+    return {'supported': True if checked else None, 'error': None, 'files': checked,
+            'shared_files': shared_files, 'shared_bytes': shared, 'examples': examples}
+
+
 # What an in-place refresh writes into B while it runs, and must leave no trace of.
 IN_PLACE_MARKER = 'pgdelta-incomplete.json'
 
@@ -925,7 +1003,7 @@ CSV_FIELDS = (
     'rebuild_s', 'fsync_s', 'fsync_wait_s', 'verify_wait_s', 'in_place', 'fsync_mode', 'source_kind',
     'wire_s2d_bytes', 'wire_d2s_bytes', 'wire_s2d_bytes_dest_rx', 'wire_d2s_bytes_source_rx',
     'tool_s2d_bytes', 'tool_d2s_bytes', 'output_bytes', 'output_minus_wal_padding_bytes',
-    'capture_bytes', 'wal_bytes', 'wal_stream_bytes', 'wal_padding_bytes',
+    'output_shared_bytes', 'capture_bytes', 'wal_bytes', 'wal_stream_bytes', 'wal_padding_bytes',
     'cpu_source_s', 'cpu_dest_s', 'prep_capture_cpu_dest_s', 'receiver_capture_cpu_dest_s',
     'counter_windows',
     'proc_cpu_source_s', 'proc_cpu_dest_s', 'peak_rss_source_kb', 'peak_rss_dest_kb',
@@ -1042,6 +1120,9 @@ def summary_row(record: dict) -> dict:
         'tool_d2s_bytes': _get(record, 'tool_reported', 'bytes_dest_to_source'),
         'output_bytes': record.get('output_bytes'),
         'output_minus_wal_padding_bytes': record.get('output_minus_wal_padding_bytes'),
+        # The output's bytes in extents it shares with another file (FIEMAP), after the run: a clone
+        # of B0 on XFS (rsync's cp -a, pgdelta's copy_file_range); 0 on ext4; empty without FIEMAP.
+        'output_shared_bytes': _get(verification, 'shared_extents', 'shared_bytes'),
         'capture_bytes': record.get('capture_bytes'),
         'wal_bytes': wal.get('wal_bytes'),
         'wal_stream_bytes': wal.get('wal_stream_bytes'),
