@@ -15,12 +15,17 @@ after the commit, so a B that holds the marker is incomplete and must be
 refreshed again (a rerun takes B's identity from the marker) or replaced
 by a full copy.
 
+One run at a time: a run holds an exclusive lock on B's root directory
+from its checks to its end (BasisLock), and commits only while B still
+holds its own marker (run_id) and renamed pg_control (check_owned).
+
 This module holds the steps on B's tree; pgdelta.receiver runs them in order.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 import errno
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -63,6 +68,45 @@ def target(path):
 def incomplete_note(basis):
     return (f'{basis} is incomplete and blocked from starting (its global/pg_control is renamed and '
             f'{MARKER} marks it): refresh it again with --in-place, or replace it with a full copy')
+
+
+class BasisBusy(InvalidInput):
+    """Another in-place run holds B."""
+
+
+class BasisLock:
+    """An exclusive flock on B's root directory, held from prepare_receiver until the run ends.
+
+    Taken without waiting: a second in-place run on the same B, by any path
+    to it, is refused while the first one lives. The kernel drops the lock
+    when its process dies, so a rerun after a crash takes it at once. A new
+    copy (--output) only reads B and takes none.
+    """
+
+    def __init__(self, basis):
+        self.fd = None
+        try:
+            fd = os.open(basis, os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | getattr(os, 'O_CLOEXEC', 0))
+        except OSError as exc:
+            raise InvalidInput(f'cannot open basis {basis} to lock it: {exc.strerror}') from exc
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            os.close(fd)
+            raise BasisBusy(f'basis {basis} is being refreshed in place by another run, which holds its lock; '
+                            f'not touching it') from None
+        except OSError as exc:
+            os.close(fd)
+            raise InvalidInput(f'cannot lock basis {basis} for an in-place refresh: {exc.strerror}') from exc
+        self.fd = fd
+
+    def release(self):
+        fd, self.fd = self.fd, None
+        if fd is not None:
+            os.close(fd)
+
+    def __del__(self):
+        self.release()
 
 
 def is_blocked(basis):
@@ -148,12 +192,35 @@ def new_marker(basis, previous, basis_identity, source_identity):
         'started_at': now,
         'first_started_at': previous.get('first_started_at') or previous.get('started_at') or now,
         'attempt': attempt + 1 if type(attempt) is int else 1,
+        # This run's own: it commits only a B whose marker still has it (check_owned).
+        'run_id': secrets.token_hex(16),
         # B's identity as read when its first in-place refresh started; a rerun reuses it, since
         # pg_controldata cannot read B while its pg_control is renamed.
         'basis_identity': basis_identity,
         'source_identity': source_identity,
         'note': incomplete_note(basis),
     }
+
+
+def check_owned(basis, run_id):
+    """B still holds this run's marker and renamed pg_control: checked before deleting anything and before the commit.
+
+    The lock keeps a second pgdelta run away; this catches a writer it
+    cannot see (another host, or a marker replaced by hand).
+    """
+    basis = Path(basis)
+    try:
+        record = read_marker(basis)
+    except InvalidInput as exc:
+        record, reason = None, str(exc)
+    else:
+        reason = f'{MARKER} is missing' if record is None else f'{MARKER} is another run\'s'
+    if record is not None and record.get('run_id') == run_id:
+        if os.path.lexists(basis / CONTROL_PENDING):
+            return
+        reason = f'{CONTROL_PENDING} is missing'
+    raise TransferError(f'{basis} was changed by another process during this run ({reason}), so B is not this '
+                        f'run\'s to finish: not deleting anything and not committing')
 
 
 def write_atomically(path, data, mode=0o600):

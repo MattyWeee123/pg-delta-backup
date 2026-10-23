@@ -214,9 +214,16 @@ class ReceiverSetup:
     reuse_any_basis: bool = False
     # {label: (path, directory identities)} that O and its staging directory must stay out of.
     protected: dict = field(default_factory=dict)
-    # In place: B is refreshed itself (output is B); marker: that of an earlier run that did not commit.
+    # In place: B is refreshed itself (output is B); marker: that of an earlier run that did not commit;
+    # lock: the hold on B (pgdelta.inplace.BasisLock) from prepare_receiver until the run ends.
     in_place: bool = False
     marker: object = None
+    lock: object = None
+
+    def release(self):
+        """Let go of B (in place); the receiver does so when its run ends. Safe to repeat."""
+        if self.lock is not None:
+            self.lock.release()
 
 
 def prepare_receiver(basis, output, *, identity=None, pg_controldata=None, reuse_any_basis=False,
@@ -231,7 +238,9 @@ def prepare_receiver(basis, output, *, identity=None, pg_controldata=None, reuse
     in_place: B is refreshed itself and output must be None. B may then
     hold the marker of an earlier in-place run that did not commit; if its
     global/pg_control is still renamed, B's identity is taken from the
-    marker, since pg_controldata cannot read B.
+    marker, since pg_controldata cannot read B. The setup then holds B's
+    lock, which the run releases when it ends; call setup.release() if it
+    is never run.
     """
     if in_place:
         if output is not None:
@@ -272,19 +281,25 @@ def _prepare_in_place(basis, identity, pg_controldata, reuse_any_basis, local_so
         placement.refuse_inside(Path(local_source), protected, f'source {local_source}')
     if not basis.resolve().name:
         raise InvalidInput(f'basis {basis} has no name, so it has no place for its receipt')
-    receipt = receipt_path(basis)
-    if os.path.lexists(receipt) and not stat.S_ISREG(os.lstat(receipt).st_mode):
-        raise InvalidInput(f'receipt path {receipt} exists and is not a regular file')
-    if os.path.lexists(basis / 'postmaster.pid'):
-        raise InvalidInput(f'basis {basis} contains postmaster.pid; a server may be running on it')
-    inventory = require_plain(scan(basis), 'basis')
-    inplace.check_links(basis, inventory)
-    marker = inplace.read_marker(basis)
-    inplace.check_basis(basis, marker)
-    if identity is None:
-        identity = _basis_identity(basis, pg_controldata, marker)
+    # Held until the run ends: no other in-place run may change B meanwhile, nor this one read B mid-change.
+    lock = inplace.BasisLock(basis)
+    try:
+        receipt = receipt_path(basis)
+        if os.path.lexists(receipt) and not stat.S_ISREG(os.lstat(receipt).st_mode):
+            raise InvalidInput(f'receipt path {receipt} exists and is not a regular file')
+        if os.path.lexists(basis / 'postmaster.pid'):
+            raise InvalidInput(f'basis {basis} contains postmaster.pid; a server may be running on it')
+        inventory = require_plain(scan(basis), 'basis')
+        inplace.check_links(basis, inventory)
+        marker = inplace.read_marker(basis)
+        inplace.check_basis(basis, marker)
+        if identity is None:
+            identity = _basis_identity(basis, pg_controldata, marker)
+    except BaseException:
+        lock.release()
+        raise
     return ReceiverSetup(basis, basis, inventory, identity, reuse_any_basis, protected, in_place=True,
-                         marker=marker)
+                         marker=marker, lock=lock)
 
 
 @dataclass
@@ -396,8 +411,10 @@ class _Receiver:
         self.fsync_effective = None if fsync == 'writeback' else fsync
         self.writeback = False
         self.writeback_calls, self.writeback_seconds, self.fsync_wait_seconds = 0, 0.0, 0.0
-        # In place: B was blocked (marker written) and, later, committed (pg_control renamed into place).
+        # In place: B was blocked (marker written, with run_id) and, later, committed (pg_control renamed
+        # into place).
         self.in_place, self.blocked, self.committed = setup.in_place, False, False
+        self.run_id = None
         self.tree_changes = None
         # Basis files below this index have been read in full by the basis thread (in place: only
         # those may be written).
@@ -469,6 +486,7 @@ class _Receiver:
                         os.unlink(receipt_path(self.setup.output))
                     except OSError:
                         pass
+            self.setup.release()
 
     def _send_error(self, exit_code, message):
         with self.error_lock:
@@ -656,7 +674,7 @@ class _Receiver:
         inplace.remove_receipt(receipt_path(basis))
         record = inplace.new_marker(basis, marker, self.setup.identity, self.source_identity)
         inplace.write_marker(basis, record)
-        self.blocked = True
+        self.blocked, self.run_id = True, record['run_id']
         renamed = inplace.block_startup(basis)
         self.tree_changes = {'attempt': record['attempt'], 'control_renamed': renamed,
                              **inplace.prepare_tree(basis, self.directories, self.files)}
@@ -1034,6 +1052,7 @@ class _Receiver:
         """
         basis = self.setup.basis
         self.verified_at = _utc_now()
+        inplace.check_owned(basis, self.run_id)
         removed_files, removed_directories = inplace.remove_extraneous(basis, self.directories, self.files)
         self.tree_changes['files_removed'] += removed_files
         self.tree_changes['directories_removed'] += removed_directories
@@ -1057,6 +1076,7 @@ class _Receiver:
         basis = self.setup.basis
         control_directory = inplace.CONTROL_FILE.rpartition('/')[0]
         mode = next(entry.mode for entry in self.directories if entry.path == control_directory)
+        inplace.check_owned(basis, self.run_id)
         try:
             inplace.commit_control(basis)
             self.committed = self.published = True

@@ -357,6 +357,97 @@ class HardLinkTests(InPlaceTestCase):
         settle(self)
 
 
+class ConcurrencyTests(InPlaceTestCase):
+    """One in-place run at a time on a B, and a run commits only a B that is still its own."""
+
+    def two_sources(self):
+        rng = random.Random(94)
+        old, extra = rng.randbytes(4 * PAGE), rng.randbytes(PAGE)
+        write_tree(self.basis, {'PG_VERSION': b'17\n', 'base/1/a': extra, 'base/1/b': old, 'base/1/stale': b'x',
+                                CONTROL_FILE: rng.randbytes(PAGE)})
+        self.first, self.second = self.root / 'S1', self.root / 'S2'
+        write_tree(self.first, {'PG_VERSION': b'17\n', 'base/1/a': extra, 'base/1/b': flip(old, 0),
+                                CONTROL_FILE: rng.randbytes(PAGE)})
+        write_tree(self.second, {'PG_VERSION': b'17\n', 'base/1/a': extra, 'base/1/b': flip(old, PAGE),
+                                 CONTROL_FILE: rng.randbytes(PAGE)})
+
+    def start_paused(self, source):
+        """An in-place run from `source`, paused at its first PAGE_DATA (B blocked and hashed); returns resume()."""
+        paused, resume = threading.Event(), threading.Event()
+
+        class Pausing(Channel):
+            def recv(self):
+                message = super().recv()
+                if message is not None and message[0] == protocol.PAGE_DATA and not paused.is_set():
+                    paused.set()
+                    resume.wait(60)
+                return message
+
+        send_channel, receive_channel = channel_pair(receiver_class=Pausing)
+        outcome = Outcome()
+        receiver = run_receiver_thread(receive_channel, outcome, self.basis, None, reuse_any_basis=True,
+                                       in_place=True)
+
+        def send():
+            try:
+                outcome.sender = run_sender(send_channel, source, node_blocks=4)
+            except BaseException as exc:
+                outcome.sender_error = exc
+            finally:
+                send_channel.close()
+
+        sender = threading.Thread(target=send)
+        sender.start()
+        self.assertTrue(paused.wait(30))
+
+        def finish():
+            resume.set()
+            sender.join(60)
+            receiver.join(60)
+            return outcome
+        self.addCleanup(resume.set)
+        return finish
+
+    def test_a_second_run_on_a_b_being_refreshed_is_refused(self):
+        self.two_sources()
+        finish = self.start_paused(self.first)
+        during = snapshot(self.basis)
+        second = transfer(self.second, self.basis, None, receiver_options={'in_place': True})
+        self.assertIsInstance(second.receiver_error, InvalidInput)
+        self.assertIn('another run', str(second.receiver_error))
+        self.assertEqual(second.sender_error.exit_code, 2)
+        self.assertEqual(snapshot(self.basis), during)
+        self.source = self.first
+        self.assert_refreshed(finish())
+        settle(self)
+
+    def test_prepare_holds_b_until_the_setup_is_released(self):
+        self.small_trees()
+        first = prepare_receiver(self.basis, None, in_place=True)
+        with self.assertRaisesRegex(InvalidInput, 'another run'):
+            prepare_receiver(self.basis, None, in_place=True)
+        with self.assertRaisesRegex(InvalidInput, 'another run'):  # by another path to the same directory
+            prepare_receiver(self.root / '.' / 'B', None, in_place=True)
+        self.assertEqual(prepare_receiver(self.basis, self.root / 'O').basis, self.basis)  # a new copy only reads B
+        first.release()
+        prepare_receiver(self.basis, None, in_place=True).release()
+
+    def test_a_run_whose_marker_was_replaced_does_not_commit(self):
+        # Another writer the lock cannot see (another host, say) took B over while this run was paused.
+        self.two_sources()
+        finish = self.start_paused(self.first)
+        record = json.loads((self.basis / MARKER).read_text())
+        (self.basis / MARKER).write_text(json.dumps(dict(record, run_id='someone-else')))
+        outcome = finish()
+        self.assertIsInstance(outcome.receiver_error, TransferError)
+        self.assertIn('not this run', str(outcome.receiver_error))
+        self.assertFalse(os.path.lexists(self.basis / CONTROL_FILE))
+        self.assertTrue(os.path.isfile(self.basis / CONTROL_PENDING))
+        self.assertTrue(os.path.isfile(self.basis / 'base/1/stale'))  # nothing deleted
+        self.assertFalse(os.path.lexists(receipt_path(self.basis)))
+        settle(self)
+
+
 class OrderGuardTests(InPlaceTestCase):
     """B's file i is written only after its digests were sent and its leaf requests answered."""
 
