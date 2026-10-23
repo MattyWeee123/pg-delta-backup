@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from experiments.incumbents import checks, run_t11, tools
-from experiments.tricky_copies import run_scenarios, scenarios
+from experiments.tricky_copies import lsnscan, pgcluster, run_scenarios, scenarios
 from experiments.tricky_copies.lsnscan import BLOCK
 from test_tricky_copies import heap_page
 
@@ -302,6 +302,12 @@ class S2bCheckTest(unittest.TestCase):
         self.assertEqual(unflushed.checks['diverged_pages_on_disk_after_fork'][
             'pages_with_lsn_after_fork'], 1)
 
+    def test_evict_sql_by_version(self):
+        self.assertIn('FILTER (WHERE pg_buffercache_evict(b.bufferid))',
+                      scenarios.evict_dirty_user_buffers_sql(17))
+        self.assertIn('FILTER (WHERE (pg_buffercache_evict(b.bufferid)).buffer_evicted)',
+                      scenarios.evict_dirty_user_buffers_sql(18))
+
     def test_registry_and_selection(self):
         spec = scenarios.BY_ID['S2b']
         self.assertEqual(spec.dirname, 'S2b-ex-primary-no-checkpoint-after-fork')
@@ -316,6 +322,48 @@ class S2bCheckTest(unittest.TestCase):
         self.assertEqual(meta['extra_conf'], {'wal_keep_size': '1GB'})
         self.assertEqual(scenarios.scenario_metadata(spec, rows=1, built_ok=False)['extra_conf'],
                          {})
+
+
+class FlushWithoutCheckpointTest(unittest.TestCase):
+    """S2b's flush on a real server, for each of PostgreSQL 17 and 18 that is installed:
+    pg_buffercache_evict() returns a boolean in 17 and a record in 18."""
+
+    def flush(self, bindir):
+        sockdir = pgcluster.short_tempdir()
+        cluster = pgcluster.Cluster('flush', pgcluster.PgBin(bindir), sockdir / 'data', sockdir,
+                                    pgcluster.free_port(), sockdir / 'server.log')
+        try:
+            cluster.initdb()
+            cluster.start()
+            cluster.psql('CREATE EXTENSION pg_buffercache;\n'
+                         'CREATE TABLE t AS SELECT g AS id, md5(g::text) AS v '
+                         'FROM generate_series(1, 2000) g;\nCHECKPOINT;\n')
+            checkpoint = cluster.scalar('SELECT checkpoint_lsn FROM pg_control_checkpoint()')
+            cluster.psql('UPDATE t SET v = upper(v) WHERE id = 1;')
+            written = cluster.scalar('SELECT pg_current_wal_lsn()')
+            flush = scenarios.flush_without_checkpoint(cluster)
+            after = cluster.scalar('SELECT checkpoint_lsn FROM pg_control_checkpoint()')
+            page = scenarios.read_block(sockdir / 'data' / cluster.scalar(
+                "SELECT pg_relation_filepath('t')"), 0)
+            cluster.stop('immediate')
+        finally:
+            cluster.ensure_stopped()
+            shutil.rmtree(sockdir, ignore_errors=True)
+        self.assertTrue(flush['clean'], flush)
+        self.assertGreater(flush['buffers_evicted'], 0)
+        self.assertEqual(after, checkpoint)  # no checkpoint ran
+        # The updated page reached disk with an LSN past the last checkpoint.
+        self.assertGreater(lsnscan.page_lsn(page), lsnscan.parse_lsn(checkpoint))
+        self.assertLessEqual(lsnscan.page_lsn(page), lsnscan.parse_lsn(written))
+
+    def test_postgresql_17_and_18(self):
+        found = [b for b in (pgcluster.DEFAULT_PG17, pgcluster.DEFAULT_PG18)
+                 if (b / 'initdb').is_file()]
+        if not found:
+            self.skipTest('no PostgreSQL 17 or 18 binaries')
+        for bindir in found:
+            with self.subTest(bindir=str(bindir)):
+                self.flush(bindir)
 
 
 def executable(path, text):

@@ -3,7 +3,7 @@
 This folder runs the correctness half of test T11 ([decision ledger](../../docs/DECISIONS.md), experiment queue). It takes EXP-03's tricky old copies S1, S2 and the new S2b, and records whether each incumbent refresh tool refuses, repairs the copy correctly, or produces wrong data. pgdelta runs on the same copies as the reference.
 
 Requirements: Python 3.10 or newer, standard library only, Linux or macOS. Every server runs as the current (non-root) user on a Unix socket, as in [EXP-03's tooling](../tricky_copies/README.md). Needed:
-- a PostgreSQL 17 bin directory (`--pg-bin`) with `pg_rewind` and `pg_amcheck`, and contrib (`amcheck`, `pg_buffercache`);
+- a PostgreSQL 17 bin directory (`--pg-bin`) with `pg_rewind` and `pg_amcheck`, and contrib (`amcheck`, `pg_buffercache`). The scenarios, pg_rewind and pgdelta also run with PostgreSQL 18;
 - optionally `pg_probackup` and `wal-g`. A tool that is missing is recorded as skipped, with the reason.
 
 On a benchmark VM, [`infra/gcp/install_incumbents.sh`](../../infra/gcp/install_incumbents.sh) installs both.

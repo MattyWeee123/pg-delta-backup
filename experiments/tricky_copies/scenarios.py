@@ -95,13 +95,21 @@ INSERT INTO accounts VALUES ({rows + 1}, 0, 'written only on the old primary');
 DIVERGED_BLOCKS_SQL = ("SELECT DISTINCT ((ctid::text)::point)[0]::bigint FROM accounts "
                        "WHERE id % 200 = 3 ORDER BY 1;")
 
-# pg_buffercache_evict() (PostgreSQL 17) writes a dirty buffer out before evicting it, so
-# it puts pages on disk without a checkpoint. Returns (dirty buffers, buffers evicted).
-EVICT_DIRTY_USER_BUFFERS_SQL = f"""SELECT count(*), count(*) FILTER (WHERE pg_buffercache_evict(b.bufferid))
+
+def evict_dirty_user_buffers_sql(major):
+    """(dirty buffers, buffers evicted) for the user relations of the current database.
+
+    pg_buffercache_evict() writes a dirty buffer out before evicting it, so it puts pages
+    on disk without a checkpoint. It returns a boolean in PostgreSQL 17 and a record
+    (buffer_evicted, buffer_flushed) from 18 on."""
+    evicted = ('pg_buffercache_evict(b.bufferid)' if major < 18
+               else '(pg_buffercache_evict(b.bufferid)).buffer_evicted')
+    return f"""SELECT count(*), count(*) FILTER (WHERE {evicted})
 FROM pg_buffercache b
 JOIN pg_class c ON b.relfilenode = pg_relation_filenode(c.oid)
 WHERE b.isdirty AND c.oid >= {FIRST_NORMAL_OID}
   AND b.reldatabase = (SELECT oid FROM pg_database WHERE datname = current_database());"""
+
 
 CRASH_PGBENCH = r"""\set aid random(1, :rows)
 BEGIN;
@@ -280,9 +288,10 @@ def history_switchpoint(text):
 def flush_without_checkpoint(cluster, passes=5):
     """Write every dirty buffer of a user relation (all forks, indexes and TOAST included)
     to disk with pg_buffercache_evict(), until a pass finds none; no checkpoint runs."""
+    sql = evict_dirty_user_buffers_sql(cluster.pgbin.major)
     evicted = 0
     for done_passes in range(1, passes + 1):
-        dirty, written = (int(v) for v in cluster.query(EVICT_DIRTY_USER_BUFFERS_SQL)[0])
+        dirty, written = (int(v) for v in cluster.query(sql)[0])
         evicted += written
         if dirty == 0:
             return {'passes': done_passes, 'buffers_evicted': evicted, 'clean': True}
