@@ -37,6 +37,12 @@ It took about 45 seconds on first boot.
 
 Measured on these VMs with a single TCP stream, from 0.1 to 10 Gbit/s, the achieved payload rate was 94 to 96% of the target in both directions. Unthrottled (`off`, the default `mq` qdisc), the link ran at 12 to 15 Gbit/s.
 
+`install_incumbents.sh` installs the incumbent refresh tools that T11 runs ([experiments/incumbents/](../../experiments/incumbents/README.md)). Run it as root on a VM after `startup.sh`: `sudo ./install_incumbents.sh`. It is idempotent and prints both versions.
+- **pg_probackup for PostgreSQL 17:** the `pg-probackup-17` package from Postgres Pro's repository (`repo.postgrespro.ru`, with its signing key in `/etc/apt/keyrings`). On October 23, 2026 the repository had version 2.5.16 for bookworm. Without such a package, the script builds the official source at tag 2.5.16. The build uses PGDG's `postgresql-server-dev-17` and the PostgreSQL source of the installed version, checked against its published SHA-256. That fallback hasn't been run.
+- **WAL-G v3.0.9:** the PostgreSQL release binary `wal-g-pg-22.04-amd64.tar.gz` from github.com/wal-g/wal-g. Its SHA-256 must match the release's published `.sha256` file and the value pinned in the script. The Ubuntu 22.04 build needs glibc 2.35, and Debian 12 has 2.36. It is installed as `/usr/local/bin/wal-g`.
+
+`/usr/local/share/pgd-incumbents.txt` records which way each tool was installed.
+
 Costs accrue only while the VMs exist, about 1 USD/hour for both. Every EXP-04 run records the machine types, kernel, versions and timestamps in its `run.json`. See [experiments/network/](../../experiments/network/README.md).
 
 Status: created and used for the EXP-04 smoke sweep on 2026-10-22.

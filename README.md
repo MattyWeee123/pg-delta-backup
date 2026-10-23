@@ -83,9 +83,9 @@ docs/references/ Open-licensed papers (others are linked in REFERENCES.md)
 docs/specs/      Design and handoff records for the measurement harness
 docs/archive/    Superseded planning documents
 benchmarks/      Measurement harness, fixture, workloads and recorded evidence
-experiments/     Tooling for each experiment (change patterns, tricky copies, network)
+experiments/     Tooling for each experiment (change patterns, tricky copies, network, incumbents)
 analysis/        Scripts that turn raw results into the committed data and figures
-infra/gcp/       Create, throttle and delete the two benchmark VMs
+infra/gcp/       Create, throttle and delete the two benchmark VMs; install the incumbent tools
 tests/           Unit and contract tests
 .github/         CI and issue/PR templates
 ```
