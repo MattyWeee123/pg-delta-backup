@@ -14,7 +14,7 @@ Python 3.10+, standard library only, POSIX (Linux, macOS). Design: [docs/SPEC.md
 - the same refreshed in place (`--in-place`), with the receiver killed (SIGKILL) at four points before the commit, where `pg_ctl start` fails on the blocked copy, and one right after it; each time a rerun makes the copy byte-identical to S and startable;
 - a stopped data directory read directly (`--source-kind datadir`), as a new copy and in place, whose output starts without recovery.
 
-Not yet tested: a reconstructed `pg_basebackup` passing `pg_verifybackup` (gate G2), a restore to a recovery target (G3), or a live workload.
+Not yet tested: a reconstructed `pg_basebackup` passing `pg_verifybackup` (gate G2), a restore to a recovery target (G3), or a live workload. `--fsync writeback`'s real `sync_file_range` calls have a Linux-only end-to-end test (a 20 MiB file, as a new copy and in place, without mocks), which is skipped on macOS and has not run yet.
 
 ## Running it
 

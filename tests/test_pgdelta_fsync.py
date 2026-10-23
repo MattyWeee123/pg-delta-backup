@@ -24,7 +24,7 @@ from pgdelta.flush import FsyncWorker
 from pgdelta.inplace import CONTROL_FILE, CONTROL_PENDING, MARKER
 from pgdelta.receiver import receipt_path
 
-from pgdelta_support import comparable, snapshot, staging_dirs, transfer, write_tree
+from pgdelta_support import PAGE, comparable, snapshot, staging_dirs, transfer, write_tree
 from test_pgdelta_engine import settle
 from test_pgdelta_inplace import pg_shapes
 from test_pgdelta_parallel import build_shapes
@@ -37,6 +37,14 @@ EXPECTED_WRITEBACK = 'writeback' if flush.writeback_available() else 'main'
 def options(fsync, jobs=1, rebuild='copy-patch', verify='pipelined', in_place=False):
     return {'jobs': jobs, 'receiver_jobs': jobs,
             'receiver_options': {'fsync': fsync, 'rebuild': rebuild, 'verify': verify, 'in_place': in_place}}
+
+
+def flip_every(blob, step):
+    """blob with one byte changed every `step` bytes."""
+    changed = bytearray(blob)
+    for offset in range(0, len(changed), step):
+        changed[offset] ^= 1
+    return bytes(changed)
 
 
 class FsyncTestCase(unittest.TestCase):
@@ -137,6 +145,29 @@ class ModeTests(FsyncTestCase):
                     self.assertTrue(all(0 <= offset and 0 < length and offset + length <= len(big)
                                         for offset, length in ranges))
                     self.assertEqual(ranges[0][0], 0)
+
+    @unittest.skipUnless(flush.writeback_available(), 'sync_file_range is Linux only')
+    def test_writeback_calls_sync_file_range_for_a_new_copy_and_in_place(self):
+        # No mocks: the real call through ctypes, on a file of over 16 MiB. A new copy writes B's bytes and
+        # the received pages; in place only received pages are written, so there every page differs.
+        rng = random.Random(33)
+        old = rng.randbytes(20 * MIB + 5)
+        cases = {'new copy': flip_every(old, 3 * MIB), 'in place': rng.randbytes(len(old))}
+        for label, new in cases.items():
+            in_place = label == 'in place'
+            source, basis = self.root / f'S-{label[:3]}', self.root / f'B-{label[:3]}'
+            control = {'PG_VERSION': b'17\n', CONTROL_FILE: rng.randbytes(PAGE)}
+            write_tree(source, dict(control, **{'base/1/big': new}))
+            write_tree(basis, dict(control, **{'base/1/big': old}))
+            output = None if in_place else self.root / f'O-{label[:3]}'
+            outcome = transfer(source, basis, output, node_blocks=128, **options('writeback', in_place=in_place))
+            with self.subTest(case=label):
+                self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+                self.assertIsNone(outcome.receiver_error, repr(outcome.receiver_error))
+                self.assertEqual(snapshot(basis if in_place else output), snapshot(source))
+                stats = outcome.receiver
+                self.assertEqual((stats['fsync_effective'], stats['fsync_mode']), ('writeback', 'writeback'))
+                self.assertGreaterEqual(stats['writeback_calls'], 2)
 
     def test_writeback_refused_by_the_filesystem_falls_back_to_main(self):
         rng = random.Random(31)
