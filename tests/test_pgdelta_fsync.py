@@ -146,6 +146,27 @@ class ModeTests(FsyncTestCase):
                                         for offset, length in ranges))
                     self.assertEqual(ranges[0][0], 0)
 
+    def test_writeback_flushes_a_whole_file_copy_in_8_mib_pieces(self):
+        """A file B already has unchanged is copied in one range; write-back must start every
+        8 MiB of that copy, not once after it (EXP-10's first sweep found 6-7 calls of ~300 MB)."""
+        rng = random.Random(31)
+        same = rng.randbytes(40 * MIB)
+        write_tree(self.source, {'a/same': same})
+        write_tree(self.basis, {'a/same': same})
+        calls = []
+
+        def record(fd, offset, length):
+            calls.append((offset, length))
+            return True
+
+        with mock.patch.object(flush, 'writeback_available', return_value=True), \
+                mock.patch.object(flush, 'start_writeback', record):
+            outcome = transfer(self.source, self.basis, self.root / 'O', node_blocks=128,
+                               **options('writeback', rebuild='copy-patch'))
+        self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+        self.assertEqual(snapshot(self.root / 'O'), snapshot(self.source))
+        self.assertEqual(calls, [(offset, 8 * MIB) for offset in range(0, 40 * MIB, 8 * MIB)])
+
     @unittest.skipUnless(flush.writeback_available(), 'sync_file_range is Linux only')
     def test_writeback_calls_sync_file_range_for_a_new_copy_and_in_place(self):
         # No mocks: the real call through ctypes, on a file of over 16 MiB. A new copy writes B's bytes and

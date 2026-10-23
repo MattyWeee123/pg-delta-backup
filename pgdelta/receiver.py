@@ -863,18 +863,26 @@ class _Receiver:
         return fd
 
     def _copy_basis(self, entry, output, stop):
-        """Copy-then-patch: copy B's bytes [output.copied, stop) into the output file."""
+        """Copy-then-patch: copy B's bytes [output.copied, stop) into the output file.
+
+        With early write-back the range is copied in WRITEBACK_BYTES pieces, write-back
+        starting after each, so a long copy (a whole unchanged file) is flushed while it is
+        still being copied rather than in one piece at its end.
+        """
         start = output.copied
-        started = time.perf_counter()
-        try:
-            self.copier.copy(output.basis_fd, output.fd, start, stop - start)
-        except _BasisShort:
-            raise TransferError(f'basis file {entry.path} changed size during the run; '
-                                f'B must be immutable') from None
-        except OSError as exc:
-            raise TransferError(f'cannot copy basis file {entry.path} into the output: {exc}') from exc
-        self.copy_seconds += time.perf_counter() - started
-        self._wrote(output, start, stop - start)
+        step = WRITEBACK_BYTES if self.writeback else stop - start
+        for offset in range(start, stop, step):
+            piece = min(step, stop - offset)
+            started = time.perf_counter()
+            try:
+                self.copier.copy(output.basis_fd, output.fd, offset, piece)
+            except _BasisShort:
+                raise TransferError(f'basis file {entry.path} changed size during the run; '
+                                    f'B must be immutable') from None
+            except OSError as exc:
+                raise TransferError(f'cannot copy basis file {entry.path} into the output: {exc}') from exc
+            self.copy_seconds += time.perf_counter() - started
+            self._wrote(output, offset, piece)
         output.copied = stop
         self.counts.basis_copy_bytes += stop - start
         self.counts.basis_copies += 1
