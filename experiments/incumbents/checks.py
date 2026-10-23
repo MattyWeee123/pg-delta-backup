@@ -14,11 +14,13 @@ from pathlib import Path
 from experiments.tricky_copies.classify import classify_pair
 from experiments.tricky_copies.lsnscan import BLOCK, relation_kind
 
+# T11's columns, then what tells a refusal for a stated reason from a tool that stopped
+# with an error, and from a harness error.
 CSV_COLUMNS = ('scenario', 'tool', 'outcome', 'logical_match', 'amcheck_ok',
-               'diverged_pages_left', 'seconds')
+               'diverged_pages_left', 'seconds', 'verdict', 'refusal', 'outcome_reason')
 
-# Messages a tool prints when it declines to touch a copy. They only decide between
-# "refused" and "failed" for a nonzero exit; exit status 0 is always "accepted".
+# Messages a tool prints when it declines to touch a copy. A nonzero exit with one of
+# them is a refusal for the stated reason; exit status 0 is always "accepted".
 REFUSAL_PATTERNS = {
     'pg_rewind': (
         r'source and target clusters are from different systems',
@@ -50,6 +52,13 @@ REFUSAL_PATTERNS = {
     ),
     'pgdelta': (),
 }
+# Exit statuses with which a tool says it refused its input. pgdelta never writes to B,
+# so B's state can't tell its refusals from its failures; its exit codes can (SPEC
+# section 3: 2 is invalid or unsupported input; 3, a transfer or I/O failure, and 4, a
+# verification failure, are failures).
+REFUSAL_EXIT_CODES = {'pgdelta': (2,)}
+# What made a run count as refused (result.json and the summaries: 'refusal').
+REFUSAL_KINDS = ('message', 'exit_code', 'error_unmodified')
 
 
 def tail(text, lines=20):
@@ -64,21 +73,45 @@ def refusal_message(output, patterns):
     return None
 
 
-def classify_outcome(returncode, target_modified, output, patterns=(), timed_out=False):
-    """(outcome, reason): 'accepted' for exit status 0; 'refused' for a nonzero exit with a
-    refusal message or before the copy was modified; 'failed' otherwise."""
+def error_line(output):
+    """The last line of ``output`` that reads like an error, else its last line, or None."""
+    lines = [line.strip() for line in (output or '').splitlines() if line.strip()]
+    for line in reversed(lines):
+        if re.search(r'\b(error|fatal|panic)\b', line, re.IGNORECASE):
+            return line
+    return lines[-1] if lines else None
+
+
+def classify_outcome(returncode, target_modified, output, patterns=(), timed_out=False,
+                     refusal_codes=None):
+    """(outcome, reason, refusal).
+
+    Exit status 0 is 'accepted'. A nonzero exit is 'refused' when the output holds one of
+    the tool's refusal messages (refusal 'message'), when it is one of the tool's refusal
+    exit codes ('exit_code'), or, for a tool without refusal exit codes, when the copy was
+    not modified ('error_unmodified': the tool stopped before touching the copy, but its
+    output doesn't say it judged the copy unsafe). Anything else is 'failed'. The reason
+    quotes the refusal message, or else the tool's last error line.
+    """
     if timed_out:
-        return 'failed', 'timed out'
+        return 'failed', 'timed out', None
     if returncode is None:
-        return 'failed', 'did not run to completion'
+        return 'failed', 'did not run to completion', None
     if returncode == 0:
-        return 'accepted', 'exit status 0'
+        return 'accepted', 'exit status 0', None
     message = refusal_message(output, patterns)
     if message:
-        return 'refused', f'exit status {returncode}: {message}'
+        return 'refused', f'exit status {returncode}: {message}', 'message'
+    said = error_line(output)
+    detail = f': {said}' if said else ''
+    if refusal_codes is not None:
+        if returncode in refusal_codes:
+            return 'refused', f'exit status {returncode}{detail}', 'exit_code'
+        return 'failed', f'exit status {returncode}{detail}', None
     if not target_modified:
-        return 'refused', f'exit status {returncode} before the copy was modified'
-    return 'failed', f'exit status {returncode} after the copy was modified'
+        return ('refused', f'exit status {returncode} before the copy was modified{detail}',
+                'error_unmodified')
+    return 'failed', f'exit status {returncode} after the copy was modified{detail}', None
 
 
 def verdict(outcome, logical_match, amcheck_ok, diverged_left, caught_up):
@@ -87,8 +120,11 @@ def verdict(outcome, logical_match, amcheck_ok, diverged_left, caught_up):
     'wrong_data' when any check found a problem (a logical mismatch, amcheck errors, or
     pages still holding B's diverged bytes), even if the copy never came up; 'repaired'
     when the copy came up, reached the source, matched it and passed amcheck;
-    'not_verified' when it couldn't be checked. Runs that weren't accepted keep their outcome.
+    'not_verified' when it couldn't be checked, or when the harness, not the tool, failed
+    ('harness_error'). Runs that weren't accepted keep their outcome.
     """
+    if outcome == 'harness_error':
+        return 'not_verified'
     if outcome != 'accepted':
         return outcome
     if logical_match is False or amcheck_ok is False or (diverged_left or 0) > 0:
@@ -233,14 +269,14 @@ def summary_row(result):
             'outcome': result.get('outcome'), 'logical_match': result.get('logical_match'),
             'amcheck_ok': result.get('amcheck_ok'),
             'diverged_pages_left': diverged.get('diverged_left'),
-            'seconds': result.get('seconds')}
+            'seconds': result.get('seconds'), 'verdict': result.get('verdict'),
+            'refusal': result.get('refusal'), 'outcome_reason': result.get('outcome_reason')}
 
 
 def run_summary(result):
-    """One run for summary.json: the CSV columns plus the verdict and the reasons."""
+    """One run for summary.json: the CSV columns plus the bring-up and the notes."""
     bring_up = result.get('bring_up') or {}
-    return {**summary_row(result), 'verdict': result.get('verdict'),
-            'outcome_reason': result.get('outcome_reason'),
+    return {**summary_row(result), 'harness_error': result.get('harness_error'),
             'caught_up': bring_up.get('caught_up'), 'bring_up_error': bring_up.get('error'),
             'logical_differences': (result.get('logical_differences') or [])[:5],
             'notes': result.get('notes') or []}

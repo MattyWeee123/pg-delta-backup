@@ -87,16 +87,49 @@ class OutcomeTest(unittest.TestCase):
     def test_classify_outcome(self):
         patterns = checks.REFUSAL_PATTERNS['pg_probackup']
         self.assertEqual(checks.classify_outcome(0, True, '', patterns),
-                         ('accepted', 'exit status 0'))
-        outcome, reason = checks.classify_outcome(1, True, PROBACKUP_REFUSED, patterns)
-        self.assertEqual(outcome, 'refused')
+                         ('accepted', 'exit status 0', None))
+        outcome, reason, refusal = checks.classify_outcome(1, True, PROBACKUP_REFUSED, patterns)
+        self.assertEqual((outcome, refusal), ('refused', 'message'))
         self.assertIn('Destination is not in source timeline history', reason)
-        self.assertEqual(checks.classify_outcome(2, False, 'boom', patterns)[0], 'refused')
         self.assertEqual(checks.classify_outcome(2, True, 'boom', patterns),
-                         ('failed', 'exit status 2 after the copy was modified'))
+                         ('failed', 'exit status 2 after the copy was modified: boom', None))
         self.assertEqual(checks.classify_outcome(None, False, '', patterns)[0], 'failed')
         self.assertEqual(checks.classify_outcome(0, True, '', patterns, timed_out=True),
-                         ('failed', 'timed out'))
+                         ('failed', 'timed out', None))
+
+    def test_errors_are_not_refusals_for_a_reason(self):
+        """A tool that stops with an error before touching the copy is still 'refused', as
+        T11 defines it, but the run says it gave no reason about the copy, and quotes the
+        error. pg_rewind's missing-WAL error is the case seen on the Mac."""
+        stderr = ('pg_rewind: servers diverged at WAL location 0/8D10130 on timeline 1\n'
+                  'pg_rewind: error: could not open file "t/pg_wal/000000010000000000000008": '
+                  'No such file or directory\n'
+                  'pg_rewind: error: could not find previous WAL record at 0/8D10130\n')
+        self.assertEqual(checks.classify_outcome(1, False, stderr,
+                                                 checks.REFUSAL_PATTERNS['pg_rewind']),
+                         ('refused', 'exit status 1 before the copy was modified: pg_rewind: '
+                          'error: could not find previous WAL record at 0/8D10130',
+                          'error_unmodified'))
+        self.assertEqual(checks.classify_outcome(1, False, '', ())[1:],
+                         ('exit status 1 before the copy was modified', 'error_unmodified'))
+        self.assertEqual(checks.error_line('INFO: a\nERROR: b\nINFO: c\n'), 'ERROR: b')
+        self.assertEqual(checks.error_line('INFO: a\nINFO: c\n'), 'INFO: c')
+        self.assertIsNone(checks.error_line(''))
+
+    def test_pgdelta_uses_its_exit_codes(self):
+        """pgdelta never writes to B, so B being unchanged says nothing: its exit code 2
+        (invalid or unsupported input) is a refusal, a crash or a failed check is not."""
+        codes = checks.REFUSAL_EXIT_CODES['pgdelta']
+        self.assertEqual(checks.classify_outcome(2, False, 'pgdelta: error: unsafe path', (),
+                                                 refusal_codes=codes),
+                         ('refused', 'exit status 2: pgdelta: error: unsafe path', 'exit_code'))
+        for code in (3, 4):
+            outcome, reason, refusal = checks.classify_outcome(
+                code, False, 'Traceback\npgdelta: error: boom', (), refusal_codes=codes)
+            self.assertEqual((outcome, refusal), ('failed', None))
+            self.assertEqual(reason, f'exit status {code}: pgdelta: error: boom')
+        self.assertEqual(checks.classify_outcome(0, False, '', (), refusal_codes=codes)[0],
+                         'accepted')
 
     def test_every_tool_has_refusal_patterns(self):
         self.assertEqual(set(checks.REFUSAL_PATTERNS) | {'lsn_skip'}, set(tools.TOOLS))
@@ -117,6 +150,7 @@ class OutcomeTest(unittest.TestCase):
         self.assertEqual(checks.verdict('accepted', None, None, 0, False), 'not_verified')
         for outcome in ('refused', 'failed', 'skipped'):
             self.assertEqual(checks.verdict(outcome, None, None, None, None), outcome)
+        self.assertEqual(checks.verdict('harness_error', None, None, None, None), 'not_verified')
 
 
 class ParseTest(unittest.TestCase):
@@ -475,12 +509,31 @@ class ProbeTest(unittest.TestCase):
         self.assertEqual(conninfo, 'host=/tmp/pgdsrc port=5555 user=postgres dbname=postgres')
 
 
-def walg_job(tmp, fake, redo='0/415F070'):
+# catchup-push succeeds but names no backup, and catchup-list finds none.
+FAKE_WALG_NO_NAME = r"""#!/bin/sh
+case "$1" in
+catchup-push) echo "INFO: backup pushed" >&2;;
+catchup-list) echo "[]";;
+*) exit 1;;
+esac
+"""
+# catchup-receive can't bind its port, so catchup-send finds nobody listening.
+FAKE_WALG_NO_RECEIVER = r"""#!/bin/sh
+case "$1" in
+catchup-receive) echo "INFO: Receiving $2 on port $3"; echo "ERROR: listen tcp :$3: bind: address already in use"; exit 1;;
+catchup-send) echo "ERROR: dial tcp $3: connect: connection refused" >&2; exit 1;;
+*) exit 1;;
+esac
+"""
+
+
+def walg_job(tmp, fake, redo='0/415F070', tool='walg'):
     """A Job for the WAL-G adapters, with a fake source and copy of B (no PostgreSQL)."""
     job = tools.Job(scenario_id='S2b', scenario_dir=tmp, expected={}, listed_pages=None,
                     meta={'old_copy': {'redo_location': redo, 'system_identifier': '7'},
-                          'source_backup': {'system_identifier': '7'}},
-                    tool='walg', tool_info={'available': True, 'path': str(fake),
+                          'source_backup': {'system_identifier': '7'},
+                          'source_cluster': {'kept': True, 'datadir': 'pgdwork-x/standby'}},
+                    tool=tool, tool_info={'available': True, 'path': str(fake),
                                             'sysid_flag': None},
                     run_dir=Path(tmp, 'run'), pgbin=None, verbose=False)
     job.logs.mkdir(parents=True)
@@ -518,6 +571,40 @@ class WalgAdapterTest(unittest.TestCase):
         self.assertEqual(fetched,
                          ['fetched-base_000000020000000000000007_D_000000010000000000000004'])
 
+    def run_job(self, tmp, fake, tool):
+        """tools.run_job on a fake source and copy of B, with no PostgreSQL."""
+        job = walg_job(tmp, fake, tool=tool)
+        source, target = job.source, job.target
+        source.scalar = lambda sql: '0/5000000'
+
+        def start_source():
+            job.source = source
+
+        def copy_old_copy():
+            job.target = target
+        with mock.patch.object(job, 'start_source', start_source), \
+                mock.patch.object(job, 'copy_old_copy', copy_old_copy):
+            return tools.run_job(job)
+
+    def test_no_backup_name_is_a_harness_error(self):
+        """The harness, not WAL-G, failed to continue the flow: no refusal."""
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_job(tmp, executable(Path(tmp, 'wal-g'), FAKE_WALG_NO_NAME), 'walg')
+        self.assertEqual((result['outcome'], result['verdict'], result['refusal']),
+                         ('harness_error', 'not_verified', None))
+        self.assertIn('named a backup', result['harness_error'])
+        self.assertEqual(result['returncode'], 0)
+        self.assertEqual([c['name'] for c in result['commands']], ['catchup-push', 'catchup-list'])
+
+    def test_unreachable_receiver_is_a_harness_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_job(tmp, executable(Path(tmp, 'wal-g'), FAKE_WALG_NO_RECEIVER),
+                                  'walg_send')
+        self.assertEqual((result['outcome'], result['verdict']), ('harness_error', 'not_verified'))
+        self.assertIn('never reached catchup-receive', result['harness_error'])
+        self.assertIn('the receiver exited with status 1', result['harness_error'])
+        self.assertEqual(result['parsed']['receiver_returncode'], 1)
+
 
 def result_doc(scenario, tool, **fields):
     return {'scenario': scenario, 'tool': tool, 'outcome': 'accepted', 'verdict': 'repaired',
@@ -533,7 +620,9 @@ class SummaryTest(unittest.TestCase):
                 result_doc('S2b', 'walg', outcome='accepted', verdict='wrong_data',
                            logical_match=False, diverged_pages={'diverged_left': 7}),
                 result_doc('S2', 'pg_probackup', outcome='refused', verdict='refused',
-                           logical_match=None, amcheck_ok=None, seconds=0.2),
+                           logical_match=None, amcheck_ok=None, seconds=0.2, refusal='message',
+                           outcome_reason='exit status 1: ERROR: Destination is not in source '
+                                          'timeline history'),
                 result_doc('S1', 'pgdelta'),
                 result_doc('S1', 'pg_rewind', bring_up={'caught_up': True, 'error': None}),
             ]
@@ -552,10 +641,15 @@ class SummaryTest(unittest.TestCase):
             with csv_path.open() as handle:
                 rows = list(csv.reader(handle))
         self.assertEqual(rows[0], list(checks.CSV_COLUMNS))
-        self.assertEqual(rows[0], ['scenario', 'tool', 'outcome', 'logical_match', 'amcheck_ok',
-                                   'diverged_pages_left', 'seconds'])
-        self.assertEqual(rows[3], ['S2', 'pg_probackup', 'refused', '', '', '', '0.2'])
-        self.assertEqual(rows[4], ['S2b', 'walg', 'accepted', 'False', 'True', '7', '1.5'])
+        self.assertEqual(rows[0][:7], ['scenario', 'tool', 'outcome', 'logical_match',
+                                       'amcheck_ok', 'diverged_pages_left', 'seconds'])
+        self.assertEqual(rows[0][7:10], ['verdict', 'refusal', 'outcome_reason'])
+        self.assertEqual(rows[3][:10], ['S2', 'pg_probackup', 'refused', '', '', '', '0.2',
+                                        'refused', 'message',
+                                        'exit status 1: ERROR: Destination is not in source '
+                                        'timeline history'])
+        self.assertEqual(rows[4][:9], ['S2b', 'walg', 'accepted', 'False', 'True', '7', '1.5',
+                                       'wrong_data', ''])
         self.assertEqual(summary['rows'], 5)
         self.assertEqual(summary['runs'][3]['verdict'], 'wrong_data')
         self.assertTrue(summary['runs'][0]['caught_up'])

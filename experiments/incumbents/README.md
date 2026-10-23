@@ -50,7 +50,14 @@ python3 experiments/incumbents/run_t11.py --tools pg_rewind --scenarios S2,S2b \
    - The tool gets its own copy of B and its own copy of the kept source cluster, which is started. No run sees another run's WAL, backups or changes.
    - The copies are made with `shutil.copytree`, which keeps file modification times. WAL-G's `catchup-send` uses them to skip files.
    - pgdelta reads the scenario's S and B directly; it never writes to either.
-3. **Classify.** Exit status 0 is **accepted**. A nonzero exit is **refused** when the output holds a known refusal message, or when the copy of B is unchanged (a size and mtime fingerprint of every file). Anything else, including a timeout, is **failed**. The refusal messages are in `checks.REFUSAL_PATTERNS`.
+3. **Classify.** Exit status 0 is **accepted**. A nonzero exit is **refused** in three cases, which `refusal` tells apart:
+   - `message`: the output holds one of the tool's known refusal messages (`checks.REFUSAL_PATTERNS`), so the tool refused for a stated reason;
+   - `exit_code`: the tool exited with one of its documented refusal codes (`checks.REFUSAL_EXIT_CODES`). Only pgdelta has them: 2, invalid or unsupported input. pgdelta never writes to B, so B's state can't tell its refusals from its failures; its exit codes 3 and 4 are **failed**;
+   - `error_unmodified`: no such message or code, but the copy of B is unchanged (a size and mtime fingerprint of every file). The tool stopped with an error before touching the copy, without saying it judged the copy unsafe. pg_rewind's "could not find previous WAL record" is one.
+
+   Anything else, including a timeout, is **failed**. `outcome_reason` quotes the refusal message, or else the tool's last error line.
+
+   When the harness, not the tool, keeps a run from completing, the outcome is **harness_error** and the verdict `not_verified`: catchup-push succeeded but no backup name could be found to fetch, catchup-send never reached a listening catchup-receive, or the harness itself raised an exception before the run was classified. `run_t11.py` then exits 1.
 4. **Check an accepted copy:**
    - **Diverged pages** (S2 and S2b, where B's timeline forked from the source's). Right after the tool, each of B's pages with an LSN after the fork is compared with the copy, and with S at the same file and block. S2b's `scenario.json` lists those pages; for S2 the same list is computed from S's timeline history file. `diverged_left` counts pages where the copy still holds B's bytes and S holds other bytes, or no page. Each such page is also classified with EXP-03's `classify_pair` (content, hint bits, FSM, VM).
    - **The incumbents** are brought up as a standby of the source:
@@ -59,7 +66,7 @@ python3 experiments/incumbents/run_t11.py --tools pg_rewind --scenarios S2,S2b \
      3. While the copy is a hot standby, it compares the logical state with `expected_state.json`: every database, and for every permanent user table its row count and md5. A copy that errors on that read counts as a mismatch.
      4. It promotes the copy and runs `pg_amcheck --all --heapallindexed --install-missing`. The promotion is needed because amcheck has to be installed, which a standby can't do.
    - **pgdelta's O** gets EXP-03's checks: byte comparison with S, `pg_verifybackup`, a restore to the end of recovery and the logical comparison. pg_amcheck then runs on the restored server.
-5. **Verdict.** `wrong_data` when any check found a problem (logical mismatch, amcheck errors, or `diverged_left` > 0), even if the copy never came up. `repaired` when the copy caught up, matched and passed amcheck. `not_verified` otherwise. Runs that weren't accepted keep their outcome as the verdict.
+5. **Verdict.** `wrong_data` when any check found a problem (logical mismatch, amcheck errors, or `diverged_left` > 0), even if the copy never came up. `repaired` when the copy caught up, matched and passed amcheck. `not_verified` otherwise, and for a harness error. Other runs that weren't accepted keep their outcome as the verdict.
 
 ### The tools
 
@@ -98,11 +105,11 @@ WAL-G runs with `PGHOST`, `PGPORT`, `PGUSER` and `PGDATABASE` pointing at the so
 
 `result.json` holds:
 - `commands`: for each command, the exact command line, exit status, seconds, and the last 20 lines of stdout and stderr;
-- `returncode`, `seconds` (the tool's own commands only), `target_modified`, `outcome` and `outcome_reason`;
+- `returncode`, `seconds` (the tool's own commands only), `target_modified`, `outcome`, `refusal`, `outcome_reason` and, if any, `harness_error`;
 - `parsed`, what the tool's output says, from `checks.parse_*`. For pg_rewind: the divergence point, the last common checkpoint, whether crash recovery ran, and whether no rewind was needed. For pg_probackup: `syncLSN`, the start LSN, the transfer ratio and the errors. For WAL-G: the backup name and the LSN used;
 - `diverged_pages`, `bring_up` (recovery configuration, LSNs reached, errors, the server log's tail), `logical_match` and `logical_differences`, `amcheck` and `amcheck_ok`, `verdict`. pgdelta's runs also hold `pgdelta_checks` (byte comparison, `pg_verifybackup`).
 
-`OUT/summary.csv` has one row per run under OUT: `scenario, tool, outcome, logical_match, amcheck_ok, diverged_pages_left, seconds`. `OUT/summary.json` adds each run's verdict and reasons, the tool versions and the scenario facts: B's state and REDO location, the timelines, and where the post-fork page list came from.
+`OUT/summary.csv` has one row per run under OUT: `scenario, tool, outcome, logical_match, amcheck_ok, diverged_pages_left, seconds`, then `verdict, refusal, outcome_reason`, so a refusal for a stated reason, a tool that stopped with an error and a harness error read differently. `OUT/summary.json` adds each run's bring-up and notes, the tool versions and the scenario facts: B's state and REDO location, the timelines, and where the post-fork page list came from.
 
 ## Checked only on Linux so far
 

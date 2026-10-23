@@ -153,6 +153,9 @@ class ToolRun:
     seconds: Optional[float] = None
     parsed: dict = field(default_factory=dict)
     notes: list = field(default_factory=list)
+    # Set when the harness, not the tool, kept the run from completing (e.g. no backup name
+    # to fetch, or a receiver that never listened); the run then says nothing about the tool.
+    harness_error: Optional[str] = None
 
 
 class Job:
@@ -323,8 +326,8 @@ def run_walg(job):
         name = names[-1] if names else None
     parsed['backup_name'] = name
     if name is None:
-        result.returncode = 1
-        result.notes.append('catchup-push succeeded but no backup name was found')
+        result.harness_error = ('catchup-push exited 0, but neither its output nor '
+                                'catchup-list --json named a backup to fetch')
         return result
     fetch, fetched, fetch_errors = job.command(
         'catchup-fetch', [walg, 'catchup-fetch', job.target, name], env=env)
@@ -364,6 +367,7 @@ def run_walg_send(job, attempts=10):
                 if not (send['returncode'] and 'connection refused' in sent.lower()
                         and receiver.poll() is None):
                     break
+            receiver_gone = receiver.poll() is not None
             # After a successful send the receiver finishes writing; after a failed one it
             # may wait forever for a sender that is gone.
             try:
@@ -384,11 +388,18 @@ def run_walg_send(job, attempts=10):
                       'log': job.relative(receive_log)}
     send, sent = sends[-1]
     returncode = send['returncode'] or receiver.returncode
+    harness_error = None
+    if send['returncode'] and 'connection refused' in sent.lower():
+        # catchup-receive only listens before a sender connects, so the tools never met.
+        state = (f'exited with status {receiver.returncode}' if receiver_gone
+                 else 'was not listening')
+        harness_error = (f'catchup-send never reached catchup-receive on port {port} after '
+                         f'{len(sends)} attempts; the receiver {state}')
     return ToolRun([*(record for record, _ in sends), receive_record], returncode,
                    send['timed_out'] or receiver_timed_out, sent + '\n' + received,
                    receive_record['seconds'],
                    {'port': port, 'send_attempts': len(sends),
-                    'receiver_returncode': receiver.returncode})
+                    'receiver_returncode': receiver.returncode}, harness_error=harness_error)
 
 
 def run_pgdelta(job):
@@ -638,7 +649,7 @@ def run_job(job):
               'scenario_dir': str(job.scenario_dir), 'rows': job.meta.get('rows'),
               'tool_info': job.tool_info, 'started_at': now(), 'commands': [],
               'returncode': None, 'seconds': None, 'target_modified': None,
-              'outcome': None, 'outcome_reason': None, 'parsed': {},
+              'outcome': None, 'outcome_reason': None, 'refusal': None, 'parsed': {},
               'diverged_pages': None, 'bring_up': None, 'logical_match': None,
               'logical_differences': [], 'amcheck': None, 'amcheck_ok': None,
               'verdict': None, 'notes': []}
@@ -662,20 +673,27 @@ def run_job(job):
         result.update(commands=tool.commands, returncode=tool.returncode, seconds=tool.seconds,
                       parsed=tool.parsed, timed_out=tool.timed_out, target=str(job.target))
         result['notes'].extend(tool.notes)
-        if job.tool == 'pgdelta':
+        if job.tool == 'pgdelta':  # pgdelta writes O; this says whether it touched B
             result['target_modified'] = tool.parsed.get('basis_unchanged') is False
         else:
             result['target_modified'] = evaluation.tree_fingerprint(job.target) != before
-        outcome, reason = checks.classify_outcome(
-            tool.returncode, result['target_modified'], tool.output,
-            checks.REFUSAL_PATTERNS.get(job.tool, ()), tool.timed_out)
-        result.update(outcome=outcome, outcome_reason=reason)
-        job.say(f'{outcome}: {reason}')
-        if outcome == 'accepted':
+        if tool.harness_error:
+            result.update(outcome='harness_error', outcome_reason=tool.harness_error,
+                          harness_error=tool.harness_error)
+        else:
+            outcome, reason, refusal = checks.classify_outcome(
+                tool.returncode, result['target_modified'], tool.output,
+                checks.REFUSAL_PATTERNS.get(job.tool, ()), tool.timed_out,
+                checks.REFUSAL_EXIT_CODES.get(job.tool))
+            result.update(outcome=outcome, outcome_reason=reason, refusal=refusal)
+        job.say(f"{result['outcome']}: {result['outcome_reason']}")
+        if result['outcome'] == 'accepted':
             check_accepted(job, result)
     except Exception as exc:  # noqa: BLE001 - recorded in result.json
         result['harness_error'] = f'{type(exc).__name__}: {exc}'
         result['traceback'] = traceback.format_exc()
+        if result['outcome'] is None:
+            result.update(outcome='harness_error', outcome_reason=result['harness_error'])
         job.say(f'HARNESS ERROR: {result["harness_error"]}')
     finally:
         job.close()
