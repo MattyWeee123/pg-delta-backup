@@ -1092,15 +1092,30 @@ class Orchestrator:
     def verify_pgbackrest(self, method, paths) -> dict:
         """pgbackrest_*: start the restored B, let it replay the archive, and take its digest.
 
-        Recovery fetches WAL through archive-get from the source's repository. The restored
-        copy's per-table digest is compared with the source's at the end of the trial
-        (logical_match, None until then): scanning the source before the last method would
-        set hint bits and change its pages under the other methods.
+        Recovery fetches WAL through archive-get from the source's repository, over the link:
+        both VMs' counters are read around the start (untimed), and run_method adds those bytes
+        to pgBackRest's wire bytes (EXP-08: pgBackRest pays for the WAL it needs, as pgdelta
+        does inside its transfer). The restored copy's per-table digest is compared with the
+        source's at the end of the trial (logical_match, None until then): scanning the source
+        before the last method would set hint bits and change its pages under the other methods.
         """
         output = Path(paths['output'])
         result = {'output_bytes': tree_bytes(output), 'shared_extents': measure.shared_extents(output)}
+        before_source, before_dest = self.snapshot_source(), self.snapshot_dest()
         result['output_start'] = self.check_output(method, output, recovery=True,
                                                    query=measure.logical_digest_sql())
+        after_dest, after_source = self.snapshot_dest(), self.snapshot_source()
+        source = measure.snapshot_delta(before_source, after_source)
+        dest = measure.snapshot_delta(before_dest, after_dest)
+        try:
+            server_log = self.dest_log(f'{method}-output-server.log').read_text(errors='replace')
+        except OSError:
+            server_log = ''
+        result['recovery'] = {
+            'what': "starting the restored copy, untimed: recovery's archive-get over SSH, then the digest",
+            'net': {'source': source['net'], 'dest': dest['net']},
+            'counter_window_seconds': {'source': source['interval_seconds'], 'dest': dest['interval_seconds']},
+            'wal_files_restored': measure.restored_wal_files(server_log)}
         if result['output_start']['ok']:
             result['logical'] = json.loads(result['output_start']['answer'])
         result['logical_match'] = None
@@ -1325,6 +1340,9 @@ class Orchestrator:
                         'between the timed phases')
             verification = self.verify(method, paths, phases)
             record['verification'] = verification
+            if verification.get('recovery'):
+                # pgbackrest_*: the WAL its recovery fetched, untimed, counts in its wire bytes.
+                record['totals'] = measure.with_recovery_bytes(record['totals'], verification['recovery'])
             record['output_bytes'] = verification.get('output_bytes')
             record['capture_bytes'] = verification.get('capture_bytes')
             record['wal'] = verification.get('wal')

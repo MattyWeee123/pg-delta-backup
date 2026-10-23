@@ -63,7 +63,8 @@ NUMERIC = ('fraction', 'target_gbit', 'measured_s2d_gbit', 'measured_d2s_gbit', 
            'prefetch_wait_s', 'prefetch_untimed_s', 'prefetch_untimed_bytes_est', 'untimed_gap_s',
            'hash_basis_s', 'wire_s2d_bytes', 'wire_d2s_bytes', 'cpu_source_s', 'cpu_dest_s',
            'combine_s', 'restore_s', 'untimed_setup_s', 'rebuild_s', 'fsync_s', 'fsync_wait_s',
-           'verify_wait_s', 'output_start_s')
+           'verify_wait_s', 'output_start_s', 'recovery_wire_s2d_bytes', 'recovery_wire_d2s_bytes',
+           'recovery_wal_files', 'output_shared_bytes')
 DELTA_METHODS = ('incremental', 'pgdelta', 'pgdelta_1thread', 'rsync_8k', 'rsync_default',
                  'pgdelta_gapfill_seq', 'pgdelta_seq', 'pgdelta_fsync_wb', 'pgdelta_fsync_worker',
                  'pgdelta_inplace', 'pgdelta_direct', 'pgdelta_direct_inplace', 'pgbackrest_zst',

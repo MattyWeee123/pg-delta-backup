@@ -2474,6 +2474,63 @@ class NewMethodRuns(unittest.TestCase):
         self.assertEqual(row['untimed_setup_s'], 3.5)
         self.assertIsNone(row['tool_s2d_bytes'])
 
+    def test_the_wal_the_restored_copy_fetches_counts_in_pgbackrests_wire_bytes(self):
+        class Recovering(self.Restoring):
+            def check_output(self, method, data, *, recovery, query=run_exp04.OUTPUT_QUERY):
+                self.events.append('check_output')
+                log = self.dest_log(f'{method}-output-server.log')
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text('LOG:  starting archive recovery\n'
+                               'LOG:  restored log file "000000010000000000000005" from archive\n'
+                               'LOG:  restored log file "000000010000000000000006" from archive\n'
+                               'LOG:  selected new timeline ID: 2\n'
+                               'LOG:  restored log file "00000002.history" from archive\n')
+                return {'ok': True, 'answer': json.dumps(LOGICAL), 'ready_seconds': 4.2}
+
+            def snapshot_source(self):
+                self.events.append('snapshot')
+                return super().snapshot_source()
+
+        orchestrator = self.orchestrator(Recovering)
+        orchestrator.pgbackrest = {'backups': {}}
+        record = self.run_method(orchestrator, 'pgbackrest_none')
+        self.assertEqual(record['status'], 'pending', record.get('traceback'))
+        # The counters are read around the start of the restored copy, untimed.
+        kinds = self.kinds(orchestrator)
+        start = kinds.index('check_output')
+        self.assertEqual((kinds[start - 1], kinds[start + 1]), ('snapshot', 'snapshot'))
+        recovery = record['verification']['recovery']
+        self.assertEqual((recovery['net']['source']['tx_bytes'], recovery['net']['dest']['tx_bytes']), (1000, 1000))
+        self.assertEqual(recovery['wal_files_restored'], 3)
+        row = measure.summary_row(record)
+        # The stub's counters move 1000 bytes per window: the restore's, then the recovery's.
+        self.assertEqual((row['wire_s2d_bytes'], row['recovery_wire_s2d_bytes']), (2000, 1000))
+        self.assertEqual((row['wire_d2s_bytes'], row['recovery_wire_d2s_bytes']), (2000, 1000))
+        self.assertEqual((row['wire_s2d_bytes_dest_rx'], row['wire_d2s_bytes_source_rx']), (2000, 2000))
+        self.assertEqual(row['recovery_wal_files'], 3)
+        # Wall time and CPU stay the restore's; it is still one timed phase.
+        self.assertEqual((row['total_s'], row['cpu_source_s'], row['counter_windows']), (1.0, 1.0, 1))
+        self.assertIn('archive-get', record['totals']['wire_bytes_scope'])
+
+    def test_recovery_bytes_and_restored_wal_files(self):
+        totals = {'wall_seconds': 3.0, 'wire_bytes_source_to_dest': 10, 'wire_bytes_dest_to_source': 2,
+                  'wire_bytes_source_to_dest_dest_rx': 11, 'wire_bytes_dest_to_source_source_rx': 3,
+                  'cpu_seconds_source': 1.5}
+        recovery = {'net': {'source': {'tx_bytes': 100, 'rx_bytes': 7}, 'dest': {'tx_bytes': 5, 'rx_bytes': 101}}}
+        added = measure.with_recovery_bytes(totals, recovery)
+        self.assertEqual((added['wire_bytes_source_to_dest'], added['wire_bytes_dest_to_source'],
+                          added['wire_bytes_source_to_dest_dest_rx'], added['wire_bytes_dest_to_source_source_rx']),
+                         (110, 7, 112, 10))
+        self.assertEqual((added['recovery_wire_bytes_source_to_dest'], added['recovery_wire_bytes_dest_to_source']),
+                         (100, 5))
+        self.assertEqual((added['wall_seconds'], added['cpu_seconds_source']), (3.0, 1.5))
+        self.assertEqual(totals['wire_bytes_source_to_dest'], 10)  # not changed in place
+        self.assertIsNone(measure.with_recovery_bytes({'wire_bytes_source_to_dest': None}, recovery)
+                          ['wire_bytes_source_to_dest'])
+        self.assertEqual(measure.restored_wal_files('LOG:  restored log file "000000010000000000000005" from archive\n'
+                                                    'LOG:  could not open "000000010000000000000006"\n'), 1)
+        self.assertEqual(measure.restored_wal_files(''), 0)
+
     def test_pending_pgbackrest_runs_pass_or_fail_against_the_source_at_the_end(self):
         orchestrator = self.orchestrator(self.Restoring)
         orchestrator.methods = ['pgbackrest_zst', 'pgbackrest_none']

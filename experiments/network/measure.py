@@ -1035,6 +1035,37 @@ def pgbackrest_backup_summary(info_text: str) -> dict:
             'stop': (latest.get('timestamp') or {}).get('stop')}
 
 
+# PostgreSQL's server log, for each WAL file restore_command fetched (pgBackRest's archive-get).
+RESTORED_WAL = re.compile(r'restored log file "([0-9A-F]{24}(?:\.partial)?|[0-9A-F]{8}\.history)" from archive')
+
+
+def restored_wal_files(server_log: str) -> int:
+    """How many WAL files (segments and timeline histories) the server's restore_command fetched."""
+    return len(RESTORED_WAL.findall(server_log))
+
+
+def with_recovery_bytes(totals: dict, recovery: dict) -> dict:
+    """pgBackRest's totals with its recovery's bytes on the wire added, and kept apart too.
+
+    The restore is timed; starting the restored copy, whose recovery fetches WAL from the
+    repository through archive-get, is not. EXP-08 counts that WAL in pgBackRest's wire bytes,
+    as pgdelta's WAL travels inside its timed transfer. Wall time and CPU stay the restore's.
+    """
+    net = recovery.get('net') or {}
+    extra = {'wire_bytes_source_to_dest': _get(net, 'source', 'tx_bytes'),
+             'wire_bytes_dest_to_source': _get(net, 'dest', 'tx_bytes'),
+             'wire_bytes_source_to_dest_dest_rx': _get(net, 'dest', 'rx_bytes'),
+             'wire_bytes_dest_to_source_source_rx': _get(net, 'source', 'rx_bytes')}
+    result = dict(totals)
+    for key, value in extra.items():
+        result[key] = None if result.get(key) is None or value is None else result[key] + value
+    result['recovery_wire_bytes_source_to_dest'] = extra['wire_bytes_source_to_dest']
+    result['recovery_wire_bytes_dest_to_source'] = extra['wire_bytes_dest_to_source']
+    result['wire_bytes_scope'] = ("the timed restore plus the untimed start of the restored copy, whose "
+                                  "recovery fetches WAL through archive-get (recovery_wire_bytes_*)")
+    return result
+
+
 def digest_summary(digest: dict) -> dict:
     """A short, comparable form of a tree digest for the result records."""
     listing = hashlib.sha256()
@@ -1058,6 +1089,7 @@ CSV_FIELDS = (
     'untimed_gap_s', 'prefetch_untimed_s', 'prefetch_untimed_bytes_est', 'hash_basis_s',
     'rebuild_s', 'fsync_s', 'fsync_wait_s', 'verify_wait_s', 'in_place', 'fsync_mode', 'source_kind',
     'wire_s2d_bytes', 'wire_d2s_bytes', 'wire_s2d_bytes_dest_rx', 'wire_d2s_bytes_source_rx',
+    'recovery_wire_s2d_bytes', 'recovery_wire_d2s_bytes', 'recovery_wal_files',
     'tool_s2d_bytes', 'tool_d2s_bytes', 'output_bytes', 'output_minus_wal_padding_bytes',
     'output_shared_bytes', 'capture_bytes', 'wal_bytes', 'wal_stream_bytes', 'wal_padding_bytes',
     'cpu_source_s', 'cpu_dest_s', 'prep_capture_cpu_dest_s', 'receiver_capture_cpu_dest_s',
@@ -1175,6 +1207,11 @@ def summary_row(record: dict) -> dict:
         'wire_d2s_bytes': totals.get('wire_bytes_dest_to_source'),
         'wire_s2d_bytes_dest_rx': totals.get('wire_bytes_source_to_dest_dest_rx'),
         'wire_d2s_bytes_source_rx': totals.get('wire_bytes_dest_to_source_source_rx'),
+        # pgbackrest_* only: of the wire bytes above, those its restored copy's recovery fetched
+        # (archive-get, untimed), and how many WAL files that was.
+        'recovery_wire_s2d_bytes': totals.get('recovery_wire_bytes_source_to_dest'),
+        'recovery_wire_d2s_bytes': totals.get('recovery_wire_bytes_dest_to_source'),
+        'recovery_wal_files': _get(verification, 'recovery', 'wal_files_restored'),
         'tool_s2d_bytes': _get(record, 'tool_reported', 'bytes_source_to_dest'),
         'tool_d2s_bytes': _get(record, 'tool_reported', 'bytes_dest_to_source'),
         'output_bytes': record.get('output_bytes'),
