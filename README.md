@@ -39,6 +39,7 @@ Our niche is the copy whose history is lost: a standby whose WAL was recycled, a
 
 1. [Research summary](docs/research/state-of-the-art.md): existing tools, correctness pitfalls, design implications.
 2. [Experiments](docs/experiments/README.md): each one's question, predictions made before running, results and graphs.
+   - [Decision ledger](docs/DECISIONS.md): every design decision graded by its evidence, and the experiments that would settle the gray areas.
 3. [Design of pgdelta v0](docs/DESIGN.md) and [how to run it](pgdelta/README.md).
 4. [Project log](docs/LOG.md): what was done, when, and why.
 5. [Plan](docs/PLAN.md): workstreams, dependencies, schedule to the November 13 freeze.

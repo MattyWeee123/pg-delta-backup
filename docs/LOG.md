@@ -3,6 +3,24 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-23 (evening): decision ledger, every design choice graded by its evidence
+
+**Why:** Matt asked whether v0 is the right direction, whether v1 builds on or scraps it, and whether design choices are backed by evidence or added blindly.
+
+**How:** a multi-agent audit, read-only, with nothing re-run.
+- It listed every design decision (89) and graded each by its evidence.
+- It compared the direction against the research.
+- Two adversarial reviewers challenged the draft, and it was revised.
+- Its main new numbers were rechecked against the raw data before committing.
+
+**The ledger:** [DECISIONS.md](DECISIONS.md).
+- **Direction:** v0's way of deciding what to reuse (keyed fingerprints of every page, every output byte verified) is well supported. The staged capture is contradicted as a performance path. Writing a complete new copy is the largest pgdelta-specific cost, and it was never compared with an alternative.
+- **v1:** builds on v0's correctness core. Replace the source path with direct reads in backup mode, and replace the write path. Whether to keep a custom engine or wrap rsync with pgdelta's verification is still open.
+- **Evidence coverage:** of the 33 performance-driven decisions, 4 have strong evidence, 4 moderate, 10 weak, 14 none, and 1 is contradicted.
+- **New measured fact:** on the VMs, writing O takes 3.3–3.5 s of pgdelta's 4.2–4.8 s transfer, split into copying B (1.6 s) and fsync (1.7 s). Hashing isn't the bottleneck there.
+- **Committed timers:** pgdelta's per-phase timers from all 252 pgdelta runs are now in [exp04-pgdelta-timers.csv](experiments/data/exp04-pgdelta-timers.csv).
+- **Next:** a ranked queue of experiments, T1 to T14, each with a prediction and a falsifier. It starts with questions for the sponsor and a measurement of how much a refresh slows the source.
+
 ## 2026-10-23 (later): closing EXP-06's open question
 
 **Does pipelined verification help at the default of 4 processes?** EXP-06 had left this mixed: one busy re-run with 3 repeats had it costing 0.18 s for uniform.
