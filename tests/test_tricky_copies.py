@@ -515,8 +515,34 @@ class S1IntegrationTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 90)
 
 
-if __name__ == '__main__':
-    unittest.main()
+@unittest.skipUnless((PG17_BIN / 'initdb').is_file(), f'{PG17_BIN}/initdb not installed')
+class LogicalStateClusterTest(unittest.TestCase):
+    def test_reads_rows_no_index_points_to(self):
+        """A heap tuple without an index entry is still a row. Read through the primary
+        key, as the planner chooses by default, the logical state would not count it."""
+        sockdir = pgcluster.short_tempdir()
+        cluster = pgcluster.Cluster('logical', pgcluster.PgBin(PG17_BIN), sockdir / 'data',
+                                    sockdir, pgcluster.free_port(), sockdir / 'server.log')
+        try:
+            cluster.initdb()
+            cluster.start()
+            cluster.psql('CREATE TABLE accounts (id bigint PRIMARY KEY, v text NOT NULL);\n'
+                         'INSERT INTO accounts SELECT g, md5(g::text) '
+                         'FROM generate_series(1, 20000) g;\nVACUUM ANALYZE accounts;\n')
+            before = logical.compute_logical_state(cluster.query)
+            ready = "UPDATE pg_index SET indisready = {} WHERE indexrelid = 'accounts_pkey'::regclass;"
+            cluster.psql(ready.format('false'))
+            cluster.psql("INSERT INTO accounts VALUES (20001, 'in the heap only');")
+            cluster.psql(ready.format('true'))
+            after = logical.compute_logical_state(cluster.query)
+            cluster.stop('immediate')
+        finally:
+            cluster.ensure_stopped()
+            shutil.rmtree(sockdir, ignore_errors=True)
+        self.assertEqual(before['tables']['postgres']['public.accounts']['rows'], 20000)
+        self.assertEqual(after['tables']['postgres']['public.accounts']['rows'], 20001)
+        self.assertEqual(logical.compare_logical_states(before, after),
+                         ['postgres.public.accounts: 20001 rows, expected 20000'])
 
 
 class ReviewFollowUpTest(unittest.TestCase):
@@ -545,3 +571,7 @@ class ReviewFollowUpTest(unittest.TestCase):
         self.assertTrue(evaluate.tool_correct(good))
         self.assertFalse(evaluate.tool_correct({**good, 'verifybackup': False}))
         self.assertIsNone(evaluate.tool_correct({'tool': {'status': 'tool not available'}}))
+
+
+if __name__ == '__main__':
+    unittest.main()

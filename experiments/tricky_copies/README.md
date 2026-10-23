@@ -70,7 +70,7 @@ A "burst" updates about 0.1% of `accounts` rows, spread over many pages. It also
 How the values are defined:
 
 - **Quiesced source.** The builder writes synchronously, so nothing else is running when S starts. To prove it, `scenario.json` records `pg_snapshot_xmax(pg_current_snapshot())` before S and after the logical state was read; the two must be equal. It also records that no other client sessions were connected.
-- **Logical state.** The md5 is taken over the md5 of each row's text form, in primary-key order. A table without a primary key is ordered by the whole row's text, with `COLLATE "C"`. The session pins `DateStyle`, `TimeZone`, `extra_float_digits`, `IntervalStyle` and `bytea_output`. Unlogged and temporary tables are listed but not hashed, because a restored backup empties them. `template0` is listed but not read.
+- **Logical state.** The md5 is taken over the md5 of each row's text form, in primary-key order. A table without a primary key is ordered by the whole row's text, with `COLLATE "C"`. The session pins `DateStyle`, `TimeZone`, `extra_float_digits`, `IntervalStyle` and `bytea_output`. It also turns index scans off (`enable_indexscan`, `enable_indexonlyscan`, `enable_bitmapscan`), so each table is read from its heap: by default PostgreSQL 17 reads it through the primary key, and the count and md5 would then miss heap tuples that no index entry points to. Unlogged and temporary tables are listed but not hashed, because a restored backup empties them. `template0` is listed but not read.
 - **Threshold.** If B has a `backup_label` (a base backup), the threshold is its `START WAL LOCATION`. Otherwise it is `Latest checkpoint's REDO location` from the matching-version `pg_controldata`.
 
 ### Why pages were wrongly skipped
