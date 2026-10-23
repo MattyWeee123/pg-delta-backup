@@ -28,12 +28,18 @@ if [ ! -x /usr/lib/postgresql/17/bin/postgres ] || ! command -v mdadm >/dev/null
     echo 'create_main_cluster = false' >> /etc/postgresql-common/createcluster.conf
   fi
   "${APT[@]}" update
-  "${APT[@]}" install --no-install-recommends postgresql-17 postgresql-client-17
+  # pgbackrest (PGDG's build) for EXP-04's T11; xfsprogs for reformat_dest_xfs.sh (T3 (d)).
+  "${APT[@]}" install --no-install-recommends postgresql-17 postgresql-client-17 pgbackrest xfsprogs
 fi
 # VMs provisioned before GNU time was added to the list above.
 if [ ! -x /usr/bin/time ]; then
   "${APT[@]}" update
   "${APT[@]}" install --no-install-recommends time
+fi
+# VMs provisioned before pgbackrest and xfsprogs were (PGDG is configured above by then).
+if [ ! -x /usr/bin/pgbackrest ] || [ ! -x /usr/sbin/mkfs.xfs ]; then
+  "${APT[@]}" update
+  "${APT[@]}" install --no-install-recommends pgbackrest xfsprogs
 fi
 # In case a default cluster was created anyway (an older postgresql-common).
 if [ -d /etc/postgresql/17/main ]; then pg_dropcluster --stop 17 main || true; fi
