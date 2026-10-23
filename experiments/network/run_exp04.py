@@ -1546,6 +1546,8 @@ class Orchestrator:
 
     def run_trial(self, index: int, pattern: str, fraction: float) -> dict:
         args = self.args
+        # A source that could not be restarted stops its own trial; this one builds a new cluster.
+        self.source_down = None
         self.trial_id = f'{index:02d}-{pattern}-f{fraction:g}-s{args.scale}'
         trial = {'schema': SCHEMA_TRIAL, 'trial_id': self.trial_id, 'pattern': pattern,
                  'fraction': fraction, 'scale': args.scale, 'seed': args.seed,

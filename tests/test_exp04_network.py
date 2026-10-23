@@ -2322,6 +2322,33 @@ class NewMethodRuns(unittest.TestCase):
         self.assertIn('could not be restarted', direct[0]['error'])
         self.assertIn('cleanup_trial', orchestrator.events)
 
+    def test_a_source_that_did_not_restart_stops_only_its_own_trial(self):
+        class RestartsOnlyLater(TrialStub):
+            run_method = run_exp04.Orchestrator.run_method
+            verify = StubOrchestrator.verify
+            starts = 0
+
+            def _source_script(self, script, *args, timeout=7200):
+                if args[0] == 'start':
+                    self.starts += 1
+                    if self.starts == 1:
+                        raise run_exp04.CommandError('the source did not start')
+                return super()._source_script(script, *args)
+
+        orchestrator = self.orchestrator(RestartsOnlyLater)
+        orchestrator.speeds = measure.parse_speeds('unthrottled')
+        orchestrator.methods = ['pgdelta_direct', 'full']
+        with mock.patch.object(run_exp04, 'Child', FakeChild), \
+                mock.patch.object(run_exp04.measure, 'tree_digest', return_value={'entries': {}, 'device': 1}):
+            first = orchestrator.run_trial(0, 'uniform', 0.01)
+            # The next trial's set-up builds a new source cluster, which restarts fine.
+            second = orchestrator.run_trial(1, 'uniform', 0.01)
+        self.assertEqual(first['status'], 'error')
+        self.assertIn('source cluster is down', first['error'])
+        self.assertEqual(second['status'], 'pass', second.get('error'))
+        self.assertEqual(sorted(run['method'] for run in second['runs']), ['full', 'pgdelta_direct'])
+        self.assertIsNone(orchestrator.source_down)
+
     # T11: pgBackRest restore --delta of a copy of B0.
 
     class Restoring(StubOrchestrator):
