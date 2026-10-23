@@ -14,10 +14,12 @@ from pathlib import Path
 from experiments.tricky_copies.classify import classify_pair
 from experiments.tricky_copies.lsnscan import BLOCK, relation_kind
 
-# T11's columns, then what tells a refusal for a stated reason from a tool that stopped
-# with an error, and from a harness error.
+# T11's columns; then what tells a refusal for a stated reason from a tool that stopped
+# with an error, and from a harness error; then the build the run used, since a summary
+# covers every run under OUT, made by any number of invocations.
 CSV_COLUMNS = ('scenario', 'tool', 'outcome', 'logical_match', 'amcheck_ok',
-               'diverged_pages_left', 'seconds', 'verdict', 'refusal', 'outcome_reason')
+               'diverged_pages_left', 'seconds', 'verdict', 'refusal', 'outcome_reason',
+               'rows', 'source_conf', 'old_copy_conf')
 
 # Messages a tool prints when it declines to touch a copy. A nonzero exit with one of
 # them is a refusal for the stated reason; exit status 0 is always "accepted".
@@ -262,21 +264,51 @@ def compare_listed_pages(copy, old, source, pages, examples=10):
 # --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
+def build_conf(result):
+    """The scenario settings by role a run's build used, or None if its result.json
+    predates them."""
+    conf = result.get('server_conf')
+    if not isinstance(conf, dict):
+        return None
+    return {'source': conf.get('source') or {}, 'old_copy': conf.get('old_copy') or {}}
+
+
+def conf_text(settings):
+    """'name=value;...' for a CSV cell; '' for no settings."""
+    return ';'.join(f'{name}={value}' for name, value in sorted((settings or {}).items()))
+
+
 def summary_row(result):
     """One run as the CSV's columns, from its result.json document."""
     diverged = result.get('diverged_pages') or {}
+    conf = build_conf(result)
     return {'scenario': result.get('scenario'), 'tool': result.get('tool'),
             'outcome': result.get('outcome'), 'logical_match': result.get('logical_match'),
             'amcheck_ok': result.get('amcheck_ok'),
             'diverged_pages_left': diverged.get('diverged_left'),
             'seconds': result.get('seconds'), 'verdict': result.get('verdict'),
-            'refusal': result.get('refusal'), 'outcome_reason': result.get('outcome_reason')}
+            'refusal': result.get('refusal'), 'outcome_reason': result.get('outcome_reason'),
+            'rows': result.get('rows'),
+            'source_conf': None if conf is None else conf_text(conf['source']),
+            'old_copy_conf': None if conf is None else conf_text(conf['old_copy'])}
+
+
+def other_builds(results, rows, conf):
+    """The runs whose scenario was built at other ``rows`` or settings than ``conf``, or
+    whose settings aren't recorded: (scenario, tool, rows, settings) for each."""
+    return [{'scenario': r.get('scenario'), 'tool': r.get('tool'), 'rows': r.get('rows'),
+             'server_conf': build_conf(r)}
+            for r in results if r.get('outcome') != 'skipped'
+            and (r.get('rows') != rows or build_conf(r) != conf)]
 
 
 def run_summary(result):
-    """One run for summary.json: the CSV columns plus the bring-up and the notes."""
+    """One run for summary.json: the CSV columns plus the bring-up, the notes, the tool's
+    version and the build's settings."""
     bring_up = result.get('bring_up') or {}
-    return {**summary_row(result), 'harness_error': result.get('harness_error'),
+    return {**summary_row(result), 'server_conf': build_conf(result),
+            'tool_version': (result.get('tool_info') or {}).get('version'),
+            'harness_error': result.get('harness_error'),
             'caught_up': bring_up.get('caught_up'), 'bring_up_error': bring_up.get('error'),
             'logical_differences': (result.get('logical_differences') or [])[:5],
             'notes': result.get('notes') or []}

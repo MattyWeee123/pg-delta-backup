@@ -232,15 +232,23 @@ def main(argv=None):
             ok &= 'harness_error' not in result
             print(f"== {spec.id} {tool}: {result['outcome']} -> {result['verdict']}", flush=True)
 
-    context = {'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
-               'pg_bin': pgbin.describe(), 'rows': args.rows,
-               'server_conf': conf, 'tools': infos,
-               'scenarios': scenario_info}
-    # The summary covers every result under OUT, so tools run separately share it.
+    # The summary covers every result under OUT, so tools run separately share it. Each
+    # run carries its own build's rows and settings; 'invocation', 'tools' and 'scenarios'
+    # describe this invocation only.
     everything = checks.collect_results(out, [spec.id for spec in scenarios.SCENARIOS],
                                         tools.TOOLS)
+    others = checks.other_builds(everything, args.rows, conf)
+    context = {'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+               'pg_bin': pgbin.describe(),
+               'invocation': {'rows': args.rows, 'server_conf': conf,
+                              'scenarios': [spec.id for spec in chosen], 'tools': tool_names},
+               'tools': infos, 'scenarios': scenario_info, 'runs_from_other_builds': others}
     json_path, csv_path = checks.write_summary(out, everything, context)
     print_table(everything)
+    for run in others:
+        print(f"warning: {run['scenario']} {run['tool']} under {out} was built with "
+              f"{run['rows']} rows and settings {run['server_conf']}, not this invocation's",
+              flush=True)
     print(f'wrote {json_path} and {csv_path}')
     return 0 if ok else 1
 

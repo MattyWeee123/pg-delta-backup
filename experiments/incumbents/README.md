@@ -109,7 +109,12 @@ WAL-G runs with `PGHOST`, `PGPORT`, `PGUSER` and `PGDATABASE` pointing at the so
 - `parsed`, what the tool's output says, from `checks.parse_*`. For pg_rewind: the divergence point, the last common checkpoint, whether crash recovery ran, and whether no rewind was needed. For pg_probackup: `syncLSN`, the start LSN, the transfer ratio and the errors. For WAL-G: the backup name and the LSN used;
 - `diverged_pages`, `bring_up` (recovery configuration, LSNs reached, errors, the server log's tail), `logical_match` and `logical_differences`, `amcheck` and `amcheck_ok`, `verdict`. pgdelta's runs also hold `pgdelta_checks` (byte comparison, `pg_verifybackup`).
 
-`OUT/summary.csv` has one row per run under OUT: `scenario, tool, outcome, logical_match, amcheck_ok, diverged_pages_left, seconds`, then `verdict, refusal, outcome_reason`, so a refusal for a stated reason, a tool that stopped with an error and a harness error read differently. `OUT/summary.json` adds each run's bring-up and notes, the tool versions and the scenario facts: B's state and REDO location, the timelines, and where the post-fork page list came from.
+`OUT/summary.csv` has one row per run under OUT, whichever invocation made it:
+- `scenario, tool, outcome, logical_match, amcheck_ok, diverged_pages_left, seconds`;
+- `verdict, refusal, outcome_reason`, so a refusal for a stated reason, a tool that stopped with an error and a harness error read differently;
+- `rows, source_conf, old_copy_conf`: the build that run used, from its own `result.json` (`source_conf` and `old_copy_conf` as `name=value`; empty for none, or for a result written before they were recorded).
+
+`OUT/summary.json` adds each run's settings, tool version, bring-up and notes. `invocation`, `tools` and `scenarios` describe the invocation that wrote it: its `--rows` and settings, the tool versions, and the scenario facts (B's state and REDO location, the timelines, the settings, where the post-fork page list came from). `runs_from_other_builds` lists the runs under OUT built at other rows or settings, and `run_t11.py` prints a warning for each. Use a separate `--out` per configuration to keep summaries apart.
 
 ## Checked only on Linux so far
 

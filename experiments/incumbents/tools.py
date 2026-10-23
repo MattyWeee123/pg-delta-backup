@@ -647,6 +647,7 @@ def run_job(job):
     """Run one tool on one scenario and return the result.json document."""
     result = {'scenario': job.scenario_id, 'tool': job.tool,
               'scenario_dir': str(job.scenario_dir), 'rows': job.meta.get('rows'),
+              'server_conf': job.meta.get('server_conf'),
               'tool_info': job.tool_info, 'started_at': now(), 'commands': [],
               'returncode': None, 'seconds': None, 'target_modified': None,
               'outcome': None, 'outcome_reason': None, 'refusal': None, 'parsed': {},

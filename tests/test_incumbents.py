@@ -655,6 +655,40 @@ class SummaryTest(unittest.TestCase):
         self.assertTrue(summary['runs'][0]['caught_up'])
 
 
+    def test_each_run_carries_its_build(self):
+        """A summary covers every run under OUT; runs from builds with other rows or
+        settings than this invocation's must say so, row by row."""
+        conf = run_t11.server_settings('4GB')
+        recorded = {**conf, 'source_ran_with': 'source', 'old_copy_ran_with': 'old_copy'}
+        documents = [
+            result_doc('S1', 'pg_rewind', rows=2000, server_conf=recorded),
+            result_doc('S2', 'pg_rewind', rows=2000,
+                       server_conf=run_t11.server_settings('4GB', '4GB')),
+            result_doc('S2b', 'pg_rewind', rows=200000, server_conf=recorded),
+            result_doc('S2b', 'lsn_skip', rows=2000),  # written before settings were recorded
+            result_doc('S1', 'walg', rows=2000, outcome='skipped', verdict='skipped'),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            for document in documents:
+                tools.write_result(Path(tmp, document['scenario'], document['tool']), document)
+            results = checks.collect_results(tmp, ['S1', 'S2', 'S2b'], tools.TOOLS)
+            others = checks.other_builds(results, 2000, conf)
+            _, csv_path = checks.write_summary(tmp, results, {'invocation': {'rows': 2000}})
+            with csv_path.open() as handle:
+                rows = {(r['scenario'], r['tool']): r for r in csv.DictReader(handle)}
+        self.assertEqual([(o['scenario'], o['tool'], o['rows']) for o in others],
+                         [('S2', 'pg_rewind', 2000), ('S2b', 'pg_rewind', 200000),
+                          ('S2b', 'lsn_skip', 2000)])
+        self.assertIsNone(others[2]['server_conf'])
+        build = {key: tuple(rows[key][c] for c in ('rows', 'source_conf', 'old_copy_conf'))
+                 for key in rows}
+        self.assertEqual(build[('S1', 'pg_rewind')], ('2000', 'wal_keep_size=4GB', ''))
+        self.assertEqual(build[('S2', 'pg_rewind')],
+                         ('2000', 'wal_keep_size=4GB', 'wal_keep_size=4GB'))
+        self.assertEqual(build[('S2b', 'pg_rewind')], ('200000', 'wal_keep_size=4GB', ''))
+        self.assertEqual(build[('S2b', 'lsn_skip')], ('2000', '', ''))
+
+
 class DriverTest(unittest.TestCase):
     def test_parse_list(self):
         self.assertEqual(run_t11.parse_list('s1, S2b ,', list(scenarios.BY_ID), 'scenario'),
@@ -790,6 +824,11 @@ class PgRewindClusterTest(unittest.TestCase):
             self.assertTrue(rewind['parsed']['crash_recovery_run'])
             self.assertEqual(runs[('S2b', 'pg_rewind')]['verdict'], 'repaired', rewind)
             self.assertEqual(rewind['diverged_pages']['diverged_left'], 0)
+            self.assertEqual((runs[('S2b', 'pg_rewind')]['rows'],
+                              runs[('S2b', 'pg_rewind')]['old_copy_conf']),
+                             (2000, 'wal_keep_size=512MB'))
+            summary = json.loads(Path(tmp, 'summary.json').read_text())
+            self.assertEqual(summary['runs_from_other_builds'], [])
             control = runs[('S2b', 'lsn_skip')]
             self.assertEqual(control['verdict'], 'wrong_data')
             self.assertGreater(control['diverged_pages_left'], 0)
