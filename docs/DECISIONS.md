@@ -502,6 +502,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 - **Proves it wrong:** per-GB times more than 1.5 times the small-scale numbers.
 
 ### T4 Offline bytes: units smaller than a page, and compression
+- **Added October 23, 2026 (from EXP-08's pre-registration):** also measure zstd on the changed files of the TPROC-C pairs. pgBackRest restores whole changed files, and EXP-08's I8b expects its zstd variant to send fewer bytes than pgdelta only because pgbench's rows compress unusually well.
 - **Question:** how many bytes would 512 B to 4 KiB units and zstd save, on pgbench pairs and HammerDB TPROC-C pairs?
 - **Prediction:** 1 KiB units cut bytes at least 2 times for scattered changes. zstd gives at most 1.6 times on TPROC-C.
 - **Proves it wrong:** under 1.5 times for scattered changes stops work on smaller units. Under 1.3 times for zstd keeps compression off.

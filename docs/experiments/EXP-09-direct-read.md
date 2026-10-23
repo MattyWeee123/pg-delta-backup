@@ -1,6 +1,6 @@
 # EXP-09: How fast is pgdelta when it reads the source's files directly?
 
-Status: **pre-registered October 23, 2026**, before the code for it ran. This is test T8a of the [decision ledger](../DECISIONS.md#t8a-cold-direct-read-without-a-capture), plus a first look at v1's whole path.
+Status: **pre-registered October 23, 2026**, before the code for it ran, and **revised the same day before running** after an independent review (see [Revisions before running](#revisions-before-running-october-23-2026)). This is test T8a of the [decision ledger](../DECISIONS.md#t8a-cold-direct-read-without-a-capture), plus a first look at v1's whole path.
 
 ## Question
 
@@ -34,18 +34,30 @@ The two `n2-standard-8` VMs of EXP-04b (local NVMe, ext4, Debian 12, PostgreSQL 
 | ID | Prediction | Source |
 |---|---|---|
 | D1 | `pgdelta_direct`'s transfer phase is 0.2–0.6 s slower than the warm staged transfer: in the same session, staged `pgdelta`'s transfer phase at the same speed. At 5 Gbit/s that's 4.6–5.0 s for local changes and 5.2–5.6 s for uniform, against the full copy's 5.07 s in EXP-04b. | ledger (T8a) |
-| D2 | `pgdelta_direct_inplace` takes **2.0–3.2 s in total for local changes (hot, append) at every speed**, faster than the full copy at every speed, unthrottled included. For uniform, it takes 2.8–4.2 s unthrottled and is faster than the full copy at 5 and 2 Gbit/s. | added here |
-| D3 | Without the capture, the source VM's CPU per run falls to 3.5–6.5 CPU-seconds for the direct methods, against 9.8–10.7 for staged pgdelta in EXP-04b. The full copy uses 2.6. | added here |
+| D2 (revised) | `pgdelta_direct_inplace` takes **2.6–3.8 s in total (median) for local changes (hot, append) at every speed**. For uniform it takes 3.0–4.5 s unthrottled and is faster than the full copy at 5 and 2 Gbit/s. *First version: 2.0–3.2 s for local changes and 2.8–4.2 s for uniform; its derivation was wrong (see revisions).* | added here |
+| D3 (revised) | Without the capture, the source VM's CPU per run falls to 4.5–7.5 CPU-seconds for the direct methods, against 9.74–10.81 for staged pgdelta (EXP-04b's medians at 2 Gbit/s, 5 Gbit/s and unthrottled). The full copy uses 2.6. *First version: 3.5–6.5, below what hashing alone needs.* | added here |
 | D4 | The direct methods send within 2% of staged pgdelta's wire bytes. | added here |
 
 **Clarification of D1, written before running.** T8a's numbers are for the transfer phase, the part that changes when the sender reads the data directory instead of S. Without a capture, the receiver's start-up (about 0.2 s in EXP-04) is no longer hidden. So each run reports both the transfer phase and the total, and D1 is judged on the transfer phase, as registered. Comparisons with the full copy are reported for both.
 
-**How D2 was estimated.** Hashing 2.1 GB on 4 processes takes about 1.1–1.3 s on each side, cold reads included (EXP-04b's phase timers; EXP-07's 2.87 GB/s raw reads). The destination's pool then re-reads B to verify it, another 2.1 GB, mostly from the page cache. In place, almost nothing is copied or flushed for local changes; uniform writes about 610 MB of pages and flushes them. Add about 0.2 s of receiver start-up.
+**How D2 was estimated (revised).** The destination's pool of 4 processes hashes B (2.1 GB) and then re-reads all of B to verify it (another 2.1 GB, mostly from the page cache), 4.2 GB in all. EXP-04b's timers show that pool hashing 2.1 GB in 1.14–1.37 s with warm inputs, so at least 2.3–2.75 s. Add about 0.3 s for the receiver's start, the pool's start and the remote launch: about 2.6–3.1 s warm. Here both sides read cold, adding D1's 0.2–0.6 s: about 2.8–3.7 s. In place, almost nothing is copied or flushed for local changes. Uniform writes about 610 MB of pages and flushes them.
 
-**What would change the plan:**
-- **T8a's rule (registered):** if `pgdelta_direct` is slower than the full copy at 5 Gbit/s in all three workloads, fix the write path (T3) before building backup-mode reads. T3 runs anyway, in the same session ([EXP-10](EXP-10-write-path.md)).
-- **If D2 holds for local changes unthrottled,** v1's design can serve Omni's same-region HA rebuild on these VMs. The next tests are then T8 (backup mode on a live, busy source), T9 (beyond RAM) and a run on persistent disks.
-- **If `pgdelta_direct_inplace` doesn't beat the full copy unthrottled for local changes,** the HA case is out on fast links, and v1 targets DR's slower links first.
+**What would change the plan** (revised; every comparison uses per-workload medians of `total_s` against the same session's full copy, with the maximum reported beside it):
+- **T8a's rule (registered):** if `pgdelta_direct` is slower than the full copy at 5 Gbit/s in all three workloads, fix the write path (T3) before building backup-mode reads. The rule is judged on `total_s`: receiver start plus transfer, each including its remote-launch overhead, as the full copy's time does. T3 runs anyway, in the same session ([EXP-10](EXP-10-write-path.md)).
+- **HA within reach:** if `pgdelta_direct_inplace`'s median unthrottled is at most 0.9 times the full copy's for both hot and append, v1's design can serve Omni's same-region HA rebuild on these VMs. The next tests are then T8 (backup mode on a live, busy source), T9 (beyond RAM) and a run on persistent disks.
+- **HA out on fast links:** if it is not faster than the full copy (ratio 1.0 or more) unthrottled for hot or for append, v1 targets DR's slower links first.
+- **Between 0.9 and 1.0:** undecided. Decided after T2 (the fastest durable full copy) and T5 (a faster hash).
+- **Every HA conclusion is provisional until T2 runs.** The comparison here is with one `pg_basebackup` stream, which is what Omni uses today. Rule 3 asks for the fastest durable copy, and T2 predicts a parallel one at 2.0–3.0 s.
+
+## Revisions before running (October 23, 2026)
+
+An independent reviewer checked this write-up against the ledger and EXP-04b's data before anything ran. Changes:
+- **D2's derivation was wrong.** It called EXP-04b's hash timers "cold reads included", but they were warm: S had just been written by the capture, and B had been prefetched. The corrected estimate and range are above. The first range (2.0–3.2 s for local changes) was infeasible below about 2.6 s.
+- **D2's rules left outcomes undecided.** A result between the old range's top and the full copy fitted neither. The rules now use ratios to the same session's full copy, with an explicit undecided band.
+- **D3's lower bound** was below what hashing 2.1 GB at 0.54–0.55 GB/s per core needs (about 3.8 CPU-s), before cold-read kernel time and sending.
+- **D1's reference** moved from EXP-04b's transfer to the same session's staged transfer at the same speed. Where the relative part (0.2–0.6 s slower) and the absolute numbers disagree, the relative part governs.
+- **The direct methods run with `--prefetch-basis on`,** like every other pgdelta method. It has almost no time to work, since the sender connects as soon as the receiver listens.
+- **Statistics:** every prediction and rule uses per-workload medians of 5 runs. Maxima are reported beside them.
 
 ## Limitations, known before running
 

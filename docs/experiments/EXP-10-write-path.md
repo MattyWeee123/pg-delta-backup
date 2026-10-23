@@ -1,6 +1,6 @@
 # EXP-10: Where should pgdelta's destination time go?
 
-Status: **pre-registered October 23, 2026**, before the code for its new arms ran. This is test T3 of the [decision ledger](../DECISIONS.md#t3-destination-write-path-on-linux). Its arms, predictions and decision rules were written there on October 23. Changes since are dated below.
+Status: **pre-registered October 23, 2026**, before the code for its new arms ran. This is test T3 of the [decision ledger](../DECISIONS.md#t3-destination-write-path-on-linux). Its arms, predictions and decision rules were written there on October 23. Changes since are dated below. The write-up was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026).
 
 ## Question
 
@@ -29,12 +29,12 @@ Every arm uses 4 worker processes on each end. Every arm is staged, as in EXP-04
 | (b) | `pgdelta_fsync_wb` | copy-patch | pipelined | early write-back (`sync_file_range`) | ext4 |
 | (b) | `pgdelta_fsync_worker` | copy-patch | pipelined | on a background thread | ext4 |
 | (e) | `pgdelta_inplace` | in place (B is patched, no copy) | pipelined | main loop | ext4 |
-| (d) | `pgdelta`, `pgdelta_inplace`, `rsync_8k`, `incremental` with `pg_combinebackup --clone` | as above | | | **XFS** with reflinks, on the destination only |
+| (d) | `pgdelta`, `pgdelta_inplace`, `rsync_8k`, and `incremental` with `pg_combinebackup --copy-file-range` | as above | | | **XFS** with reflinks, on the destination only |
 | reference | `full` | | | | ext4, and XFS in the second sweep |
 
-- **In-place runs** first copy B0 to a fresh B, untimed, before the cache drop. B is refreshed in place behind a startup block: `global/pg_control` is moved aside until the commit, so PostgreSQL can't start on a half-refreshed copy (owner decision O5).
+- **In-place runs** first copy B0 to a fresh B, untimed, before the cache drop. On XFS the copy uses `cp --reflink=never`, so B doesn't share blocks with B0. B is refreshed in place behind a startup block: `global/pg_control` is moved aside until the commit, so PostgreSQL can't start on a half-refreshed copy (owner decision O5). **In place, verification still re-reads all of B,** like the new-copy arms, so every arm verifies the same bytes.
 - **Clones on XFS:** on XFS, `copy_file_range`, which copy-then-patch already uses, clones extents instead of copying bytes, and `cp -a` (rsync's preparation) clones too.
-- **The XFS sweep** reformats only the destination's array and retakes B0. The source stays on ext4.
+- **Sweep order: ext4, then XFS, then ext4 again.** The XFS sweep reformats only the destination's array and rebuilds its trials from scratch, since B0 predates each trial's workload. The source stays on ext4. The last ext4 sweep repeats only `full` and `pgdelta`, so session drift can be told apart from the filesystem. Source-side timings (the capture, the source's hashing, the link rate) are reported for every sweep as drift checks. [EXP-09](EXP-09-direct-read.md) and EXP-08's pgBackRest sweep run before the reformat.
 
 ## Predictions and decision rules (registered in the ledger)
 
@@ -50,9 +50,18 @@ Every arm uses 4 worker processes on each end. Every arm is staged, as in EXP-04
 ### Notes written before running
 
 - **(b) has two alternatives.** The prediction and its rule apply to the better of early write-back and the fsync worker, compared with the baseline. Each is reported.
-- **(e) changed with O5.** The ledger's arm (e) was "patching B in place with an undo journal, if T1 allows". T1 is closed: B may be patched in place, and a failed refresh leaves B blocked rather than rolled back. So the arm has no undo journal. The registered prediction and rule are unchanged. Without a journal's extra writes, the result should, if anything, sit at the low end of 2.0–2.8 s.
-- **(d) adds two predictions for the other methods that can clone:** on XFS, rsync's preparation (`cp -a` of B0 plus `sync -f`) takes under 0.5 s, against 3.4–3.5 s on ext4 in EXP-04b. `pg_combinebackup --clone` takes under 1.0 s, against about 3.8 s with `--copy`.
+- **(e) changed with O5.** The ledger's arm (e) was "patching B in place with an undo journal, if T1 allows". T1 is closed: B may be patched in place, and a failed refresh leaves B blocked rather than rolled back. So the arm has no undo journal. The registered prediction and rule are unchanged. *(Revised before running: the first version said the result should sit at the low end of 2.0–2.8 s. The ledger's own estimate of the pool's remaining work, 2.7–2.8 s of hashing B and re-reading it, points to the top end instead.)*
+- **(d) adds two predictions for the other methods that can clone:** on XFS, rsync's preparation (`cp -a` of B0 plus `sync -f`) takes under 0.5 s, against 3.4–3.5 s on ext4 in EXP-04b. `pg_combinebackup --copy-file-range` takes under 2.5 s, against about 3.8 s with `--copy`. *(Revised before running: the first version predicted `--clone` under 1.0 s. But in PostgreSQL 17, `--clone` applies only to whole-file copies, and files with changed blocks, about 1.05 GB here, are rebuilt block by block.)*
 - **The "write phase"** is the receiver's `rebuild_seconds`: copying from B, writing pages, the fsyncs, and the final directory fsyncs and publication or commit. With the fsync worker, the time the commit waits for outstanding fsyncs is reported separately as `fsync_wait_seconds` and counted in the transfer phase.
+
+## Revisions before running (October 23, 2026)
+
+An independent reviewer checked the first version before anything ran. Changes:
+- **Statistics.** Every prediction and rule is judged per workload, on medians of 5 runs; maxima are reported beside them. Rule (c)'s "slower by more than 0.1 s anywhere" means in any workload's median, not in a single tail run. Rule (a) applies per workload; if workloads disagree, the default follows local changes, Omni's likelier case. (d)'s "about 1 s" for uniform means 0.7–1.3 s.
+- **(d) could mislead on the write phase alone.** With clones, O's unpatched pages aren't in the page cache, so the pipelined verifier reads about 2.1 GB from disk. On ext4 that time was hidden behind a 3.3 s write phase. So (d) reports the transfer phase and `verify_wait_seconds` beside the write phase. Reflinks are adopted for a workload only if both hold: the write phase is at most 1.5 s, and the median transfer phase is at least 0.5 s faster than `pgdelta` on ext4 in the sweeps before and after.
+- **In-place copies on XFS** use `--reflink=never` (see Setup), and the sweep order controls for session drift.
+- **The incremental arm** uses `--copy-file-range`, with a revised prediction (see the notes above).
+- **(e)'s expectation** points to the top of the range, not the bottom.
 
 ## Limitations, known before running
 
