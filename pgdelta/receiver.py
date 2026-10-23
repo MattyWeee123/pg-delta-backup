@@ -1213,17 +1213,21 @@ class _Receiver:
             'in_place': self.in_place,
             'in_place_tree': self.tree_changes,
             # fsync placement: the mode asked for and the one in effect ("writeback" falls back to "main"
-            # where the platform has no sync_file_range).
+            # where the platform has no sync_file_range). fsync_mode repeats the one in effect under the
+            # name EXP-04's harness checks, so a fallback shows there.
             'fsync': self.fsync,
             'fsync_effective': self.fsync_effective,
+            'fsync_mode': self.fsync_effective,
             'writeback_calls': self.writeback_calls,
             **vars(self.counts),
             'hash_basis_seconds': round(self.hash_basis_seconds + self.hash_leaf_seconds, 6),
-            # Writing O: page writes, copies from B, fsyncs, and the final directory fsyncs and rename.
+            # Writing O: page writes, copies from B, fsyncs (worker: only the waits for it), and the final
+            # directory fsyncs and rename (in place: the deletions and the commit).
             'rebuild_seconds': round(self.rebuild_seconds, 6),
             'copy_seconds': round(self.copy_seconds, 6),
-            # Time in fsync of the files (worker: on its thread, overlapping the main loop), and how
-            # long the main loop waited for the worker (its queue full, or at COMPLETE).
+            # Time in fsync of the files (worker: on its thread, overlapping the main loop, so not part of
+            # rebuild_seconds and possibly more than it), and how long the main loop waited for the
+            # worker (its queue full, or at COMPLETE), which is.
             'fsync_seconds': round(self.syncer.busy_seconds if self.syncer is not None else self.fsync_seconds, 6),
             'fsync_wait_seconds': round(self.fsync_wait_seconds, 6),
             'writeback_seconds': round(self.writeback_seconds, 6),

@@ -135,7 +135,7 @@ B becomes the refreshed copy. A failed run may leave B unusable, but PostgreSQL 
 - **`writeback`:** the same, but on Linux write-back of the file being written is started early, with `sync_file_range(fd, offset, nbytes, SYNC_FILE_RANGE_WRITE)` through `ctypes`, every 8 MiB written to it (copies from B and received pages alike). That call only starts the writes and makes nothing durable, so the fsync at the end of each file stays; it should then be short. Elsewhere (macOS), or if the call is refused (`ENOSYS`, `EINVAL`, `ESPIPE`, `EOPNOTSUPP`), it falls back to `main`, and `fsync_effective` says `main`.
 - **`worker`:** each finished file's descriptor goes to one background thread, which fsyncs and closes it while the main loop writes the next file. Verification doesn't wait for it: it reads through the page cache either way. At most 32 files wait; beyond that the main loop waits. COMPLETE waits for every pending fsync before anything is published or committed, and the first fsync error fails the run (exit 3), with nothing published (or B left blocked).
 
-`fsync_seconds` is the time spent in fsync, on the worker's thread for `worker`. `fsync_wait_seconds` is how long the main loop waited for the worker: while its queue was full, and at COMPLETE. Both waits also count in `rebuild_seconds`. `writeback_calls` and `writeback_seconds` count the early write-back calls.
+`fsync_seconds` is the time spent in fsync, on the worker's thread for `worker`: it then overlaps `rebuild_seconds` instead of being part of it, and can exceed it. `fsync_wait_seconds` is how long the main loop waited for the worker: while its queue was full, and at COMPLETE. Both waits count in `rebuild_seconds`. `fsync_mode` is the mode in effect, as `fsync_effective`. `writeback_calls` and `writeback_seconds` count the early write-back calls.
 
 #### Reading a stopped data directory (`--source-kind datadir`)
 
@@ -366,7 +366,7 @@ Why 0 and not a new exit code: SPEC section 4 defines success as a verified, com
   - `protocol`: from HELLO to the final COMPLETE;
   - `rebuild`: write O, meaning page writes, copies from B, fsyncs, and the final directory fsyncs and rename;
     - `copy_basis`: of which copying from B;
-    - `fsync`: of which fsyncing O's files;
+    - `fsync`: of which fsyncing O's files. With `--fsync worker` the fsyncs run on a background thread alongside `rebuild`, not in it, and may take longer than it; the part `rebuild` waited for them is `receiver.fsync_wait_seconds`;
   - `verify`: re-hashing O. With pipelined verification this overlaps writing O;
     - `verify_wait`: the part the receiver's main loop waited for (sequential: all of `verify`);
   - `pool_start`: creating the sender's pool, which starts its workers without waiting for them;
@@ -378,7 +378,7 @@ Why 0 and not a new exit code: SPEC section 4 defines success as a verified, com
   - **gap-fill:** one operation per 1 MiB piece of each gap;
   - **in place:** nothing is copied, so both are 0; `pages_copied` and `bytes_copied` count the pages left in place.
 - `receiver.in_place` and `receiver.in_place_tree`: for an in-place refresh, `{attempt, control_renamed, directories_created, files_removed, directories_removed}` (null for a new copy). `attempt` is 1 on a B without a marker and one more than the marker's on a rerun; `control_renamed` is false when a failed run had already renamed pg_control.
-- `receiver.fsync` and `receiver.fsync_effective`: the `--fsync` mode asked for and the one in effect (`writeback` falls back to `main` without `sync_file_range`); `writeback_calls`; and the timings `fsync_wait_seconds` and `writeback_seconds` (see [Where files are fsynced](#where-files-are-fsynced---fsync)).
+- `receiver.fsync` and `receiver.fsync_effective`: the `--fsync` mode asked for and the one in effect (`writeback` falls back to `main` without `sync_file_range`), and `receiver.fsync_mode`, the one in effect again under the name EXP-04's harness checks; `writeback_calls`; and the timings `fsync_wait_seconds` and `writeback_seconds` (see [Where files are fsynced](#where-files-are-fsynced---fsync)).
 - `receiver.prefetch`: what the [prefetch of B](#prefetching-b-while-the-listener-waits) did before the sender connected (null when `run_receiver` is called without it):
   - `switch` (`on` or `off`), `ran`, and `why_not` when it didn't run (`off`, or `stdio`);
   - `files`, `basis_bytes` and `cap_bytes`: what B holds and the cap;

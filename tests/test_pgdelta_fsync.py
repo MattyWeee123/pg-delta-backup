@@ -5,6 +5,7 @@ timings and the fsync statistics themselves, for a new copy and in place.
 The worker's fsyncs must all finish before publication or commit, and an
 fsync error must fail the run.
 """
+import contextlib
 import errno
 import os
 from pathlib import Path
@@ -78,6 +79,27 @@ class ModeTests(FsyncTestCase):
                 with self.subTest(compare=label):
                     self.assertEqual(result, runs[first])
         settle(self)
+
+    def test_statistics_name_the_mode_in_effect_and_the_wait(self):
+        # fsync_mode is the key a harness checks (EXP-04's measure.pgdelta_modes): the mode in effect, so
+        # that a writeback that fell back to main shows.
+        pg_shapes(self.source, self.basis)
+        rng = random.Random(32)
+        write_tree(self.source, {'a/big': rng.randbytes(9 * MIB)})
+        cases = {fsync: ({}, EXPECTED_WRITEBACK if fsync == 'writeback' else fsync) for fsync in flush.FSYNC_MODES}
+        cases['writeback refused'] = ({'writeback_available': True, 'start_writeback': False}, 'main')
+        for label, (patches, effective) in cases.items():
+            fsync = label.split()[0]
+            output = self.root / f'O-{label.replace(" ", "_")}'
+            with contextlib.ExitStack() as stack:
+                for name, value in patches.items():
+                    stack.enter_context(mock.patch.object(flush, name, return_value=value))
+                outcome = transfer(self.source, self.basis, output, **options(fsync))
+            with self.subTest(case=label):
+                self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+                self.assertEqual(outcome.receiver['fsync_mode'], effective)
+                self.assertEqual(outcome.sender['receiver']['fsync_mode'], effective)
+                self.assertEqual(outcome.sender['timings_seconds']['fsync'], outcome.receiver['fsync_seconds'])
 
     def test_writeback_starts_write_back_every_8_mib_of_each_file(self):
         rng = random.Random(30)

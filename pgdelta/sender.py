@@ -422,7 +422,9 @@ class _Sender:
             'protocol': protocol_seconds,
             'rebuild': receiver.get('rebuild_seconds'),  # writing O
             'copy_basis': receiver.get('copy_seconds'),  # of which: copying from B
-            'fsync': receiver.get('fsync_seconds'),  # of which: fsync of O's files
+            # of which: fsync of O's files. With --fsync worker it runs on a background thread alongside
+            # rebuild instead (and may exceed it); rebuild then holds the receiver's fsync_wait_seconds.
+            'fsync': receiver.get('fsync_seconds'),
             'verify': receiver.get('verify_seconds'),  # re-hashing O (overlaps writing it when pipelined)
             'verify_wait': receiver.get('verify_wait_seconds'),  # of which the receiver's main loop waited
             'pool_start': self.pool_start_seconds,
