@@ -2062,6 +2062,15 @@ class NewMethodFlags(unittest.TestCase):
         self.assertIs(contract['modes_ok'], True)
 
 
+    def test_incremental_cfr_is_optional(self):
+        self.assertIn('incremental_cfr', measure.OPTIONAL_METHODS)
+        self.assertNotIn('incremental_cfr', measure.METHODS)
+        self.assertIn('incremental_cfr', report.DELTA_METHODS)
+        self.assertEqual(measure.PROC_SCOPE['incremental_cfr'], measure.PROC_SCOPE['incremental'])
+        self.assertNotIn('incremental_cfr', measure.STAGED_METHODS)
+        self.assertEqual(measure.pgdelta_required_options(['incremental_cfr']), {})
+
+
 class MethodSpeeds(unittest.TestCase):
     speeds = measure.parse_speeds('2,5,unthrottled')
     methods = ['full', 'pgdelta', 'pgdelta_seq', 'pgdelta_inplace', 'pgdelta_direct']
@@ -2186,6 +2195,30 @@ class NewMethodRuns(unittest.TestCase):
                                  list(measure.PGDELTA_ARGS[method]['send']))
                 self.assertIsNotNone(record['totals_serial'])
                 self.assertEqual(self.kinds(orchestrator).count('drop_caches'), 1)
+
+    def test_incremental_cfr_combines_with_copy_file_range(self):
+        # EXP-10's arm (d): incremental with pg_combinebackup --copy-file-range, which clones on XFS.
+        combines = {}
+        for method in measure.INCREMENTAL_METHODS:
+            orchestrator = self.orchestrator()
+            record = self.run_method(orchestrator, method)
+            self.assertEqual(record['status'], 'pass', record.get('traceback'))
+            self.assertEqual(list(record['phases']), ['capture', 'combine'])
+            dest = [event for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'dest']
+            self.assertEqual([event[2] for event in dest], [f'{method}-capture.log', f'{method}-combine.log'])
+            [combine] = [event[1] for event in dest if Path(event[1][0]).name == 'pg_combinebackup']
+            increment = str(orchestrator.outputs / f'{method}-increment')
+            self.assertEqual(combine[2:], ['--manifest-checksums=SHA256', '-o', str(orchestrator.outputs / method),
+                                           str(orchestrator.b0), increment])
+            self.assertEqual(record['paths']['increment'], increment)
+            combines[method] = combine[1]
+            self.assertEqual(orchestrator.method_flags(method)['pg_combinebackup'],
+                             [combine[1], '--manifest-checksums=SHA256'])
+        self.assertEqual(combines, {'incremental': '--copy', 'incremental_cfr': '--copy-file-range'})
+        # incremental's own command line is as before.
+        from benchmarks.backup import combine_command
+        self.assertEqual(combine_command('pg_combinebackup', 'B0', 'I', 'O'),
+                         ['pg_combinebackup', '--copy', '--manifest-checksums=SHA256', '-o', 'O', 'B0', 'I'])
 
     def test_pgdelta_inplace_refreshes_a_copy_of_b0_made_before_the_cache_drop(self):
         orchestrator = self.orchestrator()

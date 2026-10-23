@@ -67,8 +67,8 @@ NUMERIC = ('fraction', 'target_gbit', 'measured_s2d_gbit', 'measured_d2s_gbit', 
            'recovery_wal_files', 'output_shared_bytes')
 DELTA_METHODS = ('incremental', 'pgdelta', 'pgdelta_1thread', 'rsync_8k', 'rsync_default',
                  'pgdelta_gapfill_seq', 'pgdelta_seq', 'pgdelta_fsync_wb', 'pgdelta_fsync_worker',
-                 'pgdelta_inplace', 'pgdelta_direct', 'pgdelta_direct_inplace', 'pgbackrest_zst',
-                 'pgbackrest_none', 'pgbackrest_block')
+                 'pgdelta_inplace', 'incremental_cfr', 'pgdelta_direct', 'pgdelta_direct_inplace',
+                 'pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
 # The median phase table: timed phases (and parts) in the order they run, then pgdelta's own
 # timers for its write phase, which lie inside its transfer, then the total.
 PHASE_COLUMNS = ('receiver_start_s', 'capture_s', 'prep_s', 'transfer_s', 'combine_s', 'restore_s',

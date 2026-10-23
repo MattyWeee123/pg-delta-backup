@@ -93,6 +93,7 @@ These were added on October 23, 2026, after the owner's decisions that closed T1
 | `pgdelta_fsync_wb` | T3 (b) | `--fsync writeback` | as `pgdelta` | as `pgdelta` |
 | `pgdelta_fsync_worker` | T3 (b) | `--fsync worker` | as `pgdelta` | as `pgdelta` |
 | `pgdelta_inplace` | T3 (e) | `--in-place --fsync main`: refreshes B, a copy of B0, with no `--output` and no `--rebuild` | as `pgdelta` | as `pgdelta`, on B; no in-place leftovers |
+| `incremental_cfr` | T3 (d) | `incremental`, combined with `pg_combinebackup --copy-file-range` instead of `--copy`: on XFS it clones B0's unchanged blocks into O, on ext4 it copies in the kernel | as `incremental`: **capture**, **combine** | as `incremental` |
 | `pgdelta_direct` | T8a | the sender reads the cleanly stopped source (`--source-kind datadir`); today's write path, a new O | **receiver_transfer**, one phase: **receiver_start**, then at once **transfer** | O's files byte-identical to the source's selected files; O starts and answers a query; no inode shared with B0 |
 | `pgdelta_direct_inplace` | T8a | as `pgdelta_direct`, refreshing B in place | as `pgdelta_direct` | as `pgdelta_direct`, on B; no in-place leftovers |
 | `pgbackrest_zst`, `pgbackrest_none`, `pgbackrest_block` | T11 | `pgbackrest restore --delta` of B from a repository on the source | **restore** | B starts, replays the archive, and its per-table digest equals the source's |
@@ -156,7 +157,7 @@ These were added on October 23, 2026, after the owner's decisions that closed T1
 **Different speeds per method.** T3's arms run unthrottled only, while T8a's run at 2, 5 Gbit/s and unthrottled. `--method-speeds METHODS=SPEEDS` (repeatable; methods joined with `+`) limits the named methods to some of `--speeds`; the others run at every speed, and a speed left with no method is skipped. `run.json` records `method_speeds` and `methods_by_speed`. Separate invocations work too, but each builds its own trial and B0.
 
 **ext4 or XFS** (T3 (d)): dest's `/data` is ext4 unless [`infra/gcp/reformat_dest_xfs.sh`](../../infra/gcp/README.md) has made it XFS with reflinks, which destroys everything on it. `run.json` records each VM's `data_mount` and, on XFS, `data_reflink`. Run the same T3 methods before and after.
-- **What clones on XFS, and what doesn't.** rsync's timed prep keeps `cp -a`'s default, so on XFS it clones B0, as T3 (d) means it to; pgdelta's copy-then-patch clones through `copy_file_range`. The untimed copies of B0 for the in-place methods and pgBackRest never clone (above).
+- **What clones on XFS, and what doesn't.** rsync's timed prep keeps `cp -a`'s default, so on XFS it clones B0, as T3 (d) means it to; pgdelta's copy-then-patch clones through `copy_file_range`; `incremental_cfr` combines with `pg_combinebackup --copy-file-range`, which clones too (`incremental` keeps `--copy`). The untimed copies of B0 for the in-place methods and pgBackRest never clone (above).
 - **Which kind of copy each output is** is measured, not assumed: every verification records the output's `shared_extents` from FIEMAP after the run (CSV `output_shared_bytes`, the bytes in extents shared with another file, which can only be B0). It is 0 on ext4, and empty where FIEMAP isn't available.
 
 ## Measurements
@@ -250,8 +251,10 @@ python3 experiments/network/remote.py start t3-t8a -- --speeds 2,5,unthrottled -
 # T11 in its own run, so its archiving touches no other test's numbers
 python3 experiments/network/remote.py start t11 -- --methods full,pgdelta,pgbackrest_zst,pgbackrest_none,pgbackrest_block
 
-# T3 (d): XFS on dest, then the T3 methods again
+# T3 (d): XFS on dest, then the T3 methods again, with the methods that can clone
 python3 experiments/network/remote.py ssh dest sudo ~/pgd/infra/gcp/reformat_dest_xfs.sh --yes
+python3 experiments/network/remote.py start t3-xfs -- --speeds unthrottled --repeats 5 \
+    --methods full,pgdelta,pgdelta_inplace,rsync_8k,incremental_cfr
 ```
 
 `run_exp04.py --help` lists every option:
@@ -561,6 +564,7 @@ The 0.5 Gbit/s and uniform unthrottled ratios are within 0.01 of the previous ru
   - every new method is optional; each new pgdelta method's send and receive flags, exactly; the pre-run check asks for each selected method's options and for `pgdelta.datadir`, and refuses without them; switches compared on what a method pins; the modes found wherever pgdelta's statistics keep them, and the fsync mode read as pgdelta's receiver reports it (`fsync_effective` before `fsync`; a writeback that fell back to main fails `modes_ok`; the timings' seconds are not a mode);
   - the pinned flags parsed by pgdelta's own command line, for the new methods only once pgdelta has their options (skipped until then);
   - `--method-speeds`: parsing, refusals, and the methods each speed runs in a trial;
+  - `incremental_cfr`'s `pg_combinebackup --copy-file-range` (and `incremental`'s `--copy`, as before), its paths, logs and pinned flags;
   - the copy of B0 for the in-place methods and pgBackRest with `cp -a --reflink=never`, and a copy that FIEMAP finds sharing blocks failing the run before the cache drop; FIEMAP itself (the structures' sizes against the ioctl number, batches, the shared flag, a filesystem without FIEMAP) and the CSV's `output_shared_bytes`;
   - stubbed runs: T3's methods staged with their flags; `pgdelta_inplace`'s copy of B0 before the cache drop, its receiver with `--basis B --in-place` and no `--output`, and its untimed set-up outside `total_s`; a failed copy stops the run before the cache drop; `pgdelta_direct`'s clean stop before the cache drop, its one timed phase with two steps and no counter read between the receiver listening and the sender's start, a receiver that never listens (no transfer), its sender's `--source-kind datadir --source` on the data directory, and the restart after the verification; the restart after a failed transfer and after a failed stop; a trial that stops when the source won't restart, and the next trial, which runs all its methods;
   - pgBackRest: the restore's command line and its copy of B0 before the cache drop; the set-up only in runs that select it, before B0, and the backups after the workload; the set-up's commands on both VMs (configuration, archive command through `source_cluster.py archive`, `stanza-create` and `check` per stanza, `info` from dest); the backups and their sizes; the configuration texts, parsed, with `compress-level-network=0` in dest's `pgbackrest_none` stanza only; the restore log and `info` JSON parsed; pending runs that pass or fail against the source's digest at the end of the trial, with their record and the CSV rewritten; the counters read around the start of the restored copy, its bytes added to the wire totals and kept apart, and its restored WAL files counted from the server log;

@@ -19,7 +19,7 @@ Methods (each output is verified after the timer stops, then deleted):
 
     full           dest: pg_basebackup -h source into a new directory
     incremental    dest: pg_basebackup --incremental=B0/backup_manifest, then
-                   pg_combinebackup B0 + increment (capture and combine timed apart)
+                   pg_combinebackup --copy B0 + increment (capture and combine timed apart)
     pgdelta        at the same time, in one timed phase (receiver_capture): on
                    dest pgdelta receive --listen, until it listens (receiver;
                    it then reads B0 into the page cache while it waits,
@@ -43,6 +43,9 @@ Optional methods for T3, T8a and T11 (named in --methods; see the README):
                    T3: staged as pgdelta, each with one write-path switch changed;
                    pgdelta_inplace refreshes B, a copy of B0 made before the cache
                    drop (untimed), with --in-place
+    incremental_cfr
+                   T3 (d): incremental, combined with pg_combinebackup --copy-file-range,
+                   which clones B0's unchanged blocks on dest's XFS
     pgdelta_direct, pgdelta_direct_inplace
                    T8a: the source cluster is stopped cleanly before the cache drop
                    (untimed); one timed phase: receiver_start (dest), then at once pgdelta send
@@ -678,8 +681,8 @@ class Orchestrator:
     def method_paths(self, method: str) -> dict:
         # For the in-place methods and pgBackRest, 'output' is B: the copy of B0 they patch.
         paths = {'output': self.outputs / method}
-        if method == 'incremental':
-            paths['increment'] = self.outputs / 'incremental-increment'
+        if method in measure.INCREMENTAL_METHODS:
+            paths['increment'] = self.outputs / f'{method}-increment'
         if method in measure.STAGED_METHODS:
             paths['capture'] = self.source_capture
         if method in measure.PGDELTA_DIRECT_METHODS:
@@ -703,18 +706,22 @@ class Orchestrator:
         return {'transfer': self.timed_phase(
             'transfer', lambda: [self.local_command(argv, 'full.log')])}
 
-    def run_incremental(self, paths) -> dict:
+    def run_incremental(self, method, paths) -> dict:
         phases = {}
         argv = self.basebackup(paths['increment'], host=self.source.ip, basis=self.b0)
         phases['capture'] = self.timed_phase(
-            'capture', lambda: [self.local_command(argv, 'incremental-capture.log')])
+            'capture', lambda: [self.local_command(argv, f'{method}-capture.log')])
         if phases['capture']['failures']:
             return phases
-        argv = combine_command(self.bin / 'pg_combinebackup', self.b0, paths['increment'],
-                               paths['output'], checksum=self.args.manifest_checksums)
+        argv = self.combine_argv(method, paths)
         phases['combine'] = self.timed_phase(
-            'combine', lambda: [self.local_command(argv, 'incremental-combine.log')])
+            'combine', lambda: [self.local_command(argv, f'{method}-combine.log')])
         return phases
+
+    def combine_argv(self, method, paths) -> list[str]:
+        """pg_combinebackup B0 + increment into O: --copy, or --copy-file-range for incremental_cfr."""
+        return combine_command(self.bin / 'pg_combinebackup', self.b0, paths['increment'], paths['output'],
+                               checksum=self.args.manifest_checksums, mode=measure.COMBINE_MODES[method])
 
     def pgdelta_receive_argv(self, method, paths) -> list:
         if method in measure.IN_PLACE_METHODS:
@@ -990,8 +997,8 @@ class Orchestrator:
     def run_phases(self, method, paths, daemon_holder: dict) -> dict:
         if method == 'full':
             return self.run_full(paths)
-        if method == 'incremental':
-            return self.run_incremental(paths)
+        if method in measure.INCREMENTAL_METHODS:
+            return self.run_incremental(method, paths)
         if method in measure.PGDELTA_DIRECT_METHODS:
             return self.run_pgdelta_direct(method, paths)
         if method in measure.PGDELTA_METHODS:
@@ -1586,7 +1593,11 @@ class Orchestrator:
                                f'process-max={measure.PGBACKREST_PROCESS_MAX}']}
         if method in measure.RSYNC_METHODS:
             return {'rsync': self.rsync_argv(method)[1:-2]}
-        return {'pg_basebackup': ['--manifest-checksums', self.args.manifest_checksums]}
+        flags = {'pg_basebackup': ['--manifest-checksums', self.args.manifest_checksums]}
+        if method in measure.INCREMENTAL_METHODS:
+            flags['pg_combinebackup'] = [measure.COMBINE_MODES[method],
+                                         f'--manifest-checksums={self.args.manifest_checksums}']
+        return flags
 
     # --- trials ------------------------------------------------------------
 

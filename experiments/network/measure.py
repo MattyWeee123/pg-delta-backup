@@ -35,8 +35,13 @@ T3_METHODS = ('pgdelta_gapfill_seq', 'pgdelta_seq', 'pgdelta_fsync_wb', 'pgdelta
 PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace')
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
 PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
+# T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On
+# dest's XFS that clones B0's unchanged blocks (EXP-10); on ext4 it copies in the kernel.
+INCREMENTAL_METHODS = ('incremental', 'incremental_cfr')
+COMBINE_MODES = {'incremental': '--copy', 'incremental_cfr': '--copy-file-range'}
 # Variants run only when named in --methods.
-OPTIONAL_METHODS = ('pgdelta_1thread', *T3_METHODS, *PGDELTA_DIRECT_METHODS, *PGBACKREST_METHODS)
+OPTIONAL_METHODS = ('pgdelta_1thread', *T3_METHODS, 'incremental_cfr', *PGDELTA_DIRECT_METHODS,
+                    *PGBACKREST_METHODS)
 ALL_METHODS = METHODS + OPTIONAL_METHODS
 # pgdelta methods that capture S on the source first, with the receiver started beside the capture.
 PGDELTA_STAGED_METHODS = ('pgdelta', 'pgdelta_1thread', *T3_METHODS)
@@ -262,6 +267,7 @@ PROC_SCOPE['pgdelta_1thread'] = ('source: local pg_basebackup client, pgdelta se
                                   'processes, so each pgdelta is one process. Peak RSS: largest single '
                                   "process (pg_basebackup's WAL-streaming child not added)")
 PROC_SCOPE['rsync_default'] = PROC_SCOPE['rsync_8k']
+PROC_SCOPE['incremental_cfr'] = PROC_SCOPE['incremental']
 for _method in T3_METHODS:
     PROC_SCOPE[_method] = PROC_SCOPE['pgdelta']
 for _method in PGDELTA_DIRECT_METHODS:

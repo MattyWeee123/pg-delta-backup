@@ -217,8 +217,10 @@ def verify_command(tool, output, manifest=None):
     return [str(tool), '--manifest-path', str(manifest), str(output)]
 
 
-def combine_command(tool, basis, increment, output, checksum='SHA256'):
-    return [str(tool), '--copy', '--manifest-checksums=' + checksum,
+def combine_command(tool, basis, increment, output, checksum='SHA256', mode='--copy'):
+    """pg_combinebackup of basis + increment into output; mode is how it copies (--copy, or
+    --copy-file-range, which clones on a filesystem with reflinks)."""
+    return [str(tool), mode, '--manifest-checksums=' + checksum,
             '-o', str(output), str(basis), str(increment)]
 
 
