@@ -74,11 +74,16 @@ build_probackup() {
   install -m 0755 "$dir/pg_probackup/pg_probackup" "/usr/local/bin/pg_probackup-$PG_MAJOR"
   note "pg_probackup: built from $PROBACKUP_SOURCE tag $PG_PROBACKUP_TAG against" \
     "postgresql-server-dev-$PG_MAJOR and the PostgreSQL $version source" \
-    "($(date -u +%FT%TZ)); the repository had no pg-probackup-$PG_MAJOR for $VERSION_CODENAME"
+    "($(date -u +%FT%TZ)); $1"
   rm -rf "$dir"
 }
 
-if [ -z "$(probackup_path)" ]; then
+if [ -z "$(probackup_path)" ] && [ "${PG_PROBACKUP_FROM_SOURCE:-0}" = 1 ]; then
+  build_probackup "PG_PROBACKUP_FROM_SOURCE=1 was set"
+elif [ -z "$(probackup_path)" ] && ! curl -fsS --connect-timeout 20 -o /dev/null "$PROBACKUP_KEY_URL"; then
+  # Seen on 2026-10-23: repo.postgrespro.ru did not answer from us-central1-a.
+  build_probackup "$PROBACKUP_REPO could not be reached"
+elif [ -z "$(probackup_path)" ]; then
   install -d -m 0755 /etc/apt/keyrings
   curl -fsSL -o "$PROBACKUP_KEYRING.tmp" "$PROBACKUP_KEY_URL"
   gpg --quiet --show-keys "$PROBACKUP_KEYRING.tmp" >/dev/null || fail "bad key from $PROBACKUP_KEY_URL"
@@ -92,7 +97,7 @@ if [ -z "$(probackup_path)" ]; then
       "$(dpkg-query -W -f '${Version}' "pg-probackup-$PG_MAJOR") from $PROBACKUP_REPO" \
       "($VERSION_CODENAME, $(date -u +%FT%TZ))"
   else
-    build_probackup
+    build_probackup "the repository had no pg-probackup-$PG_MAJOR for $VERSION_CODENAME"
   fi
 fi
 PROBACKUP=$(probackup_path)
