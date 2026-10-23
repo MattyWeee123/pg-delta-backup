@@ -2863,7 +2863,8 @@ class OutputVerification(unittest.TestCase):
         self.assertNotIn(('source_script', ('stop-clean',)), [event[:2] for event in orchestrator.events
                                                               if isinstance(event, tuple)])
         with mock.patch.object(run_exp04, 'Child', FakeChild):
-            self.assertEqual(orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), 'full', 0, ['full'])['status'], 'pass')
+            full = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), 'full', 0, ['full'])
+        self.assertEqual(full['status'], 'pass')
         self.assertTrue((b / 'postmaster.pid').exists())
         result = orchestrator.check_output('pgdelta_direct', orchestrator.outputs / 'other', recovery=False)
         self.assertFalse(result['ok'])
@@ -3177,8 +3178,8 @@ class PgBackRestConfig(unittest.TestCase):
         self.assertEqual(dict(config['pgbackrest_zst']),
                          {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_zst', 'compress-type': 'zst'})
         self.assertEqual(dict(config['pgbackrest_none']),
-                         {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_none', 'compress-type': 'none',
-                          'compress-level-network': '0'})
+                         {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_none',
+                          'compress-type': 'none', 'compress-level-network': '0'})
         self.assertEqual(dict(config['pgbackrest_block']),
                          {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_block', 'compress-type': 'zst',
                           'repo1-bundle': 'y', 'repo1-block': 'y'})

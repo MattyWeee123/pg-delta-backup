@@ -144,9 +144,10 @@ CACHE_POLICY = ("sync; echo 3 > /proc/sys/vm/drop_caches on both VMs, once, befo
                 "pgdelta's receiver starts at the same time as its capture after that one drop, "
                 'and reads B0 into the page cache while it waits for the sender '
                 '(--prefetch-basis on), as a real refresh would. The in-place methods and '
-                "pgBackRest patch B, a copy of B0 made (cp -a --reflink=never; sync -f) before the drop, so B "
-                'starts cold and shares no block with B0; pgdelta_direct* stops the source cluster cleanly before the drop, so the '
-                "sender reads the source's data directory cold")
+                'pgBackRest patch B, a copy of B0 made (cp -a --reflink=never; sync -f) before the '
+                'drop, so B starts cold and shares no block with B0; pgdelta_direct* stops the '
+                "source cluster cleanly before the drop, so the sender reads the source's data "
+                'directory cold')
 os.environ['PATH'] = os.environ.get('PATH', '/usr/bin:/bin') + ':/usr/sbin:/sbin'
 
 
@@ -1253,7 +1254,7 @@ class Orchestrator:
         except PermissionError:
             pass
         data = lines[1] if len(lines) > 1 else 'unknown'
-        return f"PID {pid}, data directory {data}"
+        return f'PID {pid}, data directory {data}'
 
     def tool_reported(self, method, paths, phases) -> dict:
         transfer = phases.get('transfer')
@@ -1950,7 +1951,9 @@ class Orchestrator:
                           'already paid',
                 'wire_bytes': '/proc/net/dev of the internal interface on both VMs, read just '
                               'before and after each phase; source->dest is the source tx '
-                              'counter, dest->source the dest tx counter',
+                              'counter, dest->source the dest tx counter. pgbackrest_* add the '
+                              'bytes read around the untimed start of the restored copy, whose '
+                              'recovery fetches WAL through archive-get (recovery_wire_*)',
                 'peak_rss': (f'each tool run under GNU time ({self.gnu_time} -f %M); the '
                              'per-host figure is the largest of its commands. '
                              + measure.PEAK_RSS_SCOPE + ' Server-side walsenders are not '
