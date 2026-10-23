@@ -1,6 +1,6 @@
 # EXP-08: How do the incumbent refresh tools compare where pgdelta claims its edge?
 
-Status: **pre-registered October 23, 2026**, before the tooling for it ran. It was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026), and the first version is in git (commit 80f01f5). This is test T11 of the [decision ledger](../DECISIONS.md#t11-incumbent-tools-where-pgdelta-claims-its-edge), whose registered predictions are marked "ledger" below.
+Status: **pre-registered October 23, 2026**, before the tooling for it ran. It was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026), and the first version is in git (commit 4cda743). This is test T11 of the [decision ledger](../DECISIONS.md#t11-incumbent-tools-where-pgdelta-claims-its-edge), whose registered predictions are marked "ledger" below.
 
 ## Question
 

@@ -3,6 +3,20 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-23 (late night): commit history rewritten to drop an attribution line
+
+**Why:** at Matt's request, every commit message on `main` lost its "Co-Authored-By" line naming the AI assistant, and `main` was force-pushed. Nothing else changed: each rewritten commit has the same files, author, date and subject as before.
+
+**What it changes:** the 43 commits from `cc1fb1a` onward have new IDs. Earlier commits keep theirs. Commit IDs recorded before the rewrite map as follows:
+
+| Before | After | Where the old ID appears |
+|---|---|---|
+| `6936143` | `03129f2` | the decision ledger's commit, cited in this log |
+| `625285e` | `f4d0b93` | the owner-decisions commit |
+| `80f01f5` | `4cda743` | EXP-08/09/10's first pre-registration (EXP-08 now cites the new ID) |
+| `42aa35f` | `c921186` | the revised pre-registrations |
+| `c48e853` | `d21cc64` | the code deployed to the VMs for EXP-08/09/10: recorded in each run's `DEPLOYED.json` and `run.json`. The tree hash recorded there is unchanged. |
+
 ## 2026-10-23 (night): sponsor questions closed by decision; next, T11, T8a and T3
 
 **Why:** the decision ledger's first test, T1, was a list of questions for the sponsor. Matt went through them and settled each from the project brief and Google's public docs, so nothing waits on the sponsor any more.
