@@ -101,6 +101,29 @@ def check_basis(basis, marker):
                            f'refusing to choose between them; {incomplete_note(basis)}')
 
 
+def check_links(basis, inventory):
+    """Refuse a B with a file that has another hard link: writing it in place would change that name too.
+
+    Such a B shares inodes with another copy (cp -al, rsync --link-dest,
+    pg_combinebackup --link, pg_upgrade --link) or within itself; a new copy
+    (--output) never writes B and is unaffected.
+    """
+    basis, shared = Path(basis), []
+    for entry in inventory.files:
+        try:
+            links = os.lstat(basis / entry.path).st_nlink
+        except OSError as exc:
+            raise InvalidInput(f'cannot stat basis file {entry.path}: {exc.strerror}') from exc
+        if links > 1:
+            shared.append(entry.path)
+    if shared:
+        sample = ', '.join(shared[:3]) + (f' and {len(shared) - 3} more' if len(shared) > 3 else '')
+        raise InvalidInput(f'basis {basis} has files with more than one hard link ({sample}): writing them in '
+                           f'place would change every other name for them too, such as a copy made with '
+                           f'cp -al, rsync --link-dest or pg_combinebackup --link; build a new copy with '
+                           f'--output instead')
+
+
 def check_source(files, directories):
     """The source must have global/pg_control (it is what blocks startup) and none of the reserved names."""
     paths = {entry.path for entry in files} | {entry.path for entry in directories}
@@ -242,11 +265,18 @@ def prepare_tree(basis, directories, files):
     return counts
 
 
+def _refuse_shared(path, info):
+    if info.st_nlink != 1:
+        raise TransferError(f'{path} has {info.st_nlink} hard links now (B changed during the run): writing it '
+                            f'in place would change the other names too; not writing it')
+
+
 def open_for_update(path):
     """B's file for writing in place: read-write, created (mode 0600) if missing, never truncated, no symlink.
 
     A file B holds read-only is made writable by its owner first; its final
-    mode is applied once it is verified.
+    mode is applied once it is verified. A file with another hard link is
+    refused (check_links refused those at the start), before any change.
     """
     try:
         fd = os.open(path, _UPDATE_FLAGS, 0o600)
@@ -254,11 +284,14 @@ def open_for_update(path):
         info = os.lstat(path)
         if not stat.S_ISREG(info.st_mode):
             raise
+        _refuse_shared(path, info)
         os.chmod(path, stat.S_IMODE(info.st_mode) | 0o600)
         fd = os.open(path, _UPDATE_FLAGS, 0o600)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
             raise OSError(errno.EINVAL, 'not a regular file', str(path))
+        _refuse_shared(path, info)
     except BaseException:
         os.close(fd)
         raise

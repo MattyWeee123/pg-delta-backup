@@ -23,7 +23,7 @@ import unittest
 from unittest import mock
 
 from pgdelta import protocol, receiver as receiver_module
-from pgdelta.errors import InvalidInput, PeerError, PgDeltaError, ProtocolError, VerificationError
+from pgdelta.errors import InvalidInput, PeerError, PgDeltaError, ProtocolError, TransferError, VerificationError
 from pgdelta.identity import read_identity
 from pgdelta.inplace import CONTROL_FILE, CONTROL_PENDING, MARKER
 from pgdelta.protocol import Channel
@@ -51,6 +51,13 @@ def in_place(config):
 def run(*args, timeout=180):
     return subprocess.run(python_command(*args), capture_output=True, text=True, cwd=REPO_ROOT,
                           env=subprocess_env(), timeout=timeout)
+
+
+def flip(blob, *offsets):
+    blob = bytearray(blob)
+    for offset in offsets:
+        blob[offset] ^= 0xFF
+    return bytes(blob)
 
 
 def add_type_changes(source, basis):
@@ -288,6 +295,66 @@ class FailureTests(InPlaceTestCase):
         with self.assertRaisesRegex(InvalidInput, 'overlaps source'):
             prepare_receiver(self.basis / 'base', None, in_place=True, local_source=self.basis)
         self.assertTrue(prepare_receiver(self.basis, None, in_place=True).in_place)
+
+
+class HardLinkTests(InPlaceTestCase):
+    """Patching a file of B in place changes every name of its inode: B must share none."""
+
+    def linked_trees(self):
+        rng = random.Random(93)
+        old = rng.randbytes(4 * PAGE)
+        write_tree(self.source, {'PG_VERSION': b'17\n', 'base/1/100': flip(old, 0),
+                                 'base/1/200': flip(old, 0, PAGE), CONTROL_FILE: rng.randbytes(PAGE)})
+        write_tree(self.basis, {'PG_VERSION': b'17\n', 'base/1/100': old, CONTROL_FILE: rng.randbytes(PAGE)})
+
+    def assert_refused_untouched(self, outcome, before):
+        self.assertIsInstance(outcome.receiver_error, InvalidInput)
+        self.assertIn('more than one hard link', str(outcome.receiver_error))
+        self.assertEqual(outcome.sender_error.exit_code, 2)
+        self.assertEqual(snapshot(self.basis), before)
+        self.assertFalse(os.path.lexists(self.basis / MARKER))
+        self.assertFalse(os.path.lexists(receipt_path(self.basis)))
+
+    def test_two_paths_of_b_sharing_an_inode_are_refused(self):
+        self.linked_trees()
+        os.link(self.basis / 'base/1/100', self.basis / 'base/1/200')
+        before = snapshot(self.basis)
+        outcome = transfer(self.source, self.basis, None, receiver_options={'in_place': True})
+        self.assert_refused_untouched(outcome, before)
+        self.assertEqual(os.stat(self.basis / 'base/1/100').st_nlink, 2)
+
+    def test_b_sharing_inodes_with_another_copy_is_refused_and_that_copy_is_untouched(self):
+        # B made from B0 as cp -al, rsync --link-dest or pg_combinebackup --link would make it.
+        self.linked_trees()
+        original = self.root / 'B0'
+        os.rename(self.basis, original)
+        shutil.copytree(original, self.basis, copy_function=os.link)
+        before, original_before = snapshot(self.basis), snapshot(original)
+        outcome = transfer(self.source, self.basis, None, receiver_options={'in_place': True})
+        self.assert_refused_untouched(outcome, before)
+        self.assertEqual(snapshot(original), original_before)
+
+    def test_a_link_made_during_the_run_is_never_written_through(self):
+        self.linked_trees()
+        setup = prepare_receiver(self.basis, None, in_place=True, reuse_any_basis=True)
+        outside = self.root / 'outside'
+        os.link(self.basis / 'base/1/100', outside)
+        old = outside.read_bytes()
+        send_channel, receive_channel = channel_pair()
+        outcome = Outcome()
+        thread = run_receiver_thread(receive_channel, outcome, None, None, setup=setup)
+        try:
+            run_sender(send_channel, self.source, node_blocks=4)
+        except PgDeltaError as exc:
+            outcome.sender_error = exc
+        finally:
+            send_channel.close()
+        thread.join(60)
+        self.assertIsInstance(outcome.receiver_error, TransferError)
+        self.assertIn('hard link', str(outcome.receiver_error))
+        self.assertEqual(outside.read_bytes(), old)
+        self.assert_blocked()
+        settle(self)
 
 
 class OrderGuardTests(InPlaceTestCase):

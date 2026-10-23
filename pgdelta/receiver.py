@@ -278,6 +278,7 @@ def _prepare_in_place(basis, identity, pg_controldata, reuse_any_basis, local_so
     if os.path.lexists(basis / 'postmaster.pid'):
         raise InvalidInput(f'basis {basis} contains postmaster.pid; a server may be running on it')
     inventory = require_plain(scan(basis), 'basis')
+    inplace.check_links(basis, inventory)
     marker = inplace.read_marker(basis)
     inplace.check_basis(basis, marker)
     if identity is None:
