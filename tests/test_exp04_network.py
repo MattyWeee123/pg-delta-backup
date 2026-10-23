@@ -6,13 +6,17 @@ stream over loopback.
 """
 
 import csv
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import random
+import shlex
+import shutil
 import signal
 import socket
+import subprocess
 import tempfile
 import threading
 import time
@@ -602,10 +606,16 @@ class StubOrchestrator(run_exp04.Orchestrator):
         self.b0_digest, self.b0_stat = {'entries': {}, 'device': 1}, {}
         self.ticks = {'source': 0, 'dest': 0}
         self.source.agent = self._source_agent
+        self.source.script = self._source_script
+        self.source.write = lambda path, text: self.events.append(('source_write', path, text))
 
     def _source_agent(self, *args, timeout=600):
         self.events.append(('source_agent', args))
         return {'exit_code': 0, 'log_tail': ''}
+
+    def _source_script(self, script, *args, timeout=7200):
+        self.events.append(('source_script', args))
+        return {}
 
     def concurrently(self, local, remote):
         # A sequential stand-in on the fake clock: both parts start at the same
@@ -652,7 +662,7 @@ class StubOrchestrator(run_exp04.Orchestrator):
     def _wall(self, argv):
         return self.COMMAND_WALL.get(Path(str(argv[0])).name, 1.0)
 
-    def local_command(self, argv, log_name, *, timeout=None, cwd=None):
+    def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None):
         argv = [str(part) for part in argv]
         self.events.append(('dest', argv, log_name))
         wall = self._wall(argv)
@@ -1032,17 +1042,33 @@ class StubbedRuns(unittest.TestCase):
         from experiments.change_patterns import compare_methods
         from pgdelta import cli, receiver
         parser = cli.build_parser()
+        helps = {command: parser._subparsers._group_actions[0].choices[command].format_help()
+                 for command in ('send', 'receive')}
         for method, engine in measure.PGDELTA_ENGINES.items():
             with self.subTest(method=method):
                 args = measure.PGDELTA_ARGS[method]
-                receive = parser.parse_args(['receive', '--basis', 'B', '--output', 'O', '--stdio',
+                required = measure.pgdelta_required_options([method])
+                if not all(run_exp04.pgdelta_supports(helps[command], options)
+                           for command, options in required.items()):
+                    # T3's and T8a's --fsync, --in-place and --source-kind arrive with pgdelta's
+                    # new modes; until then the orchestrator's check refuses these methods.
+                    self.assertIn(method, (*measure.T3_METHODS, *measure.PGDELTA_DIRECT_METHODS))
+                    self.skipTest(f'this pgdelta lacks options {method} pins: {required}')
+                output = [] if engine.get('in_place') else ['--output', 'O']
+                receive = parser.parse_args(['receive', '--basis', 'B', *output, '--stdio',
                                              *args['receive']])
                 send = parser.parse_args(['send', '--source', 'S', '--connect', 'h:1', *args['send']])
-                self.assertEqual((receive.jobs, receive.rebuild, receive.verify, receive.hash_backend,
+                self.assertEqual((receive.jobs, receive.verify, receive.hash_backend,
                                   receive.prefetch_basis),
-                                 (engine['jobs'], engine['rebuild'], engine['verify'], 'process',
-                                  engine['prefetch_basis']))
+                                 (engine['jobs'], engine['verify'], 'process', engine['prefetch_basis']))
+                if engine.get('rebuild'):
+                    self.assertEqual(receive.rebuild, engine['rebuild'])
                 self.assertEqual((send.jobs, send.hash_backend), (engine['jobs'], 'process'))
+                if 'fsync' in engine:
+                    self.assertEqual(receive.fsync, engine['fsync'])
+                self.assertEqual(bool(getattr(receive, 'in_place', False)), bool(engine.get('in_place')))
+                if 'source_kind' in engine:
+                    self.assertEqual(send.source_kind, engine['source_kind'])
         # pgdelta_1thread is EXP-02's engine, the one compare_methods pins (its `local` receiver,
         # over stdio, has nothing to prefetch); EXP-04 adds only the listener's prefetch to it.
         engine = measure.PGDELTA_ENGINES['pgdelta_1thread']
@@ -1124,7 +1150,8 @@ class StubbedRuns(unittest.TestCase):
                 super().__init__(*args, **kwargs)
                 clock.now += 1.5
 
-        for method in measure.PGDELTA_METHODS:
+        # Every staged pgdelta method, T3's included (pgdelta_direct* has no capture; see its tests).
+        for method in measure.PGDELTA_STAGED_METHODS:
             with self.subTest(method=method):
                 orchestrator, record = self.pgdelta_run(method, SlowStart)
                 self.assertEqual(record['status'], 'pass', record.get('traceback'))
@@ -1870,6 +1897,1552 @@ class ReportTotals(unittest.TestCase):
         self.assertIn('| rsync_8k (in place) | 0.80 | 0.97 | never (faster at every speed) |',
                       text)
         self.assertIn('`total_no_ssh_s`', text)
+
+
+# --- T3, T8a and T11: the optional methods decided on October 23, 2026 ------------
+
+NEW_METHODS = (*measure.T3_METHODS, *measure.PGDELTA_DIRECT_METHODS, *measure.PGBACKREST_METHODS)
+JOBS = ('--jobs', '4')
+# A per-table digest as logical_digest_sql prints it.
+LOGICAL = {'pgbench_accounts': {'rows': 500000, 'md5': 'a' * 32},
+           'pgbench_branches': {'rows': 5, 'md5': 'b' * 32},
+           'pgbench_tellers': {'rows': 50, 'md5': 'c' * 32},
+           'pgbench_history': {'rows': 0, 'md5': 'd41d8cd98f00b204e9800998ecf8427e'},
+           'events': {'rows': 505000, 'md5': 'e' * 32}}
+# pgbackrest info --output=json for one stanza after its full backup (pgBackRest 2.5x layout, trimmed).
+PGBACKREST_INFO = json.dumps([{
+    'name': 'pgbackrest_zst', 'status': {'code': 0, 'message': 'ok'}, 'cipher': 'none',
+    'backup': [{'label': '20261023-120000F', 'type': 'full', 'error': False,
+                'info': {'size': 2_112_000_000, 'delta': 2_112_000_000,
+                         'repository': {'size': 310_000_000, 'delta': 310_000_000}},
+                'timestamp': {'start': 1761220800, 'stop': 1761220830}}]}])
+# pgBackRest's restore, console (info) then file log (detail), trimmed.
+PGBACKREST_RESTORE_LOG = """\
+2026-10-23 12:10:00.000 P00   INFO: restore command begin 2.54.0: --config=/data/exp04/pgbackrest/pgbackrest.conf --delta --pg1-path=/data/exp04/out/pgbackrest_zst --process-max=4 --stanza=pgbackrest_zst
+2026-10-23 12:10:00.100 P00   INFO: repo1: restore backup set 20261023-120000F, recovery will start at 2026-10-23 12:00:00
+2026-10-23 12:10:00.200 P00   INFO: remove invalid files/links/paths from '/data/exp04/out/pgbackrest_zst'
+2026-10-23 12:10:03.000 P00   INFO: write updated /data/exp04/out/pgbackrest_zst/postgresql.auto.conf
+2026-10-23 12:10:03.100 P00   INFO: restore global/pg_control (performed last to ensure aborted restores cannot be started)
+2026-10-23 12:10:03.200 P00   INFO: restore size = 2.1GB, file total = 1012
+2026-10-23 12:10:03.300 P00 DETAIL: statistics: {"socket.client":{"total":5}}
+2026-10-23 12:10:03.300 P00   INFO: restore command end: completed successfully (3301ms)
+2026-10-23 12:10:01.000 P01 DETAIL: restore file /data/exp04/out/pgbackrest_zst/base/5/16384 - exists and matches backup (1GB, 48.00%) checksum 0123
+2026-10-23 12:10:02.000 P02 DETAIL: restore file /data/exp04/out/pgbackrest_zst/base/5/16384.1 (136MB, 54.00%) checksum 4567
+2026-10-23 12:10:02.500 P03 DETAIL: restore file /data/exp04/out/pgbackrest_zst/base/5/16397 - exists and matches backup (8KB, 54.01%) checksum 89ab
+"""
+
+
+class NewMethodFlags(unittest.TestCase):
+    def test_the_new_methods_are_optional(self):
+        self.assertEqual(len(NEW_METHODS), 10)
+        for method in NEW_METHODS:
+            self.assertNotIn(method, measure.METHODS)
+            self.assertIn(method, measure.OPTIONAL_METHODS)
+            self.assertIn(method, report.DELTA_METHODS)
+            self.assertIn(method, measure.PROC_SCOPE)
+        self.assertEqual(run_exp04.parse_args(['--source-ip', 'x', '--out', 'y']).methods,
+                         'full,incremental,pgdelta,rsync_8k,rsync_default')
+        # T3's methods are staged like pgdelta; T8a's and T11's have no capture.
+        for method in measure.T3_METHODS:
+            self.assertIn(method, measure.STAGED_METHODS)
+        for method in (*measure.PGDELTA_DIRECT_METHODS, *measure.PGBACKREST_METHODS):
+            self.assertNotIn(method, measure.STAGED_METHODS)
+        self.assertEqual(set(measure.PGDELTA_METHODS),
+                         {'pgdelta', 'pgdelta_1thread', *measure.T3_METHODS, *measure.PGDELTA_DIRECT_METHODS})
+        self.assertEqual(set(measure.BASIS_COPY_METHODS),
+                         {'pgdelta_inplace', 'pgdelta_direct_inplace', *measure.PGBACKREST_METHODS})
+
+    def test_each_new_pgdelta_method_pins_its_flags(self):
+        def receive(*middle, fsync='main', in_place=False):
+            return (*JOBS, *middle, '--prefetch-basis', 'on', '--fsync', fsync,
+                    *(('--in-place',) if in_place else ()))
+        direct = (*JOBS, '--source-kind', 'datadir')
+        expected = {
+            'pgdelta_gapfill_seq': (JOBS, receive('--rebuild', 'gap-fill', '--verify', 'sequential')),
+            'pgdelta_seq': (JOBS, receive('--rebuild', 'copy-patch', '--verify', 'sequential')),
+            'pgdelta_fsync_wb': (JOBS, receive('--rebuild', 'copy-patch', '--verify', 'pipelined',
+                                               fsync='writeback')),
+            'pgdelta_fsync_worker': (JOBS, receive('--rebuild', 'copy-patch', '--verify', 'pipelined',
+                                                   fsync='worker')),
+            # In place there is nothing to copy B from: no --rebuild.
+            'pgdelta_inplace': (JOBS, receive('--verify', 'pipelined', in_place=True)),
+            'pgdelta_direct': (direct, receive('--rebuild', 'copy-patch', '--verify', 'pipelined')),
+            'pgdelta_direct_inplace': (direct, receive('--verify', 'pipelined', in_place=True)),
+        }
+        for method, (send, received) in expected.items():
+            with self.subTest(method=method):
+                self.assertEqual(measure.PGDELTA_ARGS[method], {'send': send, 'receive': received})
+        # pgdelta and pgdelta_1thread are as before: no --fsync, so they still run on a pgdelta
+        # without the new modes.
+        self.assertEqual(measure.PGDELTA_ARGS['pgdelta'],
+                         {'send': JOBS, 'receive': (*JOBS, '--rebuild', 'copy-patch', '--verify',
+                                                    'pipelined', '--prefetch-basis', 'on')})
+
+    def test_the_pre_run_check_asks_for_the_selected_methods_options(self):
+        self.assertEqual(measure.pgdelta_required_options(['full', 'rsync_8k']), {})
+        self.assertEqual(measure.pgdelta_required_options(measure.METHODS), measure.PGDELTA_OPTIONS)
+        self.assertEqual(measure.pgdelta_required_options(['pgdelta_inplace']),
+                         {'send': ('--jobs',),
+                          'receive': ('--jobs', '--verify', '--prefetch-basis', '--fsync', '--in-place')})
+        self.assertEqual(measure.pgdelta_required_options(['pgdelta', 'pgdelta_direct']),
+                         {'send': ('--jobs', '--source-kind'),
+                          'receive': ('--jobs', '--rebuild', '--verify', '--prefetch-basis', '--fsync')})
+        today = ('  --jobs N\n  --rebuild {copy-patch,gap-fill}\n  --verify {pipelined,sequential}\n'
+                 '  --prefetch-basis {on,off}\n')
+        required = measure.pgdelta_required_options(['pgdelta_fsync_wb'])['receive']
+        self.assertFalse(run_exp04.pgdelta_supports(today, required))
+        self.assertTrue(run_exp04.pgdelta_supports(today + '  --fsync {main,writeback,worker}\n', required))
+
+    def test_switches_are_compared_on_what_the_method_pins(self):
+        expected = measure.pgdelta_switches(measure.PGDELTA_ENGINES['pgdelta'])
+        reported = json.loads(json.dumps(expected))
+        self.assertTrue(measure.pgdelta_switches_match(expected, reported))
+        reported['receiver']['fsync'] = 'main'  # a newer pgdelta reports more: the same engine
+        self.assertTrue(measure.pgdelta_switches_match(expected, reported))
+        reported['receiver']['verify'] = 'sequential'
+        self.assertFalse(measure.pgdelta_switches_match(expected, reported))
+        self.assertFalse(measure.pgdelta_switches_match(expected, None))
+        self.assertFalse(measure.pgdelta_switches_match(expected, {'sender': expected['sender']}))
+        self.assertNotIn('rebuild', measure.pgdelta_switches(measure.PGDELTA_ENGINES['pgdelta_inplace'])['receiver'])
+
+    def test_modes_are_found_wherever_pgdelta_reports_them(self):
+        engine = measure.PGDELTA_ENGINES['pgdelta_direct_inplace']
+        nothing = measure.pgdelta_modes_report({}, engine)
+        self.assertIsNone(nothing['modes_ok'])
+        self.assertEqual(nothing['modes_expected'],
+                         {'in_place': True, 'fsync_mode': 'main', 'source_kind': 'datadir'})
+        stats = {'source_kind': 'datadir',
+                 'receiver': {'in_place': True, 'timings_seconds': {'fsync_wait': 0.25}},
+                 'switches': {'receiver': {'fsync_mode': 'main'}}}
+        found = measure.pgdelta_modes_report(stats, engine)
+        self.assertEqual(found['modes'], {'in_place': True, 'fsync_mode': 'main', 'source_kind': 'datadir'})
+        self.assertIs(found['modes_ok'], True)
+        self.assertEqual(found['fsync_wait_seconds'], 0.25)
+        stats['receiver']['in_place'] = False
+        self.assertIs(measure.pgdelta_modes_report(stats, engine)['modes_ok'], False)
+        self.assertEqual(measure.pgdelta_modes_report({'fsync_wait_seconds': 1.5}, engine)['fsync_wait_seconds'], 1.5)
+        # pgdelta pins no mode: it expects today's write path and a capture.
+        today = measure.PGDELTA_ENGINES['pgdelta']
+        self.assertEqual(measure.pgdelta_modes(today),
+                         {'in_place': False, 'fsync_mode': 'main', 'source_kind': 'backup'})
+        self.assertIs(measure.pgdelta_modes_report({'fsync_mode': 'main', 'in_place': False}, today)['modes_ok'], True)
+
+
+    def test_the_fsync_mode_is_read_as_the_engine_reports_it(self):
+        # build/engine-v1-modes's statistics: the receiver's `fsync` (asked for) and `fsync_effective`
+        # (in effect; writeback falls back to main where sync_file_range is refused), and the sender's
+        # timings, whose `fsync` is seconds.
+        def stats(asked, effective):
+            return {'source_kind': 'backup', 'in_place': False, 'timings_seconds': {'fsync': 0.75},
+                    'receiver': {'in_place': False, 'fsync': asked, 'fsync_effective': effective,
+                                 'fsync_wait_seconds': 0.125, 'timings_seconds': None}}
+
+        worker = measure.pgdelta_modes_report(stats('worker', 'worker'),
+                                              measure.PGDELTA_ENGINES['pgdelta_fsync_worker'])
+        self.assertEqual(worker['modes'], {'in_place': False, 'fsync_mode': 'worker', 'source_kind': 'backup'})
+        self.assertEqual(worker['fsync_requested'], 'worker')
+        self.assertIs(worker['modes_ok'], True)
+        self.assertEqual(worker['fsync_wait_seconds'], 0.125)
+        # writeback asked for, main in effect: the run did not measure what pgdelta_fsync_wb names.
+        fallback = measure.pgdelta_modes_report(stats('writeback', 'main'),
+                                                measure.PGDELTA_ENGINES['pgdelta_fsync_wb'])
+        self.assertEqual((fallback['modes']['fsync_mode'], fallback['fsync_requested']), ('main', 'writeback'))
+        self.assertIs(fallback['modes_ok'], False)
+        self.assertEqual(measure.summary_row({'tool_reported': fallback})['fsync_mode'], 'main')
+        # A receiver without the keys: the timings' seconds are not a mode.
+        older = stats(None, None)
+        older['receiver'] = {'in_place': False, 'timings_seconds': {'fsync': 0.5}}
+        report = measure.pgdelta_modes_report(older, measure.PGDELTA_ENGINES['pgdelta_seq'])
+        self.assertIsNone(report['modes']['fsync_mode'])
+        self.assertIsNone(report['fsync_requested'])
+        # The contract's own key still counts.
+        contract = measure.pgdelta_modes_report({'receiver': {'fsync_mode': 'writeback'}},
+                                                measure.PGDELTA_ENGINES['pgdelta_fsync_wb'])
+        self.assertEqual(contract['modes']['fsync_mode'], 'writeback')
+        self.assertIs(contract['modes_ok'], True)
+
+
+    def test_incremental_cfr_is_optional(self):
+        self.assertIn('incremental_cfr', measure.OPTIONAL_METHODS)
+        self.assertNotIn('incremental_cfr', measure.METHODS)
+        self.assertIn('incremental_cfr', report.DELTA_METHODS)
+        self.assertEqual(measure.PROC_SCOPE['incremental_cfr'], measure.PROC_SCOPE['incremental'])
+        self.assertNotIn('incremental_cfr', measure.STAGED_METHODS)
+        self.assertEqual(measure.pgdelta_required_options(['incremental_cfr']), {})
+
+
+class MethodSpeeds(unittest.TestCase):
+    speeds = measure.parse_speeds('2,5,unthrottled')
+    methods = ['full', 'pgdelta', 'pgdelta_seq', 'pgdelta_inplace', 'pgdelta_direct']
+
+    def test_methods_limited_to_some_speeds(self):
+        limited = measure.parse_method_speeds(['pgdelta_seq+pgdelta_inplace=unthrottled', 'full=unthrottled,2'],
+                                              self.methods, self.speeds)
+        self.assertEqual(limited, {'pgdelta_seq': ['unthrottled'], 'pgdelta_inplace': ['unthrottled'],
+                                   'full': ['2g', 'unthrottled']})
+        self.assertEqual(measure.methods_at(self.methods, limited, '5g'), ['pgdelta', 'pgdelta_direct'])
+        self.assertEqual(measure.methods_at(self.methods, limited, 'unthrottled'), self.methods)
+        self.assertEqual(measure.methods_at(self.methods, {}, '2g'), self.methods)
+        self.assertEqual(measure.parse_method_speeds([], self.methods, self.speeds), {})
+
+    def test_bad_specs_are_refused(self):
+        for specs in (['pgdelta_seq'], ['=2'], ['pgdelta_seq=10'], ['rsync_8k=2'], ['pgdelta_seq=fast'],
+                      ['pgdelta_seq=2', 'pgdelta_seq=5']):
+            with self.subTest(specs=specs), self.assertRaises(ValueError):
+                measure.parse_method_speeds(specs, self.methods, self.speeds)
+        base = ['--source-ip', 'x', '--out', 'y', '--speeds', '2,unthrottled', '--methods', 'full,pgdelta_seq']
+        with redirect_stdout(io.StringIO()), mock.patch('sys.stderr', io.StringIO()), \
+                self.assertRaises(SystemExit):
+            run_exp04.parse_args([*base, '--method-speeds', 'pgdelta_seq=5'])
+        args = run_exp04.parse_args([*base, '--method-speeds', 'pgdelta_seq=unthrottled'])
+        self.assertEqual(args.method_speeds, ['pgdelta_seq=unthrottled'])
+
+
+class TrialStub(StubOrchestrator):
+    """run_trial with every VM step stubbed: events say what ran, and in what order."""
+
+    def throttle(self, rate):
+        return {}
+
+    def set_speed(self, speed):
+        return {'speed': speed, 'source_to_dest_gbit': 1.0, 'dest_to_source_gbit': 1.0}
+
+    def qdisc_stats(self):
+        return {}
+
+    def take_b0(self, trial):
+        self.events.append('take_b0')
+        self.b0_digest = {'entries': {}, 'device': 1}
+
+    def cleanup_trial(self, trial):
+        self.events.append('cleanup_trial')
+
+    def _source_script(self, script, *args, timeout=7200):
+        self.events.append(('source_script', args))
+        return {'spec': {'accounts_rows': 500000, 'events_rows': 500000}}
+
+    def setup_pgbackrest(self):
+        self.events.append('setup_pgbackrest')
+        return {'backups': {}}
+
+    def pgbackrest_backups(self):
+        self.events.append('pgbackrest_backups')
+        return {stanza: {'repo_size_bytes': 1} for stanza in self.pgbackrest_methods}
+
+    def run_method(self, trial, repeat, speed, link, method, order_index, order):
+        self.events.append(('run', speed['label'], method))
+        record = {'status': 'pass', 'speed_index': link.get('speed_index'), 'method': method}
+        self.records.append(record)
+        return record
+
+
+class NewMethodRuns(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.clock = FakeClock()
+        for patcher in (mock.patch.object(run_exp04.time, 'perf_counter', self.clock),
+                        mock.patch.object(run_exp04, 'log')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        FakeChild.started.clear()
+
+    def orchestrator(self, cls=StubOrchestrator, extra_args=()):
+        orchestrator = cls(self.tmp.name, self.clock, extra_args)
+        self.addCleanup(orchestrator.pool.shutdown)
+        return orchestrator
+
+    def run_method(self, orchestrator, method, child=FakeChild):
+        with mock.patch.object(run_exp04, 'Child', child):
+            return orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), method, 0, [method])
+
+    @staticmethod
+    def kinds(orchestrator):
+        """Events as short names: drop_caches, verify, ('dest', 'cp'), ('source_script', 'start')."""
+        kinds = []
+        for event in orchestrator.events:
+            if isinstance(event, str):
+                kinds.append(event)
+            elif event[0] in ('dest', 'source'):
+                kinds.append((event[0], Path(event[1][0]).name))
+            elif event[0] == 'source_script':
+                kinds.append((event[0], event[1][0]))
+            else:
+                kinds.append(event[0])
+        return kinds
+
+    @staticmethod
+    def sends(orchestrator):
+        return [event[1] for event in orchestrator.events
+                if isinstance(event, tuple) and event[0] == 'source' and 'send' in event[1]]
+
+    # T3: staged like pgdelta, one switch changed.
+
+    def test_t3_methods_run_staged_with_their_own_flags(self):
+        for method in measure.T3_METHODS:
+            with self.subTest(method=method):
+                orchestrator = self.orchestrator()
+                FakeChild.started.clear()
+                record = self.run_method(orchestrator, method)
+                self.assertEqual(record['status'], 'pass', record.get('traceback'))
+                self.assertEqual(list(record['phases']), ['receiver_capture', 'transfer'])
+                receive = FakeChild.started[0].argv
+                self.assertEqual(receive[receive.index('--pg-controldata') + 2:],
+                                 list(measure.PGDELTA_ARGS[method]['receive']))
+                [send] = self.sends(orchestrator)
+                self.assertEqual(send[send.index('--source') + 1], orchestrator.source_capture)
+                self.assertEqual(send[-len(measure.PGDELTA_ARGS[method]['send']):],
+                                 list(measure.PGDELTA_ARGS[method]['send']))
+                self.assertIsNotNone(record['totals_serial'])
+                self.assertEqual(self.kinds(orchestrator).count('drop_caches'), 1)
+
+    def test_incremental_cfr_combines_with_copy_file_range(self):
+        # EXP-10's arm (d): incremental with pg_combinebackup --copy-file-range, which clones on XFS.
+        combines = {}
+        for method in measure.INCREMENTAL_METHODS:
+            orchestrator = self.orchestrator()
+            record = self.run_method(orchestrator, method)
+            self.assertEqual(record['status'], 'pass', record.get('traceback'))
+            self.assertEqual(list(record['phases']), ['capture', 'combine'])
+            dest = [event for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'dest']
+            self.assertEqual([event[2] for event in dest], [f'{method}-capture.log', f'{method}-combine.log'])
+            [combine] = [event[1] for event in dest if Path(event[1][0]).name == 'pg_combinebackup']
+            increment = str(orchestrator.outputs / f'{method}-increment')
+            self.assertEqual(combine[2:], ['--manifest-checksums=SHA256', '-o', str(orchestrator.outputs / method),
+                                           str(orchestrator.b0), increment])
+            self.assertEqual(record['paths']['increment'], increment)
+            combines[method] = combine[1]
+            self.assertEqual(orchestrator.method_flags(method)['pg_combinebackup'],
+                             [combine[1], '--manifest-checksums=SHA256'])
+        self.assertEqual(combines, {'incremental': '--copy', 'incremental_cfr': '--copy-file-range'})
+        # incremental's own command line is as before.
+        from benchmarks.backup import combine_command
+        self.assertEqual(combine_command('pg_combinebackup', 'B0', 'I', 'O'),
+                         ['pg_combinebackup', '--copy', '--manifest-checksums=SHA256', '-o', 'O', 'B0', 'I'])
+
+    def test_pgdelta_inplace_refreshes_a_copy_of_b0_made_before_the_cache_drop(self):
+        orchestrator = self.orchestrator()
+        record = self.run_method(orchestrator, 'pgdelta_inplace')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        b = str(orchestrator.outputs / 'pgdelta_inplace')
+        dest = [event[1] for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'dest']
+        # Never a reflink clone: on XFS cp's default would make B share every block with B0.
+        self.assertEqual(dest[:2], [['cp', '-a', '--reflink=never', str(orchestrator.b0), b], ['sync', '-f', b]])
+        kinds = self.kinds(orchestrator)
+        self.assertLess(kinds.index(('dest', 'sync')), kinds.index('drop_caches'))
+        self.assertLess(kinds.index('drop_caches'), kinds.index(('source', 'pg_basebackup')))
+        receive = FakeChild.started[0].argv
+        self.assertEqual(receive[receive.index('--basis') + 1], b)
+        self.assertNotIn('--output', receive)
+        self.assertNotIn('--rebuild', receive)
+        self.assertIn('--in-place', receive)
+        self.assertEqual(receive[receive.index('--fsync') + 1], 'main')
+        self.assertEqual(record['paths']['receipt'], b + '.pgdelta-receipt.json')
+        # The copy is untimed set-up; the timed phases are pgdelta's.
+        row = measure.summary_row(record)
+        self.assertEqual(row['total_s'], 3.12)
+        self.assertEqual(row['untimed_setup_s'], 3.5)  # the stub's cp 3.0 s and sync 0.5 s
+        self.assertEqual([step['what'][:7] for step in record['preparation']['steps']], ['copy B0'])
+
+    def test_a_failed_copy_of_b0_fails_the_run_before_the_cache_drop(self):
+        class FailingCopy(StubOrchestrator):
+            def local_command(self, argv, log_name, **kwargs):
+                result = super().local_command(argv, log_name, **kwargs)
+                if Path(str(argv[0])).name == 'cp':
+                    result['exit_code'] = 1
+                return result
+
+        orchestrator = self.orchestrator(FailingCopy)
+        record = self.run_method(orchestrator, 'pgbackrest_zst')
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('copy of B0', record['error'])
+        self.assertNotIn('drop_caches', self.kinds(orchestrator))
+
+    def test_a_copy_of_b0_that_shares_blocks_fails_the_run_before_the_cache_drop(self):
+        for method in measure.BASIS_COPY_METHODS:
+            with self.subTest(method=method):
+                orchestrator = self.orchestrator()
+                orchestrator.pgbackrest = {'backups': {}}
+                shared = {'supported': True, 'error': None, 'files': 990, 'shared_files': 990,
+                          'shared_bytes': 2_100_000_000, 'examples': ['base/5/16384']}
+                with mock.patch.object(run_exp04.measure, 'shared_extents', return_value=shared) as check:
+                    record = self.run_method(orchestrator, method)
+                check.assert_called_once_with(orchestrator.outputs / method)
+                self.assertEqual(record['status'], 'error')
+                self.assertIn('shares disk blocks', record['error'])
+                self.assertNotIn('drop_caches', self.kinds(orchestrator))
+
+    def test_the_copy_of_b0_records_that_it_shares_no_blocks(self):
+        orchestrator = self.orchestrator()
+        unshared = {'supported': True, 'error': None, 'files': 990, 'shared_files': 0, 'shared_bytes': 0,
+                    'examples': []}
+        with mock.patch.object(run_exp04.measure, 'shared_extents', return_value=unshared):
+            record = self.run_method(orchestrator, 'pgdelta_inplace')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        [step] = record['preparation']['steps']
+        self.assertEqual(step['shared_extents'], unshared)
+        self.assertIn('--reflink=never', step['what'])
+
+    # T8a: no capture; the source is stopped cleanly first and restarted whatever happens.
+
+    def test_pgdelta_direct_reads_the_stopped_source_without_a_capture(self):
+        clock = self.clock
+
+        class SlowStart(FakeChild):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                clock.now += 1.5
+
+        orchestrator = self.orchestrator()
+        record = self.run_method(orchestrator, 'pgdelta_direct', SlowStart)
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        # One timed phase: the receiver's start, then the transfer at once, with no untimed gap.
+        self.assertEqual(list(record['phases']), ['receiver_transfer'])
+        self.assertEqual(record['phases']['receiver_transfer']['steps'],
+                         {'receiver_start': {'host': 'dest', 'offset_seconds': 0.0, 'wall_seconds': 1.5},
+                          'transfer': {'host': 'source', 'offset_seconds': 1.5, 'wall_seconds': 2.06}})
+        kinds = self.kinds(orchestrator)
+        self.assertNotIn(('source', 'pg_basebackup'), kinds)
+        self.assertNotIn(('dest', 'cp'), kinds)  # a new copy O: nothing to copy first
+        # Stopped before the cache drop, restarted after the verification.
+        self.assertEqual([kind for kind in kinds if isinstance(kind, tuple) and kind[0] == 'source_script'],
+                         [('source_script', 'stop-clean'), ('source_script', 'start')])
+        self.assertLess(kinds.index(('source_script', 'stop-clean')), kinds.index('drop_caches'))
+        self.assertLess(kinds.index('verify'), kinds.index(('source_script', 'start')))
+        [send] = self.sends(orchestrator)
+        self.assertEqual(send[send.index('--source') + 1], orchestrator.source_data)
+        self.assertEqual(send[send.index('--source-kind') + 1], 'datadir')
+        receive = FakeChild.started[0].argv
+        self.assertEqual(receive[receive.index('--basis') + 1], str(orchestrator.b0))
+        self.assertEqual(receive[receive.index('--output') + 1], str(orchestrator.outputs / 'pgdelta_direct'))
+        self.assertEqual(receive[receive.index('--fsync') + 1], 'main')
+        self.assertNotIn('--in-place', receive)
+        # The receiver's record (its whole life) is in the phase, after it exited.
+        transfer = record['phases']['receiver_transfer']['commands']
+        self.assertEqual([command['host'] for command in transfer], ['dest', 'source'])
+        self.assertIn('receiver_transfer', transfer[0]['role'])
+        row = measure.summary_row(record)
+        self.assertEqual((row['receiver_start_s'], row['transfer_s'], row['total_s']), (1.5, 2.06, 3.56))
+        self.assertEqual(row['ssh_overhead_s'], 0.06)
+        self.assertIsNone(row['capture_s'])
+        self.assertIsNone(row['serial_total_s'])
+        self.assertEqual(row['counter_windows'], 1)
+        self.assertIsNone(record['prefetch_untimed'])
+        self.assertIsNone(row['untimed_gap_s'])
+        self.assertIn('source_restart', record)
+        self.assertIsNone(orchestrator.source_down)
+
+    def test_pgdelta_direct_starts_the_sender_as_soon_as_the_receiver_listens(self):
+        class Snapshots(StubOrchestrator):
+            def snapshot_source(self):
+                self.events.append('snapshot')
+                return super().snapshot_source()
+
+            def snapshot_dest(self):
+                self.events.append('snapshot')
+                return super().snapshot_dest()
+
+            def start_receiver(self, method, paths, holder):
+                commands = super().start_receiver(method, paths, holder)
+                self.events.append('listening')
+                return commands
+
+        for method in measure.PGDELTA_DIRECT_METHODS:
+            with self.subTest(method=method):
+                orchestrator = self.orchestrator(Snapshots)
+                record = self.run_method(orchestrator, method)
+                self.assertEqual(record['status'], 'pass', record.get('traceback'))
+                kinds = self.kinds(orchestrator)
+                listening = kinds.index('listening')
+                send = kinds.index(('source', 'python3'))
+                # No counter read (an SSH call to the source) between the two: the receiver can't
+                # prefetch B0 off the clock while the sender is not yet started.
+                self.assertEqual(kinds[listening:send], ['listening'])
+                self.assertEqual(kinds.count('snapshot'), 4)  # one window: both VMs before and after
+
+    def test_a_direct_receiver_that_never_listens_fails_without_a_transfer(self):
+        class Silent(FakeChild):
+            LOG = ''
+            EXIT = 1
+
+        orchestrator = self.orchestrator()
+        record = self.run_method(orchestrator, 'pgdelta_direct', Silent)
+        self.assertEqual(record['status'], 'error')
+        self.assertEqual(self.sends(orchestrator), [])
+        phase = record['phases']['receiver_transfer']
+        self.assertEqual(list(phase['steps']), ['receiver_start'])
+        [failure] = phase['failures']
+        self.assertTrue(failure.startswith('dest: ') and failure.endswith(' exited 1'), failure)
+        self.assertIn(('source_script', 'start'), self.kinds(orchestrator))
+
+    def test_pgdelta_direct_inplace_copies_b0_and_stops_the_source_first(self):
+        orchestrator = self.orchestrator()
+        record = self.run_method(orchestrator, 'pgdelta_direct_inplace')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        kinds = self.kinds(orchestrator)
+        drop = kinds.index('drop_caches')
+        self.assertLess(kinds.index(('dest', 'sync')), drop)
+        self.assertLess(kinds.index(('source_script', 'stop-clean')), drop)
+        receive = FakeChild.started[0].argv
+        self.assertEqual(receive[receive.index('--basis') + 1], str(orchestrator.outputs / 'pgdelta_direct_inplace'))
+        self.assertIn('--in-place', receive)
+        self.assertNotIn('--output', receive)
+        [send] = self.sends(orchestrator)
+        self.assertEqual(send[send.index('--source-kind') + 1], 'datadir')
+
+    def test_the_source_is_restarted_whatever_happens(self):
+        class LostTransfer(StubOrchestrator):
+            def remote_command(self, argv, log_name, **kwargs):
+                if 'send' in [str(part) for part in argv]:
+                    raise run_exp04.CommandError('ssh: connection lost')
+                return super().remote_command(argv, log_name, **kwargs)
+
+        class FailedStop(StubOrchestrator):
+            def _source_script(self, script, *args, timeout=7200):
+                super()._source_script(script, *args)
+                if args[0] == 'stop-clean':
+                    raise run_exp04.CommandError('the source did not stop cleanly')
+                return {}
+
+        for cls in (LostTransfer, FailedStop):
+            with self.subTest(failure=cls.__name__):
+                orchestrator = self.orchestrator(cls)
+                FakeChild.started.clear()
+                record = self.run_method(orchestrator, 'pgdelta_direct_inplace')
+                self.assertEqual(record['status'], 'error')
+                scripts = [kind[1] for kind in self.kinds(orchestrator)
+                           if isinstance(kind, tuple) and kind[0] == 'source_script']
+                self.assertEqual(scripts, ['stop-clean', 'start'])
+                self.assertIsNone(orchestrator.source_down)
+                if FakeChild.started:
+                    self.assertTrue(FakeChild.started[0].stopped)
+
+    def test_a_source_that_does_not_restart_stops_the_trial(self):
+        class NoRestart(TrialStub):
+            run_method = run_exp04.Orchestrator.run_method
+            verify = StubOrchestrator.verify
+
+            def _source_script(self, script, *args, timeout=7200):
+                if args[0] == 'start':
+                    raise run_exp04.CommandError('the source did not start')
+                return super()._source_script(script, *args)
+
+        orchestrator = self.orchestrator(NoRestart)
+        orchestrator.speeds = measure.parse_speeds('2,unthrottled')
+        orchestrator.methods = ['pgdelta_direct', 'full']
+        with mock.patch.object(run_exp04, 'Child', FakeChild), \
+                mock.patch.object(run_exp04.measure, 'tree_digest', return_value={'entries': {}, 'device': 1}):
+            trial = orchestrator.run_trial(0, 'uniform', 0.01)
+        self.assertEqual(trial['status'], 'error')
+        self.assertIn('source cluster is down', trial['error'])
+        direct = [record for record in orchestrator.records if record['method'] == 'pgdelta_direct']
+        self.assertEqual(len(direct), 1)
+        self.assertIn('could not be restarted', direct[0]['error'])
+        self.assertIn('cleanup_trial', orchestrator.events)
+
+    def test_a_source_that_did_not_restart_stops_only_its_own_trial(self):
+        class RestartsOnlyLater(TrialStub):
+            run_method = run_exp04.Orchestrator.run_method
+            verify = StubOrchestrator.verify
+            starts = 0
+
+            def _source_script(self, script, *args, timeout=7200):
+                if args[0] == 'start':
+                    self.starts += 1
+                    if self.starts == 1:
+                        raise run_exp04.CommandError('the source did not start')
+                return super()._source_script(script, *args)
+
+        orchestrator = self.orchestrator(RestartsOnlyLater)
+        orchestrator.speeds = measure.parse_speeds('unthrottled')
+        orchestrator.methods = ['pgdelta_direct', 'full']
+        with mock.patch.object(run_exp04, 'Child', FakeChild), \
+                mock.patch.object(run_exp04.measure, 'tree_digest', return_value={'entries': {}, 'device': 1}):
+            first = orchestrator.run_trial(0, 'uniform', 0.01)
+            # The next trial's set-up builds a new source cluster, which restarts fine.
+            second = orchestrator.run_trial(1, 'uniform', 0.01)
+        self.assertEqual(first['status'], 'error')
+        self.assertIn('source cluster is down', first['error'])
+        self.assertEqual(second['status'], 'pass', second.get('error'))
+        self.assertEqual(sorted(run['method'] for run in second['runs']), ['full', 'pgdelta_direct'])
+        self.assertIsNone(orchestrator.source_down)
+
+    # T11: pgBackRest restore --delta of a copy of B0.
+
+    class Restoring(StubOrchestrator):
+        verify = run_exp04.Orchestrator.verify
+        tool_reported = run_exp04.Orchestrator.tool_reported
+
+        def check_output(self, method, data, *, recovery, query=run_exp04.OUTPUT_QUERY):
+            self.events.append(('check_output', recovery, query))
+            return {'ok': True, 'answer': json.dumps(LOGICAL), 'ready_seconds': 4.2}
+
+    def test_pgbackrest_restores_a_copy_of_b0_from_the_source_repository(self):
+        orchestrator = self.orchestrator(self.Restoring, ['--methods', 'full,pgbackrest_block'])
+        orchestrator.methods = ['full', 'pgbackrest_block']
+        orchestrator.pgbackrest = {'backups': {'pgbackrest_block': {'repo_size_bytes': 123}}}
+        record = self.run_method(orchestrator, 'pgbackrest_block')
+        # Restored and started; it passes or fails once the source's digest is taken.
+        self.assertEqual(record['status'], 'pending', record.get('traceback'))
+        b = str(orchestrator.outputs / 'pgbackrest_block')
+        restore = [event[1] for event in orchestrator.events
+                   if isinstance(event, tuple) and event[0] == 'dest' and event[1][0] == '/usr/bin/pgbackrest']
+        self.assertEqual(restore, [['/usr/bin/pgbackrest', f'--config={orchestrator.work}/pgbackrest/pgbackrest.conf',
+                                    '--stanza=pgbackrest_block', '--delta', '--process-max=4',
+                                    f'--pg1-path={b}', 'restore']])
+        kinds = self.kinds(orchestrator)
+        self.assertLess(kinds.index(('dest', 'sync')), kinds.index('drop_caches'))
+        self.assertLess(kinds.index('drop_caches'), kinds.index(('dest', 'pgbackrest')))
+        self.assertEqual(list(record['phases']), ['restore'])
+        [check] = [event for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'check_output']
+        self.assertEqual(check, ('check_output', True, measure.logical_digest_sql()))
+        self.assertEqual(record['verification']['logical'], LOGICAL)
+        self.assertIsNone(record['verification']['logical_match'])
+        self.assertEqual(record['tool_reported']['backup'], {'repo_size_bytes': 123})
+        self.assertEqual(record['tool_reported']['flags']['stanza'],
+                         {'compress-type': 'zst', 'repo1-bundle': 'y', 'repo1-block': 'y'})
+        row = measure.summary_row(record)
+        self.assertEqual((row['restore_s'], row['total_s'], row['counter_windows']), (1.0, 1.0, 1))
+        self.assertEqual((row['status'], row['logical_match'], row['output_start_s']), ('pending', None, 4.2))
+        self.assertEqual(row['untimed_setup_s'], 3.5)
+        self.assertIsNone(row['tool_s2d_bytes'])
+
+    def test_the_wal_the_restored_copy_fetches_counts_in_pgbackrests_wire_bytes(self):
+        class Recovering(self.Restoring):
+            def check_output(self, method, data, *, recovery, query=run_exp04.OUTPUT_QUERY):
+                self.events.append('check_output')
+                log = self.dest_log(f'{method}-output-server.log')
+                log.parent.mkdir(parents=True, exist_ok=True)
+                log.write_text('LOG:  starting archive recovery\n'
+                               'LOG:  restored log file "000000010000000000000005" from archive\n'
+                               'LOG:  restored log file "000000010000000000000006" from archive\n'
+                               'LOG:  selected new timeline ID: 2\n'
+                               'LOG:  restored log file "00000002.history" from archive\n')
+                return {'ok': True, 'answer': json.dumps(LOGICAL), 'ready_seconds': 4.2}
+
+            def snapshot_source(self):
+                self.events.append('snapshot')
+                return super().snapshot_source()
+
+        orchestrator = self.orchestrator(Recovering)
+        orchestrator.pgbackrest = {'backups': {}}
+        record = self.run_method(orchestrator, 'pgbackrest_none')
+        self.assertEqual(record['status'], 'pending', record.get('traceback'))
+        # The counters are read around the start of the restored copy, untimed.
+        kinds = self.kinds(orchestrator)
+        start = kinds.index('check_output')
+        self.assertEqual((kinds[start - 1], kinds[start + 1]), ('snapshot', 'snapshot'))
+        recovery = record['verification']['recovery']
+        self.assertEqual((recovery['net']['source']['tx_bytes'], recovery['net']['dest']['tx_bytes']), (1000, 1000))
+        self.assertEqual(recovery['wal_files_restored'], 3)
+        row = measure.summary_row(record)
+        # The stub's counters move 1000 bytes per window: the restore's, then the recovery's.
+        self.assertEqual((row['wire_s2d_bytes'], row['recovery_wire_s2d_bytes']), (2000, 1000))
+        self.assertEqual((row['wire_d2s_bytes'], row['recovery_wire_d2s_bytes']), (2000, 1000))
+        self.assertEqual((row['wire_s2d_bytes_dest_rx'], row['wire_d2s_bytes_source_rx']), (2000, 2000))
+        self.assertEqual(row['recovery_wal_files'], 3)
+        # Wall time and CPU stay the restore's; it is still one timed phase.
+        self.assertEqual((row['total_s'], row['cpu_source_s'], row['counter_windows']), (1.0, 1.0, 1))
+        self.assertIn('archive-get', record['totals']['wire_bytes_scope'])
+
+    def test_recovery_bytes_and_restored_wal_files(self):
+        totals = {'wall_seconds': 3.0, 'wire_bytes_source_to_dest': 10, 'wire_bytes_dest_to_source': 2,
+                  'wire_bytes_source_to_dest_dest_rx': 11, 'wire_bytes_dest_to_source_source_rx': 3,
+                  'cpu_seconds_source': 1.5}
+        recovery = {'net': {'source': {'tx_bytes': 100, 'rx_bytes': 7}, 'dest': {'tx_bytes': 5, 'rx_bytes': 101}}}
+        added = measure.with_recovery_bytes(totals, recovery)
+        self.assertEqual((added['wire_bytes_source_to_dest'], added['wire_bytes_dest_to_source'],
+                          added['wire_bytes_source_to_dest_dest_rx'], added['wire_bytes_dest_to_source_source_rx']),
+                         (110, 7, 112, 10))
+        self.assertEqual((added['recovery_wire_bytes_source_to_dest'], added['recovery_wire_bytes_dest_to_source']),
+                         (100, 5))
+        self.assertEqual((added['wall_seconds'], added['cpu_seconds_source']), (3.0, 1.5))
+        self.assertEqual(totals['wire_bytes_source_to_dest'], 10)  # not changed in place
+        self.assertIsNone(measure.with_recovery_bytes({'wire_bytes_source_to_dest': None}, recovery)
+                          ['wire_bytes_source_to_dest'])
+        self.assertEqual(measure.restored_wal_files('LOG:  restored log file "000000010000000000000005" from archive\n'
+                                                    'LOG:  could not open "000000010000000000000006"\n'), 1)
+        self.assertEqual(measure.restored_wal_files(''), 0)
+
+    def test_pending_pgbackrest_runs_pass_or_fail_against_the_source_at_the_end(self):
+        orchestrator = self.orchestrator(self.Restoring)
+        orchestrator.methods = ['pgbackrest_zst', 'pgbackrest_none']
+        orchestrator.pgbackrest = {'backups': {}}
+        records = [self.run_method(orchestrator, method) for method in orchestrator.methods]
+        records[1]['verification']['logical']['events']['rows'] = 504999  # a lost row
+        trial = {'runs': [{'repeat': 0, 'speed': '0.5g', 'method': record['method'], 'status': 'pending'}
+                          for record in records]}
+        with mock.patch.object(orchestrator, 'query', return_value=json.dumps(LOGICAL)) as query:
+            check = orchestrator.finish_logical_checks(trial)
+        query.assert_called_once()
+        self.assertEqual(query.call_args.args, (measure.logical_digest_sql(),))
+        self.assertEqual((query.call_args.kwargs['host'], query.call_args.kwargs['port']), ('10.0.0.12', 5432))
+        self.assertEqual([record['status'] for record in records], ['pass', 'fail'])
+        self.assertEqual([run['status'] for run in trial['runs']], ['pass', 'fail'])
+        self.assertEqual([run['match'] for run in check['runs']], [True, False])
+        self.assertIn('events', records[1]['verification']['logical_differences'][0])
+        saved = json.loads(orchestrator.record_path(records[1]).read_text())
+        self.assertEqual((saved['status'], saved['verification']['logical_match']), ('fail', False))
+        with open(orchestrator.out / 'summary.csv', newline='') as stream:
+            rows = list(csv.DictReader(stream))
+        self.assertEqual([(row['status'], row['logical_match']) for row in rows],
+                         [('pass', 'True'), ('fail', 'False')])
+        # Nothing pending: no query of the source.
+        with mock.patch.object(orchestrator, 'query') as query:
+            self.assertIsNone(orchestrator.finish_logical_checks(trial))
+        query.assert_not_called()
+
+    def test_pgbackrest_is_set_up_only_in_runs_that_select_it(self):
+        for methods in (['full', 'pgdelta'], ['full', 'pgbackrest_zst']):
+            with self.subTest(methods=methods):
+                orchestrator = self.orchestrator(TrialStub)
+                orchestrator.speeds = measure.parse_speeds('unthrottled')
+                orchestrator.methods = methods
+                with mock.patch.object(run_exp04.measure, 'tree_digest', return_value={'entries': {}, 'device': 1}):
+                    trial = orchestrator.run_trial(0, 'uniform', 0.01)
+                self.assertEqual(trial['status'], 'pass', trial.get('traceback'))
+                kinds = self.kinds(orchestrator)
+                steps = [kind for kind in kinds if kind in ('setup_pgbackrest', 'take_b0', 'pgbackrest_backups')
+                         or kind in (('source_script', 'setup'), ('source_script', 'workload'))]
+                if 'pgbackrest_zst' in methods:
+                    # Set up before B0; the backups after the workload and its CHECKPOINT.
+                    self.assertEqual(steps, [('source_script', 'setup'), 'setup_pgbackrest', 'take_b0',
+                                             ('source_script', 'workload'), 'pgbackrest_backups'])
+                    self.assertEqual(trial['pgbackrest']['backups'], {'pgbackrest_zst': {'repo_size_bytes': 1}})
+                else:
+                    self.assertEqual(steps, [('source_script', 'setup'), 'take_b0', ('source_script', 'workload')])
+                    self.assertNotIn('pgbackrest', trial)
+                    self.assertIsNone(orchestrator.pgbackrest_run_record())
+
+    def test_method_speeds_limit_what_runs_at_each_speed(self):
+        orchestrator = self.orchestrator(TrialStub)
+        orchestrator.speeds = measure.parse_speeds('2,unthrottled')
+        orchestrator.methods = ['full', 'pgdelta_seq', 'pgdelta_direct']
+        orchestrator.method_speeds = {'pgdelta_seq': ['unthrottled']}
+        with mock.patch.object(run_exp04.measure, 'tree_digest', return_value={'entries': {}, 'device': 1}):
+            orchestrator.run_trial(0, 'uniform', 0.01)
+        runs = [event[1:] for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'run']
+        self.assertEqual(sorted(method for speed, method in runs if speed == '2g'), ['full', 'pgdelta_direct'])
+        self.assertEqual(sorted(method for speed, method in runs if speed == 'unthrottled'),
+                         ['full', 'pgdelta_direct', 'pgdelta_seq'])
+
+    def test_pgbackrest_set_up_commands(self):
+        orchestrator = self.orchestrator()
+        orchestrator.methods = ['full', 'pgbackrest_zst', 'pgbackrest_block']
+        state = orchestrator.setup_pgbackrest()
+        paths = measure.pgbackrest_paths(orchestrator.work)
+        texts = orchestrator.pgbackrest_texts()
+        # The source: its configuration, then archiving (one restart) through source_cluster.py.
+        writes = [event[1:] for event in orchestrator.events if event[0] == 'source_write']
+        self.assertEqual(writes, [(paths['config'], texts['source_config'])])
+        [archive] = [event[1] for event in orchestrator.events if event[0] == 'source_script']
+        self.assertEqual(archive[0], 'archive')
+        self.assertEqual(archive[archive.index('--command') + 1],
+                         f'/usr/bin/pgbackrest --config={paths["config"]} --stanza=pgbackrest_zst archive-push %p'
+                         f' && /usr/bin/pgbackrest --config={paths["config"]} --stanza=pgbackrest_block '
+                         'archive-push %p')
+        # On the source: every stanza-create before archiving starts, then check per stanza.
+        steps = [list(event[1][event[1].index('/usr/bin/pgbackrest') + 1:]) if event[0] == 'source_agent'
+                 else event[1][0] for event in orchestrator.events
+                 if (event[0] == 'source_agent' and '/usr/bin/pgbackrest' in event[1])
+                 or event[0] == 'source_script']
+        config = f'--config={paths["config"]}'
+        self.assertEqual(steps, [[config, '--stanza=pgbackrest_zst', 'stanza-create'],
+                                 [config, '--stanza=pgbackrest_block', 'stanza-create'], 'archive',
+                                 [config, '--stanza=pgbackrest_zst', 'check'],
+                                 [config, '--stanza=pgbackrest_block', 'check']])
+        # Dest: its configuration and its own SSH set-up, then info per stanza through it.
+        self.assertEqual(Path(paths['config']).read_text(), texts['dest_config'])
+        self.assertEqual(Path(paths['ssh_config']).read_text(), texts['ssh_config'])
+        self.assertTrue(os.access(paths['ssh'], os.X_OK))
+        info = [event[1] for event in orchestrator.events if event[0] == 'dest']
+        self.assertEqual(info, [['/usr/bin/pgbackrest', f'--config={paths["config"]}', f'--stanza={stanza}', 'info']
+                                for stanza in ('pgbackrest_zst', 'pgbackrest_block')])
+        self.assertEqual(sorted(state['stanzas']), ['pgbackrest_block', 'pgbackrest_zst'])
+        self.assertEqual(state['archive_command'], archive[archive.index('--command') + 1])
+
+    def test_pgbackrest_backups_are_full_and_recorded(self):
+        orchestrator = self.orchestrator()
+        orchestrator.methods = ['pgbackrest_zst']
+        calls = []
+
+        def agent(*args, timeout=600):
+            calls.append(args)
+            return {'exit_code': 0, 'log_tail': PGBACKREST_INFO if 'info' in args else 'backup done'}
+
+        orchestrator.source.agent = agent
+        backups = orchestrator.pgbackrest_backups()
+        commands = [call[call.index(orchestrator.pgbackrest_exe) + 2:] for call in calls]
+        self.assertEqual(commands, [('--stanza=pgbackrest_zst', '--type=full', 'backup'),
+                                    ('--stanza=pgbackrest_zst', '--output=json', 'info')])
+        self.assertEqual(backups['pgbackrest_zst']['repo_size_bytes'], 310_000_000)
+        self.assertEqual(backups['pgbackrest_zst']['label'], '20261023-120000F')
+
+    def test_run_json_records_the_flags_each_method_pins(self):
+        orchestrator = self.orchestrator()
+        self.assertEqual(orchestrator.method_flags('pgdelta_fsync_wb'),
+                         {command: list(args) for command, args in measure.PGDELTA_ARGS['pgdelta_fsync_wb'].items()})
+        self.assertEqual(orchestrator.method_flags('pgbackrest_none')['stanza'],
+                         {'compress-type': 'none', 'compress-level-network': '0'})
+        self.assertEqual(orchestrator.method_flags('pgbackrest_none')['dest_stanza'], {'compress-level-network': '0'})
+        self.assertEqual(orchestrator.method_flags('pgbackrest_none')['restore'], ['--delta', '--process-max=4'])
+        self.assertIn('--fsync', orchestrator.method_flags('rsync_8k')['rsync'])
+        self.assertEqual(orchestrator.method_flags('full'), {'pg_basebackup': ['--manifest-checksums', 'SHA256']})
+        orchestrator.methods = ['pgbackrest_zst']
+        record = orchestrator.pgbackrest_run_record()
+        self.assertIn('archive_mode = on', record['archiving'])
+        self.assertIn('[pgbackrest_zst]', record['source_config'])
+
+    def test_the_pre_run_check_needs_the_new_options_and_the_datadir_module(self):
+        orchestrator = self.orchestrator()
+        orchestrator.methods = ['pgdelta', 'pgdelta_direct']
+        helps = {'send': '  --jobs N\n  --source-kind {backup,datadir}\n',
+                 'receive': ('  --jobs N\n  --rebuild {copy-patch,gap-fill}\n  --verify {pipelined,sequential}\n'
+                             '  --prefetch-basis {on,off}\n  --fsync {main,writeback,worker}\n')}
+
+        def local(argv, **kwargs):
+            if '-c' in argv:  # import pgdelta.datadir
+                return mock.Mock(returncode=0, stdout='')
+            return mock.Mock(returncode=0, stdout=helps[argv[3]])
+
+        def remote(*args, timeout=600):
+            if '-c' in args:
+                return {'exit_code': 1, 'log_tail': 'No module named pgdelta.datadir'}
+            return {'exit_code': 0, 'log_tail': helps[args[-2]]}
+
+        orchestrator.source.agent = remote
+        with mock.patch.object(run_exp04.subprocess, 'run', side_effect=local), \
+                self.assertRaises(SystemExit) as refused:
+            orchestrator.check_pgdelta_jobs()
+        self.assertIn('pgdelta.datadir', str(refused.exception))
+        orchestrator.source.agent = lambda *args, timeout=600: (
+            {'exit_code': 0, 'log_tail': ''} if '-c' in args else {'exit_code': 0, 'log_tail': helps[args[-2]]})
+        with mock.patch.object(run_exp04.subprocess, 'run', side_effect=local):
+            found = orchestrator.check_pgdelta_jobs()
+        self.assertEqual(found, {'send': {'dest': True, 'source': True}, 'receive': {'dest': True, 'source': True},
+                                 'pgdelta.datadir': {'dest': True, 'source': True}})
+        helps['receive'] = helps['receive'].replace('--fsync', '--other')
+        with mock.patch.object(run_exp04.subprocess, 'run', side_effect=local), self.assertRaises(SystemExit):
+            orchestrator.check_pgdelta_jobs()
+
+
+# --- the verification of the new methods ------------------------------------------
+
+class OutputVerification(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        patcher = mock.patch.object(run_exp04, 'log')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def orchestrator(self, cls=StubOrchestrator):
+        orchestrator = cls(self.tmp.name, FakeClock())
+        self.addCleanup(orchestrator.pool.shutdown)
+        return orchestrator
+
+    def test_outputs_start_on_a_spare_port_with_no_listener_and_no_archiving(self):
+        orchestrator = self.orchestrator()
+        argv = [str(part) for part in orchestrator.output_start_argv(Path('/d/B'), Path('/l/server.log'))]
+        self.assertEqual(argv[:6], ['/usr/lib/postgresql/17/bin/pg_ctl', '-D', '/d/B', '-l', '/l/server.log', '-o'])
+        self.assertEqual(argv[7:], ['-w', '-t', '1800', 'start'])
+        self.assertEqual(shlex.split(argv[6]), ['-p', '5433', '-k', str(orchestrator.work / 'vs'),
+                                                '-c', 'listen_addresses=', '-c', 'archive_mode=off'])
+        self.assertEqual([str(part) for part in orchestrator.output_stop_argv(Path('/d/B'))],
+                         ['/usr/lib/postgresql/17/bin/pg_ctl', '-D', '/d/B', '-m', 'fast', '-w', '-t', '300', 'stop'])
+        self.assertEqual([str(part) for part in orchestrator.psql_argv('/s', 5433, 'SELECT 1;')],
+                         ['/usr/lib/postgresql/17/bin/psql', '-X', '-A', '-t', '-q', '-v', 'ON_ERROR_STOP=1',
+                          '-h', '/s', '-p', '5433', '-U', 'study', '-d', 'postgres', '-c', 'SELECT 1;'])
+
+    def server_stub(self, *, start_exit=0, answers=()):
+        """An orchestrator whose pg_ctl creates and removes postmaster.pid, and whose psql answers in turn."""
+        answers = list(answers)
+
+        class Server(StubOrchestrator):
+            def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None):
+                argv = [str(part) for part in argv]
+                self.events.append(('dest', argv, log_name))
+                data = Path(argv[argv.index('-D') + 1])
+                code = 0
+                if argv[-1] == 'start':
+                    code = start_exit
+                    if not start_exit:
+                        (data / 'postmaster.pid').write_text('1')
+                elif argv[-1] == 'stop':
+                    (data / 'postmaster.pid').unlink(missing_ok=True)
+                return {'host': 'dest', 'argv': argv, 'exit_code': code, 'wall_seconds': 0.1}
+
+            def query(self, sql, **kwargs):
+                self.events.append(('query', sql))
+                answer = answers.pop(0)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+
+        return self.orchestrator(Server)
+
+    def test_check_output_waits_for_recovery_and_stops_the_server(self):
+        data = self.root / 'B'
+        data.mkdir()
+        orchestrator = self.server_stub(answers=[run_exp04.CommandError('starting up'), 't', 'f', '{"x": 1}'])
+        with mock.patch.object(run_exp04.time, 'sleep'):
+            result = orchestrator.check_output('pgbackrest_zst', data, recovery=True, query='SELECT digest;')
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['answer'], '{"x": 1}')
+        queries = [event[1] for event in orchestrator.events if event[0] == 'query']
+        self.assertEqual(queries, ['SELECT pg_is_in_recovery();'] * 3 + ['SELECT digest;'])
+        self.assertFalse((data / 'postmaster.pid').exists())
+        self.assertEqual([command['argv'][-1] for command in result['stop']['commands']], ['stop'])
+
+    def test_check_output_stops_the_server_when_the_query_fails(self):
+        data = self.root / 'O'
+        data.mkdir()
+        orchestrator = self.server_stub(answers=[run_exp04.CommandError('relation does not exist')])
+        result = orchestrator.check_output('pgdelta_direct', data, recovery=False)
+        self.assertFalse(result['ok'])
+        self.assertIn('relation does not exist', result['error'])
+        self.assertFalse((data / 'postmaster.pid').exists())
+        # One that never started is not stopped.
+        orchestrator = self.server_stub(start_exit=1)
+        result = orchestrator.check_output('pgdelta_direct', data, recovery=False)
+        self.assertFalse(result['ok'])
+        self.assertIn('did not start', result['error'])
+        self.assertEqual(result['stop'], {'commands': []})
+
+    def test_an_output_that_cannot_be_stopped_is_left_in_place_and_blocks_later_starts(self):
+        class Unstoppable(StubOrchestrator):
+            """pg_ctl start writes postmaster.pid; stop leaves it (the server keeps running)."""
+            clean_method = run_exp04.Orchestrator.clean_method
+
+            def local_command(self, argv, log_name, **kwargs):
+                argv = [str(part) for part in argv]
+                if Path(argv[0]).name == 'pg_ctl':
+                    self.events.append(('dest', argv, log_name))
+                    data = Path(argv[argv.index('-D') + 1])
+                    if argv[-1] == 'start':
+                        (data / 'postmaster.pid').write_text('4242\n')
+                    return {'host': 'dest', 'argv': argv, 'exit_code': 0 if argv[-1] == 'start' else 1,
+                            'wall_seconds': 0.1}
+                if Path(argv[0]).name == 'cp':
+                    Path(argv[-1]).mkdir(parents=True)
+                return super().local_command(argv, log_name, **kwargs)
+
+            def query(self, sql, **kwargs):
+                return 'f' if 'pg_is_in_recovery' in sql else json.dumps(LOGICAL)
+
+            def remove_dest(self, *paths):
+                for path in paths:
+                    self.events.append(('remove_dest', str(path)))
+                    shutil.rmtree(path, ignore_errors=True)
+
+            def verify(self, method, paths, phases):
+                if method in measure.PGBACKREST_METHODS:
+                    return run_exp04.Orchestrator.verify(self, method, paths, phases)
+                return super().verify(method, paths, phases)
+
+        orchestrator = self.orchestrator(Unstoppable)
+        orchestrator.pgbackrest = {'backups': {}}
+        b = orchestrator.outputs / 'pgbackrest_zst'
+        with mock.patch.object(run_exp04, 'Child', FakeChild):
+            record = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), 'pgbackrest_zst', 0, ['pgbackrest_zst'])
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('could not be stopped', record['error'])
+        # Its data directory is still there under the running server, and recorded.
+        self.assertTrue((b / 'postmaster.pid').exists())
+        self.assertEqual(record['output_stuck']['data'], str(b))
+        self.assertEqual([command['argv'][4] for command in record['output_stuck']['stops']], ['fast', 'immediate'])
+        # No later method may start an output or reuse that path; the others run.
+        drops = orchestrator.events.count('drop_caches')
+        for method in ('pgbackrest_zst', 'pgbackrest_none', 'pgdelta_direct'):
+            with self.subTest(method=method), mock.patch.object(run_exp04, 'Child', FakeChild):
+                later = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), method, 0, [method])
+                self.assertEqual(later['status'], 'error')
+                self.assertIn('could not be stopped', later['error'])
+        self.assertEqual(orchestrator.events.count('drop_caches'), drops)
+        self.assertNotIn(('source_script', ('stop-clean',)), [event[:2] for event in orchestrator.events
+                                                              if isinstance(event, tuple)])
+        with mock.patch.object(run_exp04, 'Child', FakeChild):
+            full = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), 'full', 0, ['full'])
+        self.assertEqual(full['status'], 'pass')
+        self.assertTrue((b / 'postmaster.pid').exists())
+        result = orchestrator.check_output('pgdelta_direct', orchestrator.outputs / 'other', recovery=False)
+        self.assertFalse(result['ok'])
+        self.assertIn('still runs on port 5433', result['error'])
+        # The trial's clean-up removes the other outputs but not that one.
+        (orchestrator.outputs / 'full').mkdir()
+        self.assertEqual(orchestrator.removable_outputs(), [orchestrator.outputs / 'full'])
+
+    def test_a_server_an_earlier_run_left_on_the_output_port_is_found(self):
+        orchestrator = self.orchestrator()
+        self.assertIsNone(orchestrator.stale_output_server())
+        lock = orchestrator.output_socket / '.s.PGSQL.5433.lock'
+        lock.parent.mkdir(parents=True)
+        lock.write_text(f'{os.getpid()}\n/data/exp04/out/pgbackrest_zst\n1761220800\n5433\n')
+        self.assertEqual(orchestrator.stale_output_server(),
+                         f'PID {os.getpid()}, data directory /data/exp04/out/pgbackrest_zst')
+        with mock.patch.object(run_exp04.os, 'kill', side_effect=ProcessLookupError):
+            self.assertIsNone(orchestrator.stale_output_server())
+        lock.write_text('')
+        self.assertIsNone(orchestrator.stale_output_server())
+
+    def make_tree(self, name, files):
+        root = self.root / name
+        for path, data in files.items():
+            (root / path).parent.mkdir(parents=True, exist_ok=True)
+            (root / path).write_bytes(data)
+        return root
+
+    SOURCE_FILES = {'PG_VERSION': b'17\n', 'global/pg_control': b'C' * 64, 'base/5/16384': b'P' * 8192,
+                    'pg_wal/000000010000000000000003': b'W' * 128, 'postmaster.opts': b'opts\n'}
+    SELECTED = ['PG_VERSION', 'base/5/16384', 'global/pg_control', 'pg_wal/000000010000000000000003']
+
+    def direct_run(self, method, output_files, *, selected=None):
+        source = self.make_tree('src-data', self.SOURCE_FILES)
+        output = self.make_tree(f'out-{method}-{len(list(self.root.iterdir()))}', output_files)
+        b0 = self.make_tree('B0', {'PG_VERSION': b'17\n', 'global/pg_control': b'old' * 8})
+
+        class Direct(StubOrchestrator):
+            verify = run_exp04.Orchestrator.verify
+
+            def check_output(self, method, data, *, recovery, query=run_exp04.OUTPUT_QUERY):
+                self.events.append(('check_output', recovery, query))
+                return {'ok': True, 'answer': '5', 'ready_seconds': 0.8}
+
+        orchestrator = self.orchestrator(Direct)
+        orchestrator.work = self.root  # B0 and the stats under the temporary tree
+        orchestrator.b0_digest, orchestrator.b0_stat = measure.tree_digest(b0), measure.tree_stat(b0)
+        listed = self.SELECTED if selected is None else selected
+        orchestrator.source.agent = lambda *args, timeout=600: {
+            'selected': listed, 'digest': measure.files_digest(source, listed)}
+        return orchestrator, orchestrator.verify(method, {'output': output}, {})
+
+    def test_direct_output_matches_the_files_the_datadir_mode_selects(self):
+        output_files = {path: self.SOURCE_FILES[path] for path in self.SELECTED}
+        orchestrator, result = self.direct_run('pgdelta_direct', output_files)
+        self.assertTrue(result['verified'], result)
+        self.assertTrue(result['identical_to_source'])
+        self.assertEqual(result['selected_files'], 4)
+        self.assertEqual(result['capture_bytes'], 3 + 64 + 8192 + 128)
+        self.assertEqual(result['wal']['wal_bytes'], 128)
+        self.assertEqual(result['output_start']['ready_seconds'], 0.8)
+        self.assertIn(('check_output', False, run_exp04.OUTPUT_QUERY), orchestrator.events)
+        row = measure.summary_row({'method': 'pgdelta_direct', 'verification': result})
+        self.assertEqual((row['identical_to_s'], row['output_start_s']), (True, 0.8))
+        # A changed page, an extra file and a missing one are all differences.
+        for change in ({'base/5/16384': b'X' * 8192}, {'postmaster.opts': b'opts\n'}):
+            with self.subTest(change=sorted(change)):
+                _, result = self.direct_run('pgdelta_direct', {**output_files, **change})
+                self.assertFalse(result['verified'])
+                self.assertFalse(result['identical_to_source'])
+        _, result = self.direct_run('pgdelta_direct', output_files, selected=[*self.SELECTED, 'global/missing'])
+        self.assertFalse(result['identical_to_source'])
+        self.assertIn('selected but not a regular file on the source: global/missing', result['differences'])
+
+    def test_direct_in_place_must_leave_no_marker(self):
+        output_files = {path: self.SOURCE_FILES[path] for path in self.SELECTED}
+        _, result = self.direct_run('pgdelta_direct_inplace', output_files)
+        self.assertTrue(result['verified'], result)
+        self.assertEqual(result['in_place_leftovers'], [])
+        _, result = self.direct_run('pgdelta_direct_inplace', {**output_files, 'pgdelta-incomplete.json': b'{}'})
+        self.assertFalse(result['verified'])
+        self.assertEqual(result['in_place_leftovers'], ['pgdelta-incomplete.json'])
+
+    def test_staged_in_place_checks_its_leftovers_too(self):
+        class Staged(StubOrchestrator):
+            verify = run_exp04.Orchestrator.verify
+
+            def local_command(self, argv, log_name, **kwargs):
+                return {'host': 'dest', 'argv': [str(a) for a in argv], 'exit_code': 0, 'wall_seconds': 0.1}
+
+        capture = self.make_tree('S', {'PG_VERSION': b'17\n', 'global/pg_control': b'C' * 8})
+        output = self.make_tree('B', {'PG_VERSION': b'17\n', 'global/pg_control': b'C' * 8,
+                                      'global/pg_control.pgdelta': b'C' * 8})
+        orchestrator = self.orchestrator(Staged)
+        orchestrator.b0_digest, orchestrator.b0_stat = {'entries': {}, 'device': -1}, {}
+        orchestrator.source.agent = lambda *args, timeout=600: measure.tree_digest(capture)
+        result = orchestrator.verify('pgdelta_inplace', {'output': output, 'capture': str(capture)}, {})
+        self.assertEqual(result['in_place_leftovers'], ['global/pg_control.pgdelta'])
+        self.assertFalse(result['verified'])
+
+    def test_in_place_leftovers(self):
+        def digest(*paths):
+            return {'entries': {path: ['file', 1, 'x', 0o600, 1, 1] for path in paths}}
+        self.assertEqual(measure.in_place_leftovers(digest('PG_VERSION', 'global/pg_control')), [])
+        self.assertEqual(measure.in_place_leftovers(digest('global/pg_control', 'pgdelta-incomplete.json',
+                                                           'global/pg_control.incomplete', 'base/x.pgdelta-tmp')),
+                         ['base/x.pgdelta-tmp', 'global/pg_control.incomplete', 'pgdelta-incomplete.json'])
+        self.assertEqual(measure.in_place_leftovers(digest('PG_VERSION', 'global/pgdelta_pg_control')),
+                         ['global/pgdelta_pg_control', 'global/pg_control is missing'])
+
+    def test_files_digest_and_the_datadir_list(self):
+        root = self.make_tree('d', {'a': b'1', 'b/c': b'22'})
+        (root / 'link').symlink_to('a')
+        digest = measure.files_digest(root, ['b/c', 'a', 'link', 'gone', 'a'])
+        self.assertEqual(sorted(digest['entries']), ['a', 'b/c'])
+        self.assertEqual(digest['missing'], ['gone', 'link'])
+        self.assertEqual((digest['files'], digest['bytes']), (2, 3))
+        self.assertEqual(digest['entries']['b/c'][:3], measure.tree_digest(root)['entries']['b/c'][:3])
+        self.assertEqual(measure.files_of(measure.tree_digest(root))['files'], 2)
+        self.assertEqual(measure.parse_datadir_list('["a", "b/c"]'), ['a', 'b/c'])
+        self.assertEqual(measure.parse_datadir_list('{"files": ["a"], "bytes": 1}'), ['a'])
+        self.assertEqual(measure.parse_datadir_list('reading /x\n["a"]\n'), ['a'])
+        for bad in ('', '{"x": 1}', '[1, 2]'):
+            with self.subTest(text=bad), self.assertRaises(ValueError):
+                measure.parse_datadir_list(bad)
+
+    def test_agent_hashes_what_the_datadir_mode_lists(self):
+        root = self.make_tree('data', {'PG_VERSION': b'17\n', 'postmaster.pid': b'1\n'})
+        listing = mock.Mock(returncode=0, stdout='["PG_VERSION"]\n', stderr='')
+        with mock.patch.object(agent.subprocess, 'run', return_value=listing) as run:
+            result = agent.cmd_datadir_digest(Namespace(root=str(root), pg_controldata='/b/pg_controldata'))
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[1:], ['-m', 'pgdelta.datadir', 'list', str(root), '--pg-controldata', '/b/pg_controldata',
+                                    '--sources'])
+        self.assertEqual(result['selected'], ['PG_VERSION'])
+        self.assertEqual(list(result['digest']['entries']), ['PG_VERSION'])
+        with mock.patch.object(agent.subprocess, 'run', return_value=mock.Mock(returncode=2, stdout='', stderr='bad')), \
+                self.assertRaises(SystemExit):
+            agent.cmd_datadir_digest(Namespace(root=str(root), pg_controldata='/b/pg_controldata'))
+        self.assertIs(agent.xfs_reflink('meta-data=/dev/md127 isize=512\n= crc=1 finobt=1, sparse=1, rmapbt=0\n'
+                                        '= reflink=1 bigtime=1 inobtcount=1'), True)
+        self.assertIs(agent.xfs_reflink('= reflink=0'), False)
+        self.assertIsNone(agent.xfs_reflink(None))
+
+
+    def test_an_unlogged_relation_is_hashed_as_pgdelta_sends_it(self):
+        # PostgreSQL 17, an unlogged table with 2 rows, stopped cleanly: its main fork holds a page,
+        # its init fork none. pgdelta sends the main fork with the init fork's bytes (the empty
+        # relation recovery's reset would leave), and `list --sources` says so.
+        root = self.make_tree('data', {'PG_VERSION': b'17\n', 'base/5/16384': b'\x01' * 8192,
+                                       'base/5/16384_init': b''})
+        pairs = [['PG_VERSION', 'PG_VERSION'], ['base/5/16384', 'base/5/16384_init'],
+                 ['base/5/16384_init', 'base/5/16384_init']]
+        listing = mock.Mock(returncode=0, stdout=json.dumps(pairs, indent=1) + '\n', stderr='')
+        with mock.patch.object(agent.subprocess, 'run', return_value=listing):
+            result = agent.cmd_datadir_digest(Namespace(root=str(root), pg_controldata='/b/pg_controldata'))
+        self.assertEqual(result['selected'], ['PG_VERSION', 'base/5/16384', 'base/5/16384_init'])
+        self.assertEqual(result['read_from'], {'base/5/16384': 'base/5/16384_init'})
+        self.assertIs(result['sources'], True)
+        empty = ['file', 0, hashlib.sha256(b'').hexdigest()]
+        self.assertEqual(result['digest']['entries']['base/5/16384'][:3], empty)
+        # The output pgdelta wrote: the main fork empty, as sent. It matches.
+        output = self.make_tree('O', {'PG_VERSION': b'17\n', 'base/5/16384': b'', 'base/5/16384_init': b''})
+        same, differences = measure.compare_digests(result['digest'], measure.files_of(measure.tree_digest(output)))
+        self.assertTrue(same, differences)
+
+    def test_a_list_without_sources_is_read_as_paths(self):
+        root = self.make_tree('data', {'PG_VERSION': b'17\n'})
+        refused = mock.Mock(returncode=2, stdout='', stderr='error: unrecognized arguments: --sources\n')
+        plain = mock.Mock(returncode=0, stdout='["PG_VERSION"]\n', stderr='')
+        with mock.patch.object(agent.subprocess, 'run', side_effect=[refused, plain]) as run:
+            result = agent.cmd_datadir_digest(Namespace(root=str(root), pg_controldata='/b/pg_controldata'))
+        self.assertEqual([call.args[0][-1] for call in run.call_args_list], ['--sources', '/b/pg_controldata'])
+        self.assertEqual((result['selected'], result['sources'], result['read_from']), (['PG_VERSION'], False, {}))
+        self.assertEqual(measure.parse_datadir_sources('[["a", "a_init"], "b"]'), {'a': 'a_init', 'b': 'b'})
+        self.assertEqual(measure.parse_datadir_list('[["a", "a_init"], "b"]'), ['a', 'b'])
+        for bad in ('[["a"]]', '[["a", 1]]', '[{"a": "b"}]'):
+            with self.subTest(text=bad), self.assertRaises(ValueError):
+                measure.parse_datadir_sources(bad)
+
+
+def fiemap_reply(*extents):
+    """An FS_IOC_FIEMAP reply buffer holding (logical, length, flags) extents."""
+    buffer = bytearray(measure.FIEMAP_HEADER.size + len(extents) * measure.FIEMAP_EXTENT.size)
+    measure.FIEMAP_HEADER.pack_into(buffer, 0, 0, 0, 0, len(extents), len(extents), 0)
+    for index, (logical, length, flags) in enumerate(extents):
+        measure.FIEMAP_EXTENT.pack_into(buffer, measure.FIEMAP_HEADER.size + index * measure.FIEMAP_EXTENT.size,
+                                        logical, 4096 * index, length, 0, 0, flags, 0, 0, 0)
+    return buffer
+
+
+class SharedExtents(unittest.TestCase):
+    """FIEMAP's shared flag: whether a copy is a reflink clone (XFS) or real bytes."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        (self.root / 'base').mkdir()
+        (self.root / 'base' / '16384').write_bytes(b'x' * 100)
+        (self.root / 'PG_VERSION').write_bytes(b'17\n')
+
+    def test_layout_and_parse(self):
+        # The structures' sizes match the ioctl number's size field (0x20) and the kernel's 56-byte extent.
+        self.assertEqual(measure.FIEMAP_HEADER.size, 32)
+        self.assertEqual(measure.FIEMAP_EXTENT.size, 56)
+        self.assertEqual((measure.FS_IOC_FIEMAP >> 16) & 0x3fff, measure.FIEMAP_HEADER.size)
+        reply = fiemap_reply((0, 65536, measure.FIEMAP_EXTENT_SHARED), (65536, 4096, measure.FIEMAP_EXTENT_LAST))
+        self.assertEqual(measure.parse_fiemap(reply), [(0, 65536, 0x2000), (65536, 4096, 0x1)])
+
+    def test_shared_bytes_follow_the_flag_across_batches(self):
+        replies = [fiemap_reply((0, 8192, measure.FIEMAP_EXTENT_SHARED), (8192, 8192, 0)),
+                   fiemap_reply((16384, 4096, measure.FIEMAP_EXTENT_SHARED | measure.FIEMAP_EXTENT_LAST))]
+        starts = []
+
+        def ioctl(fd, request, buffer):
+            self.assertEqual(request, measure.FS_IOC_FIEMAP)
+            starts.append(measure.FIEMAP_HEADER.unpack_from(buffer, 0)[0])
+            reply = replies.pop(0)
+            buffer[:len(reply)] = reply
+            return 0
+
+        with mock.patch.object(measure.fcntl, 'ioctl', ioctl):
+            self.assertEqual(measure.shared_extent_bytes(self.root / 'PG_VERSION'), 12288)
+        self.assertEqual(starts, [0, 16384])  # the second call starts where the first batch ended
+
+    def test_a_tree_that_shares_blocks_and_one_that_does_not(self):
+        def clone(fd, request, buffer):
+            buffer[:] = fiemap_reply((0, 4096, measure.FIEMAP_EXTENT_SHARED | measure.FIEMAP_EXTENT_LAST)) \
+                + bytes(len(buffer) - measure.FIEMAP_HEADER.size - measure.FIEMAP_EXTENT.size)
+            return 0
+
+        def copy(fd, request, buffer):
+            buffer[:measure.FIEMAP_HEADER.size + measure.FIEMAP_EXTENT.size] = fiemap_reply(
+                (0, 4096, measure.FIEMAP_EXTENT_LAST))
+            return 0
+
+        with mock.patch.object(measure.fcntl, 'ioctl', clone):
+            found = measure.shared_extents(self.root)
+        self.assertEqual(found, {'supported': True, 'error': None, 'files': 2, 'shared_files': 2,
+                                 'shared_bytes': 8192, 'examples': ['PG_VERSION', 'base/16384']})
+        with mock.patch.object(measure.fcntl, 'ioctl', copy):
+            self.assertEqual(measure.shared_extents(self.root)['shared_files'], 0)
+
+    def test_without_fiemap_nothing_is_claimed(self):
+        with mock.patch.object(measure.fcntl, 'ioctl', side_effect=OSError(95, 'Operation not supported')):
+            found = measure.shared_extents(self.root)
+        self.assertIs(found['supported'], False)
+        self.assertIsNone(found['shared_files'])
+        self.assertIn('not supported', found['error'])
+        self.assertIsNone(measure.shared_extents(self.root / 'missing')['supported'])
+
+    def test_the_csv_reports_the_outputs_shared_bytes(self):
+        record = {'verification': {'shared_extents': {'shared_bytes': 2_000_000_000}}}
+        self.assertEqual(measure.summary_row(record)['output_shared_bytes'], 2_000_000_000)
+        self.assertIsNone(measure.summary_row({})['output_shared_bytes'])
+
+
+class LogicalDigest(unittest.TestCase):
+    def test_tables_are_exp01s(self):
+        from experiments.change_patterns import run_study
+        self.assertEqual(tuple(table for table, _ in measure.LOGICAL_TABLES), run_study.USER_TABLES)
+
+    def test_query_shape(self):
+        sql = measure.logical_digest_sql()
+        self.assertTrue(sql.startswith('SELECT json_build_object('))
+        for table, key in measure.LOGICAL_TABLES:
+            self.assertIn(f"'{table}', (SELECT json_build_object(", sql)
+            if key:
+                self.assertIn(f'{key} / 65536 AS b', sql)
+                self.assertIn(f"md5(string_agg(md5(t::text), '' ORDER BY {key}))", sql)
+        self.assertIn("string_agg(md5(r), '' ORDER BY r)", measure.table_digest_sql('pgbench_history', None))
+        self.assertIn('TimeZone=UTC', measure.LOGICAL_SESSION_OPTIONS)
+
+    def test_compare(self):
+        self.assertEqual(measure.compare_logical(LOGICAL, json.loads(json.dumps(LOGICAL))), (True, []))
+        changed = json.loads(json.dumps(LOGICAL))
+        changed['pgbench_accounts']['md5'] = 'f' * 32
+        del changed['events']
+        same, differences = measure.compare_logical(LOGICAL, changed)
+        self.assertFalse(same)
+        self.assertEqual([difference.split(':')[0] for difference in differences], ['events', 'pgbench_accounts'])
+        # Counts are compared as numbers: sum() comes back as JSON 5 or "5" alike.
+        text_counts = {table: {**value, 'rows': str(value['rows'])} for table, value in LOGICAL.items()}
+        self.assertTrue(measure.compare_logical(LOGICAL, text_counts)[0])
+
+
+class PgBackRestConfig(unittest.TestCase):
+    work = '/data/exp04'
+
+    def parse(self, text):
+        import configparser
+        parser = configparser.ConfigParser(interpolation=None)
+        parser.optionxform = str
+        parser.read_string(text)
+        return parser
+
+    def test_source_config_has_a_stanza_and_a_repository_per_variant(self):
+        text = measure.pgbackrest_source_config(self.work, measure.PGBACKREST_METHODS,
+                                                pg_path='/data/exp04/src/data', socket_path='/data/exp04/src/s',
+                                                port=5432, user='study')
+        config = self.parse(text)
+        self.assertEqual(config.sections(), ['global', *measure.PGBACKREST_METHODS])
+        self.assertEqual(dict(config['global']),
+                         {'log-path': '/data/exp04/pgbackrest/log', 'lock-path': '/data/exp04/pgbackrest/lock',
+                          'spool-path': '/data/exp04/pgbackrest/spool', 'log-level-console': 'info',
+                          'log-level-file': 'detail', 'start-fast': 'y', 'process-max': '4',
+                          'repo1-retention-full': '1'})
+        common = {'pg1-path': '/data/exp04/src/data', 'pg1-socket-path': '/data/exp04/src/s', 'pg1-port': '5432',
+                  'pg1-user': 'study'}
+        self.assertEqual(dict(config['pgbackrest_zst']),
+                         {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_zst', 'compress-type': 'zst'})
+        self.assertEqual(dict(config['pgbackrest_none']),
+                         {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_none',
+                          'compress-type': 'none', 'compress-level-network': '0'})
+        self.assertEqual(dict(config['pgbackrest_block']),
+                         {**common, 'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_block', 'compress-type': 'zst',
+                          'repo1-bundle': 'y', 'repo1-block': 'y'})
+        # Only the selected variants.
+        only = self.parse(measure.pgbackrest_source_config(self.work, ['pgbackrest_none'], pg_path='p', socket_path='s',
+                                                           port=5432, user='study'))
+        self.assertEqual(only.sections(), ['global', 'pgbackrest_none'])
+
+    def test_dest_config_reaches_the_repository_over_ssh_with_the_harness_key(self):
+        config = self.parse(measure.pgbackrest_dest_config(self.work, ['pgbackrest_zst'], source_ip='10.0.0.12',
+                                                           ssh_user='bench'))
+        self.assertEqual(config['global']['repo1-host'], '10.0.0.12')
+        self.assertEqual(config['global']['repo1-host-user'], 'bench')
+        self.assertEqual(config['global']['repo1-host-config'], '/data/exp04/pgbackrest/pgbackrest.conf')
+        self.assertEqual(config['global']['cmd-ssh'], '/data/exp04/pgbackrest/ssh')
+        self.assertEqual(dict(config['pgbackrest_zst']), {'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_zst'})
+        self.assertNotIn('pg1-path', config['pgbackrest_zst'])  # given on the restore's command line
+        ssh = measure.pgbackrest_ssh_config('10.0.0.12', 'bench', '/home/bench/.ssh/exp04_ed25519')
+        for line in ('Host 10.0.0.12', '    User bench', '    IdentityFile /home/bench/.ssh/exp04_ed25519',
+                     '    BatchMode yes', '    StrictHostKeyChecking accept-new', '    IdentitiesOnly yes'):
+            self.assertIn(line + '\n', ssh)
+        wrapper = measure.pgbackrest_ssh_wrapper('/data/exp04/pgbackrest/ssh_config')
+        self.assertTrue(wrapper.startswith('#!/bin/sh\n'))
+        self.assertTrue(wrapper.endswith('exec ssh -F /data/exp04/pgbackrest/ssh_config "$@"\n'))
+
+    def test_pgbackrest_none_is_uncompressed_on_the_network_too(self):
+        # With compress-type=none and a remote repository, pgBackRest compresses what it sends
+        # (compress-level-network, default 3) unless the level is 0 where the command runs: dest.
+        config = self.parse(measure.pgbackrest_dest_config(self.work, measure.PGBACKREST_METHODS,
+                                                           source_ip='10.0.0.12', ssh_user='bench'))
+        self.assertEqual(dict(config['pgbackrest_none']), {'repo1-path': '/data/exp04/pgbackrest/repo-pgbackrest_none',
+                                                           'compress-level-network': '0'})
+        for stanza in ('pgbackrest_zst', 'pgbackrest_block'):
+            self.assertNotIn('compress-level-network', config[stanza])
+        self.assertNotIn('compress-level-network', config['global'])
+        self.assertEqual(measure.pgbackrest_dest_options('pgbackrest_none'), {'compress-level-network': '0'})
+        self.assertEqual(measure.pgbackrest_dest_options('pgbackrest_zst'), {})
+
+    def test_archive_and_restore_commands(self):
+        self.assertEqual(measure.pgbackrest_archive_command('/usr/bin/pgbackrest', '/c', ['pgbackrest_zst']),
+                         '/usr/bin/pgbackrest --config=/c --stanza=pgbackrest_zst archive-push %p')
+        self.assertEqual(measure.pgbackrest_restore_argv('/usr/bin/pgbackrest', '/c', 'pgbackrest_none', '/o/B'),
+                         ['/usr/bin/pgbackrest', '--config=/c', '--stanza=pgbackrest_none', '--delta',
+                          '--process-max=4', '--pg1-path=/o/B', 'restore'])
+        lines = source_cluster.archive_lines("a 'b' && c")
+        self.assertEqual(lines, ['archive_mode = on', "archive_command = 'a ''b'' && c'"])
+
+    def test_restore_log_and_backup_info(self):
+        parsed = measure.parse_pgbackrest_restore(PGBACKREST_RESTORE_LOG)
+        self.assertEqual(parsed, {'version': '2.54.0', 'backup_set': '20261023-120000F', 'restore_size': '2.1GB',
+                                  'file_total': 1012, 'file_lines': 3, 'files_matched': 2, 'completed': True,
+                                  'reported_ms': 3301, 'statistics': {'socket.client': {'total': 5}}})
+        empty = measure.parse_pgbackrest_restore('')
+        self.assertIsNone(empty['completed'])
+        self.assertIsNone(empty['files_matched'])
+        aborted = measure.parse_pgbackrest_restore('P00   INFO: restore command end: aborted with exception [075]')
+        self.assertIs(aborted['completed'], False)
+        summary = measure.pgbackrest_backup_summary(PGBACKREST_INFO)
+        self.assertEqual(summary, {'stanza': 'pgbackrest_zst', 'label': '20261023-120000F', 'type': 'full',
+                                   'size_bytes': 2_112_000_000, 'delta_bytes': 2_112_000_000,
+                                   'repo_size_bytes': 310_000_000, 'repo_delta_bytes': 310_000_000,
+                                   'start': 1761220800, 'stop': 1761220830})
+        self.assertIsNone(measure.pgbackrest_backup_summary('[{"name": "s", "backup": []}]')['backup'])
+
+
+class SourceClusterCommands(unittest.TestCase):
+    def test_start_and_stop_argv(self):
+        self.assertEqual(source_cluster.start_argv('/w/src', '/b', '/w/logs/server.log'),
+                         ['/b/pg_ctl', '-D', '/w/src/data', '-l', '/w/logs/server.log', '-o', '-k /w/src/s -p 5432',
+                          '-w', '-t', '600', 'start'])
+        self.assertEqual(source_cluster.stop_argv('/w/src', '/b'),
+                         ['/b/pg_ctl', '-D', '/w/src/data', '-m', 'fast', '-w', '-t', '600', 'stop'])
+
+    def test_a_stop_that_does_not_end_shut_down_fails(self):
+        args = Namespace(root='/w/src', bin_dir='/b')
+        results = [mock.Mock(returncode=0, stdout='', stderr=''),
+                   mock.Mock(returncode=0, stdout='Database cluster state:               in production\n')]
+        with mock.patch.object(source_cluster.subprocess, 'run', side_effect=results), \
+                self.assertRaises(SystemExit):
+            source_cluster.cmd_stop_clean(args)
+        results = [mock.Mock(returncode=0, stdout='', stderr=''),
+                   mock.Mock(returncode=0, stdout='Database cluster state:               shut down\n')]
+        with mock.patch.object(source_cluster.subprocess, 'run', side_effect=results):
+            self.assertEqual(source_cluster.cmd_stop_clean(args)['state'], 'shut down')
+
+    def test_start_leaves_a_running_cluster_be(self):
+        with mock.patch.object(source_cluster.subprocess, 'run',
+                               return_value=mock.Mock(returncode=0, stdout='server is running', stderr='')) as run:
+            result = source_cluster.cmd_start(Namespace(root='/w/src', bin_dir='/b', log_dir='/w/logs'))
+        self.assertEqual(result['already_running'], True)
+        self.assertEqual(run.call_args.args[0], ['/b/pg_ctl', '-D', '/w/src/data', 'status'])
+
+
+class InfraScripts(unittest.TestCase):
+    SCRIPT = Path(__file__).resolve().parents[1] / 'infra' / 'gcp' / 'reformat_dest_xfs.sh'
+
+    def run_script(self, *args, host='pgd-dest', uid='0'):
+        """The script with stand-ins for id and hostname, and every destructive command refusing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_dir = Path(tmp)
+            stubs = {'id': f'echo {uid}', 'hostname': f'echo {host}'}
+            stubs.update({name: 'echo "$0 must not run" >&2; exit 99'
+                          for name in ('umount', 'mkfs.xfs', 'mount', 'chown', 'chmod', 'wipefs')})
+            for name, body in stubs.items():
+                path = bin_dir / name
+                path.write_text(f'#!/bin/sh\n{body}\n')
+                path.chmod(0o755)
+            env = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}'}
+            return subprocess.run(['bash', str(self.SCRIPT), *args], capture_output=True, text=True,
+                                  env=env, timeout=60)
+
+    def test_it_refuses_without_yes_root_or_the_destination(self):
+        self.assertTrue(os.access(self.SCRIPT, os.X_OK))
+        cases = ((('',), {}, 'usage'), (('--yes',), {'uid': '501'}, 'run as root'),
+                 (('--yes',), {'host': 'pgd-source'}, 'refusing to run on pgd-source'),
+                 (('--yes',), {'host': 'laptop'}, 'for pgd-dest only'))
+        for args, kwargs, message in cases:
+            with self.subTest(message=message):
+                result = self.run_script(*[arg for arg in args if arg], **kwargs)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(message, result.stderr)
+                self.assertNotIn('must not run', result.stderr)
+
+    def test_it_refuses_without_the_array(self):
+        if Path('/dev/md/pgdata').exists():
+            self.skipTest('this machine has the array')
+        result = self.run_script('--yes')
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn('no md array', result.stderr)
+        self.assertNotIn('must not run', result.stderr)
+
+    def test_startup_installs_pgbackrest_and_xfsprogs(self):
+        text = (self.SCRIPT.parent / 'startup.sh').read_text()
+        self.assertIn('postgresql-17 postgresql-client-17 pgbackrest xfsprogs', text)
+        self.assertIn('install --no-install-recommends pgbackrest xfsprogs', text)
+
+    def test_remote_provision_runs_this_trees_startup_script_on_both(self):
+        vms = {'source': {'external': '203.0.113.1'}, 'dest': {'external': '203.0.113.2'}}
+        calls = []
+
+        def ssh(config, address, command, **kwargs):
+            calls.append((address, command, kwargs['input_bytes']))
+            return mock.Mock(stdout=b'pgd startup done\n')
+
+        with mock.patch.object(remote, 'instances', return_value=vms), mock.patch.object(remote, 'ssh', ssh), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(remote.cmd_provision({}, Namespace()), 0)
+        script = (self.SCRIPT.parent / 'startup.sh').read_bytes()
+        self.assertEqual([(address, payload) for address, _, payload in calls],
+                         [('203.0.113.1', script), ('203.0.113.2', script)])
+        self.assertIn('sudo bash "$f" < /dev/null', calls[0][1])
+
+
+class NewMethodReport(unittest.TestCase):
+    def rows(self):
+        def row(speed, gbit, method, total, **extra):
+            return {'trial_id': 't0', 'speed': speed, 'target_gbit': gbit, 'method': method, 'total_s': total,
+                    'status': 'pass', 'measured_s2d_gbit': None, 'error': '', **extra}
+        return [row('5g', 5.0, 'full', 5.0, transfer_s=5.0),
+                row('5g', 5.0, 'pgdelta', 6.0, receiver_start_s=0.2, capture_s=2.0, transfer_s=4.0, rebuild_s=3.3,
+                    fsync_s=1.7, serial_total_s=6.2),
+                row('5g', 5.0, 'pgdelta_direct', 4.8, receiver_start_s=0.3, transfer_s=4.5, rebuild_s=3.4,
+                    fsync_s=1.7),
+                row('5g', 5.0, 'pgdelta_fsync_worker', 4.9, receiver_start_s=0.2, capture_s=2.0, transfer_s=2.9,
+                    fsync_wait_s=0.3, serial_total_s=5.1),
+                row('5g', 5.0, 'pgbackrest_zst', 3.0, restore_s=3.0),
+                row('5g', 5.0, 'pgbackrest_none', 9.0, restore_s=9.0, status='pending')]
+
+    def test_ratios_and_phases_of_the_new_methods(self):
+        text = report.render(self.rows())
+        self.assertIn('| pgdelta_direct | 0.96 | never (faster at every speed) |', text)
+        self.assertIn('| pgbackrest_zst | 0.60 | never (faster at every speed) |', text)
+        self.assertIn('| pgdelta_fsync_worker (serial) | 1.02 | 5g |', text)
+        self.assertIn('| pgbackrest_none |  | n/a |', text)  # pending: not in the medians
+        self.assertIn('pgbackrest_none: pending', text)
+        phases = text.split('Median timed phases')[1]
+        self.assertIn('| method | speed | runs | receiver_start_s | capture_s | transfer_s | restore_s | rebuild_s | '
+                      'fsync_s | fsync_wait_s | total_s |', phases)
+        self.assertIn('| pgdelta_direct | 5g | 1 | 0.30 |  | 4.50 |  | 3.40 | 1.70 |  | 4.80 |', phases)
+        self.assertIn('| pgbackrest_zst | 5g | 1 |  |  |  | 3.00 |  |  |  | 3.00 |', phases)
+        self.assertIn('restore alone', text)
+
+    def test_new_csv_columns(self):
+        record = {'method': 'pgdelta_fsync_wb', 'preparation': {'wall_seconds': 0.4},
+                  'phases': {'receiver_capture': {'wall_seconds': 1.1, 'parts': {'receiver': {'wall_seconds': 0.2}}},
+                             'transfer': {'wall_seconds': 3.0}},
+                  'tool_reported': {'timings_seconds': {'rebuild': 2.0, 'fsync': 0.1, 'verify_wait': 0.05},
+                                    'fsync_wait_seconds': 0.6,
+                                    'modes': {'in_place': False, 'fsync_mode': 'writeback', 'source_kind': 'backup'}},
+                  'verification': {'identical_to_capture': True}}
+        row = measure.summary_row(record)
+        self.assertEqual(set(row), set(measure.CSV_FIELDS))
+        self.assertEqual((row['rebuild_s'], row['fsync_s'], row['fsync_wait_s'], row['verify_wait_s']),
+                         (2.0, 0.1, 0.6, 0.05))
+        self.assertEqual((row['in_place'], row['fsync_mode'], row['source_kind']), (False, 'writeback', 'backup'))
+        self.assertEqual((row['receiver_start_s'], row['untimed_setup_s'], row['restore_s']), (0.2, 0.4, None))
+        for column in ('restore_s', 'untimed_setup_s', 'rebuild_s', 'fsync_s', 'fsync_wait_s', 'verify_wait_s',
+                       'in_place', 'fsync_mode', 'source_kind', 'logical_match', 'output_start_s'):
+            self.assertIn(column, measure.CSV_FIELDS)
+        for column in ('restore_s', 'untimed_setup_s', 'rebuild_s', 'fsync_s', 'fsync_wait_s', 'output_start_s'):
+            self.assertIn(column, report.NUMERIC)
+
+
+PG_BIN = Path(os.environ.get('PGDELTA_TEST_PG_BIN', '/opt/homebrew/opt/postgresql@17/bin'))
+
+
+@unittest.skipUnless(all((PG_BIN / tool).exists() for tool in ('initdb', 'pg_ctl', 'psql', 'pgbench')),
+                     f'PostgreSQL binaries not found in {PG_BIN}')
+class OutputOnACluster(unittest.TestCase):
+    """The start of an output and the logical digest, on a real PostgreSQL."""
+
+    def test_the_output_starts_despite_the_sources_settings_and_its_digest_follows_its_rows(self):
+        from experiments.change_patterns import workloads
+        tmp = tempfile.mkdtemp(prefix='e4-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+
+        class Real(StubOrchestrator):
+            local_command = run_exp04.Orchestrator.local_command
+
+        orchestrator = Real(tmp, FakeClock(), ['--bin-dir', str(PG_BIN), '--gnu-time', 'none'])
+        self.addCleanup(orchestrator.pool.shutdown)
+        data = Path(tmp) / 'out' / 'pgdelta_direct'
+        subprocess.run([str(PG_BIN / 'initdb'), '-D', str(data), '-U', 'study', '--auth=trust', '--no-sync',
+                        '-E', 'UTF8', '--locale=C'], check=True, capture_output=True)
+        # The source's settings, which would stop it starting here or make it archive.
+        with open(data / 'postgresql.conf', 'a') as stream:
+            stream.write("listen_addresses = '192.0.2.1'\narchive_mode = on\narchive_command = 'false'\n")
+        settings = ("SELECT current_setting('archive_mode') || ',' || current_setting('listen_addresses') || ',' "
+                    "|| current_setting('port');")
+        with mock.patch.object(run_exp04, 'log'):
+            result = orchestrator.check_output('pgdelta_direct', data, recovery=False, query=settings)
+        self.assertTrue(result['ok'], (result, orchestrator.dest_log('pgdelta_direct-output-server.log').read_text()))
+        self.assertEqual(result['answer'], 'off,,5433')
+        self.assertFalse((data / 'postmaster.pid').exists())
+        # Tables to digest: pgbench at scale 1 and a few events.
+        start = orchestrator.output_start_argv(data, Path(tmp) / 'load.log')
+        subprocess.run([str(part) for part in start], check=True, capture_output=True, env=run_exp04.server_env())
+        try:
+            socket_dir = str(orchestrator.output_socket)
+            subprocess.run([str(PG_BIN / 'pgbench'), '-i', '-q', '-s', '1', '-h', socket_dir, '-p', '5433',
+                            '-U', 'study', 'postgres'], check=True, capture_output=True)
+            ddl = workloads.EVENTS_DDL + '\n' + workloads.events_prefill_sql(1000)
+            subprocess.run([str(PG_BIN / 'psql'), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', socket_dir, '-p', '5433',
+                            '-U', 'study', '-d', 'postgres', '-c', ddl], check=True, capture_output=True)
+
+            def digest():
+                return json.loads(orchestrator.query(measure.logical_digest_sql(), host=socket_dir, port=5433,
+                                                     log_name='digest.log'))
+
+            first = digest()
+            self.assertEqual({table: int(value['rows']) for table, value in first.items()},
+                             {'pgbench_accounts': 100000, 'pgbench_branches': 1, 'pgbench_tellers': 10,
+                              'pgbench_history': 0, 'events': 1000})
+            self.assertEqual(digest(), first)
+            orchestrator.query('UPDATE pgbench_accounts SET abalance = 1 WHERE aid = 70000;', host=socket_dir,
+                               port=5433, log_name='update.log')
+            second = digest()
+            same, differences = measure.compare_logical(first, second)
+            self.assertFalse(same)
+            self.assertEqual([difference.split(':')[0] for difference in differences], ['pgbench_accounts'])
+        finally:
+            orchestrator.stop_output('pgdelta_direct', data)
+        self.assertFalse((data / 'postmaster.pid').exists())
 
 
 if __name__ == '__main__':

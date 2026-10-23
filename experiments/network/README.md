@@ -7,7 +7,7 @@ On two real machines, at what link speed does pgdelta stop beating a full copy? 
 ## Setup
 
 - **Machines:** `pgd-source` and `pgd-dest` (see [infra/gcp/](../../infra/gcp/README.md)).
-  - `n2-standard-8` with Debian 12 and PostgreSQL 17 from PGDG, rsync 3.2.7, Python 3.11 and GNU time 1.9 (Debian package `time`, for each tool's peak memory).
+  - `n2-standard-8` with Debian 12 and PostgreSQL 17 from PGDG, rsync 3.2.7, Python 3.11 and GNU time 1.9 (Debian package `time`, for each tool's peak memory). pgBackRest from PGDG and xfsprogs are installed for T11 and T3 (d).
   - Local NVMe SSDs striped at `/data`: 4 per VM, about 1.6 GB/s writes and 2.0 GB/s reads with direct I/O. The design asked for 2, but the zone had no stock for that.
   - Both VMs are in one zone and talk over internal addresses. MTU 1460, virtio_net, 8 queues. A single TCP stream between them runs at 13 to 15 Gbit/s unthrottled.
 - **Control:** `run_exp04.py` runs on `pgd-dest`, the receiving side. It drives `pgd-source` over one multiplexed SSH connection with a key made on `pgd-dest` for this purpose.
@@ -38,11 +38,11 @@ Each **trial** is a (pattern, fraction, scale) triple. The defaults are scale 70
    - Then every method runs once, in an order drawn from `random.Random(--order-seed)`, a new order for every (repeat, speed).
 5. **Each method run:**
    1. Remove leftovers.
-   2. Untimed set-up: pgdelta's stats directory on the source; the rsync daemon on dest.
+   2. Untimed set-up: pgdelta's stats directory on the source; the rsync daemon on dest. For the optional methods of T3, T8a and T11 also B, a copy of B0, and a clean stop of the source (see [their section](#methods-for-t3-t8a-and-t11)).
    3. `sync; echo 3 > /proc/sys/vm/drop_caches` on both VMs, once, recorded with timestamps in `cache_drop`.
    4. The timed phases (below).
    5. Untimed verification.
-   6. Delete the outputs.
+   6. Delete the outputs (and restart the source, if it was stopped).
 
 | Method | Timed phases | Verification (untimed) |
 |---|---|---|
@@ -76,7 +76,89 @@ The staged methods (pgdelta and both rsync variants) each take their own fresh c
   - So the two serial bounds differ. rsync's has a cold read of B0 on its critical path (the copy), and pgdelta's has none. EXP-04's note says how N5 is read under the serial reading.
 - **`inplace_total_s`** (rsync only) is capture + transfer, rsync without its prep: the lower bound for patching B0 directly, which is faster but leaves B0 half-updated if anything fails. O is warm here and B0 would be cold, which only loosens the bound. `report.py` shows it as `rsync_* (in place)` rows.
 - **`total_no_ssh_s`**, **`serial_total_no_ssh_s`** and **`inplace_total_no_ssh_s`** are the same totals with the remote-launch overhead taken out (see **Wall time** below).
-- `prep_s`, `capture_s`, `prep_capture_s` (the pair, rsync only), `receiver_start_s` and `receiver_capture_s` (the pair, pgdelta only), `transfer_s` and `combine_s` are the phases and parts.
+- `prep_s`, `capture_s`, `prep_capture_s` (the pair, rsync only), `receiver_start_s` and `receiver_capture_s` (the pair, pgdelta only), `transfer_s`, `combine_s` and `restore_s` (pgBackRest) are the phases and parts.
+
+## Methods for T3, T8a and T11
+
+These were added on October 23, 2026, after the owner's decisions that closed T1 ([DECISIONS](../../docs/DECISIONS.md#decisions-of-october-23-2026-t1-closed)): B may be patched in place, and T11, T8a and T3 run next. None is in the default `--methods`; name them to run them.
+- **Each pgdelta method keeps EXP-06's engine and changes one thing.** That is 4 jobs on both ends and `--prefetch-basis on`, pinned by flags in `measure.PGDELTA_ENGINES` like `pgdelta`'s. Unlike `pgdelta` and `pgdelta_1thread`, which are left as they were, every new one also pins the receiver's `--fsync`, so a change of its default can't move them.
+- **The pre-run check asks for what the selected methods use.** It is `measure.pgdelta_required_options(methods)`, the union of their flags: the default methods need what they always did, T3's add the receiver's `--fsync` and `--in-place`, and T8a's add the sender's `--source-kind` and an importable `pgdelta.datadir` on both VMs. A run refuses to start on a pgdelta without them. These options are being added to pgdelta separately; the harness is written against that contract.
+- **Each record says what pgdelta reported.** `tool_reported.modes` holds `in_place`, `fsync_mode` and `source_kind`, wherever pgdelta's statistics keep them. `modes_ok` says whether they are the pinned ones, and is None while pgdelta reports none of them. `fsync_wait_seconds` is there too.
+  - **The fsync mode is the one in effect.** pgdelta's receiver reports `fsync`, the mode asked for, and `fsync_effective`, the one in effect: `writeback` falls back to `main` where `sync_file_range` is missing or refused. `modes.fsync_mode` (and the CSV's `fsync_mode`) is `fsync_effective`, and `tool_reported.fsync_requested` is `fsync`, so a `pgdelta_fsync_wb` run that fell back shows `main` and fails `modes_ok`. Only mode names count: the `fsync` among the timings is seconds. `switches_ok` now compares only the switches a method pins, so new keys in `switches` don't fail it.
+
+| Method | For | What it changes | Timed phases | Verification (untimed) |
+|---|---|---|---|---|
+| `pgdelta_gapfill_seq` | T3 (a) | `--rebuild gap-fill --verify sequential` | as `pgdelta` | as `pgdelta` |
+| `pgdelta_seq` | T3 (a), (c) | `--rebuild copy-patch --verify sequential` | as `pgdelta` | as `pgdelta` |
+| `pgdelta_fsync_wb` | T3 (b) | `--fsync writeback` | as `pgdelta` | as `pgdelta` |
+| `pgdelta_fsync_worker` | T3 (b) | `--fsync worker` | as `pgdelta` | as `pgdelta` |
+| `pgdelta_inplace` | T3 (e) | `--in-place --fsync main`: refreshes B, a copy of B0, with no `--output` and no `--rebuild` | as `pgdelta` | as `pgdelta`, on B; no in-place leftovers |
+| `incremental_cfr` | T3 (d) | `incremental`, combined with `pg_combinebackup --copy-file-range` instead of `--copy`: on XFS it clones B0's unchanged blocks into O, on ext4 it copies in the kernel | as `incremental`: **capture**, **combine** | as `incremental` |
+| `pgdelta_direct` | T8a | the sender reads the cleanly stopped source (`--source-kind datadir`); today's write path, a new O | **receiver_transfer**, one phase: **receiver_start**, then at once **transfer** | O's files byte-identical to the source's selected files; O starts and answers a query; no inode shared with B0 |
+| `pgdelta_direct_inplace` | T8a | as `pgdelta_direct`, refreshing B in place | as `pgdelta_direct` | as `pgdelta_direct`, on B; no in-place leftovers |
+| `pgbackrest_zst`, `pgbackrest_none`, `pgbackrest_block` | T11 | `pgbackrest restore --delta` of B from a repository on the source | **restore** | B starts, replays the archive, and its per-table digest equals the source's |
+
+`pgdelta`, run in the same invocation, is each T3 arm's baseline: copy-then-patch, pipelined, fsync in the main loop, a new O.
+
+**Untimed set-up, before the cache drop.** It is recorded in each run's `preparation`, and its wall time is the CSV's `untimed_setup_s`.
+- **The in-place methods and pgBackRest patch B, a copy of B0.** The copy is `cp -a --reflink=never B0 B`, then `sync -f B`, into the method's output path. B stands in for the old copy that a real refresh already has, and B0 stays untouched for the next method, as before. B is cold when the timers start.
+  - **B shares no block with B0.** Since coreutils 9.0 (Debian 12 has 9.1), `cp` defaults to `--reflink=auto`, which on dest's XFS would make B a clone of B0: every page then written into B would be a copy-on-write unshare of one of B0's blocks, which a real old copy doesn't pay. So the copy says `--reflink=never` ([EXP-10](../../docs/experiments/EXP-10-write-path.md)), and FIEMAP (`measure.shared_extents`) then checks that no extent of B is flagged shared; one that is fails the run before the cache drop. The check is in the step's `shared_extents`.
+- **pgdelta_direct\* stops the source cluster cleanly** with `source_cluster.py stop-clean`: `pg_ctl stop -m fast`, after which `pg_controldata` must say `shut down`. The cache drop comes after it, so the sender reads the source's files cold.
+
+**T3: staged like pgdelta.** The receiver starts beside the capture of S, prefetches B0 while it waits, and then comes the transfer. Totals, serial bounds and records are pgdelta's.
+- **`pgdelta_inplace`'s receiver** is `pgdelta receive --basis B --in-place --listen ... --jobs 4 --verify pipelined --prefetch-basis on --fsync main`. While it runs, pgdelta writes `B/pgdelta-incomplete.json` and keeps `global/pg_control` under another name, so PostgreSQL refuses to start on a half-done B. Its receipt is `B.pgdelta-receipt.json`, beside B.
+- **Its verification is pgdelta's, on B:** `pg_verifybackup`, B byte-identical to S, and no inode shared with B0. On top of that, `measure.in_place_leftovers`: no marker, no entry named after pgdelta, no other `global/pg_control*` file, and `global/pg_control` back in place. The comparison with S would catch any other leftover.
+
+**T8a: the sender reads the stopped source directly.**
+- **One timed phase, `receiver_transfer`, in two steps.** **receiver_start** runs on dest, from launching `pgdelta receive --basis B0 --output O --listen ...` until its log says it is listening. The **transfer** follows at once: `pgdelta send --source-kind datadir --source /data/exp04/src/data` on the source, until both ends exit. Each step's wall and start offset are in the phase's `steps`, and the CSV's `receiver_start_s` and `transfer_s` are those walls. `total_s` is the phase's wall, their sum to within microseconds. Without a capture, there is no serial bound.
+- **No untimed gap.** The receiver prefetches B0 from when it listens until the sender connects. Two timed phases would put the counter reads, about 0.12 s with two SSH calls, between the two, and the receiver would prefetch B0 there, off the clock, in nearly every run; with no capture to overlap, nothing forces that split. So the counters are read once around both steps (`counter_windows` 1), the sender starts as soon as the receiver listens, and `prefetch_untimed` is empty for these methods. The receiver's record, with its whole life, is in the phase's commands.
+- **Verification, while the source is still stopped:**
+  - The agent's `datadir-digest` runs `python -m pgdelta.datadir list --sources` on the source's data directory, which prints the files pgdelta's datadir mode selects (PostgreSQL's base-backup exclusions applied), each with the file whose bytes it sends, and hashes only those, from that file. The two differ for an unlogged relation's main fork, which pgdelta sends with its init fork's bytes, the empty relation that recovery's reset would leave, since the copy starts without recovery. The record's `verification.read_from` lists them. A pgdelta whose `list` has no `--sources` lists paths only, each hashed as itself. EXP-01's tables are all logged, so EXP-04's data has no such file.
+  - O's regular files must be exactly those files, with the same SHA-256. `identical_to_s` reports it, `capture_bytes` holds the selected files' bytes, and `wal_bytes` the WAL in O.
+  - Only then is O (or B) started on dest (below). It must answer `SELECT count(*) FROM pgbench_branches`, and is stopped again.
+  - B0 must be unchanged.
+- **The source is restarted after every pgdelta_direct\* run, whatever happened:** a failed transfer, a failed verification, or even a failed clean stop. `source_cluster.py start` uses the options `setup` started it with, and leaves a running cluster alone. The result is in the record's `source_restart`. If the source can't be restarted, the trial stops with an error, since every later method needs it. Only that trial stops: the next one builds a new source cluster and runs as usual.
+
+**Starting an output on dest** (pgdelta_direct\* and pgbackrest\_\*):
+- The command is `pg_ctl start -o '-p 5433 -k /data/exp04/vs -c listen_addresses= -c archive_mode=off'`, with `LC_ALL=C` and no `PG*` variables in its environment.
+- The settings override the output's `postgresql.conf`, which is the source's: it listens on the source's address, which dest doesn't have, and in a pgBackRest trial it would archive into the source's repositories.
+- It is stopped with `pg_ctl stop -m fast`, then `immediate` if needed. **If it still runs after both,** the run fails and its data directory is left in place, never removed under the running server: not by that run's clean-up, nor by a later run of the same method, nor by the trial's clean-up. The record's `output_stuck` says so. For the rest of the invocation, every method that would start an output (pgdelta_direct\*, pgbackrest\_\*) or use that path fails at once, before its set-up, since the server still holds port 5433; the other methods run as usual.
+- A run refuses to start if a server still holds port 5433 in `/data/exp04/vs` (from the socket's lock file, whose PID still runs), left by an earlier run that was killed, when it selects a method that starts an output.
+- `output_start_s` is the time from `pg_ctl start` until the server answered, recovery included.
+
+**T11: pgBackRest from an existing repository, the backup counted as already paid.**
+- **Trial set-up, untimed, before B0, and only when a pgbackrest method is selected.** On the source, under `/data/exp04/pgbackrest/`:
+  - a `pgbackrest.conf` with one stanza per selected variant, named after the method, each with its own repository (`repo1-path=.../repo-<method>`) and `process-max=4`;
+  - `stanza-create` for every stanza, before archiving starts, since each WAL file goes to all of them;
+  - `archive_mode = on`, with an `archive_command` that runs `pgbackrest archive-push` for every stanza in turn, added to `postgresql.conf` by `source_cluster.py archive`, which restarts the source once (a clean stop, then a start) and checks that the settings are in effect;
+  - `check` for each stanza.
+- **Its counterpart on dest:**
+  - a `pgbackrest.conf` with the source as repository host (`repo1-host` its address, `repo1-host-user` the SSH user, `repo1-host-config` the source's configuration), and a stanza section per variant with its `repo1-path` and the variant's options that act where the command runs (`measure.PGBACKREST_DEST_OPTIONS`: `compress-level-network=0` for `pgbackrest_none`);
+  - `cmd-ssh` set to a wrapper that runs `ssh -F /data/exp04/pgbackrest/ssh_config`, an SSH configuration of its own with the harness key (`--ssh-key`, `IdentitiesOnly`, `BatchMode`, `StrictHostKeyChecking accept-new`). `~/.ssh/config` is left alone.
+  - `pgbackrest info` for each stanza on dest proves that the repository is reachable without a prompt.
+- **One full backup per variant, untimed,** after the workload and its `CHECKPOINT`: `pgbackrest --stanza=<variant> --type=full backup`, with `start-fast=y`. `info --output=json` gives its size and repository size, in `trials/<trial>.json` (`pgbackrest.backups`) and each run's `tool_reported.backup`.
+- **Timed, on dest:** **restore** is `pgbackrest --config=... --stanza=<variant> --delta --process-max=4 --pg1-path=B restore`. Its 4 processes each reach the repository over SSH, where pgBackRest turns SSH compression off. With `compress-type=none` and a remote repository, pgBackRest would still compress what it sends itself, at `compress-level-network` (default 3), so `pgbackrest_none` sets it to 0 on dest, where the restore and the recovery's `archive-get` run, and is uncompressed on the wire, as EXP-08 registers. The zst variants send their files as stored. pgBackRest reads every file of B to compare checksums, and fetches what differs.
+- **Verification, untimed:**
+  - B is started on dest (above). Recovery fetches WAL with the `restore_command` pgBackRest wrote (`archive-get`, over SSH to the source), runs to the end of the archive, and promotes. The harness waits until `pg_is_in_recovery()` is false, takes B's per-table digest, and stops it.
+  - **The WAL that recovery fetches counts in pgBackRest's wire bytes** (EXP-08), as pgdelta's WAL travels inside its timed transfer. Both VMs' counters are read around the start, untimed, into `verification.recovery` (with `wal_files_restored`, the server log's `restored log file` lines), and those bytes are added to the run's wire totals: `wire_s2d_bytes` is the restore plus the recovery, and `recovery_wire_s2d_bytes` / `recovery_wire_d2s_bytes` hold the recovery's part, so the restore alone is the difference. Wall time and CPU stay the restore's (`totals.wire_bytes_scope` says so). The window also holds the start, the digest query (on a Unix socket) and the stop, which use no link, and the counter reads' own SSH traffic, as every window does.
+  - **How much WAL that is depends on the run order.** Recovery replays to the end of the archive, and every staged capture before it in the trial (pgdelta's and rsync's `pg_basebackup` S, the T3 methods) ends a WAL segment that the source archives to every stanza. So a restore later in the trial fetches more segments, about 16 MiB each for `pgbackrest_none` and nearly nothing compressed for the zst variants, whose segments are mostly zeros. `recovery_wal_files` shows it per run; compare the recovery's bytes across orders only with it in view.
+  - **The per-table digest** (`measure.logical_digest_sql`) covers EXP-01's tables: `pgbench_accounts`, `pgbench_branches`, `pgbench_tellers`, `pgbench_history` and `events`. For each, it takes the row count and an md5 over its rows in primary-key order, in two levels: per block of 65,536 key values, then over the blocks. `pgbench_history`, which has no key, hashes its rows sorted. The session runs in UTC with ISO dates, so a row's text doesn't depend on settings.
+  - **The source's digest is taken once, after the trial's last method,** beside the row-level ground truth and for the same reason: a scan of the source earlier would set hint bits and change its pages under the other methods. Until then each pgBackRest run's status is `pending` (`logical_match` empty). At the end it becomes `pass` or `fail`, and its record and the CSV are rewritten (`trials/<trial>.json` `logical_check`).
+- **What pgBackRest reports** (`tool_reported.restore`): from its console log and its detailed file log (kept as `<method>-pgbackrest-restore-file.log`), the restore size, the file total, the files that matched B, whether it completed, and its statistics line if it printed one. pgBackRest reports no network bytes; the wire columns are the measure.
+
+| Variant | Stanza options |
+|---|---|
+| `pgbackrest_zst` | `compress-type=zst` |
+| `pgbackrest_none` | `compress-type=none`, `compress-level-network=0` (on dest too: no compression on the network either) |
+| `pgbackrest_block` | `compress-type=zst`, `repo1-bundle=y`, `repo1-block=y` (block incremental) |
+
+**Archiving stays in pgBackRest runs.** Only a run with a pgbackrest method configures pgBackRest and turns archiving on, and only from its own trial set-up; every trial builds a fresh source cluster, and the repositories are removed with it. `run.json` `pgbackrest` records the configurations, the archive command and that archiving was on (it is null in other runs). Inside such a run, archiving does touch the other methods: each staged capture ends a WAL segment, which the source then pushes to every stanza in the background. To keep T3's and T8a's numbers clean, run T11 in its own invocation.
+
+**Different speeds per method.** T3's arms run unthrottled only, while T8a's run at 2, 5 Gbit/s and unthrottled. `--method-speeds METHODS=SPEEDS` (repeatable; methods joined with `+`) limits the named methods to some of `--speeds`; the others run at every speed, and a speed left with no method is skipped. `run.json` records `method_speeds` and `methods_by_speed`. Separate invocations work too, but each builds its own trial and B0.
+
+**ext4 or XFS** (T3 (d)): dest's `/data` is ext4 unless [`infra/gcp/reformat_dest_xfs.sh`](../../infra/gcp/README.md) has made it XFS with reflinks, which destroys everything on it. `run.json` records each VM's `data_mount` and, on XFS, `data_reflink`. Run the same T3 methods before and after.
+- **What clones on XFS, and what doesn't.** rsync's timed prep keeps `cp -a`'s default, so on XFS it clones B0, as T3 (d) means it to; pgdelta's copy-then-patch clones through `copy_file_range`; `incremental_cfr` combines with `pg_combinebackup --copy-file-range`, which clones too (`incremental` keeps `--copy`). The untimed copies of B0 for the in-place methods and pgBackRest never clone (above).
+- **Which kind of copy each output is** is measured, not assumed: every verification records the output's `shared_extents` from FIEMAP after the run (CSV `output_shared_bytes`, the bytes in extents shared with another file, which can only be B0). It is 0 on ext4, and empty where FIEMAP isn't available.
 
 ## Measurements
 
@@ -101,7 +183,7 @@ For every timed phase, both VMs' counters are read just before and just after it
   - **The same gap affects wall time.** B0 that the prefetch reads in the gap is read off the clock: the transfer would otherwise have read it, so pgdelta's `total_s` can understate by about that time. No other method has destination work in the gap. rsync's copy of B0 ends inside `prep_capture`, and `full` and `incremental` run nothing there.
     - Each pgdelta record measures it as `prefetch_untimed` (CSV: `untimed_gap_s`, `prefetch_untimed_s` and `prefetch_untimed_bytes_est`). That is the overlap of the prefetch's reading with the gap, from the receiver's wall-clock start and end against the phases' `ended_utc` and `started_utc`, all on pgd-dest's clock. The bytes are estimated at the prefetch's average rate.
     - `report.py` lists every run where it is above 0. It is at most the gap, about 0.12 s, or about 85 MB at the smoke run's cold read rate of B0 (725 MB/s).
-  - **Per-phase floor.** Every timed phase has its own counter window, and each window holds the exit of its "before" snapshot agent and the start of its "after" one (python3 over SSH on the source). `run.json` `phase_floor` measures this with three empty phases at start-up, per VM. The totals don't subtract it. `counter_windows` says how many windows a total holds: 1 for `full`, 2 for `incremental`, `pgdelta` and both rsync variants. (Before the overlap, rsync had a third, source-idle window for its prep.)
+  - **Per-phase floor.** Every timed phase has its own counter window, and each window holds the exit of its "before" snapshot agent and the start of its "after" one (python3 over SSH on the source). `run.json` `phase_floor` measures this with three empty phases at start-up, per VM. The totals don't subtract it. `counter_windows` says how many windows a total holds: 1 for `full`, `pgdelta_direct*` and `pgbackrest_*`, 2 for `incremental`, `pgdelta` (and T3's methods) and both rsync variants. (Before the overlap, rsync had a third, source-idle window for its prep.)
 - **Per process:** `proc_cpu_*_s` is CPU from `wait4` of every command we launch, and `peak_rss_*_kb` the largest peak RSS among them on that VM.
   - Peak RSS comes from **GNU time** (`/usr/bin/time -f %M`), which every tool runs under. A child's own `ru_maxrss` can't be used: Linux carries the parent's RSS high-water mark into a forked child, so pg_basebackup, pg_combinebackup and rsync would report the Python launcher's memory.
   - Measured on pgd-dest from a parent holding 420 MB, `/bin/true` reported 420,644 KiB through `wait4` and 1,144 KiB under GNU time. Every run repeats this check at start-up on both VMs (`run.json` `rss_probe`) and refuses to start if GNU time is missing or reports more than 16 MiB for `/bin/true`.
@@ -156,14 +238,34 @@ python3 experiments/network/remote.py fetch full            # -> results/exp04/f
 infra/gcp/teardown.sh                      # results on /data are lost: fetch first
 ```
 
+For T3, T8a and T11 (see [Methods for T3, T8a and T11](#methods-for-t3-t8a-and-t11); speeds and repeats here are examples):
+
+```sh
+python3 experiments/network/remote.py provision     # VMs made before pgBackRest and xfsprogs were installed
+
+# T3 unthrottled and T8a at 2, 5 Gbit/s and unthrottled, in one run
+python3 experiments/network/remote.py start t3-t8a -- --speeds 2,5,unthrottled --repeats 5 \
+    --methods full,pgdelta,pgdelta_gapfill_seq,pgdelta_seq,pgdelta_fsync_wb,pgdelta_fsync_worker,pgdelta_inplace,pgdelta_direct,pgdelta_direct_inplace \
+    --method-speeds pgdelta_gapfill_seq+pgdelta_seq+pgdelta_fsync_wb+pgdelta_fsync_worker+pgdelta_inplace=unthrottled
+
+# T11 in its own run, so its archiving touches no other test's numbers
+python3 experiments/network/remote.py start t11 -- --methods full,pgdelta,pgbackrest_zst,pgbackrest_none,pgbackrest_block
+
+# T3 (d): XFS on dest, then the T3 methods again, with the methods that can clone
+python3 experiments/network/remote.py ssh dest sudo ~/pgd/infra/gcp/reformat_dest_xfs.sh --yes
+python3 experiments/network/remote.py start t3-xfs -- --speeds unthrottled --repeats 5 \
+    --methods full,pgdelta,pgdelta_inplace,rsync_8k,incremental_cfr
+```
+
 `run_exp04.py --help` lists every option:
 - the trial options `--patterns`, `--fractions`, `--scale`, `--seed`, `--hot-percent`, `--events-rows` and `--batch-size`;
-- `--speeds` (Gbit/s values and `unthrottled`), `--methods` and `--repeats`;
+- `--speeds` (Gbit/s values and `unthrottled`), `--methods`, `--method-speeds` (some methods at some speeds only) and `--repeats`;
+- `--pgbackrest` (default `/usr/bin/pgbackrest`, on both VMs);
 - `--order-seed` (method orders, and speed orders from their own seeded stream), `--speed-order` (`shuffle`, `alternate` or `ascending`), `--link-test-seconds`, `--idle-seconds` and `--disk-test-mib`;
 - `--gnu-time` (default `/usr/bin/time`; `none` skips peak memory);
 - `--keep-outputs`, `--keep-cluster` and `--stop-on-error`.
 
-`--methods` defaults to `full,incremental,pgdelta,rsync_8k,rsync_default`. `pgdelta` runs EXP-06's engine and `pgdelta_1thread` EXP-02's, each pinned by its flags (`measure.PGDELTA_ENGINES`), never pgdelta's defaults. Add `pgdelta_1thread` (for example `--methods full,incremental,pgdelta,pgdelta_1thread,rsync_8k,rsync_default`) to run both, as EXP-04's design asks once parallel hashing is merged. The run checks `pgdelta send --help` (`--jobs`) and `receive --help` (`--jobs`, `--rebuild`, `--verify`) on both VMs first and refuses to start without them. Each pgdelta record's `tool_reported` holds the flags passed, the `switches` pgdelta reported as in effect, and `switches_ok`, whether they are the pinned engine's.
+`--methods` defaults to `full,incremental,pgdelta,rsync_8k,rsync_default`. `pgdelta` runs EXP-06's engine and `pgdelta_1thread` EXP-02's, each pinned by its flags (`measure.PGDELTA_ENGINES`), never pgdelta's defaults. Add `pgdelta_1thread` (for example `--methods full,incremental,pgdelta,pgdelta_1thread,rsync_8k,rsync_default`) to run both, as EXP-04's design asks once parallel hashing is merged. The run checks `pgdelta send --help` and `receive --help` on both VMs first for every flag the selected methods pass (the default methods: `send --jobs`, and `receive --jobs --rebuild --verify --prefetch-basis`), and refuses to start without them. Each pgdelta record's `tool_reported` holds the flags passed, the `switches` pgdelta reported as in effect, and `switches_ok`, whether they include the pinned engine's. `run.json` `method_flags` holds every selected method's pinned flags. The optional methods of T3, T8a and T11 are described in [their own section](#methods-for-t3-t8a-and-t11).
 
 `tpcb` is not supported here because pgbench is not a generated script. A second run refuses to start while one holds `/data/exp04/.exp04.lock`.
 
@@ -201,26 +303,44 @@ logs/rss-probe/                 the start-up peak-RSS probe on pgd-dest
 driver.log                      the orchestrator's progress log
 ```
 
+The T3, T8a and T11 methods add:
+- **in `run.json`:**
+  - `method_flags`, every selected method's pinned flags;
+  - `method_speeds` and `methods_by_speed`;
+  - `pgdelta_required_options`, which `pgdelta_jobs_check` checked;
+  - `pgbackrest`: null, or the configurations, SSH set-up and archive command of a pgBackRest run;
+  - per VM in `environment`: `pgbackrest` (its version) and `data_reflink`.
+- **in `trials/<trial>.json`:** `pgbackrest` (the set-up's results and the backups' sizes) and `logical_check` (the source's digest and each pgBackRest run's match).
+- **in each run record:** `preparation` (the untimed set-up's commands, and for a copy of B0 its `shared_extents`), `source_restart` (pgdelta_direct\*), and in `verification`: `in_place_leftovers`, `output_start`, `logical`, `logical_match`, and for every method `shared_extents`.
+- **in the logs on dest:** `<method>-setup-copy.log` and `-setup-sync.log`, `<method>-restore.log` and `-pgbackrest-restore-file.log`, and `<method>-output-server.log`, `-output-start.log`, `-output-recovery.log`, `-output-query.log` and `-output-stop-*.log`.
+- **in the logs on the source:** `pgbackrest-<stanza>-*.log`, and `cluster/start-*/server.log` after each restart.
+
 `report.py summary.csv` prints, per trial:
 - the median `total_s` of each method at each speed, the ratio to the full copy, and the first speed at which each delta method is no longer faster. This is the headline, and its crossover is computed on `total_s`.
 - `rsync_* (serial)` and `pgdelta* (serial)` rows: the same for `serial_total_s`, the upper bound with the concurrent phase's two parts (rsync's copy of B0, or pgdelta's receiver start-up, and the capture) one after the other.
 - `rsync_* (in place)` rows: the same for `inplace_total_s`, the lower bound without the copy of B0.
 - a second, labelled view of the same tables on `total_no_ssh_s`, with the remote-launch overhead taken out.
+- a table of median timed phases per method and speed: `receiver_start_s`, `capture_s`, `prep_s`, `transfer_s`, `combine_s`, `restore_s`, then pgdelta's own `rebuild_s`, `fsync_s`, `fsync_wait_s` and `verify_wait_s` (inside its transfer), and `total_s`, with only the columns some run has. Runs still `pending` are listed with the others that did not pass.
+
+The new methods appear in the same tables, with their ratios to the full copy when `full` ran in the same invocation. T3's staged methods also get `(serial)` rows.
 
 CSV columns:
 - `run_name`, `trial_id`, `pattern`, `fraction`, `scale`, `rows_changed`, `repeat`;
 - `speed`, `speed_index` (its position in the repeat's speed order), `target_gbit`, and `measured_s2d_gbit` / `measured_d2s_gbit` from the link test;
 - `method`, `order_index`, `status`;
 - `total_s` (end to end), `total_no_ssh_s`; rsync only: `inplace_total_s`, `inplace_total_no_ssh_s`; rsync and pgdelta: `serial_total_s`, `serial_total_no_ssh_s`;
-- `prep_s` (rsync only), `capture_s`, `prep_capture_s` (rsync only), `receiver_start_s` and `receiver_capture_s` (pgdelta only), `transfer_s`, `combine_s`, `ssh_overhead_s`;
+- `prep_s` (rsync only), `capture_s`, `prep_capture_s` (rsync only), `receiver_start_s` (pgdelta: a part of `receiver_capture`, or the first step of pgdelta_direct\*'s `receiver_transfer`) and `receiver_capture_s` (staged pgdelta only), `transfer_s`, `combine_s`, `restore_s` (pgBackRest only), `ssh_overhead_s`;
+- `untimed_setup_s`: the untimed set-up before the cache drop (the rsync daemon's start; the copy of B0 to B; the clean stop of the source);
 - pgdelta only, from its receiver's statistics: `prefetch_bytes` (B0 read into the page cache while it waited), `prefetch_basis_bytes` (B0's size), `prefetch_s` (time spent reading), `prefetch_wait_s` (from the receiver listening until the sender connected) and `prefetch_stopped` (`finished`, `cap`, `error`, or `connected` if the sender came first);
-- pgdelta only: `untimed_gap_s` (between `receiver_capture` and the transfer, untimed), `prefetch_untimed_s` (how long the prefetch read B0 in that gap, off the clock) and `prefetch_untimed_bytes_est` (the bytes, at the prefetch's average rate); `hash_basis_s` (the receiver hashing B0 for the sender, inside the transfer);
-- `wire_s2d_bytes`, `wire_d2s_bytes` and the receive-side cross-checks;
-- `tool_s2d_bytes`, `tool_d2s_bytes`, `output_bytes`, `output_minus_wal_padding_bytes`, `capture_bytes`;
+- pgdelta only: `untimed_gap_s` (between `receiver_capture` and the transfer, untimed; empty for pgdelta_direct\*, which has no gap), `prefetch_untimed_s` (how long the prefetch read B0 in that gap, off the clock) and `prefetch_untimed_bytes_est` (the bytes, at the prefetch's average rate); `hash_basis_s` (the receiver hashing B0 for the sender, inside the transfer);
+- pgdelta only, its own timers inside the transfer: `rebuild_s` (the write phase), `fsync_s` (of which flushing O's files), `fsync_wait_s` (the main loop waiting for flushes done elsewhere, when pgdelta reports it) and `verify_wait_s`; and the modes it reported: `in_place`, `fsync_mode`, `source_kind` (empty before pgdelta reports them);
+- `wire_s2d_bytes`, `wire_d2s_bytes` and the receive-side cross-checks (pgBackRest: the restore plus its restored copy's recovery);
+- pgBackRest only: `recovery_wire_s2d_bytes`, `recovery_wire_d2s_bytes` (of those, what the recovery's `archive-get` used, untimed) and `recovery_wal_files` (the WAL files it fetched);
+- `tool_s2d_bytes`, `tool_d2s_bytes`, `output_bytes`, `output_minus_wal_padding_bytes`, `output_shared_bytes` (the output's bytes in extents it shares with another file after the run, from FIEMAP: a clone of B0 on XFS), `capture_bytes`;
 - `wal_bytes`, `wal_stream_bytes`, `wal_padding_bytes`;
 - `cpu_source_s`, `cpu_dest_s` (end to end), `prep_capture_cpu_dest_s` (rsync only), `receiver_capture_cpu_dest_s` (pgdelta only), `counter_windows`;
 - `proc_cpu_source_s`, `proc_cpu_dest_s`, `peak_rss_source_kb`, `peak_rss_dest_kb` and `proc_scope` (not comparable across methods; see **Per process**);
-- `verified`, `identical_to_s`, `caches_dropped`, `error`.
+- `verified`, `identical_to_s` (staged methods: against S; pgdelta_direct\*: against the source's selected files), `logical_match` (pgBackRest: the per-table digest against the source's, empty while `pending`), `output_start_s` (pgdelta_direct\* and pgBackRest: starting the output on dest, untimed), `caches_dropped`, `error`.
 
 ## Smoke run
 
@@ -402,6 +522,11 @@ The 0.5 Gbit/s and uniform unthrottled ratios are within 0.01 of the previous ru
 - **The source is otherwise idle.** No workload runs during the backups. Autovacuum stays on, as in EXP-01, and a long sweep gives it time to run: at the default 1% fractions no table reaches its threshold, but a 10% fraction would trigger an autoanalyze. `trials/*.json` has `pg_stat_user_tables` after the workload and at the end, so a run can be checked.
 - **Each capture adds a checkpoint and a WAL segment to the source.** So S differs from run to run by pg_control, the backup label and a new 16 MiB WAL segment, which is zero-padded on disk. Every method still sees the same data pages. But the staged methods (pgdelta, rsync) send that whole segment, about 16.8 MB per run, where `full` and `incremental` stream only the few KB of real WAL. That's a fixed per-run cost of the staged design, recorded per run as `wal_bytes` and `wal_padding_bytes` (see **WAL** above).
 - **Plain format, default tablespace, 8 KiB blocks**, PostgreSQL 17.11 only.
+- **The T3, T8a and T11 methods have not run on the VMs yet.** The pgdelta options they pin (`--fsync`, `--in-place`, `--source-kind`, `pgdelta.datadir`) are being built at the same time; until they are deployed the pre-run check refuses these methods. pgBackRest's configuration, its SSH set-up, the restore and the archive recovery have only been checked as command lines and texts, not run.
+- **pgBackRest's transport differs.** Its restore goes over SSH, which encrypts, with 4 connections; pg_basebackup, pgdelta and rsync use one or two unencrypted TCP connections. Where the link is fast, SSH's CPU cost may limit it.
+- **Archiving runs in the background in a pgBackRest run.** Every staged capture ends a WAL segment that the source pushes to every stanza, during whatever runs next; that CPU is in `cpu_source_s`. Hence T11 in its own run.
+- **pgBackRest runs pass or fail only at the end of their trial,** when the source's digest is taken. `--stop-on-error` doesn't stop on a digest mismatch, and a trial that ends early leaves its pgBackRest runs `pending`.
+- **In place, the copy of B0 is not timed.** That is the point of patching in place: B already exists. B is a fresh `cp -a --reflink=never` of B0, synced and then evicted from the page cache, not a copy that has aged on disk.
 
 ## Tests
 
@@ -435,5 +560,18 @@ The 0.5 Gbit/s and uniform unthrottled ratios are within 0.01 of the previous ru
 - `remote.py`'s config and instance parsing;
 - the source cluster's EXP-01 spec and pg_hba lines;
 - the report's medians and crossover, the serial rows (rsync and pgdelta) with their caveat, and in-place rows, and the labelled overhead-free view. The crossover compares the medians, not rounded ratios, and ratios are rounded once, for display. Runs whose prefetch read B0 between timed phases are listed.
+- the T3, T8a and T11 methods:
+  - every new method is optional; each new pgdelta method's send and receive flags, exactly; the pre-run check asks for each selected method's options and for `pgdelta.datadir`, and refuses without them; switches compared on what a method pins; the modes found wherever pgdelta's statistics keep them, and the fsync mode read as pgdelta's receiver reports it (`fsync_effective` before `fsync`; a writeback that fell back to main fails `modes_ok`; the timings' seconds are not a mode);
+  - the pinned flags parsed by pgdelta's own command line, for the new methods only once pgdelta has their options (skipped until then);
+  - `--method-speeds`: parsing, refusals, and the methods each speed runs in a trial;
+  - `incremental_cfr`'s `pg_combinebackup --copy-file-range` (and `incremental`'s `--copy`, as before), its paths, logs and pinned flags;
+  - the copy of B0 for the in-place methods and pgBackRest with `cp -a --reflink=never`, and a copy that FIEMAP finds sharing blocks failing the run before the cache drop; FIEMAP itself (the structures' sizes against the ioctl number, batches, the shared flag, a filesystem without FIEMAP) and the CSV's `output_shared_bytes`;
+  - stubbed runs: T3's methods staged with their flags; `pgdelta_inplace`'s copy of B0 before the cache drop, its receiver with `--basis B --in-place` and no `--output`, and its untimed set-up outside `total_s`; a failed copy stops the run before the cache drop; `pgdelta_direct`'s clean stop before the cache drop, its one timed phase with two steps and no counter read between the receiver listening and the sender's start, a receiver that never listens (no transfer), its sender's `--source-kind datadir --source` on the data directory, and the restart after the verification; the restart after a failed transfer and after a failed stop; a trial that stops when the source won't restart, and the next trial, which runs all its methods;
+  - pgBackRest: the restore's command line and its copy of B0 before the cache drop; the set-up only in runs that select it, before B0, and the backups after the workload; the set-up's commands on both VMs (configuration, archive command through `source_cluster.py archive`, `stanza-create` and `check` per stanza, `info` from dest); the backups and their sizes; the configuration texts, parsed, with `compress-level-network=0` in dest's `pgbackrest_none` stanza only; the restore log and `info` JSON parsed; pending runs that pass or fail against the source's digest at the end of the trial, with their record and the CSV rewritten; the counters read around the start of the restored copy, its bytes added to the wire totals and kept apart, and its restored WAL files counted from the server log;
+  - verification: the output's start command line; waiting for recovery; the server stopped whatever happens; one that can't be stopped left in place, with later output starts and its path refused and the other methods running; a server an earlier run left on the port, found from its lock file; a direct output against the selected files (a changed page, an extra file, a selected file the source lacks); in-place leftovers, staged and direct; `files_digest`, `parse_datadir_list` and the agent's `datadir-digest`, with `list --sources` (an unlogged relation's main fork hashed from its init fork, as pgdelta sends it, and matching an output that holds it so) and its fallback to plain `list`; the logical digest's query and comparison;
+  - `source_cluster.py`: its start and stop command lines, a stop that doesn't end `shut down`, a start that leaves a running cluster alone, the archive settings' quoting;
+  - `reformat_dest_xfs.sh` refusing without `--yes`, without root, on pgd-source or another host, and without the array, with every destructive command replaced by one that fails; `startup.sh`'s packages; `remote.py provision`;
+  - the new CSV and report columns, ratios and the phase table;
+  - on a real PostgreSQL, when its binaries are present (`PGDELTA_TEST_PG_BIN`): an output whose configuration listens on an address the host lacks and archives starts with the harness's settings, and its per-table digest is stable and follows a changed row.
 
 pgdelta's prefetch itself is tested in `tests/test_pgdelta_prefetch.py`.

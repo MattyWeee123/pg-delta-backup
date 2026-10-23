@@ -6,6 +6,8 @@ pgd-dest under nohup, so the Mac can disconnect while it runs.
 
     remote.py ips                         addresses of both VMs
     remote.py wait-ready                  wait for the startup script on both VMs
+    remote.py provision                   run this tree's infra/gcp/startup.sh again on both
+                                          (installs what a VM made from an older one lacks)
     remote.py deploy                      tarball of the tracked files -> ~/pgd on both
     remote.py setup-ssh                   key on pgd-dest, authorized on pgd-source
     remote.py start NAME -- ARGS...       run_exp04.py ARGS on pgd-dest, results in
@@ -167,6 +169,24 @@ def cmd_wait_ready(config, args) -> int:
     return 0
 
 
+def cmd_provision(config, args) -> int:
+    """Run the working tree's startup.sh as root on both VMs.
+
+    A VM keeps the startup script it was created with in its metadata, so a reboot
+    reruns that one. The script is idempotent: with /data mounted it only installs
+    missing packages (pgBackRest and xfsprogs on VMs made before T11 and T3).
+    """
+    script = (REPO_ROOT / 'infra' / 'gcp' / 'startup.sh').read_bytes()
+    # From a file, with stdin closed: apt's maintainer scripts must not read the script itself.
+    command = ('f=$(mktemp) && cat > "$f" && sudo bash "$f" < /dev/null; status=$?; '
+               'rm -f "$f"; exit $status')
+    for role, vm in instances(config).items():
+        result = ssh(config, vm['external'], command, input_bytes=script, timeout=1800)
+        tail = result.stdout.decode(errors='replace').strip().splitlines()[-1:]
+        print(f'{role}: {tail[0] if tail else "done"}')
+    return 0
+
+
 def cmd_deploy(config, args) -> int:
     data, manifest = build_tarball()
     print(f'deploying {manifest["files"]} files, {len(data)} bytes, commit '
@@ -285,6 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = commands.add_parser('wait-ready')
     sub.add_argument('--timeout', type=float, default=900)
     sub.set_defaults(func=cmd_wait_ready)
+    commands.add_parser('provision').set_defaults(func=cmd_provision)
     commands.add_parser('deploy').set_defaults(func=cmd_deploy)
     commands.add_parser('setup-ssh').set_defaults(func=cmd_setup_ssh)
     sub = commands.add_parser('start')

@@ -15,6 +15,10 @@ command never gets in the way.
     agent.py blast-recv --listen IP:PORT   receive one bulk TCP stream, report its rate
     agent.py blast-send --connect IP:PORT  send a bulk TCP stream for --seconds
     agent.py digest DIR                    path, kind, size, SHA-256 of every entry
+    agent.py datadir-digest DIR --pg-controldata PATH
+                                           the files pgdelta's datadir mode selects in a
+                                           stopped data directory, and the SHA-256 of the
+                                           bytes it sends for each
     agent.py remove --under ROOT PATH...   rm -rf, only below ROOT
     agent.py disk-test DIR                 sequential write and read with dd
 
@@ -135,9 +139,22 @@ def cmd_env(args) -> dict:
                      'package': text_of(['dpkg-query', '-W', '-f=${Version}', 'time'])},
         'coreutils': (text_of(['sync', '--version']) or '').split('\n')[0] or None,
         'data_mount': text_of(['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS,SIZE', '/data']),
+        # XFS only (infra/gcp/reformat_dest_xfs.sh): whether /data can clone extents.
+        'data_reflink': xfs_reflink(text_of(['xfs_info', '/data'])),
+        'pgbackrest': text_of(['pgbackrest', 'version']),
         'mdstat': read('/proc/mdstat'),
         'deployed': json.loads(deployed) if deployed else None,
     }
+
+
+def xfs_reflink(text: str | None) -> bool | None:
+    """reflink=1 or 0 from xfs_info's output; None when /data isn't XFS or xfs_info is missing."""
+    if not text:
+        return None
+    for word in text.replace(',', ' ').split():
+        if word.startswith('reflink='):
+            return word == 'reflink=1'
+    return None
 
 
 def cmd_drop_caches(args) -> dict:
@@ -265,6 +282,34 @@ def cmd_digest(args) -> dict:
     return digest
 
 
+def cmd_datadir_digest(args) -> dict:
+    """What pgdelta's datadir mode sends from the stopped data directory DIR, hashed.
+
+    `python -m pgdelta.datadir list --sources` names the files (PostgreSQL's base-backup
+    exclusions applied) and, for each, the file whose bytes are sent: an unlogged relation's
+    main fork is sent with its init fork's bytes. Each listed file is hashed from that one, as
+    tree_digest hashes a whole tree. A pgdelta whose list has no --sources lists paths only,
+    each read as itself.
+    """
+    started = time.monotonic()
+    command = [sys.executable, '-m', measure.PGDELTA_DATADIR_MODULE, 'list', args.root,
+               '--pg-controldata', args.pg_controldata]
+    listing = subprocess.run([*command, '--sources'], cwd=REPO_ROOT, capture_output=True, text=True,
+                             timeout=600)
+    with_sources = True
+    if listing.returncode != 0 and 'unrecognized arguments: --sources' in listing.stderr:
+        listing = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True, timeout=600)
+        with_sources = False
+    if listing.returncode != 0:
+        raise SystemExit(f'{measure.PGDELTA_DATADIR_MODULE} list failed ({listing.returncode}): '
+                         f'{listing.stderr.strip()[-2000:]}')
+    sources = measure.parse_datadir_sources(listing.stdout)
+    digest = measure.files_digest(Path(args.root), sources)
+    digest['seconds'] = round(time.monotonic() - started, 3)
+    return {'selected': list(sources), 'sources': with_sources, 'read_from': digest['read_from'],
+            'digest': digest, 'listing_stderr_tail': listing.stderr[-4000:]}
+
+
 def cmd_remove(args) -> dict:
     under = Path(args.under).resolve()
     removed = []
@@ -341,6 +386,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub = commands.add_parser('digest')
     sub.add_argument('root')
     sub.set_defaults(func=cmd_digest)
+    sub = commands.add_parser('datadir-digest')
+    sub.add_argument('root')
+    sub.add_argument('--pg-controldata', required=True)
+    sub.set_defaults(func=cmd_datadir_digest)
     sub = commands.add_parser('remove')
     sub.add_argument('--under', required=True)
     sub.add_argument('paths', nargs='+')
