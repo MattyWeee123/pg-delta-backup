@@ -145,10 +145,14 @@ def summarize_stats(stats):
 
 
 def run_tool(scenario_dir, *, python, repo_root, tool_cmd=None, pg_controldata=None, extra=(),
-             timeout=7200):
+             timeout=7200, output=None, stats_path=None, log_path=None):
+    """Run the tool on the scenario's S and B. O, the stats and the log go into the
+    scenario directory unless ``output``, ``stats_path`` or ``log_path`` say otherwise."""
     scenario_dir = Path(scenario_dir)
     source, basis = scenario_dir / 'source_backup', scenario_dir / 'old_copy'
-    output, stats_path = scenario_dir / 'output', scenario_dir / 'tool_stats.json'
+    output = Path(output or scenario_dir / 'output')
+    stats_path = Path(stats_path or scenario_dir / 'tool_stats.json')
+    log_path = Path(log_path or scenario_dir / 'tool.log')
     cmd = tool_command(source, basis, output, stats_path, python=python, tool_cmd=tool_cmd,
                        pg_controldata=pg_controldata, extra=extra)
     result = {'command': cmd, 'python': str(python), 'repo_root': str(repo_root)}
@@ -167,7 +171,7 @@ def run_tool(scenario_dir, *, python, repo_root, tool_cmd=None, pg_controldata=N
         return result
     result['seconds'] = round(time.monotonic() - started, 2)
     result['returncode'] = proc.returncode
-    (scenario_dir / 'tool.log').write_text(
+    log_path.write_text(
         '$ ' + shlex.join(cmd) + '\n--- stdout\n' + proc.stdout + '\n--- stderr\n' + proc.stderr)
     result['stderr_tail'] = proc.stderr.strip().splitlines()[-10:]
     result['basis_unchanged'] = tree_fingerprint(basis) == before
@@ -197,9 +201,11 @@ def log_tail(path, lines=20):
         return []
 
 
-def restore_and_compare(backup_dir, expected_state, pgbin, work_parent, keep=False):
+def restore_and_compare(backup_dir, expected_state, pgbin, work_parent, keep=False,
+                        while_running=None):
     """Copy a backup to a disposable directory, start it, wait for recovery to finish
-    and compare its logical state with the expected one."""
+    and compare its logical state with the expected one. ``while_running(cluster)``, if
+    given, runs next on the started server and returns a dict merged into the result."""
     work = Path(tempfile.mkdtemp(prefix='pgdrestore-', dir=work_parent))
     sockdir = short_tempdir()
     datadir = work / 'data'
@@ -221,6 +227,8 @@ def restore_and_compare(backup_dir, expected_state, pgbin, work_parent, keep=Fal
         result['logical_match'] = not differences
         result['differences'] = differences[:50]
         result['tables_compared'] = sum(len(t) for t in actual['tables'].values())
+        if while_running is not None:
+            result.update(while_running(cluster))
     except (CommandError, TimeoutError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         result['error'] = f'{type(exc).__name__}: {exc}'
         result['log_tail'] = log_tail(cluster.logfile)
