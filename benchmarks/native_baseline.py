@@ -1,7 +1,9 @@
-"""Disposable PostgreSQL 17 full/incremental baseline and recovery checks.
+"""Disposable PostgreSQL 17 backup-method baseline and recovery checks.
 
-Only controls clusters created beneath a new temporary directory. This first
-runner measures local native backups, not cross-host network performance.
+Runs registered methods (benchmarks/methods.py; full and incremental by
+default) plus a workload-only no_backup control. Only controls clusters
+created beneath a new temporary directory. This runner measures local
+backups, not cross-host network performance.
 """
 from __future__ import annotations
 
@@ -23,13 +25,17 @@ import time
 import traceback
 import uuid
 
+from benchmarks import methods
 from benchmarks.backup import (atomic_json, basebackup_command, directory_bytes,
-                               run_backup, run_command)
+                               prepare_backup, run_backup, run_command, verify_basis)
 from benchmarks.resources import ResourceSampler
 
 
 TOOLS = ("postgres", "initdb", "pg_ctl", "psql", "pg_basebackup",
          "pg_combinebackup", "pg_verifybackup", "pgbench", "pg_waldump")
+# The matrix that produced the committed evidence; keep it the default.
+DEFAULT_METHODS = ("pg_basebackup_full", "pg_basebackup_incremental")
+NO_BACKUP = "no_backup"
 TABLES = {"accounts": "id", "ledger": "worker, seq", "markers": "name", "items": "id"}
 
 
@@ -156,12 +162,13 @@ class Trial:
         self.source_sampler = None
         self.commands = []
         self.counter = 0
+        self.phase_logs = {}
 
     def command(self, name, arguments=(), *, sql=None, check=True, timeout=120,
-                monitor_resources=False):
+                monitor_resources=False, executable=None):
         self.counter += 1
         prefix = self.output / f"{self.counter:03d}-{name}"
-        argv = [self.tools.get(name, name), *map(str, arguments)]
+        argv = [executable or self.tools.get(name, name), *map(str, arguments)]
         phase = run_command(argv, prefix.with_suffix('.out'), timeout,
                             stderr_path=prefix.with_suffix('.err'), input_text=sql,
                             env=controlled_env(), monitor_resources=monitor_resources)
@@ -261,11 +268,17 @@ VACUUM ANALYZE bench.accounts;
         return record
 
     def backup_phase(self, stage, argv):
-        record, _ = self.command(Path(argv[0]).name, argv[1:], check=False,
-                                 monitor_resources=True)
+        record, out = self.command(Path(argv[0]).name, argv[1:], check=False,
+                                   monitor_resources=True, executable=argv[0])
+        self.phase_logs[stage] = out
         return {'exit_code': record['returncode'], 'duration_seconds': record['seconds'],
                 'error': record['error'], 'stdout': record['stdout'], 'stderr': record['stderr'],
                 'resources': record['resources']}
+
+    def read_log(self, stage):
+        if stage not in self.phase_logs:
+            raise FileNotFoundError(f"no output recorded for {stage}")
+        return self.phase_logs[stage].read_text()
 
     def change(self):
         changed = max(1, int(self.args.rows * self.args.change_fraction))
@@ -408,6 +421,7 @@ COMMIT;
 
 
 def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> dict:
+    spec = None if method == NO_BACKUP else methods.get(method)
     trial.setup()
     basis = trial.root / "basis"
     trial.backup(basis)
@@ -421,6 +435,22 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
     record["database_bytes"] = int(trial.sql("SELECT pg_database_size('postgres');"))
     record["system_identifier"] = trial.sql("SELECT system_identifier FROM pg_control_system();")
     record["basis_bytes"] = directory_bytes(basis)
+    output = trial.root / "output"
+    if spec is not None:
+        adapter = dict(
+            run_id=trial.output.name, output=output, tools=trial.tools,
+            execute=trial.backup_phase, read_log=trial.read_log, host=trial.socket,
+            user='bench', basis=basis if spec.needs_basis else None,
+            capture_path=trial.root / spec.capture_dir if spec.capture_dir else None)
+        # Preparation (e.g. copying B for rsync) stays outside the workload window.
+        prepared = prepare_backup(method, **adapter) if spec.prepare else None
+        # B was verified above; its checksum policy also runs before the workload.
+        basis_record = verify_basis(
+            basis, execute=trial.backup_phase, tools=trial.tools, verification={
+                'exit_code': basis_check['returncode'],
+                'duration_seconds': basis_check['seconds'], 'error': basis_check['error'],
+                'stdout': basis_check['stdout'], 'stderr': basis_check['stderr']},
+        ) if spec.trusts_basis else None
     if mode == "active":
         trial.launch_workload()
     else:
@@ -433,17 +463,24 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
     source_sampler.start()
     start = time.perf_counter()
     start_wall = time.time()
-    output = trial.root / "output"
-    if method in ('full', 'incremental'):
+    measured = {}
+
+    def end_measurement():
+        # The measured interval ends after final verification, before a staged
+        # method's output check (which reads all of O and S) can load the source.
+        if measured:
+            return
+        measured['end_wall'] = time.time()
+        measured['source_resources'] = source_sampler.stop()
+        trial.source_sampler = None
+        measured['stats_after'] = trial.pg_stats()
+        measured['workload_running'] = (trial.workload is not None
+                                        and trial.workload.poll() is None)
+
+    if spec is not None:
         backup_result, code = run_backup(
-            'pg_basebackup_' + method, run_id=trial.output.name, output=output,
-            tools=trial.tools, execute=trial.backup_phase, host=trial.socket, user='bench',
-            basis=basis if method == 'incremental' else None,
-            increment=trial.root / 'increment' if method == 'incremental' else None,
-            basis_verification={'exit_code': basis_check['returncode'],
-                'duration_seconds': basis_check['seconds'], 'error': basis_check['error'],
-                'stdout': basis_check['stdout'], 'stderr': basis_check['stderr']}
-                if method == 'incremental' else None)
+            method, **adapter, prepared=prepared, after_verification=end_measurement,
+            basis_verification=basis_record)
         record['backup_result'] = backup_result
         atomic_json(trial.output / 'backup-result.json', backup_result)
         if code:
@@ -453,34 +490,36 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
                                      if backup_result['combination'] else 0.0)
         if backup_result['increment_verification']:
             record['increment_input_verification_seconds'] = backup_result['increment_verification']['duration_seconds']
+        if backup_result['transfer']:
+            record['transfer_seconds'] = backup_result['transfer']['duration_seconds']
+        if prepared:
+            record['preparation_seconds'] = sum(p['duration_seconds'] for p in prepared.values())
         record['capture_bytes'] = backup_result['backup_file_bytes']
         record['output_bytes'] = backup_result['output_file_bytes']
         record['method_seconds'] = backup_result['method_seconds']
         record['verification_seconds'] = backup_result['verification']['duration_seconds']
         record['verified_backup_seconds'] = backup_result['time_to_verified_seconds']
-        for name in ('output', 'increment'):
-            manifest = trial.root / name / 'backup_manifest'
-            if manifest.is_file():
+        for name in ('output', spec.capture_dir):
+            manifest = trial.root / name / 'backup_manifest' if name else None
+            if manifest and manifest.is_file():
                 shutil.copyfile(manifest, trial.output / (name + '-manifest.json'))
-    elif method == "no_backup":
-        trial.finish_workload()
     else:
-        raise ValueError("Unknown method")
-    if method == 'no_backup':
+        trial.finish_workload()
+    if method == NO_BACKUP:
         record['method_seconds'] = time.perf_counter() - start
-    end_wall = time.time()
-    record['source_resources'] = source_sampler.stop()
-    trial.source_sampler = None
-    stats_after = trial.pg_stats()
+    end_measurement()
+    end_wall = measured['end_wall']
+    record['source_resources'] = measured['source_resources']
+    stats_after = measured['stats_after']
     record['postgres_stats'] = {'before': stats_before, 'after': stats_after,
                                 'delta': stats_delta(stats_before, stats_after),
                                 'scope': 'measured backup or no-backup interval'}
     if record['source_resources']['unavailable_reason']:
         record['unavailable_metrics']['source_resources'] = record['source_resources']['unavailable_reason']
     if mode == "active":
-        if method != "no_backup":
+        if method != NO_BACKUP:
             # Workload must stay active through the measured backup interval.
-            if trial.workload.poll() is not None:
+            if not measured['workload_running']:
                 raise RuntimeError("Workload finished before backup; increase --duration")
             trial.finish_workload()
         logs = sorted(trial.output.glob("pgbench-log.*"))
@@ -495,7 +534,7 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
         expected = trial.state(trial.socket, "expected-after-workload")
         if expected["ledger"]["rows"] != entire["all_logged_successes"]:
             raise RuntimeError("External successful transaction count differs from source ledger")
-    if method == "no_backup":
+    if method == NO_BACKUP:
         record["status"] = "pass"
         return record
     record["self_contained_restore"] = trial.restore(output, "package-restore",
@@ -543,6 +582,46 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
     return record
 
 
+def trial_matrix(chosen, repeats: int, seed: int) -> list:
+    """Each repetition runs every method in both modes plus one no_backup control."""
+    rng = random.Random(seed)
+    matrix = []
+    for repeat in range(repeats):
+        block = [(method, mode) for mode in ("quiescent", "active") for method in chosen]
+        block.append((NO_BACKUP, "active"))
+        rng.shuffle(block)
+        matrix.extend((repeat, method, mode) for method, mode in block)
+    return matrix
+
+
+def parse_methods(text: str) -> list:
+    chosen = [name.strip() for name in text.split(",") if name.strip()]
+    if not chosen or len(set(chosen)) != len(chosen) or any(
+            name not in methods.names() for name in chosen):
+        raise ValueError("--methods takes distinct names from: " + ", ".join(methods.names())
+                         + f"; {NO_BACKUP} is always included")
+    return chosen
+
+
+def extra_tools(args, chosen) -> dict:
+    """Executables beyond the PostgreSQL binaries that the chosen methods use."""
+    needed = {name for method in chosen
+              for name in methods.get(method).tools + methods.get(method).optional_tools}
+    tools = {"python": args.python} if "python" in needed else {}
+    if "rsync" in needed:
+        tools["rsync"] = shutil.which(args.rsync)
+        if not tools["rsync"]:
+            raise ValueError(f"Missing rsync: {args.rsync}")
+    if "pgdelta" in needed and args.pgdelta:
+        tools["pgdelta"] = shlex.split(args.pgdelta)
+    if "pg_controldata" in needed:
+        found = (str(Path(args.bin_dir) / "pg_controldata") if args.bin_dir
+                 else shutil.which("pg_controldata"))
+        if found and Path(found).is_file():
+            tools["pg_controldata"] = found
+    return tools
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True, help="New result directory; must not exist")
@@ -553,6 +632,13 @@ def main(argv=None):
     parser.add_argument("--duration", type=int, default=8)
     parser.add_argument("--rate", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20261009)
+    parser.add_argument("--methods", default=",".join(DEFAULT_METHODS),
+                        help="comma-separated registered methods; no_backup is always added")
+    parser.add_argument("--rsync", default="rsync", help="rsync executable for rsync_staged")
+    parser.add_argument("--python", default=sys.executable,
+                        help="interpreter for the basis copy and python -m pgdelta")
+    parser.add_argument("--pgdelta", default=None,
+                        help="pgdelta command prefix; default: PYTHON -m pgdelta")
     args = parser.parse_args(argv)
     if args.rows < 100 or math.gcd(args.rows, 48271) != 1 or not 0 < args.change_fraction <= 1:
         parser.error("rows must be >=100 and coprime to 48271; change fraction must be in (0,1]")
@@ -560,11 +646,17 @@ def main(argv=None):
         parser.error("repeats >=1, duration >=4 seconds and rate >=10 required")
     if args.output.exists():
         parser.error("Output must not already exist")
+    try:
+        chosen = parse_methods(args.methods)
+    except ValueError as exc:
+        parser.error(str(exc))
     tools = preflight(args.bin_dir)
+    tools.update(extra_tools(args, chosen))
     args.output = args.output.resolve()
     args.output.mkdir(parents=True)
     version = subprocess.check_output([tools["postgres"], "--version"], text=True).strip()
-    bundle = {"schema_version": 2, "status": "running", "scope": "native baseline smoke",
+    # v3: trial methods carry registry names (v2 used "full"/"incremental").
+    bundle = {"schema_version": 3, "status": "running", "scope": "native baseline smoke",
         "performance_claim": "descriptive local measurements; not a controlled cross-host performance baseline",
         "postgres_version": version, "python_version": platform.python_version(),
         "platform": platform.platform(), "cpu_count": os.cpu_count(),
@@ -574,13 +666,11 @@ def main(argv=None):
         "cache_policy": "uncontrolled OS cache; fresh cluster per trial; no cold-cache claim",
         "warmup_policy": "active workload ready after >=10 commits; no excluded backup warmup",
         "trials": []}
-    rng = random.Random(args.seed)
-    matrix = []
-    for repeat in range(args.repeats):
-        block = [(method, mode) for mode in ("quiescent", "active") for method in ("full", "incremental")]
-        block.append(("no_backup", "active"))
-        rng.shuffle(block)
-        matrix.extend((repeat, method, mode) for method, mode in block)
+    if "rsync" in tools:
+        bundle["rsync_version"] = methods.rsync_version(
+            subprocess.check_output([tools["rsync"], "--version"], text=True))
+    matrix = trial_matrix(chosen, args.repeats, args.seed)
+    bundle["methods"] = chosen
     bundle["trial_order"] = matrix
     atomic_json(args.output / "results.json", bundle)
     for index, (repeat, method, mode) in enumerate(matrix):
@@ -590,7 +680,8 @@ def main(argv=None):
         root = Path(tempfile.mkdtemp(prefix="pdb-"))
         trial = Trial(root, args.output / run_id, tools, args)
         try:
-            record.update(run_trial(trial, method, mode, repeat == 0 and method == "full" and mode == "quiescent"))
+            record.update(run_trial(trial, method, mode,
+                                    repeat == 0 and method == chosen[0] and mode == "quiescent"))
         except Exception as exc:
             record.update(status="error", error=str(exc))
             (trial.output / "error.txt").write_text(traceback.format_exc())

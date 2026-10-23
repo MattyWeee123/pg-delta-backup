@@ -36,6 +36,7 @@ import argparse
 import json
 import random
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -45,7 +46,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from benchmarks.backup import atomic_json, run_backup, run_command
+from benchmarks import methods
+from benchmarks.backup import (NO_TRANSPORT_OBSERVER, SELF_REPORTED_BYTES, atomic_json,
+                               prepare_backup, run_backup, run_command, successful,
+                               verify_basis)
 
 # HammerDB writes naive local timestamps; the official image runs UTC, which
 # the time profile header states explicitly. Parsing as UTC keeps these
@@ -405,7 +409,10 @@ def build_pair_record(*, pair_id, repetition, order, control, treatment,
     increase, increase_reason = (None, rejection) if rejection else latency_change(
         control['latency'], treatment['latency'])
 
-    unavailable = {'network_bytes': 'transport observer not implemented'}
+    # A transfer method's own byte counts, when the shared record has them.
+    network_bytes = (backup_result or {}).get('network_bytes')
+    unavailable = ({'network_bytes': NO_TRANSPORT_OBSERVER} if network_bytes is None
+                   else {'interface_bytes': SELF_REPORTED_BYTES})
     if loss_reason:
         unavailable['throughput_loss'] = loss_reason
     if increase_reason:
@@ -445,7 +452,7 @@ def build_pair_record(*, pair_id, repetition, order, control, treatment,
                      'matched to the backup window'),
         },
         'backup_result': backup_result,
-        'network_bytes': None,
+        'network_bytes': network_bytes,
         'unavailable_metrics': unavailable,
     }
 
@@ -592,6 +599,27 @@ def make_executor(container, directory, timeout, *, docker_bin='docker'):
     return execute, phases
 
 
+def container_reader(container, *, docker_bin='docker'):
+    """A `read_file` for run_backup that reads a path inside the container.
+
+    Every failure is an OSError, which is what read_file's callers catch.
+    """
+
+    def read_file(path):
+        try:
+            done = subprocess.run([docker_bin, 'exec', container, 'cat', str(path)],
+                                  capture_output=True, text=True, timeout=120, check=False)
+        except subprocess.TimeoutExpired as exc:
+            raise OSError(f'reading {path} in {container} timed out after '
+                          f'{exc.timeout} seconds') from exc
+        if done.returncode != 0:
+            raise OSError(f'cannot read {path} in {container}: '
+                          f'{(done.stderr or "").strip()[:400]}')
+        return done.stdout
+
+    return read_file
+
+
 def start_observer(project, output, duration, *, python=None):
     """Sample container resources for the trial, using Etash's observer."""
     command = [python or sys.executable, '-m', 'benchmarks.observe_docker',
@@ -630,8 +658,41 @@ def run_trial(treatment, *, options, directory, sleep=time.sleep):
         options.compose_project, directory / 'resources-docker.jsonl',
         window_seconds + options.observer_margin)
     backup_result = capture_started_at = verified_at = None
-    backup_output_bytes = None
+    backup_output_bytes = prepared = basis_check = None
+    if treatment == BACKUP:
+        spec = methods.get(options.method)
+        # A fresh path per trial: pg_basebackup refuses a non-empty
+        # destination, so a shared path would fail every repetition
+        # after the first.
+        destination = f"{str(options.backup_output).rstrip('/')}/{name}"
+        phase_logs = directory / 'backup-phases'
+        execute, phases = make_executor(
+            options.runner_container, phase_logs, options.timeout,
+            docker_bin=options.docker)
+        adapter = dict(
+            run_id=f'{name}-backup', output=destination, tools=options.tools,
+            execute=execute, host=options.pg_host, port=options.pg_port,
+            user=options.pg_user, checksum=options.checksum,
+            checkpoint=options.checkpoint,
+            basis=getattr(options, 'basis', None) if spec.needs_basis else None,
+            capture_path=f'{destination}-{spec.capture_dir}' if spec.capture_dir else None,
+            read_log=lambda phase: (phase_logs / f'{phase}.log').read_text(encoding='utf-8'),
+            read_file=container_reader(options.runner_container, docker_bin=options.docker))
     try:
+        if treatment == BACKUP and spec.trusts_basis:
+            # pg_verifybackup reads all of B: like preparation, it runs before
+            # the workload starts, and run_backup reuses the record.
+            basis_check = verify_basis(adapter['basis'], execute=execute, tools=options.tools,
+                                       read_file=adapter['read_file'])
+            if not successful(basis_check):
+                reason = basis_check['error'] or f'exit code {basis_check["exit_code"]}'
+                raise TrialError(f'basis verification failed: {reason}; see {phase_logs}')
+        if treatment == BACKUP and spec.prepare:
+            # Preparation (e.g. copying B for rsync) runs before the workload
+            # starts, so it overlaps neither measurement window.
+            prepared = prepare_backup(options.method, **adapter)
+            if not all(successful(phase) for phase in prepared.values()):
+                raise TrialError(f'{options.method} preparation failed; see {phase_logs}')
         start_workload(
             name=name, image=options.hammerdb_image, network=options.network,
             host=options.pg_host, password=options.pg_password,
@@ -644,21 +705,20 @@ def run_trial(treatment, *, options, directory, sleep=time.sleep):
         if treatment == BACKUP:
             if options.backup_offset:
                 sleep(options.backup_offset)
-            execute, phases = make_executor(
-                options.runner_container, directory / 'backup-phases',
-                options.timeout, docker_bin=options.docker)
+
+            def end_of_workload():
+                # Called once verification ends. Anything after it (a staged
+                # method's output check reads all of O and S, then the du
+                # probe) waits for the workload to exit, so it cannot load
+                # the recovery window.
+                wait_for_exit(name, timeout=window_seconds + options.marker_margin,
+                              docker_bin=options.docker, sleep=sleep)
+
             # run_backup returns (record, exit_code); the record alone is the
-            # shared v2 artifact that the pair record embeds.
-            # A fresh path per trial: pg_basebackup refuses a non-empty
-            # destination, so a shared path would fail every repetition
-            # after the first.
-            destination = f"{str(options.backup_output).rstrip('/')}/{name}"
+            # shared v3 artifact that the pair record embeds.
             backup_result, backup_exit = run_backup(
-                options.method,
-                run_id=f'{name}-backup', output=destination,
-                tools=options.tools, execute=execute, host=options.pg_host,
-                port=options.pg_port, user=options.pg_user,
-                checksum=options.checksum, checkpoint=options.checkpoint)
+                options.method, **adapter, prepared=prepared,
+                basis_verification=basis_check, after_verification=end_of_workload)
             backup_output_bytes = container_bytes(
                 options.runner_container, destination, docker_bin=options.docker)
             atomic_json(directory / 'backup-result.json',
@@ -728,7 +788,18 @@ def parse_args(argv=None):
     parser.add_argument('--backup-offset', type=float, default=0,
                         help='seconds after ramp-up before the backup starts')
     parser.add_argument('--method', default='pg_basebackup_full',
-                        choices=('pg_basebackup_full',))
+                        choices=methods.names())
+    parser.add_argument('--basis', default=None,
+                        help='old copy inside the runner container, for methods '
+                             'that need one')
+    parser.add_argument('--rsync', default='rsync',
+                        help='rsync inside the runner container')
+    parser.add_argument('--python', default='python3',
+                        help='python inside the runner container')
+    parser.add_argument('--pgdelta', type=shlex.split, default=None,
+                        help='pgdelta command prefix; default: PYTHON -m pgdelta')
+    parser.add_argument('--pg-controldata', default=None,
+                        help='passed to pgdelta as --pg-controldata when given')
     parser.add_argument('--checksum', default='SHA256')
     parser.add_argument('--checkpoint', default='fast', choices=('fast', 'spread'))
     parser.add_argument('--pg-host', default='postgres')
@@ -760,6 +831,10 @@ def main(argv=None):
         'pg_basebackup': 'pg_basebackup',
         'pg_verifybackup': 'pg_verifybackup',
         'pg_combinebackup': 'pg_combinebackup',
+        'rsync': options.rsync,
+        'python': options.python,
+        'pgdelta': options.pgdelta,
+        'pg_controldata': options.pg_controldata,
     }
     if options.scripts_dir is None:
         options.scripts_dir = str(
@@ -774,6 +849,13 @@ def main(argv=None):
                 f'{options.output} already exists; use a new directory per run')
         if options.repeats < 1:
             raise ValueError('--repeats must be at least 1')
+        spec = methods.get(options.method)
+        if spec.needs_basis and not options.basis:
+            raise ValueError(
+                f'{options.method} refreshes an old copy; pass --basis with its '
+                'path inside the runner container')
+        if options.basis and not spec.needs_basis:
+            raise ValueError(f'--basis is not used by {options.method}')
     except ValueError as exc:
         print(f'error: {exc}', file=sys.stderr)
         return EXIT_INVALID_INPUT
@@ -787,8 +869,9 @@ def main(argv=None):
         'settings': {
             key: getattr(options, key)
             for key in ('repeats', 'vu', 'rampup', 'duration', 'warehouses',
-                        'backup_offset', 'method', 'checksum', 'checkpoint',
-                        'network', 'compose_project', 'hammerdb_image')
+                        'backup_offset', 'method', 'basis', 'checksum',
+                        'checkpoint', 'network', 'compose_project',
+                        'hammerdb_image')
         },
         'note': 'single-host smoke measurement; not a baseline',
     })

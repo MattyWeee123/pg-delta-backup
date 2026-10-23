@@ -4,15 +4,19 @@ This runner creates real PostgreSQL 17 clusters, takes full and incremental back
 
 The first complete successful run is preserved in the [October 9 smoke report](evidence/2026-10-09-native-smoke/report.md), with results.json, provenance and compressed raw evidence alongside it.
 
-The suite now calls the same `benchmarks/backup.py` adapters and v2 backup record as
-Sam’s configurable CLI. CI also invokes that public CLI for full and incremental
-captures and restores both outputs. See [the consolidation guide](CONSOLIDATION.md).
+The suite now calls the same `benchmarks/backup.py` adapters and v3 backup record as
+Sam’s configurable CLI, and runs methods from the same registry (`benchmarks/methods.py`).
+Trial methods carry registry names (`pg_basebackup_full`, ...) from bundle schema v3 on; the
+committed v1 evidence says `full` and `incremental`, and `report_native` reads both.
+CI also invokes that public CLI for full and incremental captures and restores both
+outputs. See [the consolidation guide](CONSOLIDATION.md).
 
 ## What the treatments mean
 
 - **Full:** copy a new complete physical backup with streamed WAL.
 - **Incremental:** use an old backup manifest and WAL summaries, verify the incremental, combine with the old backup, then verify the usable result. The old basis remains intact.
 - **No backup:** run the same transaction workload without starting a measured backup; this is the application control.
+- **Staged transfers (opt-in):** `--methods pg_basebackup_full,rsync_staged` adds `rsync_staged`; `pg_delta_staged` runs the pgdelta tool. Each captures a full S, builds the output from S and the trial's B0, and verifies it with S's manifest. Copying B0 for rsync happens before the workload starts and is reported as `preparation_seconds`, outside the refresh timings; `transfer_seconds` is the transfer alone. The default matrix stays full plus incremental, so new runs remain comparable with the committed evidence. The first quiescent trial of the first listed method carries the negative controls.
 
 Each treatment starts a fresh cluster with the same synthetic data and its own B0. Preparation is excluded from refresh timing. Trials are randomized within each repetition. The smoke configuration uses 20,000 account rows with 256-byte payloads, 1% deterministic key changes, separate insert/delete fixtures and a rollback fixture. This is not a claimed production-sized database.
 
@@ -48,7 +52,7 @@ The first quiescent full trial includes corrupt-file, missing-required-WAL and s
 
 ## Measurement boundaries
 
-`capture_seconds` is pg_basebackup duration, including normal synchronization and streamed WAL. `method_seconds` adds incremental-input verification and combination for the incremental treatment. `verified_backup_seconds` also includes final verification. The common verified B0 is a preparation cost, excluded from all refresh timings. Restores and later PITR validation are separate.
+`capture_seconds` is pg_basebackup duration, including normal synchronization and streamed WAL. `method_seconds` adds incremental-input verification and combination for the incremental treatment, or the transfer for a staged method. `verified_backup_seconds` also includes final verification. The common verified B0 is a preparation cost, excluded from all refresh timings. Restores and later PITR validation are separate.
 
 `capture_bytes` and `output_bytes` are apparent file lengths, including metadata/WAL, not allocated disk size or wire bytes. Network and device-level bytes remain unavailable. An absent phase is different from an unmeasured one: full-backup combine time is zero because that phase does not apply.
 

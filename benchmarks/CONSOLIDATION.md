@@ -6,34 +6,62 @@ Sam's `benchmark-harness-v0.1` commit `ff8b85e` is preserved as a parent of the 
 
 | Entry point | Purpose | Uses |
 |---|---|---|
-| `python -m benchmarks.benchmark` | Run one full or incremental backup against an existing disposable fixture; retain logs and results | Shared capture, input verification, combination, final verification, timers and v2 backup record |
+| `python -m benchmarks.benchmark` | Run one registered backup method against an existing disposable fixture; retain logs and results | Shared capture, input verification, combination or transfer, final verification, timers and v3 backup record |
 | `python -m benchmarks.native_baseline` | Create small isolated databases, run the randomized matrix, and test actual recovery | The same adapters and record, plus controlled fixtures, pgbench, restore oracles and negative controls |
 
-Both paths default to plain format, streamed WAL, SHA256 manifests, a fast checkpoint and normal PostgreSQL synchronization. The CLI permits an explicit checksum/checkpoint choice, recorded with the run; comparisons must match those choices. Disabling file checksums (`NONE`) is rejected, and every listed basis file must have a checksum. PostgreSQL can otherwise accept a manifest without file checksums, which cannot detect same-size data corruption. `--format tar` is now rejected because this PG17 verification path expects an unpacked plain backup. There is no custom backup or transfer engine in either path.
+Both paths default to plain format, streamed WAL, SHA256 manifests, a fast checkpoint and normal PostgreSQL synchronization. The CLI permits an explicit checksum/checkpoint choice, recorded with the run; comparisons must match those choices. Disabling file checksums (`NONE`) is rejected, and every listed basis file must have a checksum. PostgreSQL can otherwise accept a manifest without file checksums, which cannot detect same-size data corruption. `--format tar` is now rejected because this PG17 verification path expects an unpacked plain backup. The harness has no transfer engine of its own: the staged methods call rsync or the separately developed pgdelta tool.
 
-The shared adapter supports `pg_basebackup_full` and `pg_basebackup_incremental`. Incremental requires a complete immutable B0, verifies it as preparation, captures I1, verifies I1, combines B0+I1 with `--copy`, then verifies the resulting full package. A failing phase stops the pipeline. The native suite passes the actual B0 verification result obtained before workload launch; the standalone CLI performs that prerequisite itself. Chained incremental bases are outside this CLI's initial contract.
+Methods are registered in [`methods.py`](methods.py); `run_backup` looks them up by name, and the CLI, the native suite and the HammerDB driver take their `--method` choices from the registry. Four are registered: `pg_basebackup_full`, `pg_basebackup_incremental`, and the staged transfers `rsync_staged` and `pg_delta_staged` described below. Incremental requires a complete immutable B0, verifies it as preparation, captures I1, verifies I1, combines B0+I1 with `--copy`, then verifies the resulting full package. A failing phase stops the pipeline. The native suite passes the actual B0 verification result obtained before workload launch; the standalone CLI performs that prerequisite itself. Chained incremental bases are outside this CLI's initial contract.
 
 The CLI's result is `PASS_MANIFEST_ONLY`, with `restore_tested: false`. That statement remains true even when a surrounding integration test subsequently restores the output: the restore verdict is recorded separately. A native trial's outer `pass` means its documented recovery checks passed; it does not certify unimplemented active-cutoff guarantees.
 
-## Shared result schema v2
+## Shared result schema v3
 
-Sam's original ten-field v0.1 record is extended deliberately, with `schema_version: 2` and contract tests. Both frontends retain the shared backup record. Native results embed it under `backup_result`; their outer record also contains workload and restore evidence. Existing convenience timing fields are derived from that shared result. Previously committed v1 evidence is historical and is not rewritten.
+Sam's original ten-field v0.1 record is extended deliberately, with contract tests. Version 2 separated manifest verification from restore; version 3 adds `transfer` and `transfer_stats` for methods that move bytes between a staged backup and an old copy. The two native methods produce exactly the v2 record plus those two keys set to null. All frontends retain the shared backup record. Native results embed it under `backup_result`; their outer record also contains workload and restore evidence. Existing convenience timing fields are derived from that shared result. Previously committed v1 and v2 evidence is historical and is not rewritten.
 
 | Field | Meaning |
 |---|---|
-| `backup`, `verification` | Capture and final manifest/WAL verification outcomes |
-| `basis_verification` | Incremental prerequisite, outside refresh timing; the creation/storage of B0 must also be disclosed |
+| `backup`, `verification` | Capture and final manifest/WAL verification outcomes; for staged methods `verification.output_check` records the output check below |
+| `basis_verification` | Incremental prerequisite, outside refresh timing; the creation/storage of B0 must also be disclosed. The CLI also records here a basis that changed during the run (`FAIL_BASIS`, with `changes`) |
 | `increment_verification`, `combination` | Incremental-only phases; null for full backup |
+| `transfer`, `transfer_stats` | Staged-method transfer phase and its counters (tool, version, bytes each way, literal/matched data, untimed `preparation` phases); null for the native methods |
 | Phase `exit_code`, `duration_seconds`, `error` | Execution outcome; timeout/missing executable is a failure, never a successful zero-time run |
-| `backup_file_bytes`, `output_file_bytes` | Apparent captured and usable-output file lengths, including WAL/metadata; not network bytes |
-| `method_seconds` | Wall time for capture and any input verification/reconstruction |
+| `backup_file_bytes`, `output_file_bytes` | Apparent captured and usable-output file lengths, including WAL/metadata; not network bytes. Null when the directory is missing or is itself a symlink |
+| `method_seconds` | Wall time for capture and any input verification, reconstruction or transfer |
 | `time_to_verified_seconds` | Wall time through final verification; null on failure |
 | `integrity_verified`, `restore_tested`, `status` | Explicit distinction between manifest integrity and separately tested recovery |
-| `network_bytes`, `unavailable_metrics` | Null plus reason until a transport observer exists |
+| `network_bytes`, `unavailable_metrics` | `bytes_source_to_dest + bytes_dest_to_source` from `transfer_stats` when a method reports both; otherwise null plus reason until a transport observer exists. A filled value is the method's own count of its transfer stream, flagged under `unavailable_metrics.interface_bytes`; it is not an interface or packet measurement |
 
 Each executed CLI phase also has a `resources` observation when Linux `/proc` is available, with a sibling `.resources.jsonl` sample series. The CLI sees its own backup/verification process tree, not the PostgreSQL server in a separate container or host. The native suite additionally samples its owned source server and records PostgreSQL cumulative-statistics deltas. The host-side [Compose resource observer](observe_docker.py) samples both Compose services during HammerDB experiments. These sources have different scopes and must not be merged into one wire-byte or device-I/O figure.
 
-Timings include command launch and waiting. At the smoke database's short durations, orchestration overhead is material. These measurements are not a performance acceptance threshold. Execution logs and atomically published JSON survive failures; POSIX command timeouts kill the process group. The CLI refuses source/basis/output overlap, including symlink aliases. Auth/TLS environment settings are preserved while implicit libpq routing settings are removed.
+Timings include command launch and waiting. At the smoke database's short durations, orchestration overhead is material. These measurements are not a performance acceptance threshold. Execution logs and atomically published JSON survive failures; POSIX command timeouts kill the process group. The CLI refuses source/basis/output overlap, including symlink aliases. For every method that takes a basis, it also snapshots B before the run: path, type, mode, size, mtime, ctime, inode and device of every entry, without hashing contents. It compares the snapshot again afterwards. Any change fails the run as `FAIL_BASIS` (exit 4), whatever the method reported, and the first changes are listed in `basis_verification`. ctime is included because a write cannot set it back, so a same-size rewrite that restores mtime is still caught. Auth/TLS environment settings are preserved while implicit libpq routing settings are removed.
+
+## Staged transfer methods and their timing
+
+Both staged methods follow [SPEC section 2](../docs/SPEC.md): a fresh full `pg_basebackup` S is captured on the source side, and the output O is built from S and the old copy B without modifying B. O is first verified with `pg_verifybackup --manifest-path S/backup_manifest O`. That alone does not show that O matches S. PostgreSQL 17.11's tool skips `backup_manifest`, `postgresql.auto.conf`, `recovery.signal`, `standby.signal`, the `pg_wal` entries outside the backup's WAL range and empty directories. It also reads straight through an O that is a symlink to S or hard links into it.
+
+So `run_backup` then runs the harness's output check, [`output_check.py`](output_check.py), for every method registered with `output_matches_capture`. The check runs under the method's `python` tool, wherever the method's commands run (inside the runner container for HammerDB). O must be a real directory, not a symlink, and must not overlap S or B. No entry of O may be the same file (device and inode) as an entry of S or B, have a second hard link, or be a symlink into S or B. O must also hold exactly S's relative paths and types, with byte-identical files (streamed in 1 MiB chunks) and identical symlink targets. Any difference fails the run as `FAIL_VERIFY`. The first differences are listed in `verification.error` and in full in `verification.output_check`. A transfer that leaves any of B's content in O, or publishes O as a link to S, therefore fails.
+
+Status adds `FAIL_PREPARE` and `FAIL_TRANSFER` to the existing failure states, and unreadable transfer statistics count as `FAIL_TRANSFER`, so no sample is reported without byte counts.
+
+- `rsync_staged` copies B to a new O, then runs `rsync --archive --checksum --no-whole-file --inplace --block-size=8192 --delete --stats S/ O/` and parses the `--stats` block, in GNU rsync 3.x or macOS openrsync layout. `--rsync` selects the executable and its version banner is recorded. rsync updates the old copy in place; the copy only keeps B reusable across trials.
+- `pg_delta_staged` runs `python -m pgdelta local --source S --basis B --output O --stats-json FILE [--pg-controldata PATH]`, with FILE beside O, and reads `bytes_source_to_dest` and `bytes_dest_to_source` from it. The whole statistics object is retained under `transfer_stats.reported`. `--pgdelta` replaces the command prefix; `python -m pgdelta` needs the package importable from the working directory or `PYTHONPATH`.
+
+| Phase | Record | Timing |
+|---|---|---|
+| Preparation: rsync version probe, copy B to O | `transfer_stats.preparation` | Outside `method_seconds` and `time_to_verified_seconds`, like B0 verification. The native suite and the HammerDB driver run it before the workload starts. Its duration is still recorded and must be disclosed |
+| Staging capture of S | `backup` | Inside the timer; in a two-host deployment it runs on the source side, not across the link |
+| Transfer S (and B) to O | `transfer` | Inside the timer |
+| Verification of O against S's manifest | `verification` | `time_to_verified_seconds` only |
+| Output check: O independent of S and B, and identical to S | `verification.output_check` | Outside both timers: it needs S next to O, which only the harness has. The native suite and the HammerDB driver end their measured windows before it runs; HammerDB also waits for the workload to exit first. Its duration is recorded |
+
+The two staged methods are therefore not timed on the same terms. `rsync_staged`'s untimed preparation copies B into O, so its timer covers only rsync's in-place update. `pg_delta_staged` has no preparation and builds O from B and S inside its timed transfer, copying every reused page. Their `method_seconds` and `time_to_verified_seconds` are not a like-for-like comparison. `report_native` adds a "preparation + method seconds" column (`preparation_seconds + method_seconds`) for that; elsewhere, add the `transfer_stats.preparation` durations to `method_seconds`.
+
+`method_seconds` is wall time from the start of capture to the end of the transfer, including the gap between them; `time_to_verified_seconds` adds verification. Every run so far keeps S, B and O on one host, so the byte counts are the tools' own transfer-stream counters, with no network crossed. rsync's are protocol-stream bytes for a local push (sent is source to destination) and exclude SSH/TCP framing. pgdelta's are whatever its statistics file reports. Neither replaces the independent link observer planned in [PLAN.md](../docs/PLAN.md#interfaces-to-agree-at-the-sync).
+
+## Adding a method
+
+Write a function in `methods.py` that takes the `Context` and runs its phases through `ctx.execute(stage, argv)`. It returns a dict with any of `backup`, `increment_verification`, `combination` and `transfer` (phase records), `transfer_stats` (a dict), `failure` (a status and exit code, or None) and `verify_manifest`. Then `register()` a `Method` naming it, whether it needs a basis, its capture directory (`increment`, `staging` or none), the tools it needs and any untimed `prepare` step. Set `output_matches_capture` when O must be an exact, independent copy of the capture, as for the staged methods; it requires the `python` tool. `run_backup` handles basis verification for methods that trust the basis, preparation, the timer, the final verification, the output check and the v3 record, so the three frontends need no edits. Only a new tool flag (as `--rsync` was) touches a frontend. Add stub-backed tests like `tests/test_methods.py`.
 
 ## HammerDB and pgbench have different jobs
 
@@ -53,7 +81,7 @@ The current exact-data restore checker is specific to the account-transfer fixtu
 | pgbench | Already used for inexpensive controlled workloads and per-transaction observations. |
 | HammerDB | Sam's schema builder and workload scripts retained for the larger application benchmark. Do not implement a new TPC-C-like generator. |
 | Docker / Compose | Shared environment packaging and lifecycle; optional on a machine with matching tools installed. |
-| [rsync](https://download.samba.org/pub/rsync/rsync.1) | Next transfer comparison on identical frozen backup inputs. Use remote/delta mode explicitly and include basis/output work. Do not synchronize changing live PGDATA and call it a valid backup. |
+| [rsync](https://download.samba.org/pub/rsync/rsync.1) | Registered as `rsync_staged`: delta mode forced with `--no-whole-file` on frozen staged inputs, with basis-copy, transfer and verification work recorded separately. Do not synchronize changing live PGDATA and call it a valid backup. The SPEC's in-backup-mode rsync variant is not implemented. |
 | [pgBackRest](https://pgbackrest.org/user-guide.html) | Later production-backup comparison; supports established backup/restore workflows. Keep its repository, compression and recovery semantics explicit. It is a comparison target, not the custom algorithm. |
 | [sysstat](https://sysstat.github.io/) (`pidstat`, `iostat`) | Reuse process and device observations when implementing resource instrumentation; account for child/server processes and observer overhead. |
 | Linux interface counters / packet capture | Count the designated backup link in both directions. Container-wide traffic may include workload traffic, and summing both endpoints double-counts the same bytes. Validate the observer before claiming savings. |

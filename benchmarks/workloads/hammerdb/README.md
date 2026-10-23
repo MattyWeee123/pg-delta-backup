@@ -185,6 +185,15 @@ window analysis and an exact recovery checker for the HammerDB schema remain to 
 control trial and a backup trial, aligns their windows and writes a schema v2 record. It is the
 automation that this document previously listed as remaining work.
 
+`--method` accepts any registered method. Methods that refresh an old copy (incremental and the
+staged transfers) need `--basis` with its path inside the runner container and are refused
+without one; the runner image must also provide rsync or pgdelta for the staged methods.
+Their untimed preparation, such as copying the basis, runs before the workload starts, and so does
+the incremental method's verification of the basis (`pg_verifybackup` and the file-checksum
+policy). The staged methods' output check, which reads all of the output and the staged capture
+to confirm they are independent and identical, waits until the workload has exited, so it
+cannot load the recovery window. It needs `--python` in the runner container.
+
 **Run it on Linux.** The driver passes container paths to the shared backup adapters, which wrap
 them in `pathlib.Path`; on Windows that rewrites them with backslashes and the container command
 fails. Use WSL or a Linux host. The parsing and arithmetic are platform independent and their
@@ -232,7 +241,7 @@ so a two minute window was correctly rejected and six minutes was used instead.
 | `JOBTIMING` summary rows | Latency percentiles per stored procedure |
 | `docker logs -t` | Window markers, the NOPM result line, retained raw evidence |
 | `observe_docker` | Container CPU, memory and block I/O, started automatically per trial |
-| `run_backup` | The shared v2 backup record, embedded in the pair record |
+| `run_backup` | The shared v3 backup record, embedded in the pair record |
 
 **Latency is whole-run, not window-aligned.** `JOBTIMING` percentiles cover a virtual user's
 entire elapsed time including ramp-up, and HammerDB's schema has no time dimension for latency.

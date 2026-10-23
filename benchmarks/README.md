@@ -55,7 +55,7 @@ Include raw values and failed trials; report speedup only where the recovery gua
 
 Both the configurable CLI and the [native recovery suite](NATIVE.md) use the same backup adapters and result schema. See [the consolidation and tool decisions](CONSOLIDATION.md). Sam's HammerDB workload is retained in [workloads/hammerdb](workloads/hammerdb/README.md).
 
-The CLI captures a full backup, or a native incremental followed by reconstruction. It verifies manifests and required WAL; its success status is `PASS_MANIFEST_ONLY`. It does not itself restore the database or orchestrate HammerDB. The native suite adds those fixture-specific recovery tests.
+The CLI runs one method from the [registry](methods.py): a full backup, a native incremental followed by reconstruction, or a staged transfer (`rsync_staged`, `pg_delta_staged`) that captures S and refreshes a copy of an old basis from it. It verifies manifests and required WAL; its success status is `PASS_MANIFEST_ONLY`. It does not itself restore the database or orchestrate HammerDB. The native suite adds those fixture-specific recovery tests. Adding a method means registering it in `methods.py`; see [CONSOLIDATION.md](CONSOLIDATION.md#adding-a-method).
 
 For an existing disposable Linux fixture with matching PostgreSQL 17 tools on PATH:
 
@@ -65,6 +65,15 @@ python -m benchmarks.benchmark --host 127.0.0.1 --port 5432 --user postgres --ou
 python -m benchmarks.benchmark --host 127.0.0.1 --port 5432 --user postgres \
   --out benchmarks/runs --method pg_basebackup_incremental \
   --basis benchmarks/runs/FULL_RUN_ID/backup
+```
+
+Staged transfers take the same immutable basis. Their capture S goes in `staging/`, and `rsync_staged` records which rsync ran (macOS ships openrsync; pass `--rsync` for GNU rsync 3.x):
+
+```sh
+python -m benchmarks.benchmark --host 127.0.0.1 --user postgres --out benchmarks/runs \
+  --method rsync_staged --basis benchmarks/runs/FULL_RUN_ID/backup
+python -m benchmarks.benchmark --host 127.0.0.1 --user postgres --out benchmarks/runs \
+  --method pg_delta_staged --basis benchmarks/runs/FULL_RUN_ID/backup
 ```
 
 Authentication uses the existing `.pgpass`/`PGPASSFILE` or password environment, never a password argument. The legacy `python benchmarks/benchmark.py` entrypoint also works. `--source-pgdata` optionally checks source/output overlap. Each invocation creates a unique directory; incremental capture goes in `increment/` and its reconstructed output goes in `backup/`.
@@ -106,7 +115,7 @@ docker compose -f benchmarks/fixture/docker-compose.yml run --rm --entrypoint sh
 | Checkpoint | fast | Explicit policy for both methods; do not compare against spread without labeling the difference. |
 | Format | plain | Tar is rejected by this verification path. |
 | CLI timeout | 3600 seconds per command | Failure preserves logs and cannot receive a successful verified time. |
-| Result schema | v2 | Common backup record, with separate incremental phases and explicit manifest-only status. |
+| Result schema | v3 | Common backup record, with separate incremental and transfer phases, transfer byte counts and explicit manifest-only status. |
 
 ## First PostgreSQL baseline recipe
 

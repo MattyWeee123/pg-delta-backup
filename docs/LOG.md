@@ -1,0 +1,243 @@
+# Project log
+
+A dated record of what was done, why, and what came out of it. Newest entries first.
+Experiments have their own write-ups in [docs/experiments/](experiments/).
+
+## 2026-10-23 (later): closing EXP-06's open question
+
+**Does pipelined verification help at the default of 4 processes?** EXP-06 had left this mixed: one busy re-run with 3 repeats had it costing 0.18 s for uniform.
+- **Method:** predictions and a decision rule were recorded first. Then 10 interleaved runs per configuration on the kept EXP-06 pairs ([results](experiments/EXP-06-engine-throughput.md#results-of-the-check-run-october-23-2026)).
+- **Result:** pipelined was 0.06–0.13 s (3–7%) faster in all three workloads, with one-sided permutation p = 0.05–0.08 each. Both numeric predictions failed: the effect was smaller than predicted for hot, and present, not absent, for uniform. The decision rule keeps `--verify pipelined` as the default.
+- **Other loose ends from the reviews, and how they stand:**
+  - EXP-07's C7-against-C6 comparison is closed as "no measurable difference". It changes no decision.
+  - EXP-06's thin margins on the busy Mac were superseded by the Linux check and EXP-04/04b, which measured the engine on the VMs.
+
+## 2026-10-23: EXP-04b done; VMs deleted; where the project stands
+
+**EXP-04b** ([write-up](experiments/EXP-04b-default-checksums.md)): the same sweep with PostgreSQL's default CRC32C manifests. 324 runs, all verified.
+- **What CRC32C changed:**
+  - the full copy and the staged capture halved (8.3 → 4.0 s);
+  - `pg_combinebackup` fell 34–38%;
+  - pgdelta's and rsync's own transfers were unchanged.
+- **Crossovers** (beats a full copy below):
+
+| | Scattered changes | Local changes |
+|---|---|---|
+| pgdelta | 2.0 Gbit/s | 2.5 Gbit/s |
+| rsync | 0.8–1.0 Gbit/s | 3.9 Gbit/s |
+| incremental | 3.75 Gbit/s | every speed for hot; append lost narrowly at the unthrottled link |
+
+- **Predictions:** R1–R4 and R7 held. R5 failed for local changes: rsync's crossover came out above the predicted range, where the arithmetic check written before the results put it. R6 held only in part: append lost narrowly at the unthrottled link.
+- **A second independent recheck** of the EXP-04b write-up found 3 major and 9 minor overstatements, all fixed. The append result is a loss, not a tie. The hot/append difference is noise in the full copy between trials. Incremental's lead at full speed shrank.
+- **Independent recheck:** two reviewers recomputed the EXP-04 and EXP-07 write-ups from the raw data and found 9 major and 22 minor overstatements. All are fixed.
+  - N2 failed for every method but pgdelta.
+  - N5 held in full under the serial reading.
+  - N7 held only in part.
+  - EXP-07 measured only the local capture, not every backup.
+  - pgdelta's own transfer is the other half of its cost.
+
+**The two VMs were deleted** at 00:05 UTC, after the results were fetched. No instances or disks remain. **GCP access and spend, checked through `gcloud` as Matt (read-only):**
+- Project `postgres-delta-backup` is ACTIVE, with billing enabled on the sponsored billing account.
+- No instances or disks remain.
+- The audit log shows both VMs created at 10:08 UTC on October 22 and deleted at 00:07 UTC on October 23, so they ran 14.0 hours.
+- At list prices that's about 15–16 USD: two `n2-standard-8` at about 0.39 USD/hour each, plus 4 local SSDs each at about 0.16 USD/hour.
+- The exact billed figure needs the console's billing page. The browser pane's Google session had expired there, and signing in is Matt's to do.
+
+**Where the project stands:**
+- **pgdelta v0 is correct and sends the minimum page data.** That's evidence from 756 runs between two machines plus the tricky-copy experiment.
+- **It isn't yet fast enough to matter on fast links.** Where PostgreSQL's incremental backup can be used, it wins.
+- **Where incremental can't be used,** pgdelta wins only for scattered changes on links below about 2 Gbit/s. rsync wins for local changes below about 3.9 Gbit/s. Both lose to a plain full copy above that.
+- **Two design directions follow from the measurements:**
+  - start the session before the capture, so the destination can hash and copy B while S is taken;
+  - read the source's files directly instead of taking S.
+
+## 2026-10-22 (night, cont.): EXP-04 done; the cause found (EXP-07); EXP-04b running
+
+**EXP-04** ([write-up](experiments/EXP-04-network-sweep.md)): 432 runs between the two VMs, all passed and verified.
+
+| | Beats a full copy below |
+|---|---|
+| pgdelta | 1.1 Gbit/s (scattered changes), 1.5 (local) |
+| rsync | 0.6 (scattered), 1.9 (local) |
+| PostgreSQL incremental | 3.0 (scattered), every speed (local) |
+
+- **The surprise:** the local backup S that pgdelta and rsync start with took 8.5 s, as long as a whole full copy over the network. A staged method can't win on fast links while that holds.
+- **Predictions:** N6 and N7 held. N2 held for pgdelta (within 7% in all 18 cells) but failed for the full copy. N3 and N5 held in part. N1 held in part (overhead 0.1–0.4%, not 2–6%). **N4 failed** (crossovers lower than predicted).
+- **Correction to EXP-02:** on the wire, incremental streams only the WAL actually written. pgdelta and rsync must send a 16 MiB segment padded with zeros. So for local changes incremental sends the fewest bytes (17 MB against 29 MB), not pgdelta. A note was added to EXP-02.
+
+**EXP-07** ([write-up](experiments/EXP-07-capture-speed.md)): why the capture was so slow.
+- **The harness asked `pg_basebackup` for SHA-256 manifest checksums.** With PostgreSQL's default, CRC32C, the local capture takes 4.1 s instead of 8.6 s. The same setting applied to every full copy, capture and combine in EXP-04; EXP-04b measures how much each changes.
+- **Reading the files directly with 4 parallel readers takes 0.73 s** (2.9 GB/s), 5.5× faster than even the CRC32C backup.
+- **One mistake, caught and fixed:** the first attempt's direct-read variant listed `pg_wal`, whose old segments PostgreSQL recycled mid-run. It was fixed and re-run, and both attempts are kept.
+- **Next design step:** read the source's data files directly, in parallel and in backup mode, instead of writing S. It needs its own correctness experiment (torn pages, WAL replay).
+
+**EXP-04b** ([pre-registration](experiments/EXP-04b-default-checksums.md)): the same sweep with CRC32C manifests.
+- Speeds 0.5–5 Gbit/s and unthrottled, 3 repeats.
+- Predictions computed from EXP-04's phase times and EXP-07, recorded before the sweep.
+- Started 22:24 UTC. The VMs are deleted when it ends.
+
+## 2026-10-22 (overnight): Linux check done; EXP-04 sweep running
+
+**pgdelta gets the same head start as rsync** (recorded in the [EXP-04 write-up](experiments/EXP-04-network-sweep.md) before the sweep):
+- rsync copies the old copy at the destination while the source captures S. So now pgdelta's receiver starts during the capture and reads B into memory while it waits.
+- It can't fingerprint B early: the key arrives with the sender's first message, by design.
+- Any reading that happens between the two timed phases is measured and added to the checks.
+- Incremental is now the only method that reads B cold on its critical path. Comparisons with it say so.
+
+**EXP-06's Linux check** (on `pgd-dest`; predictions recorded first): all three held.
+- 4 worker processes hash 3.9× faster than 1.
+- 8 processes are only 4.5× faster, at 1.8× the CPU, because the 8 vCPUs are 4 cores with two hyperthreads each. So the default of 4 holds on Linux too.
+- One VM core hashes at 0.55 GB/s, 2.4× slower than the Mac.
+
+All 676 tests pass on the VM's Python 3.11.
+
+**Full EXP-04 sweep started at 18:13 UTC** at commit `d559b1b`:
+- 3 workloads × 8 link speeds × 6 methods × 3 repeats;
+- link speeds and method orders shuffled;
+- estimated 4–5 hours.
+
+The VMs are deleted once the results are fetched. `analysis/exp04.py` was written and tested on the smoke data, so the figures and verdict numbers come straight from the sweep.
+
+## 2026-10-22 (late night): EXP-06 halves pgdelta's fixed cost; EXP-04 tooling ready
+
+**EXP-06** ([write-up](experiments/EXP-06-engine-throughput.md)), on the Mac, inputs cached:
+- **What changed in the engine:**
+  - hashing runs in 4 worker processes;
+  - each output file is built by copying the old file in bulk and then patching the changed pages;
+  - finished files are verified in parallel.
+- **Result:** a 2.1 GB refresh with 1% of rows changed went from 4.37 s to 1.40 s for scattered changes, and from about 3.0 s to 1.3 s for local ones. Outputs were byte-identical in all 270 benchmark runs (two passes plus the re-run).
+- **Modelled crossover against a full copy:** from 2.8 to 8.6 Gbit/s for scattered changes, and to about 13 Gbit/s for local ones, level with rsync.
+- **Five of seven predictions held. Two held only in part:**
+  - copy-then-patch helps only scattered changes;
+  - 8 processes went over the CPU bound on the Mac's mixed cores, so the default is 4, not the best-measured 8.
+- **Still open:** parallel verification's benefit at the default of 4 processes is unproven.
+- **The reviews caught two major problems,** both fixed:
+  - on Linux, worker CPU would have gone uncounted, because the workers would have been started by a separate server process;
+  - an argument for the default rested on a page-cache artefact.
+- **Gap found in the method:** reading the inputs once before the runs didn't keep them cached, so every run now re-reads its own inputs first. EXP-05's numbers may include some cold reads.
+
+**EXP-04 fairness fixes are merged** (two review rounds, re-validated on the VMs):
+- rsync now pays for copying the old copy and flushing it to disk;
+- peak memory is measured per tool;
+- link speeds run in random order;
+- pgdelta's two engines (the new default and EXP-02's single-threaded one) are pinned by their flags.
+
+**Privacy:** the benchmark records listed other programs running on the Mac. The repository is public, so committed data and write-ups now use generic labels ("desktop application", "macOS system process").
+
+**Next:** give pgdelta's destination the same head start rsync gets: start the receiver, and fingerprint the old copy, while the source takes its backup. Then check the Linux engine on a VM, and run the full EXP-04 sweep.
+
+## 2026-10-22 (night): EXP-05 failed; EXP-06 designed
+
+**EXP-05, parallel hashing with threads** ([write-up](experiments/EXP-05-parallel-hashing.md)): three of four predictions failed.
+- Results stay identical for any thread count, but 2–4 threads gain at most 1.2×. **8 threads is 1.5× slower than 1 and uses 3× the CPU.**
+- **Cause:** Python's interpreter lock is taken back after every 8 KiB page, and the hand-off costs more than the hash.
+- **Second finding:** writing the output is as slow as hashing. With scattered changes, the destination copies tens of thousands of small runs of unchanged pages one by one, and then re-reads everything to verify it. This also explains why EXP-02's uniform 1% runs were slower than 5–10%.
+- **The review found a deadlock** in the thread pool's shutdown, and the default of 8 threads is the slowest setting. The branch isn't merged as is.
+
+**Next ([EXP-06](experiments/EXP-06-engine-throughput.md), pre-registered):**
+- hash in worker processes;
+- build each output file by copying the old file in bulk and then patching the changed pages;
+- verify finished files in parallel while the next one is written.
+
+Each change can be switched off, so its share is measured. Target: uniform 1% from 4.55 s to at most 2 s.
+
+**EXP-04 waits for this,** so the sweep on real links measures the engine that would actually ship, alongside one-thread pgdelta. The VMs keep running meanwhile (about 1 USD/hour).
+
+## 2026-10-22 (night): EXP-04 tooling built; fairness fixes before the sweep
+
+**Built and smoke-tested** ([experiments/network/](../experiments/network/README.md)):
+- Two `n2-standard-8` VMs in `us-central1-b`, each with 4 striped local NVMe SSDs. Other zones had none in stock with 2 SSDs.
+- **Running now, about 1 USD/hour together,** until the sweep is done. They'll then be deleted with `infra/gcp/teardown.sh`.
+- The smoke run (scale 5, 30 method runs) passed: every output was verified, staged outputs were byte-identical to S, and B0 was untouched. At that size fixed costs dominate, so its timings only check the tooling.
+
+**The fairness review found 2 major and 4 minor problems**, all being fixed before any real data is collected:
+- **rsync's timer was narrower than the others'.** Copying B0 and flushing the copy to disk happened outside it, and rsync didn't flush its own writes. pgdelta, `pg_basebackup` and `pg_combinebackup` all build and flush a complete copy inside their timers. Left as is, rsync would have looked faster than it is.
+- **Peak memory was wrong for every non-Python tool:** a child process reports its parent's peak memory from before it started.
+- **Minor:**
+  - SSH launch overhead counted against the staged methods only;
+  - the 16 MiB WAL segment each staged copy must send wasn't recorded separately;
+  - link speeds always ran in the same order;
+  - one rsync log overwrote the other.
+
+[EXP-04's predictions](experiments/EXP-04-network-sweep.md) were recorded before the smoke run's numbers were looked at.
+
+## 2026-10-22 (evening): EXP-01 and EXP-02 done
+
+**EXP-01, how many pages change** ([write-up](experiments/EXP-01-change-patterns.md)), 37 trials at about 2.1 GB:
+- The simple model `1 − (1 − f)^(rows per page)` predicted changed heap pages within 0.4 percentage points at every fraction.
+- **Local changes** (hot rows, appends, retention, ranges) left 99% of pages untouched: a refresh sends about 1% of the database.
+- **Scattered updates** dirty most of a table once more than about 2% of its rows change. Then no page-level method can avoid resending the table.
+- 8 KiB comparison halves the bytes against 64 KiB chunks for scattered changes.
+- PostgreSQL's change tracker missed no changed block with checksums on. With checksums off, a read scan changed 100,001 pages through hint bits alone, which the tracker (correctly) ignores.
+- Every prediction held, except that index pages changed at about 2f, not f, for clustered updates.
+
+**EXP-02, comparing methods on the same inputs** ([write-up](experiments/EXP-02-local-comparison.md)):
+- **Bytes:** pgdelta's page data equalled rsync's (8 KiB blocks) to the byte in all 37 trials, and was 0.5–20% below PostgreSQL incremental, whose extra is exactly its "tracked but unchanged" blocks. Default rsync sent 1.7–2.5× more for scattered changes.
+- **Compute is the real difference.** pgdelta spends a nearly fixed 3–5 s per 2.1 GB (hashing every page on one core, three passes, plus writing a full new copy). rsync takes 1.2 s for local changes but up to 10 s for scattered ones.
+- **Model of time vs. link speed:** pgdelta beats a full copy below about 2.5 Gbit/s for scattered changes and 5.5 Gbit/s for local ones; rsync below 1–1.6 and about 13 Gbit/s respectively.
+- **Wrong predictions:** rsync's checksum traffic back to the source was six times lower than predicted (0.04%), and default rsync's penalty was 1.7×, not ≥2×, at 1% of rows. One open question: pgdelta was slower at 1% of rows than at 5–10%.
+
+**Decision:** pgdelta's fixed hashing cost is the bottleneck, so the next change is parallel hashing ([EXP-05](experiments/EXP-05-parallel-hashing.md), pre-registered before building it). Leaf-fingerprint truncation would cut back-traffic for scattered changes, but at 0.1% of the database it can wait.
+
+**Housekeeping:** figures are now byte-stable across reruns (fixed SVG ids, no timestamps, deterministic line order), so regenerating them only shows in git when the data changes.
+
+## 2026-10-22 (later): Engine built and reviewed; EXP-03 done
+
+**Built, each in its own worktree and each reviewed by a separate agent that tried to break it:**
+- **`pgdelta/`, the v0 engine:**
+  - keyed BLAKE2b hash tree (8 KiB pages, 1 MiB nodes);
+  - framed sender/receiver protocol over pipes or TCP;
+  - verified rebuild into a staging folder, renamed into place only after every file checks out.
+- **`experiments/change_patterns/`, the EXP-01 study tooling,** plus `compare_methods.py` for EXP-02.
+- **`benchmarks/methods.py`, pluggable backup methods,** with two new ones: `rsync_staged` and `pg_delta_staged`.
+- **`experiments/tricky_copies/`, the EXP-03 scenarios.**
+
+**Reviews found 4 major and 22 minor problems.** Every one was reproduced before being fixed, then fixed with a regression test that failed first, and the fix was re-reviewed. The majors:
+- **Engine:** on macOS's case-insensitive disk, `--output basis/O` could create O *inside* the old copy `Basis`. Placement is now checked by filesystem identity, not path text.
+- **Harness:** `pg_verifybackup` doesn't check every file (it skips `postgresql.auto.conf`, `*.signal`, extra WAL), so a wrong rebuild could pass. The harness now also compares the output with the fresh backup file by file.
+- **Harness:** an output published as a symlink to the source passed every check. Now refused.
+- **Study:** the tracker's per-file block lists were parsed and then thrown away. Now kept in the trial JSON.
+
+The test suite went from 133 to 478 tests, all passing.
+
+**EXP-03 results** ([write-up](experiments/EXP-03-tricky-copies.md)):
+- **The tool was correct on all ten tricky old copies:** byte-identical, `pg_verifybackup`, restore and data comparison.
+- **LSN skipping went wrong in four of the eight same-cluster scenarios.** After a failover it would have kept 2,371 pages of stale data. Two of my seven pre-registered LSN predictions were wrong; the write-up says so and explains why.
+
+**Smaller decisions:**
+- **The identity check is a policy, not a safety requirement.** Every output file is verified against the source, so reuse from a "foreign" old copy can't make the result wrong. `--reuse-any-basis` turns the policy off; across a 17→18 upgrade it reused 53% of pages.
+- **Known residual issues, accepted for now (all minor):**
+  - In `local` mode, a signal arriving right after publication reports failure even though O is complete; the receipt beside O shows the truth.
+  - The harness doesn't re-check that the staged source backup S is unchanged before comparing.
+  - The HammerDB driver now waits for the workload before saving the backup record.
+
+**Then ran:** the EXP-01/02 matrix at scale 70 ([run plan](../experiments/change_patterns/run_exp01.sh)); results in the entry above.
+
+**GCP access confirmed** (Matt logged in to `gcloud` with his own account):
+- Project `postgres-delta-backup` is active, with billing on the sponsored account and Compute Engine enabled.
+- Quotas in us-central1: 200 N2 vCPUs, 24 instances, 8 IP addresses.
+- The default VPC allows all internal traffic between VMs.
+
+**Started:** building and validating the EXP-04 two-machine driver on two `n2-standard-8` VMs, plus a fairness review. Every method gets:
+- the same timing boundaries;
+- shaping in both directions, with the achieved rate verified;
+- OS page caches dropped before each timed run;
+- randomized method order;
+- wire bytes counted from the network interface, not taken from the tools' own reports.
+
+## 2026-10-22: Starting the build
+
+**Goal.** Build the tool end to end and back every claim with an experiment.
+
+**Environment found.**
+- **Local machine:** Apple M5 Pro, 15 cores, 24 GB RAM, 764 GB free disk. No Docker, PostgreSQL or `gcloud`. Python 3.14 and Homebrew are present. PostgreSQL 17.11 and 18.6 are being installed with Homebrew; both include the August 2026 visibility-map fix.
+- **GCP:** the project `postgres-delta-backup` isn't reachable yet. The browser pane isn't signed in to Google, and there's no `gcloud`. Matt needs to sign in before the two-machine benchmark; everything until then runs locally.
+
+**Plan, in order of what de-risks the project most.**
+1. **Change-pattern study.** How many 8 KiB pages, and how many larger chunks, actually change when a given fraction of rows changes, under different workload shapes? If most pages change, the tool can't win, so this goes first.
+2. **v0 engine.** Hash tree over 8 KiB pages, a transfer protocol between a sender and receiver process, and a verified rebuild into a new folder. Run locally first, with exact byte accounting.
+3. **Local comparison** against a full copy, PostgreSQL incremental backup and rsync, on the same inputs.
+4. **Correctness experiments** on tricky old copies: a server that diverged after failover, truncation, `FILE_COPY` databases, enabling checksums, unlogged tables. Each one also checks whether skipping pages by LSN would have been wrong.
+5. **Two-machine benchmark on GCP** over throttled links, to find the link speed where the tool starts to win.
+
+**How the work is organised.** The engine, the study tooling and the harness refactor are built in parallel, each in its own git worktree. Each is then reviewed by an independent reviewer that tries to break it before anything is merged.

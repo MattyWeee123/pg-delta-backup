@@ -2,10 +2,24 @@
 
 A CMU student project with Google's AlloyDB team: a tool that brings an older physical copy of a PostgreSQL cluster up to date by sending only the pages that changed, verifying every reused page by hash.
 
-**Status, October 22, 2026**
-- **Measurement harness: built.** Backup and restore checks, resource sampling, and the HammerDB slowdown driver.
-- **Tool: not started.** v0 is next ([plan](docs/PLAN.md)).
+**Status, October 23, 2026** (details in the [project log](docs/LOG.md))
+- **Tool: v0 built** ([`pgdelta/`](pgdelta/README.md), [design](docs/DESIGN.md)).
+  - It compares 8 KiB pages by keyed hash, sends only the ones that differ, and rebuilds and verifies a new copy before publishing it.
+  - It hashes on worker processes (`--jobs`, default 4), building the new copy by copy-then-patch and verifying it in parallel.
+- **Evidence** ([all experiments](docs/experiments/README.md), each with predictions recorded before running):
+  - **Correct on ten tricky old copies,** including after failover, where skipping pages by LSN would have kept stale data ([EXP-03](docs/experiments/EXP-03-tricky-copies.md)). All 756 runs between two machines produced copies that passed `pg_verifybackup`, and every pgdelta and rsync copy was byte-identical to its source backup.
+  - **Sends exactly the changed pages,** about 1% of the database for local changes ([EXP-01](docs/experiments/EXP-01-change-patterns.md), [EXP-02](docs/experiments/EXP-02-local-comparison.md)). On the wire, PostgreSQL's incremental backup sends slightly less, because staged methods must send a padded WAL segment.
+  - **Worker processes cut its fixed cost by 2–3×** ([EXP-06](docs/experiments/EXP-06-engine-throughput.md)); threads didn't, because of Python's interpreter lock ([EXP-05](docs/experiments/EXP-05-parallel-hashing.md)).
+  - **Between two cloud VMs** ([EXP-04](docs/experiments/EXP-04-network-sweep.md), [EXP-04b](docs/experiments/EXP-04b-default-checksums.md)), for 2.1 GB with 1% of rows changed:
+    - PostgreSQL's incremental backup is the fastest delta method wherever it can be used. A full copy beats it only on the fastest links.
+    - Where it can't, pgdelta is fastest only for scattered changes below about 2 Gbit/s, and rsync for local changes below about 3.9 Gbit/s.
+    - A full copy wins on faster links.
+  - **Why staged pgdelta can't win on fast links:** the local backup it starts from costs as much as a full copy ([EXP-07](docs/experiments/EXP-07-capture-speed.md)), and its own transfer is about as long again.
+- **Next:** overlap pgdelta's destination-side work with the capture, and read the source's files directly instead of taking a backup first. Each needs a new experiment.
+- **Measurement harness: built.** Backup and restore checks, resource sampling, the HammerDB slowdown driver, and a two-VM network benchmark ([experiments/network/](experiments/network/README.md)).
 - **Research: done.** [What already exists and where the gap is](docs/research/state-of-the-art.md).
+
+![Who wins where](docs/figures/exp04b-winners.svg)
 
 ## The problem and our niche
 
@@ -24,13 +38,16 @@ Our niche is the copy whose history is lost: a standby whose WAL was recycled, a
 ## Start here
 
 1. [Research summary](docs/research/state-of-the-art.md): existing tools, correctness pitfalls, design implications.
-2. [Plan](docs/PLAN.md): workstreams, dependencies, schedule to the November 13 freeze.
-3. [Specification](docs/SPEC.md): architecture, design decisions, correctness gates.
-4. [Correctness contract](docs/CORRECTNESS.md): what "no data loss" means and how we test it.
-5. [Questions for Ben and Sumaithri](docs/BEN-QUESTIONS.md): our assumptions and the few open questions.
-6. [References](docs/REFERENCES.md): curated reading list.
-7. [Benchmark harness](benchmarks/README.md) and [native recovery suite](benchmarks/NATIVE.md).
-8. [Validation log](docs/VALIDATION.md): what has actually been run.
+2. [Experiments](docs/experiments/README.md): each one's question, predictions made before running, results and graphs.
+3. [Design of pgdelta v0](docs/DESIGN.md) and [how to run it](pgdelta/README.md).
+4. [Project log](docs/LOG.md): what was done, when, and why.
+5. [Plan](docs/PLAN.md): workstreams, dependencies, schedule to the November 13 freeze.
+6. [Specification](docs/SPEC.md): architecture, design decisions, correctness gates.
+7. [Correctness contract](docs/CORRECTNESS.md): what "no data loss" means and how we test it.
+8. [Questions for Ben and Sumaithri](docs/BEN-QUESTIONS.md): our assumptions and the few open questions.
+9. [References](docs/REFERENCES.md): curated reading list.
+10. [Benchmark harness](benchmarks/README.md) and [native recovery suite](benchmarks/NATIVE.md).
+11. [Validation log](docs/VALIDATION.md): what has actually been run.
 
 Work items are GitHub issues #4 to #13. Older planning docs are in [docs/archive](docs/archive/).
 
@@ -42,36 +59,41 @@ Python 3.10+:
 python -m unittest discover -s tests -v
 ```
 
-`benchmarks/benchmark.py` runs a full backup, or native incremental plus reconstruction. It verifies the output with `pg_verifybackup` and writes a shared v2 JSON run record. It needs PostgreSQL 17 client utilities and a disposable test cluster; see [the benchmark plan](benchmarks/README.md#running-the-consolidated-cli) for the fixture and flags.
+`benchmarks/benchmark.py` runs one method from the [method registry](benchmarks/methods.py): a full backup, native incremental plus reconstruction, or a staged rsync or pgdelta transfer from a fresh backup into a copy of an old one. It verifies the output with `pg_verifybackup` and writes a shared v3 JSON run record. It needs PostgreSQL 17 client utilities and a disposable test cluster; see [the benchmark plan](benchmarks/README.md#running-the-consolidated-cli) for the fixture and flags.
 
 ```sh
 python benchmarks/benchmark.py --host 127.0.0.1 --port 5432 --user postgres --out benchmarks/runs
 ```
 
-A successful run records `PASS_MANIFEST_ONLY`, not `PASS`: this runner has no restore gate, and `network_bytes` is null until network measurement exists.
+A successful run records `PASS_MANIFEST_ONLY`, not `PASS`: this runner has no restore gate. `network_bytes` is null for the native methods until network measurement exists; the staged methods fill it from their own transfer counters.
 The native suite performs real restores; HammerDB supplies the larger workload.
 
 `experiments/chunk_demo.py` is a toy model of the engine on synthetic bytes. It doesn't touch PostgreSQL or a network.
+`experiments/change_patterns/` measures how many pages really change between two backups under different row-change patterns, and how that compares with PostgreSQL's own change tracker ([README](experiments/change_patterns/README.md)).
 
 ## Repository layout
 
 ```text
-docs/            Plan, spec, correctness contract, sponsor questions, references
+pgdelta/         The tool (v0): hash tree, protocol, sender, receiver
+docs/            Plan, spec, design, log, correctness contract, sponsor questions, references
+docs/experiments/ Experiment write-ups, curated data (data/) and figures (../figures/)
 docs/research/   State-of-the-art research and its source notes
 docs/references/ Open-licensed papers (others are linked in REFERENCES.md)
 docs/specs/      Design and handoff records for the measurement harness
 docs/archive/    Superseded planning documents
 benchmarks/      Measurement harness, fixture, workloads and recorded evidence
-experiments/     Toy model of chunk reuse
+experiments/     Tooling for each experiment (change patterns, tricky copies, network)
+analysis/        Scripts that turn raw results into the committed data and figures
+infra/gcp/       Create, throttle and delete the two benchmark VMs
 tests/           Unit and contract tests
 .github/         CI and issue/PR templates
 ```
 
 ## Language
 
-Not decided yet; the team confirms at the next sync.
-The proposal is Python for v0: it plugs into the existing harness, and hashing runs as compiled code through `hashlib`.
-Rust remains an option for the hashing core if measurements show it's the bottleneck.
+v0 is Python: it plugs into the existing harness, and hashing runs as compiled code through `hashlib`.
+EXP-02 showed hashing is the bottleneck. EXP-05 tests whether hashing on several threads is enough
+before reaching for a compiled core (Rust).
 C would only be needed for a PostgreSQL patch, which is out of scope.
 
 ## Contribution rules

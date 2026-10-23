@@ -7,7 +7,8 @@ import tempfile
 import unittest
 from unittest import mock
 
-from benchmarks.backup import run_backup
+from benchmarks.backup import (CHECKSUM_POLICY, basis_changed, run_backup, snapshot_changes,
+                               tree_snapshot, verify_basis)
 from benchmarks.benchmark import assert_no_overlap, connection_env, parse_args
 
 
@@ -47,7 +48,7 @@ class SharedPipelineTests(unittest.TestCase):
         self.assertIn('--manifest-checksums=SHA256', calls[3][1])
         self.assertEqual(result['status'], 'PASS_MANIFEST_ONLY')
         self.assertFalse(result['restore_tested'])
-        self.assertEqual(result['schema_version'], 2)
+        self.assertEqual(result['schema_version'], 3)
 
     def test_full_has_no_incremental_phases(self):
         result, code, calls = self.pipeline(incremental=False)
@@ -108,6 +109,69 @@ class SharedPipelineTests(unittest.TestCase):
         self.assertEqual(result['status'], 'FAIL_BASIS')
         self.assertEqual(code, 4)
         execute.assert_not_called()
+
+    def test_basis_verified_early_is_not_checked_again(self):
+        """A frontend may verify B before its workload starts and pass the record on."""
+        reads, calls = [], []
+
+        def read_file(path):
+            reads.append(path)
+            return Path(path).read_text()
+
+        def execute(stage, command):
+            calls.append(stage)
+            return {'exit_code': 0, 'duration_seconds': .1, 'error': None}
+
+        early = verify_basis(self.root / 'basis', execute=execute, tools=self.tools,
+                             read_file=read_file)
+        self.assertEqual(early['checksum_policy'], CHECKSUM_POLICY)
+        result, code = run_backup(
+            'pg_basebackup_incremental', run_id='early', output=self.root / 'output',
+            tools=self.tools, execute=execute, host='fixture', basis=self.root / 'basis',
+            increment=self.root / 'increment', read_file=read_file, basis_verification=early)
+        self.assertEqual(code, 0)
+        self.assertEqual(calls, ['basis_verification', 'backup', 'increment_verification',
+                                 'combination', 'verification'])
+        self.assertEqual(len(reads), 1)
+        self.assertEqual(result['basis_verification'], early)
+
+    def test_supplied_passing_pg_verifybackup_record_still_gets_the_checksum_policy(self):
+        (self.root / 'basis' / 'backup_manifest').write_text(json.dumps(
+            {'Files': [{'Path': 'base.dat', 'Size': 10}]}))
+        execute = mock.Mock()
+        result, code = run_backup('pg_basebackup_incremental', run_id='bad',
+            output=self.root / 'out', tools=self.tools, execute=execute, host='fixture',
+            basis=self.root / 'basis', increment=self.root / 'increment',
+            basis_verification={'exit_code': 0, 'duration_seconds': .1, 'error': None})
+        self.assertEqual((result['status'], code), ('FAIL_BASIS', 4))
+        self.assertIn('checksums', result['basis_verification']['error'])
+        execute.assert_not_called()
+
+    def test_tree_snapshot_sees_additions_removals_and_metadata_changes(self):
+        basis = self.root / 'basis'
+        (basis / 'base').mkdir()
+        (basis / 'base' / 'f').write_bytes(b'x')
+        before = tree_snapshot(basis)
+        self.assertEqual(snapshot_changes(before, tree_snapshot(basis)), [])
+        (basis / 'base' / 'new').write_bytes(b'')
+        (basis / 'base' / 'f').chmod(0o600)
+        (basis / 'backup_manifest').unlink()
+        changes = snapshot_changes(before, tree_snapshot(basis))
+        self.assertIn('backup_manifest was removed', changes)
+        self.assertIn('base/new was added', changes)
+        (changed,) = [line for line in changes if line.startswith('base/f ')]
+        self.assertIn('mode', changed)
+        self.assertEqual(len(snapshot_changes(before, tree_snapshot(basis), limit=2)), 2)
+
+    def test_basis_changed_overrides_a_passing_record(self):
+        result = {'basis_verification': None, 'status': 'PASS_MANIFEST_ONLY',
+                  'integrity_verified': True, 'time_to_verified_seconds': 1.0}
+        failed, code = basis_changed(result, ['base/f changed (size)'])
+        self.assertEqual((failed['status'], code), ('FAIL_BASIS', 4))
+        self.assertFalse(failed['integrity_verified'])
+        self.assertIsNone(failed['time_to_verified_seconds'])
+        self.assertEqual(failed['basis_verification']['changes'], ['base/f changed (size)'])
+        self.assertEqual(result['status'], 'PASS_MANIFEST_ONLY')
 
     def test_symlink_alias_cannot_bypass_overlap_guard(self):
         source = self.root / 'source'

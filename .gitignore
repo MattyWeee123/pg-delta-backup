@@ -2,7 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .env
-data/
+/data/
 scratch/
 results/raw/
 results/native*/
@@ -12,3 +12,4 @@ runs/
 target/
 .claude/
 results/hammerdb*/
+/results/

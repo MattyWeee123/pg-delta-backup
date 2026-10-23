@@ -12,6 +12,14 @@ Environment:
     STUB_CADENCE   seconds between counter samples in the emitted log
     STUB_EXEC_MS   milliseconds each `exec` takes, to give a backup real width
     STUB_FAIL      subcommand that should exit non-zero
+    STUB_MANIFEST  text an exec'd `cat .../backup_manifest` prints instead
+
+An exec'd rsync prints a version banner or GNU rsync 3.x --stats output, so
+transfer methods can be driven through the container as well. An exec'd
+`cat .../backup_manifest` prints a manifest with a checksum on every file.
+
+Every invocation is appended to docker.log and every exec to exec.log, one
+line each; newlines inside an argument (python -c source) are written as \\n.
 """
 
 import os
@@ -25,6 +33,26 @@ STATE = Path(os.environ['STUB_STATE'])
 WINDOW = float(os.environ.get('STUB_WINDOW', '2.0'))
 CADENCE = float(os.environ.get('STUB_CADENCE', '0.02'))
 EXEC_MS = float(os.environ.get('STUB_EXEC_MS', '100'))
+RSYNC_VERSION = 'rsync  version 3.4.1  protocol version 32\n'
+# GNU rsync 3.x layout; the numbers are illustrative, not from a measured run.
+RSYNC_STATS = '''
+Number of files: 1,203 (reg: 1,164, dir: 39)
+Number of created files: 0
+Number of deleted files: 3 (reg: 3)
+Number of regular files transferred: 41
+Total file size: 1,231,486,976 bytes
+Total transferred file size: 335,642,624 bytes
+Literal data: 24,576,000 bytes
+Matched data: 311,066,624 bytes
+File list size: 0
+File list generation time: 0.002 seconds
+File list transfer time: 0.000 seconds
+Total bytes sent: 24,893,113
+Total bytes received: 1,210,662
+
+sent 24,893,113 bytes  received 1,210,662 bytes  4,746,141.82 bytes/sec
+total size is 1,231,486,976  speedup is 47.18
+'''
 
 
 def rfc3339(moment):
@@ -75,14 +103,24 @@ def write_jobs_db(name, destination):
     connection.close()
 
 
+MANIFEST = ('{"PostgreSQL-Backup-Manifest-Version": 2, "Files": [{"Path": "PG_VERSION", '
+            '"Size": 3, "Checksum-Algorithm": "SHA256", "Checksum": "ab"}]}')
+
+
+def one_line(argv):
+    return ' '.join(argv).replace('\n', '\\n') + '\n'
+
+
 def main(argv):
     if not argv:
         return 1
     command = argv[0]
+    STATE.mkdir(parents=True, exist_ok=True)
+    with (STATE / 'docker.log').open('a', encoding='utf-8') as log:
+        log.write(one_line(argv))
     if os.environ.get('STUB_FAIL') == command:
         sys.stderr.write(f'stub failure for {command}\n')
         return 1
-    STATE.mkdir(parents=True, exist_ok=True)
 
     if command == 'run':
         name = argv[argv.index('--name') + 1]
@@ -108,10 +146,16 @@ def main(argv):
         write_jobs_db(name, argv[2])
         return 0
     if command == 'exec':
-        (STATE / 'exec.log').open('a', encoding='utf-8').write(
-            ' '.join(argv) + '\n')
+        with (STATE / 'exec.log').open('a', encoding='utf-8') as log:
+            log.write(one_line(argv))
         time.sleep(EXEC_MS / 1000.0)
-        print('stub exec ok')
+        program = Path(argv[2]).name if len(argv) > 2 else ''
+        if program == 'rsync':
+            sys.stdout.write(RSYNC_VERSION if '--version' in argv else RSYNC_STATS)
+        elif program == 'cat' and argv[-1].endswith('backup_manifest'):
+            sys.stdout.write(os.environ.get('STUB_MANIFEST', MANIFEST))
+        else:
+            print('stub exec ok')
         return 0
     if command == 'rm':
         return 0

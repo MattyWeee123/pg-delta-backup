@@ -96,7 +96,7 @@ jobs:
           from pathlib import Path
           result = json.loads(Path('results/native/run/compose-cli.json').read_text())
           assert result['status'] == 'PASS_MANIFEST_ONLY', result
-          assert result['schema_version'] == 2 and not result['restore_tested']
+          assert result['schema_version'] == 3 and not result['restore_tested']
           PY
           docker compose -p pgdelta-ci -f benchmarks/fixture/docker-compose.yml run --rm --entrypoint sh runner \
             -c 'cd /results && tar --exclude=backup --exclude=increment -czf - .' \

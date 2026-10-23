@@ -51,7 +51,7 @@ Owners are suggestions to confirm at the sync.
 
 ## Interfaces to agree at the sync
 
-1. **Backup method contract:** inputs (old copy, source connection, output folder) and the v2 result record. Every method uses it.
+1. **Backup method contract:** inputs (old copy, source connection, output folder) and the v3 result record, registered in `benchmarks/methods.py`. Every method uses it.
 2. **Network bytes:** Sam's measurement fills `network_bytes` for every method, so no method reports its own traffic unchecked.
 3. **Tricky-copy format:** a folder plus the expected outcome ("must reuse", "must refuse", "must fall back to a full copy").
 

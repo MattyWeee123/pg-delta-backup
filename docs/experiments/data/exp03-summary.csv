@@ -1,0 +1,11 @@
+scenario,title,lsn_prediction,pages_compared,pages_without_counterpart,pages_changed,pages_skipped,pages_wrongly_skipped,wrong_hint_bits_only,wrong_fsm,tool_mode,tool_policy,tool_pages_total,tool_pages_sent,tool_bytes_source_to_dest,tool_bytes_dest_to_source,byte_identical,verifybackup,restore_ok,logical_match,tool_correct,wrong_checksum_only,wrong_content,wrong_hint_bits_and_lsn,wrong_lsn_only,wrong_vm
+S1,"Lagging standby, same timeline",correct,8525,0,1734,6850,59,53,6,reuse,source and basis identities match,10619,3796,31142757,131923,True,True,True,True,True,,,,,
+S1b,"Lagging standby, same timeline, no checkpoint replayed",correct,8525,0,1749,6776,0,,,reuse,source and basis identities match,10619,3811,31265637,131970,True,True,True,True,True,,,,,
+S2,Ex-primary that kept writing after a failover,wrong,8525,0,3010,7914,2399,19,7,reuse,source and basis identities match,10621,5089,41729752,131663,True,True,True,True,True,,2371,1,,1
+S3,Crash-consistent copy,correct,8742,0,5019,3722,0,,,reuse,source and basis identities match,10836,7095,58169490,167211,True,True,True,True,True,,,,,
+S4,VACUUM truncated a table between copies,correct,6998,0,508,6490,0,,,reuse,source and basis identities match,9092,2567,21074526,57318,True,True,True,True,True,,,,,
+S5,Databases created with STRATEGY FILE_COPY,wrong,9360,12990,3,9357,0,,,reuse,source and basis identities match,24473,15090,123707081,57238,True,True,True,True,True,,,,,
+S6,pg_checksums --enable between copies,wrong,8427,0,8427,8415,8415,,369,full,"data checksum version differs (source 1, basis 0)",10521,10521,86158450,12410,True,True,True,True,True,7925,,,,121
+S7,"Hint bits set by reads, no checksums",wrong,8396,0,3770,8396,3770,3770,,reuse,source and basis identities match,10489,5827,47786647,104554,True,True,True,True,True,,,,,
+S8,A different cluster with the same data,n/a,8427,0,7,8427,7,,4,full,"system identifier differs (source 7699411807044928000, basis 7699411800946397668)",10521,10521,86158450,12489,True,True,True,True,True,,3,,,
+S9,pg_upgrade --link from 17 to 18,n/a,8426,39,2846,8202,2622,,311,full,"system identifier differs (source 7699411821534941776, basis 7699411815114752558)",10559,10559,86470904,12080,True,True,True,True,True,,1580,,635,96

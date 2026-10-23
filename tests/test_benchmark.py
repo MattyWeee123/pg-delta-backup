@@ -15,6 +15,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
+from benchmarks import benchmark
 from benchmarks.benchmark import (
     EXIT_INVALID_INPUT,
     EXIT_IO_FAILURE,
@@ -169,6 +170,18 @@ class DirectoryBytesTests(unittest.TestCase):
             self.skipTest('symlink creation not permitted on this host')
         self.assertEqual(directory_bytes(self.directory), 16)
 
+    def test_symlinked_root_is_not_measured(self):
+        """A symlink published as the output must not report its target's size."""
+        target = self.directory / 'real'
+        target.mkdir()
+        (target / 'a.dat').write_bytes(b'x' * 10)
+        try:
+            (self.directory / 'alias').symlink_to(target, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest('symlink creation not permitted on this host')
+        self.assertIsNone(directory_bytes(self.directory / 'alias'))
+        self.assertEqual(directory_bytes(target), 10)
+
 
 class CommandBuilderTests(unittest.TestCase):
     def build(self, *extra):
@@ -294,6 +307,60 @@ class RunIdTests(unittest.TestCase):
         run_id = new_run_id()
         self.assertNotIn('/', run_id)
         self.assertNotIn('\\', run_id)
+
+
+class ResolveToolTests(unittest.TestCase):
+    """A venv's bin/python is a symlink; following it drops the venv."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.directory = Path(temp.name)
+        self.venv_python = self.directory / 'venv' / 'bin' / 'python'
+        self.venv_python.parent.mkdir(parents=True)
+        try:
+            self.venv_python.symlink_to(sys.executable)
+        except (OSError, NotImplementedError):
+            self.skipTest('symlink creation not permitted on this host')
+        self.backup_stub = make_stub(self.directory, 'fakebase', STUB_BASEBACKUP)
+        self.verify_stub = make_stub(self.directory, 'fakeverify', STUB_VERIFYBACKUP)
+
+    def test_symlinked_interpreter_keeps_its_own_path(self):
+        self.assertEqual(benchmark.resolve_tool(str(self.venv_python)), str(self.venv_python))
+
+    def test_relative_path_becomes_absolute_without_following_links(self):
+        cwd = os.getcwd()
+        os.chdir(self.directory)
+        self.addCleanup(os.chdir, cwd)
+        self.assertEqual(benchmark.resolve_tool(os.path.join('venv', 'bin', 'python')),
+                         os.path.join(os.getcwd(), 'venv', 'bin', 'python'))
+
+    def test_a_name_on_path_is_returned_absolute(self):
+        relative_dir = os.path.relpath(self.venv_python.parent)
+        with mock.patch.dict(os.environ, {'PATH': relative_dir}):
+            found = benchmark.resolve_tool('python')
+        self.assertTrue(os.path.isabs(found), found)
+        self.assertEqual(found, str(self.venv_python))
+
+    def test_cli_passes_the_unresolved_interpreter_to_the_method(self):
+        basis = self.directory / 'basis'
+        basis.mkdir()
+        seen = {}
+
+        def run_backup(method, **kwargs):
+            seen.update(kwargs['tools'])
+            return build_result('r', method, outcome(), outcome(), 1)
+
+        argv = ['--out', str(self.directory / 'runs'), '--method', 'pg_delta_staged',
+                '--basis', str(basis), '--pg-basebackup', str(self.backup_stub),
+                '--pg-verifybackup', str(self.verify_stub),
+                '--python', str(self.venv_python),
+                '--pgdelta', f'{self.venv_python} -m pgdelta']
+        with mock.patch.object(benchmark, 'run_backup', run_backup), \
+                redirect_stdout(StringIO()):
+            self.assertEqual(main(argv), EXIT_OK)
+        self.assertEqual(seen['python'], str(self.venv_python))
+        self.assertEqual(seen['pgdelta'], [str(self.venv_python), '-m', 'pgdelta'])
 
 
 class MainTests(unittest.TestCase):

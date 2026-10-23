@@ -6,18 +6,21 @@ No HammerDB, PostgreSQL or Docker is required.
 """
 
 import sqlite3
+import subprocess
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from benchmarks.backup import verify_basis
 from benchmarks.hammerdb_experiment import (
     Sample,
     TrialError,
     Window,
     build_pair_record,
     collect_workload,
+    container_reader,
     main,
     make_executor,
     read_trial,
@@ -461,6 +464,41 @@ class PairRecordTests(unittest.TestCase):
         record = build_pair_record(**self.pair())
         self.assertEqual(record['backup_result']['schema_version'], 2)
 
+    def test_network_bytes_come_from_a_transfer_method_record(self):
+        arguments = self.pair()
+        arguments['backup_result'] = {'schema_version': 3, 'network_bytes': 1234}
+        record = build_pair_record(**arguments)
+        self.assertEqual(record['network_bytes'], 1234)
+        self.assertNotIn('network_bytes', record['unavailable_metrics'])
+        self.assertIn('interface_bytes', record['unavailable_metrics'])
+
+
+class ContainerReaderTests(unittest.TestCase):
+    """Callers of read_file catch OSError, so a hung docker exec must raise one."""
+
+    def timing_out(self):
+        return mock.patch('benchmarks.hammerdb_experiment.subprocess.run',
+                          side_effect=subprocess.TimeoutExpired(['docker'], 120))
+
+    def test_timeout_is_raised_as_an_os_error(self):
+        read = container_reader('runner', docker_bin='docker')
+        with self.timing_out(), self.assertRaises(OSError) as caught:
+            read('/results/basis/backup_manifest')
+        self.assertIn('timed out', str(caught.exception))
+        self.assertIn('/results/basis/backup_manifest', str(caught.exception))
+
+    def test_timeout_reading_the_basis_manifest_fails_the_basis_check(self):
+        read = container_reader('runner', docker_bin='docker')
+
+        def execute(stage, command):
+            return {'exit_code': 0, 'duration_seconds': .1, 'error': None}
+
+        with self.timing_out():
+            check = verify_basis('/results/basis', execute=execute,
+                                 tools={'pg_verifybackup': 'pg_verifybackup'}, read_file=read)
+        self.assertNotEqual(check['exit_code'], 0)
+        self.assertIn('timed out', check['error'])
+
 
 class StubDockerTests(unittest.TestCase):
     """Orchestration against a stand-in docker CLI. No containers are started."""
@@ -583,7 +621,7 @@ class StubDockerTests(unittest.TestCase):
         trial = run_trial('backup', options=self.options(),
                           directory=self.root / 'bkp', sleep=lambda _: None)
         self.assertIsNotNone(trial['backup_result'])
-        self.assertEqual(trial['backup_result']['schema_version'], 2)
+        self.assertEqual(trial['backup_result']['schema_version'], 3)
         self.assertIsNotNone(trial['capture_started_at'])
         self.assertLess(trial['capture_started_at'], trial['verified_at'])
         # The backup must sit inside the measured window, or the pair is void.
@@ -613,6 +651,86 @@ class StubDockerTests(unittest.TestCase):
         self.assertTrue(all(d.startswith('/results/out/') for d in normalised),
                         normalised)
         self.assertEqual(len({Path(d).name for d in normalised}), 2)
+
+    def staged_options(self):
+        tools = {**self.options().tools, 'rsync': 'rsync', 'python': 'python3'}
+        return self.options(method='rsync_staged', basis='/results/basis', tools=tools)
+
+    def test_staged_method_prepares_before_the_workload_and_reports_bytes(self):
+        directory = self.root / 'staged'
+        trial = run_trial('backup', options=self.staged_options(),
+                          directory=directory, sleep=lambda _: None)
+        result = trial['backup_result']
+        self.assertEqual(result['status'], 'PASS_MANIFEST_ONLY')
+        self.assertEqual(result['schema_version'], 3)
+        self.assertEqual(result['network_bytes'], 24893113 + 1210662)
+        self.assertEqual(result['transfer_stats']['version'],
+                         'rsync version 3.4.1 protocol version 32')
+        lines = (self.state / 'exec.log').read_text().splitlines()
+        # The second python3 is the harness's output check; du is the
+        # driver's own output-size probe after the backup.
+        self.assertEqual([line.split()[2] for line in lines],
+                         ['rsync', 'python3', 'pg_basebackup', 'rsync', 'pg_verifybackup',
+                          'python3', 'du'])
+        self.assertIn('-I -c', lines[5])
+        self.assertTrue(lines[5].endswith(' -- /results/out/' + Path(
+            lines[2].split()[lines[2].split().index('--pgdata') + 1]).name[:-len('-staging')]))
+        self.assertIsNotNone(result['verification']['output_check'])
+        # The check reads all of O and S, so it waits until the workload has
+        # exited rather than loading the recovery window.
+        calls = (self.state / 'docker.log').read_text().splitlines()
+        first_exit_poll = next(i for i, line in enumerate(calls) if line.startswith('inspect'))
+        check = next(i for i, line in enumerate(calls) if ' --reference ' in line)
+        self.assertLess(first_exit_poll, check)
+        self.assertIn('/results/basis', lines[1])
+        words = lines[2].split()
+        self.assertTrue(words[words.index('--pgdata') + 1].endswith('-staging'))
+        self.assertIn('--manifest-path', lines[4])
+        # The copy of B finished before the workload container started.
+        (started,) = self.state.glob('hdb-backup-*.start')
+        copied = directory / 'backup-phases' / 'output_preparation.log'
+        self.assertLessEqual(copied.stat().st_mtime, started.stat().st_mtime)
+        self.assertTrue(trial['whole'].contains(
+            Window(trial['capture_started_at'], trial['verified_at'])))
+
+    def incremental_options(self):
+        return self.options(method='pg_basebackup_incremental', basis='/results/basis')
+
+    def test_trusted_basis_is_verified_before_the_workload_starts(self):
+        """Verifying B reads all of it, so it must not load the measured run."""
+        trial = run_trial('backup', options=self.incremental_options(),
+                          directory=self.root / 'incr', sleep=lambda _: None)
+        result = trial['backup_result']
+        self.assertEqual(result['status'], 'PASS_MANIFEST_ONLY')
+        self.assertEqual(result['basis_verification']['exit_code'], 0)
+        calls = (self.state / 'docker.log').read_text().splitlines()
+        started = next(i for i, line in enumerate(calls) if line.startswith('run '))
+        verified = [i for i, line in enumerate(calls)
+                    if line == 'exec runner pg_verifybackup /results/basis']
+        policy = [i for i, line in enumerate(calls)
+                  if line == 'exec runner cat /results/basis/backup_manifest']
+        # Once each, both before the workload, and not repeated inside it.
+        self.assertEqual(len(verified), 1, calls)
+        self.assertEqual(len(policy), 1, calls)
+        self.assertLess(verified[0], started)
+        self.assertLess(policy[0], started)
+
+    def test_unusable_basis_fails_the_trial_before_the_workload(self):
+        import os
+        with mock.patch.dict(os.environ, {'STUB_MANIFEST': '{"Files": [{"Path": "x"}]}'}):
+            with self.assertRaises(TrialError) as caught:
+                run_trial('backup', options=self.incremental_options(),
+                          directory=self.root / 'bad-basis', sleep=lambda _: None)
+        self.assertIn('checksums', str(caught.exception))
+        self.assertEqual(list(self.state.glob('*.start')), [])
+
+    def test_failed_preparation_fails_the_trial_before_the_workload(self):
+        import os
+        with mock.patch.dict(os.environ, {'STUB_FAIL': 'exec'}):
+            with self.assertRaises(TrialError):
+                run_trial('backup', options=self.staged_options(),
+                          directory=self.root / 'prep', sleep=lambda _: None)
+        self.assertEqual(list(self.state.glob('*.start')), [])
 
     def test_failed_docker_run_raises_rather_than_measuring(self):
         import os
@@ -647,6 +765,34 @@ class CliTests(unittest.TestCase):
     def test_existing_output_is_refused(self):
         (self.root / 'run').mkdir()
         self.assertEqual(self.run_main(env={'POSTGRES_PASSWORD': 'p'}), 2)
+
+    def test_method_choices_come_from_the_registry(self):
+        from benchmarks import methods
+        from benchmarks.hammerdb_experiment import parse_args
+        for name in methods.names():
+            self.assertEqual(parse_args(['--output', 'x', '--method', name]).method, name)
+
+    def refusal(self, *extra):
+        import os
+        from contextlib import redirect_stderr, redirect_stdout
+        from io import StringIO
+        stderr = StringIO()
+        with mock.patch.dict(os.environ, {'POSTGRES_PASSWORD': 'p'}):
+            with redirect_stdout(StringIO()), redirect_stderr(stderr):
+                code = main(['--output', str(self.root / 'run'), *extra])
+        self.assertEqual(code, 2)
+        self.assertFalse((self.root / 'run').exists())
+        return stderr.getvalue()
+
+    def test_method_needing_a_basis_is_refused_without_one(self):
+        for name in ('rsync_staged', 'pg_delta_staged', 'pg_basebackup_incremental'):
+            with self.subTest(name=name):
+                message = self.refusal('--method', name)
+                self.assertIn(name, message)
+                self.assertIn('--basis', message)
+
+    def test_basis_is_refused_for_a_method_without_one(self):
+        self.assertIn('--basis', self.refusal('--basis', '/results/old'))
 
     def test_zero_repeats_is_refused(self):
         self.assertEqual(
