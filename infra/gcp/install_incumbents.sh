@@ -57,7 +57,7 @@ build_probackup() {
   # pg_probackup compiles part of PostgreSQL's own source (pg_basebackup's WAL streaming,
   # the WAL reader), so besides the PGDG server headers it needs the raw source tree of
   # the installed server version, checked against its published SHA-256.
-  "${APT[@]}" install --no-install-recommends build-essential git bzip2 \
+  "${APT[@]}" install --no-install-recommends build-essential git bzip2 gettext \
     "postgresql-server-dev-$PG_MAJOR" libssl-dev zlib1g-dev libreadline-dev libzstd-dev \
     liblz4-dev libkrb5-dev libselinux1-dev libxml2-dev libxslt1-dev libpam0g-dev
   local version dir url
