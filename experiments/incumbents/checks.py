@@ -59,8 +59,6 @@ REFUSAL_PATTERNS = {
 # section 3: 2 is invalid or unsupported input; 3, a transfer or I/O failure, and 4, a
 # verification failure, are failures).
 REFUSAL_EXIT_CODES = {'pgdelta': (2,)}
-# What made a run count as refused (result.json and the summaries: 'refusal').
-REFUSAL_KINDS = ('message', 'exit_code', 'error_unmodified')
 
 
 def tail(text, lines=20):
@@ -264,10 +262,10 @@ def compare_listed_pages(copy, old, source, pages, examples=10):
 # --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
-def build_conf(result):
-    """The scenario settings by role a run's build used, or None if its result.json
+def build_conf(document):
+    """The scenario settings by role a scenario.json or result.json records, or None if it
     predates them."""
-    conf = result.get('server_conf')
+    conf = document.get('server_conf')
     if not isinstance(conf, dict):
         return None
     return {'source': conf.get('source') or {}, 'old_copy': conf.get('old_copy') or {}}

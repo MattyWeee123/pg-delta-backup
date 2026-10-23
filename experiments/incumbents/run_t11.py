@@ -74,22 +74,14 @@ def server_settings(wal_keep_size, old_copy_wal_keep_size=None):
     return {'source': settings(wal_keep_size), 'old_copy': settings(old_copy_wal_keep_size)}
 
 
-def built_conf(meta):
-    """The settings by role a scenario was built with, or None for a build made before the
-    roles were told apart (it gave every cluster the same settings)."""
-    conf = meta.get('server_conf')
-    if not isinstance(conf, dict):
-        return None
-    return {'source': conf.get('source') or {}, 'old_copy': conf.get('old_copy') or {}}
-
-
 def scenario_ready(directory, rows, conf):
     """The scenario's metadata if it is built at ``rows`` with the settings ``conf`` (from
     server_settings) and its source kept, else None."""
     meta = read_json(Path(directory) / 'scenario.json')
     if not meta or not meta.get('built_ok') or meta.get('rows') != rows:
         return None
-    if built_conf(meta) != conf:
+    # A build without server_conf predates the roles and gave every cluster the settings.
+    if checks.build_conf(meta) != conf:
         return None
     kept = meta.get('source_cluster') or {}
     if not kept.get('kept') or not (Path(directory) / kept.get('datadir', '') / 'PG_VERSION').is_file():
