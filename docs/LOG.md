@@ -3,6 +3,24 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-23 (late night): the code for EXP-08/09/10 built, reviewed and merged; first sweep running
+
+**Built** (each by one agent in its own worktree, then two adversarial reviewers, then fixes with regression tests):
+- **Engine** (`pgdelta/inplace.py`, `flush.py`, `datadir.py`):
+  - `--in-place` refreshes B itself behind a startup block. `global/pg_control` is moved aside until the commit and a marker file records the run, so PostgreSQL can't start on a half-refreshed copy, and a rerun finishes the job.
+  - `--fsync main|writeback|worker` chooses where files are flushed.
+  - `--source-kind datadir` reads a cleanly stopped data directory directly, with PostgreSQL 17's base-backup exclusions.
+  - The reviews found 14 problems, 3 of them major: hard-linked files could be patched through a shared inode; two in-place runs could race on one B; `--in-place` would empty any directory. All are fixed.
+- **Harness:** methods for T3 (five write-path arms), T8a (direct reads, with a new copy and in place), pgBackRest delta restore (three repository variants) and `pg_combinebackup --copy-file-range`, plus an XFS reformat script for the destination. The reviews found 14, 5 major: a reflink clone of B0 on XFS, pgBackRest still compressing on the network, and its recovery WAL going uncounted. All are fixed.
+- **T11 runner** (`experiments/incumbents/`) and the scenarios S2b and S2c, with refusal classes, exposed-page counts and stale pages counted after recovery. Two rounds of reviews found 8 and 9 problems; all are fixed.
+- **Tests:** 678 before, 863 after, all passing (5 skipped: Linux-only or binaries missing).
+
+**A development run on the Mac changed EXP-08 before its registered run.** `pg_rewind` needs B's own WAL back to the fork, so it now runs in two arms (registered in EXP-08 first).
+
+**Cloud:** `us-central1-b` had no stock, so the two VMs run in `us-central1-a`, with the same machine type and four local NVMe SSDs each. A small smoke run of every new method passed (20 of 20 verified). The main ext4 sweep for EXP-09 and EXP-10 (255 runs) started at 21:07 UTC.
+
+**Analysis:** `analysis/exp09_10.py` was written and dry-run on the smoke data before the registered results existed. It computes every prediction and rule exactly as pre-registered.
+
 ## 2026-10-23 (late night): commit history rewritten to drop an attribution line
 
 **Why:** at Matt's request, every commit message on `main` lost its "Co-Authored-By" line naming the AI assistant, and `main` was force-pushed. Nothing else changed: each rewritten commit has the same files, author, date and subject as before.
