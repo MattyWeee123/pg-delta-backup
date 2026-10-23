@@ -1,6 +1,6 @@
 # EXP-10: Where should pgdelta's destination time go?
 
-Status: **ext4 arms done** (results below, October 23, 2026); the XFS arm (d) is still to run. Pre-registered October 23, 2026, before the code for its new arms ran. This is test T3 of the [decision ledger](../DECISIONS.md#t3-destination-write-path-on-linux). Its arms, predictions and decision rules were written there on October 23. Changes since are dated below. The write-up was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026).
+Status: **ext4 arms done** (results below, October 23, 2026, corrected after an independent recheck); the XFS arm (d) and a rerun of the early write-back arm are still to run. Pre-registered October 23, 2026, before the code for its new arms ran. This is test T3 of the [decision ledger](../DECISIONS.md#t3-destination-write-path-on-linux). Its arms, predictions and decision rules were written there on October 23. Changes since are dated below. The write-up was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026).
 
 ## Question
 
@@ -63,6 +63,12 @@ An independent reviewer checked the first version before anything ran. Changes:
 - **The incremental arm** uses `--copy-file-range`, with a revised prediction (see the notes above).
 - **(e)'s expectation** points to the top of the range, not the bottom.
 
+### Added October 23, after the ext4 results and before the rerun
+
+- **Early write-back reruns.** The first sweep's write-back arm started write-back only after each whole-file copy (see the results below). The fixed engine starts it every 8 MiB during the copy (commit e569d55).
+- **When and with what:** the arm reruns in the final ext4 sweep, next to that sweep's baseline (`pgdelta`) and fsync-thread arm, with the same workloads, 5 repeats, unthrottled.
+- **What stays the same:** prediction (b) and its rule. Judged on the rerun's own baseline, the fixed write-back arm replaces the first measurement of write-back only.
+
 ## Limitations, known before running
 
 - **The staged frame keeps S warm and B prefetched**, as in EXP-04b, so the arms differ only in the destination's write path. [EXP-09](EXP-09-direct-read.md) measures the same in-place path with cold direct reads.
@@ -71,7 +77,7 @@ An independent reviewer checked the first version before anything ran. Changes:
 
 ## Results: the ext4 arms (a), (b), (c) and (e)
 
-**Run:** October 23, 2026, in the sweep `exp09-10-ext4` shared with [EXP-09](EXP-09-direct-read.md); see EXP-09 for the machines, the data files and why this session is faster than EXP-04b. EXP-10's share is 90 runs: six arms × three workloads × 5 repeats, unthrottled, every one verified byte for byte against S. Arm (d), on XFS, runs in a later sweep.
+**Run:** October 23, 2026, in the sweep `exp09-10-ext4` shared with [EXP-09](EXP-09-direct-read.md); see EXP-09 for the machines, the data files and why this session is faster than EXP-04b. EXP-10 adds 75 runs (five arms × three workloads × 5 repeats, unthrottled) and shares its baseline's 15 runs with EXP-09. Every one was verified byte for byte against S. Arm (d), on XFS, runs in a later sweep.
 
 ![EXP-10: the destination write path](../figures/exp10-write-path.svg)
 
@@ -86,10 +92,10 @@ An independent reviewer checked the first version before anything ran. Changes:
 | (b) fsync on a background thread | 3.76 (3.82) | 2.95 (2.97) | 2.95 (2.96) |
 | **(e) in place, startup block** | **2.85** (2.90) | **2.38** (2.39) | **2.36** (2.38) |
 
-**The receiver's own timers explain the differences** (median runs, hot):
+**The receiver's own timers explain the differences** (hot; medians of each timer over the 5 runs):
 - **Baseline:** the write phase took 3.07 s: 1.35 s copying B's bytes and 1.67 s flushing.
-- **Early write-back:** the fsync fell to 0.43 s, but the write phase stayed at 3.08 s. The flushing just moved into the writes; it didn't overlap anything.
-- **fsync on a thread:** the thread spent 1.63 s flushing, but the main loop waited only 0.66 s for it, and the write phase fell to 2.15 s.
+- **Early write-back:** the fsync fell to 0.43 s, but the write phase stayed at 3.08 s, because the flushing moved into the `sync_file_range` calls (1.2 s). **The arm didn't test what it was meant to.** For a file copied whole from B, which is most files with local changes, write-back started once, after the copy, not every 8 MiB during it. So the hot and append runs made only 6–7 calls of about 300 MB each (uniform: 150 calls; per-run counts are in the receiver logs). The code is fixed (commit e569d55, with a regression test), and the arm reruns in the final ext4 sweep.
+- **fsync on a thread:** the thread spent 1.63 s flushing, but the main loop waited only 0.66 s for it, and the write phase fell to 2.15 s. The figure shows the median run's own values (it waited 0.76 s in that run).
 - **In place:** nothing is copied. The write phase is 0.14 s, of which 0.08 s is fsync (0.79 and 0.43 s for uniform, which writes about 610 MB of pages).
 
 ### Verdict on each prediction
@@ -97,12 +103,12 @@ An independent reviewer checked the first version before anything ran. Changes:
 | Arm | Prediction | Result | Decision rule |
 |---|---|---|---|
 | (a) | copy-then-patch and gap-fill within 0.3 s of each other | **Held:** differences of −0.03, +0.02 and +0.04 s | no gap over 0.3 s, so the default stays copy-then-patch |
-| (b) | moving the fsync saves 1.0–1.6 s (the better of the two alternatives) | **Failed for uniform and hot, at the boundary for append.** The fsync thread saved 0.68 s (uniform), 0.99 s (hot) and 1.00 s (append); early write-back saved 0.01–0.06 s | the saving is over 0.5 s in every workload, so **the fsync moves to a background thread** for the new-copy mode. Early write-back is dropped |
+| (b) | moving the fsync saves 1.0–1.6 s (the better of the two alternatives) | **Failed in all three workloads, append by 4 ms:** the fsync thread saved 0.68 s (uniform), 0.99 s (hot) and 0.996 s (append); early write-back saved 0.01–0.06 s, but as implemented it didn't overlap flushing with copying (see above) | the saving is over 0.5 s in every workload, so **the fsync moves to a background thread** for the new-copy mode. Early write-back is re-measured with the fix before any decision on it |
 | (c) | sequential verification adds at least 1.0 s | **Failed:** it added 0.65–0.77 s | pipelined is never slower, so **pipelined stays the default** |
-| (e) | in place, a local-change transfer of 2.0–2.8 s | **Held:** 2.36 and 2.38 s, saving 1.56–1.58 s in all three workloads | the saving is over 1 s, so **in place becomes the candidate default**, as T1's failed prediction anticipated |
+| (e) | in place, a local-change transfer of 2.0–2.8 s | **Held:** 2.36 and 2.38 s, saving 1.56–1.58 s against the baseline in all three workloads. The revision's expectation of "the top end" was wrong: hashing B and re-reading it overlap in the pool instead of adding up | the rule compares with the baseline, and the saving is over 1 s, so **in place becomes the candidate default**, as T1's failed prediction anticipated. Against the improved new-copy mode (fsync on a thread) the gap is smaller: 0.57–0.59 s for local changes and 0.90 s for uniform |
 | (d) | XFS clones | to run | |
 
-### What this changes (pending the recheck and arm (d))
+### What this changes (rechecked; arm (d) and the write-back rerun pending)
 
-- **v1's write path is in place.** It is 1.6 s faster than writing a new copy, and it is the only arm that removes both of v0's write costs. The new-copy mode stays for copies that must survive a failed refresh (owner decision O5); there, the fsync moves to a background thread.
+- **v1's write path is in place.** It is 1.56–1.58 s faster than today's new-copy path, and 0.57–0.59 s (local changes) or 0.90 s (uniform) faster than the new-copy path with the fsync thread. That second gap is below rule (e)'s 1 s threshold. So choosing in place as the default rests on the registered comparison with the baseline, plus O5 allowing it. In place is also the only arm that removes both of v0's write costs (the copy and most of the flush) and needs no room for a second copy. The new-copy mode stays for copies that must survive a failed refresh; there, the fsync moves to a background thread.
 - **The two numeric failures were overestimates:** the fsync thread saved 0.7–1.0 s, not 1.0–1.6 s, and pipelined verification saved 0.65–0.77 s, not over 1.0 s. Both rules still pick the same option as their predictions did.

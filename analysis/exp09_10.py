@@ -4,7 +4,7 @@
 
 Reads the harness's summary.csv and per-run records from `remote.py fetch`, writes the curated
 data docs/experiments/data/exp09-10-runs.csv and exp09-10-cells.csv, the figures
-docs/figures/exp09-direct.svg, exp10-write-path.svg and exp09-10-where-time-goes.svg, and
+docs/figures/exp09-direct.svg and exp10-write-path.svg, and
 prints every prediction and decision rule of docs/experiments/EXP-09-direct-read.md and
 EXP-10-write-path.md with its verdict. Every statistic is a per-workload median over the
 repeats, as the revised pre-registrations say; maxima are reported beside them.
