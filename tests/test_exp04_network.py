@@ -2027,6 +2027,40 @@ class NewMethodFlags(unittest.TestCase):
         self.assertIs(measure.pgdelta_modes_report({'fsync_mode': 'main', 'in_place': False}, today)['modes_ok'], True)
 
 
+    def test_the_fsync_mode_is_read_as_the_engine_reports_it(self):
+        # build/engine-v1-modes's statistics: the receiver's `fsync` (asked for) and `fsync_effective`
+        # (in effect; writeback falls back to main where sync_file_range is refused), and the sender's
+        # timings, whose `fsync` is seconds.
+        def stats(asked, effective):
+            return {'source_kind': 'backup', 'in_place': False, 'timings_seconds': {'fsync': 0.75},
+                    'receiver': {'in_place': False, 'fsync': asked, 'fsync_effective': effective,
+                                 'fsync_wait_seconds': 0.125, 'timings_seconds': None}}
+
+        worker = measure.pgdelta_modes_report(stats('worker', 'worker'),
+                                              measure.PGDELTA_ENGINES['pgdelta_fsync_worker'])
+        self.assertEqual(worker['modes'], {'in_place': False, 'fsync_mode': 'worker', 'source_kind': 'backup'})
+        self.assertEqual(worker['fsync_requested'], 'worker')
+        self.assertIs(worker['modes_ok'], True)
+        self.assertEqual(worker['fsync_wait_seconds'], 0.125)
+        # writeback asked for, main in effect: the run did not measure what pgdelta_fsync_wb names.
+        fallback = measure.pgdelta_modes_report(stats('writeback', 'main'),
+                                                measure.PGDELTA_ENGINES['pgdelta_fsync_wb'])
+        self.assertEqual((fallback['modes']['fsync_mode'], fallback['fsync_requested']), ('main', 'writeback'))
+        self.assertIs(fallback['modes_ok'], False)
+        self.assertEqual(measure.summary_row({'tool_reported': fallback})['fsync_mode'], 'main')
+        # A receiver without the keys: the timings' seconds are not a mode.
+        older = stats(None, None)
+        older['receiver'] = {'in_place': False, 'timings_seconds': {'fsync': 0.5}}
+        report = measure.pgdelta_modes_report(older, measure.PGDELTA_ENGINES['pgdelta_seq'])
+        self.assertIsNone(report['modes']['fsync_mode'])
+        self.assertIsNone(report['fsync_requested'])
+        # The contract's own key still counts.
+        contract = measure.pgdelta_modes_report({'receiver': {'fsync_mode': 'writeback'}},
+                                                measure.PGDELTA_ENGINES['pgdelta_fsync_wb'])
+        self.assertEqual(contract['modes']['fsync_mode'], 'writeback')
+        self.assertIs(contract['modes_ok'], True)
+
+
 class MethodSpeeds(unittest.TestCase):
     speeds = measure.parse_speeds('2,5,unthrottled')
     methods = ['full', 'pgdelta', 'pgdelta_seq', 'pgdelta_inplace', 'pgdelta_direct']

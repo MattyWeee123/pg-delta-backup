@@ -177,32 +177,50 @@ def pgdelta_modes(engine: dict) -> dict:
             'source_kind': engine.get('source_kind') or 'backup'}
 
 
-def pgdelta_reported(stats: dict, *keys):
+def pgdelta_reported(stats: dict, *keys, accept=None):
     """The first of `keys` that pgdelta's statistics report, wherever this version keeps it.
 
     The mode keys (in_place, fsync_mode, source_kind, fsync_wait_seconds) may be at the top
     level, in the receiver's part, in the switches or with the timings; None if absent.
+    With `accept`, only a value it accepts counts (the timings' `fsync` is seconds, not a mode).
     """
     receiver = stats.get('receiver') if isinstance(stats.get('receiver'), dict) else {}
     places = (stats, receiver, _get(stats, 'switches', 'receiver'), _get(stats, 'switches', 'sender'),
               stats.get('timings_seconds'), receiver.get('timings_seconds'))
     for key in keys:
         for place in places:
-            if isinstance(place, dict) and place.get(key) is not None:
+            if isinstance(place, dict) and place.get(key) is not None \
+                    and (accept is None or accept(place[key])):
                 return place[key]
     return None
+
+
+# The receiver's --fsync choices. pgdelta's receiver reports `fsync` (the mode asked for) and
+# `fsync_effective` (the one in effect: writeback falls back to main where sync_file_range is
+# missing or refused); the harness's contract named `fsync_mode`, which counts too.
+FSYNC_MODES = ('main', 'writeback', 'worker')
+
+
+def _fsync_mode(value) -> bool:
+    return value in FSYNC_MODES
 
 
 def pgdelta_modes_report(stats: dict, engine: dict) -> dict:
     """The modes pgdelta reported, the ones `engine` expects, and whether they agree.
 
-    modes_ok is None when this pgdelta reports none of them (before the modes existed).
+    The fsync mode compared is the one in effect, so a writeback run that fell back to main
+    fails modes_ok; the one asked for is kept as fsync_requested. modes_ok is None when this
+    pgdelta reports none of the modes (before the modes existed).
     """
     expected = pgdelta_modes(engine)
-    reported = {key: pgdelta_reported(stats, key) for key in expected}
+    reported = {key: pgdelta_reported(stats, key) for key in expected if key != 'fsync_mode'}
+    reported['fsync_mode'] = pgdelta_reported(stats, 'fsync_effective', 'fsync_mode', 'fsync',
+                                              accept=_fsync_mode)
+    reported = {key: reported[key] for key in expected}
     known = {key: value for key, value in reported.items() if value is not None}
     return {'modes': reported, 'modes_expected': expected,
             'modes_ok': None if not known else all(expected[key] == value for key, value in known.items()),
+            'fsync_requested': pgdelta_reported(stats, 'fsync', 'fsync_mode', accept=_fsync_mode),
             'fsync_wait_seconds': pgdelta_reported(stats, 'fsync_wait_seconds', 'fsync_wait')}
 # What the per-process CPU and peak-RSS columns cover. Every method's capture
 # is served by a walsender, a PostgreSQL server process on the source that no
@@ -1108,7 +1126,8 @@ def summary_row(record: dict) -> dict:
         'fsync_s': _get(record, 'tool_reported', 'timings_seconds', 'fsync'),
         'fsync_wait_s': _get(record, 'tool_reported', 'fsync_wait_seconds'),
         'verify_wait_s': _get(record, 'tool_reported', 'timings_seconds', 'verify_wait'),
-        # pgdelta only: the modes its statistics report (empty before pgdelta reported them).
+        # pgdelta only: the modes its statistics report (empty before pgdelta reported them); the
+        # fsync mode in effect, which for writeback can fall back to main (tool_reported.fsync_requested).
         'in_place': _get(record, 'tool_reported', 'modes', 'in_place'),
         'fsync_mode': _get(record, 'tool_reported', 'modes', 'fsync_mode'),
         'source_kind': _get(record, 'tool_reported', 'modes', 'source_kind'),
