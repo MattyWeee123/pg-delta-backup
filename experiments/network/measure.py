@@ -543,12 +543,16 @@ def files_digest(root: Path, paths) -> dict:
 
     What pgdelta's datadir mode reads from a stopped data directory is a selection of its
     files (PostgreSQL's base-backup exclusions applied), so only those are hashed; a listed
-    path that is missing or not a regular file goes in `missing`.
+    path that is missing or not a regular file goes in `missing`. `paths` may map each listed
+    path to the path whose bytes pgdelta sends for it (an unlogged relation's main fork is sent
+    with its init fork's bytes); each entry is then keyed by the listed path and hashes the
+    other, and `read_from` names those that differ.
     """
     root = Path(root)
+    sources = dict(paths) if isinstance(paths, dict) else {rel: rel for rel in paths}
     entries, missing, total = {}, [], 0
-    for rel in sorted(set(paths)):
-        path = root / rel
+    for rel in sorted(sources):
+        path = root / sources[rel]
         try:
             info = os.lstat(path)
         except FileNotFoundError:
@@ -565,14 +569,18 @@ def files_digest(root: Path, paths) -> dict:
                         info.st_ino, info.st_nlink]
         total += info.st_size
     return {'root': str(root), 'device': os.lstat(root).st_dev, 'entries': entries,
-            'files': len(entries), 'bytes': total, 'missing': missing}
+            'files': len(entries), 'bytes': total, 'missing': missing,
+            'read_from': {rel: read for rel, read in sorted(sources.items()) if read != rel}}
 
 
-def parse_datadir_list(text: str) -> list[str]:
-    """The relative paths `python -m pgdelta.datadir list` printed as JSON.
+def parse_datadir_sources(text: str) -> dict[str, str]:
+    """{listed path: path read} from `python -m pgdelta.datadir list [--sources]`, as JSON.
 
-    A JSON list of path strings, or an object holding one under 'files' or 'paths'. If the
-    whole output doesn't parse, its last non-empty line is tried.
+    With --sources it prints [path, path read] pairs, which differ for the main fork of an
+    unlogged relation: pgdelta sends it with its init fork's bytes, the empty relation that
+    recovery's reset would leave. Without, a list of paths, each read as itself. Either may be
+    held under 'files' or 'paths' in an object. If the whole output doesn't parse, its last
+    non-empty line is tried.
     """
     try:
         value = json.loads(text)
@@ -583,9 +591,22 @@ def parse_datadir_list(text: str) -> list[str]:
         value = json.loads(lines[-1])
     if isinstance(value, dict):
         value = next((value[key] for key in ('files', 'paths') if isinstance(value.get(key), list)), None)
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+    if not isinstance(value, list):
         raise ValueError('pgdelta.datadir list must print a JSON list of relative paths')
-    return value
+    sources = {}
+    for item in value:
+        if isinstance(item, str):
+            sources[item] = item
+        elif isinstance(item, list) and len(item) == 2 and all(isinstance(part, str) for part in item):
+            sources[item[0]] = item[1]
+        else:
+            raise ValueError('pgdelta.datadir list must print relative paths or [path, path read] pairs')
+    return sources
+
+
+def parse_datadir_list(text: str) -> list[str]:
+    """The relative paths `python -m pgdelta.datadir list` printed as JSON (see parse_datadir_sources)."""
+    return list(parse_datadir_sources(text))
 
 
 # --- shared extents (reflink clones) ----------------------------------------------

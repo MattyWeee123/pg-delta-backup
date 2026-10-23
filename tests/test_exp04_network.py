@@ -6,6 +6,7 @@ stream over loopback.
 """
 
 import csv
+import hashlib
 import io
 import json
 import os
@@ -2778,7 +2779,8 @@ class OutputVerification(unittest.TestCase):
         with mock.patch.object(agent.subprocess, 'run', return_value=listing) as run:
             result = agent.cmd_datadir_digest(Namespace(root=str(root), pg_controldata='/b/pg_controldata'))
         argv = run.call_args.args[0]
-        self.assertEqual(argv[1:], ['-m', 'pgdelta.datadir', 'list', str(root), '--pg-controldata', '/b/pg_controldata'])
+        self.assertEqual(argv[1:], ['-m', 'pgdelta.datadir', 'list', str(root), '--pg-controldata', '/b/pg_controldata',
+                                    '--sources'])
         self.assertEqual(result['selected'], ['PG_VERSION'])
         self.assertEqual(list(result['digest']['entries']), ['PG_VERSION'])
         with mock.patch.object(agent.subprocess, 'run', return_value=mock.Mock(returncode=2, stdout='', stderr='bad')), \
@@ -2788,6 +2790,42 @@ class OutputVerification(unittest.TestCase):
                                         '= reflink=1 bigtime=1 inobtcount=1'), True)
         self.assertIs(agent.xfs_reflink('= reflink=0'), False)
         self.assertIsNone(agent.xfs_reflink(None))
+
+
+    def test_an_unlogged_relation_is_hashed_as_pgdelta_sends_it(self):
+        # PostgreSQL 17, an unlogged table with 2 rows, stopped cleanly: its main fork holds a page,
+        # its init fork none. pgdelta sends the main fork with the init fork's bytes (the empty
+        # relation recovery's reset would leave), and `list --sources` says so.
+        root = self.make_tree('data', {'PG_VERSION': b'17\n', 'base/5/16384': b'\x01' * 8192,
+                                       'base/5/16384_init': b''})
+        pairs = [['PG_VERSION', 'PG_VERSION'], ['base/5/16384', 'base/5/16384_init'],
+                 ['base/5/16384_init', 'base/5/16384_init']]
+        listing = mock.Mock(returncode=0, stdout=json.dumps(pairs, indent=1) + '\n', stderr='')
+        with mock.patch.object(agent.subprocess, 'run', return_value=listing):
+            result = agent.cmd_datadir_digest(Namespace(root=str(root), pg_controldata='/b/pg_controldata'))
+        self.assertEqual(result['selected'], ['PG_VERSION', 'base/5/16384', 'base/5/16384_init'])
+        self.assertEqual(result['read_from'], {'base/5/16384': 'base/5/16384_init'})
+        self.assertIs(result['sources'], True)
+        empty = ['file', 0, hashlib.sha256(b'').hexdigest()]
+        self.assertEqual(result['digest']['entries']['base/5/16384'][:3], empty)
+        # The output pgdelta wrote: the main fork empty, as sent. It matches.
+        output = self.make_tree('O', {'PG_VERSION': b'17\n', 'base/5/16384': b'', 'base/5/16384_init': b''})
+        same, differences = measure.compare_digests(result['digest'], measure.files_of(measure.tree_digest(output)))
+        self.assertTrue(same, differences)
+
+    def test_a_list_without_sources_is_read_as_paths(self):
+        root = self.make_tree('data', {'PG_VERSION': b'17\n'})
+        refused = mock.Mock(returncode=2, stdout='', stderr='error: unrecognized arguments: --sources\n')
+        plain = mock.Mock(returncode=0, stdout='["PG_VERSION"]\n', stderr='')
+        with mock.patch.object(agent.subprocess, 'run', side_effect=[refused, plain]) as run:
+            result = agent.cmd_datadir_digest(Namespace(root=str(root), pg_controldata='/b/pg_controldata'))
+        self.assertEqual([call.args[0][-1] for call in run.call_args_list], ['--sources', '/b/pg_controldata'])
+        self.assertEqual((result['selected'], result['sources'], result['read_from']), (['PG_VERSION'], False, {}))
+        self.assertEqual(measure.parse_datadir_sources('[["a", "a_init"], "b"]'), {'a': 'a_init', 'b': 'b'})
+        self.assertEqual(measure.parse_datadir_list('[["a", "a_init"], "b"]'), ['a', 'b'])
+        for bad in ('[["a"]]', '[["a", 1]]', '[{"a": "b"}]'):
+            with self.subTest(text=bad), self.assertRaises(ValueError):
+                measure.parse_datadir_sources(bad)
 
 
 def fiemap_reply(*extents):

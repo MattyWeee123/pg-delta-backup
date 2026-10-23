@@ -1057,6 +1057,8 @@ class Orchestrator:
         independent, problems = measure.independence(digest, self.b0_digest)
         result = {'identical_to_source': identical and not expected.get('missing'),
                   'differences': differences[:20], 'selected_files': len(source['selected']),
+                  # Listed files sent with another file's bytes (an unlogged relation's main fork).
+                  'read_from': source.get('read_from'),
                   'independent_of_basis': independent, 'independence_problems': problems,
                   'source_digest': measure.digest_summary(expected),
                   'output_digest': measure.digest_summary(digest),
