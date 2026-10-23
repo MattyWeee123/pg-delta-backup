@@ -16,6 +16,15 @@ things differ, both needed for a second machine:
     source_cluster.py verify   --root R [trial options]     (row-level ground truth)
     source_cluster.py stop     --root R [--remove]
 
+and, between them, three that stop and start the running cluster:
+
+    source_cluster.py stop-clean --root R                   pg_ctl stop -m fast; must end
+                                                            'shut down' (pgdelta_direct*)
+    source_cluster.py start      --root R --log-dir L       start it again, as setup did
+    source_cluster.py archive    --root R --log-dir L --command CMD
+                                                            archive_mode = on with CMD, then
+                                                            restart (pgbackrest_* trials only)
+
 Each prints one RESULT_PREFIX JSON line (see agent.py). The trial options
 (--scale, --pattern, --fraction, --seed, --hot-percent, --events-rows,
 --batch-size) are EXP-01's, parsed by run_study's own parser.
@@ -25,6 +34,8 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -162,6 +173,85 @@ def cmd_verify(args) -> dict:
             'tables_after': trial.table_state('after'), 'commands': trial.commands}
 
 
+def start_argv(root, bin_dir, log) -> list[str]:
+    """pg_ctl start with the socket directory and port run_study.Trial.start gives the server."""
+    root = Path(root)
+    return [str(Path(bin_dir) / 'pg_ctl'), '-D', str(root / 'data'), '-l', str(log), '-o',
+            shlex.join(['-k', str(root / 's'), '-p', str(run_study.PORT)]), '-w', '-t', '600', 'start']
+
+
+def stop_argv(root, bin_dir, mode: str = 'fast') -> list[str]:
+    return [str(Path(bin_dir) / 'pg_ctl'), '-D', str(Path(root) / 'data'), '-m', mode, '-w', '-t',
+            '600', 'stop']
+
+
+def cluster_state(root, bin_dir) -> str | None:
+    """'Database cluster state' from pg_controldata: 'shut down' after a clean stop."""
+    result = subprocess.run([str(Path(bin_dir) / 'pg_controldata'), str(Path(root) / 'data')],
+                            capture_output=True, text=True, env=run_study.controlled_env())
+    found = re.search(r'^Database cluster state:\s*(.+?)\s*$', result.stdout, re.MULTILINE)
+    return found.group(1) if found else None
+
+
+def archive_lines(command: str) -> list[str]:
+    """postgresql.conf lines that archive every WAL file with `command`."""
+    return ['archive_mode = on', "archive_command = '" + command.replace("'", "''") + "'"]
+
+
+def cmd_stop_clean(args) -> dict:
+    """Stop the running cluster with a shutdown checkpoint, and check that it says so."""
+    root, bin_dir = Path(args.root), Path(args.bin_dir)
+    argv = stop_argv(root, bin_dir)
+    started = time.perf_counter()
+    result = subprocess.run(argv, capture_output=True, text=True, env=run_study.controlled_env())
+    seconds = round(time.perf_counter() - started, 3)
+    state = cluster_state(root, bin_dir)
+    if result.returncode != 0 or state != 'shut down':
+        raise SystemExit(f'the source did not stop cleanly (pg_ctl exit {result.returncode}, '
+                         f'cluster state {state!r}): {(result.stdout + result.stderr).strip()[-2000:]}')
+    return {'stopped': True, 'state': state, 'seconds': seconds, 'argv': argv}
+
+
+def cmd_start(args) -> dict:
+    """Start the cluster again, with the options `setup` started it with (a running one is left be)."""
+    root, bin_dir = Path(args.root), Path(args.bin_dir)
+    status = subprocess.run([str(bin_dir / 'pg_ctl'), '-D', str(root / 'data'), 'status'],
+                            capture_output=True, text=True, env=run_study.controlled_env())
+    if status.returncode == 0:
+        return {'started': False, 'already_running': True, 'status': status.stdout.strip()[-1000:]}
+    log_dir = Path(args.log_dir) / f'start-{time.strftime("%Y%m%dT%H%M%S")}'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (root / 's').mkdir(exist_ok=True)
+    argv = start_argv(root, bin_dir, log_dir / 'server.log')
+    started = time.perf_counter()
+    result = subprocess.run(argv, capture_output=True, text=True, env=run_study.controlled_env())
+    seconds = round(time.perf_counter() - started, 3)
+    if result.returncode != 0:
+        raise SystemExit(f'the source did not start (pg_ctl exit {result.returncode}): '
+                         f'{(result.stdout + result.stderr).strip()[-2000:]}')
+    return {'started': True, 'seconds': seconds, 'argv': argv, 'log': str(log_dir / 'server.log')}
+
+
+def cmd_archive(args) -> dict:
+    """archive_mode = on with archive_command, which takes a restart: stop cleanly, then start."""
+    root, bin_dir = Path(args.root), Path(args.bin_dir)
+    lines = archive_lines(args.command)
+    with open(root / 'data' / 'postgresql.conf', 'a') as stream:
+        stream.write('# EXP-04 (T11): archive to the pgBackRest repositories (trials with a '
+                     'pgbackrest method only)\n' + '\n'.join(lines) + '\n')
+    stop = cmd_stop_clean(args)
+    start = cmd_start(args)
+    show = subprocess.run([str(bin_dir / 'psql'), '-X', '-A', '-t', '-h', str(root / 's'), '-p',
+                           str(run_study.PORT), '-U', run_study.USER, '-d', run_study.DATABASE, '-c',
+                           "SELECT current_setting('archive_mode') || ' ' || current_setting('archive_command')"],
+                          capture_output=True, text=True, env=run_study.controlled_env())
+    in_effect = show.stdout.strip()
+    if show.returncode != 0 or in_effect != f'on {args.command}':
+        raise SystemExit(f'archiving is not in effect after the restart: {in_effect!r} '
+                         f'{show.stderr.strip()[-1000:]}')
+    return {'appended_postgresql_conf': lines, 'in_effect': in_effect, 'stop': stop, 'start': start}
+
+
 def cmd_stop(args) -> dict:
     root, bin_dir = Path(args.root), Path(args.bin_dir)
     stopped = False
@@ -207,6 +297,21 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('--bin-dir', default=DEFAULT_BIN_DIR)
     sub.add_argument('--remove', action='store_true', help='then delete the cluster directory')
     sub.set_defaults(func=cmd_stop)
+    sub = commands.add_parser('stop-clean')
+    sub.add_argument('--root', required=True)
+    sub.add_argument('--bin-dir', default=DEFAULT_BIN_DIR)
+    sub.set_defaults(func=cmd_stop_clean)
+    sub = commands.add_parser('start')
+    sub.add_argument('--root', required=True)
+    sub.add_argument('--bin-dir', default=DEFAULT_BIN_DIR)
+    sub.add_argument('--log-dir', required=True)
+    sub.set_defaults(func=cmd_start)
+    sub = commands.add_parser('archive')
+    sub.add_argument('--root', required=True)
+    sub.add_argument('--bin-dir', default=DEFAULT_BIN_DIR)
+    sub.add_argument('--log-dir', required=True)
+    sub.add_argument('--command', required=True, help='archive_command (pgBackRest archive-push)')
+    sub.set_defaults(func=cmd_archive)
     return parser
 
 

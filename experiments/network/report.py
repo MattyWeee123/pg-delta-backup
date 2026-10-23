@@ -26,9 +26,24 @@ labelled as such:
   minus inner wall of each remote command, about 60 ms each, where it is on
   the critical path) taken out.
 
+The optional methods of T3, T8a and T11 are in the same tables. What their
+`total_s` holds:
+- T3's staged methods (pgdelta_gapfill_seq, pgdelta_seq, pgdelta_fsync_wb,
+  pgdelta_fsync_worker, pgdelta_inplace): as pgdelta, with serial rows too.
+  pgdelta_inplace patches B, a copy of B0 made before the timers (untimed);
+- pgdelta_direct*: receiver start + transfer, with no capture; the source
+  was stopped before the timers (untimed);
+- pgbackrest_*: the restore alone; the backup is counted as already paid.
+
+After the totals, a table of median timed phases per method and speed shows
+where each method's time goes, with pgdelta's own timers for its write phase
+(`rebuild_s`, `fsync_s`, `fsync_wait_s`), which lie inside its transfer.
+
 pgdelta runs whose prefetch read B0 between its two timed phases, off the
 clock (`prefetch_untimed_s` > 0), are listed with that time and an estimate
-of the bytes; their `total_s` can understate by about that time.
+of the bytes; their `total_s` can understate by about that time. For
+pgdelta_direct* that is nearly every run: its receiver listens at once and
+prefetches until the sender connects.
 
 Ratios are computed from the medians and rounded only for display; "faster"
 compares the medians themselves.
@@ -46,8 +61,17 @@ NUMERIC = ('fraction', 'target_gbit', 'measured_s2d_gbit', 'measured_d2s_gbit', 
            'serial_total_no_ssh_s', 'prep_s', 'capture_s', 'prep_capture_s', 'receiver_start_s',
            'receiver_capture_s', 'transfer_s', 'prefetch_bytes', 'prefetch_basis_bytes', 'prefetch_s',
            'prefetch_wait_s', 'prefetch_untimed_s', 'prefetch_untimed_bytes_est', 'untimed_gap_s',
-           'hash_basis_s', 'wire_s2d_bytes', 'wire_d2s_bytes', 'cpu_source_s', 'cpu_dest_s')
-DELTA_METHODS = ('incremental', 'pgdelta', 'pgdelta_1thread', 'rsync_8k', 'rsync_default')
+           'hash_basis_s', 'wire_s2d_bytes', 'wire_d2s_bytes', 'cpu_source_s', 'cpu_dest_s',
+           'combine_s', 'restore_s', 'untimed_setup_s', 'rebuild_s', 'fsync_s', 'fsync_wait_s',
+           'verify_wait_s', 'output_start_s')
+DELTA_METHODS = ('incremental', 'pgdelta', 'pgdelta_1thread', 'rsync_8k', 'rsync_default',
+                 'pgdelta_gapfill_seq', 'pgdelta_seq', 'pgdelta_fsync_wb', 'pgdelta_fsync_worker',
+                 'pgdelta_inplace', 'pgdelta_direct', 'pgdelta_direct_inplace', 'pgbackrest_zst',
+                 'pgbackrest_none', 'pgbackrest_block')
+# The median phase table: timed phases (and parts) in the order they run, then pgdelta's own
+# timers for its write phase, which lie inside its transfer, then the total.
+PHASE_COLUMNS = ('receiver_start_s', 'capture_s', 'prep_s', 'transfer_s', 'combine_s', 'restore_s',
+                 'rebuild_s', 'fsync_s', 'fsync_wait_s', 'verify_wait_s', 'total_s')
 IN_PLACE = ' (in place)'
 SERIAL = ' (serial)'
 # (column, heading)
@@ -176,7 +200,9 @@ def render(rows: list[dict]) -> str:
              "path, while pgdelta's receiver, started first, still prefetches B0 during the "
              "capture, so pgdelta's serial rows hold no cold read of B0. "
              "'(in place)' rows are rsync without its copy of B0 (`inplace_total_s`), a lower "
-             'bound for patching B0 directly.', '']
+             'bound for patching B0 directly. pgdelta_inplace and pgbackrest_* patch B, a copy of '
+             'B0 made before the timers; pgdelta_direct* is receiver start + transfer, with no '
+             'capture; pgbackrest_* is the restore alone, its backup counted as already paid.', '']
     for trial_id in sorted({row['trial_id'] for row in rows}):
         lines += [f'## {trial_id}', '']
         for index, (column, heading) in enumerate(VIEWS):
@@ -188,6 +214,7 @@ def render(rows: list[dict]) -> str:
                       f'crossover uses `{column}`.', '']
             lines += _tables(table, speeds, trial_id, methods)
             lines.append('')
+        lines += phase_table(rows, speeds, trial_id)
     lines += untimed_prefetch(rows)
     failed = [row for row in rows if row.get('status') != 'pass']
     if failed:
@@ -195,6 +222,31 @@ def render(rows: list[dict]) -> str:
         lines += [f'- {row["trial_id"]} {row["speed"]} {row["method"]}: {row["status"]} '
                   f'{row.get("error") or ""}' for row in failed]
     return '\n'.join(lines) + '\n'
+
+
+def phase_table(rows, speeds, trial_id) -> list[str]:
+    """Median timed phases per method and speed (passing runs), the columns any run has."""
+    passing = [row for row in rows if row['trial_id'] == trial_id and row.get('status') == 'pass']
+    columns = [column for column in PHASE_COLUMNS
+               if any(row.get(column) is not None for row in passing)]
+    if not passing or columns == ['total_s']:
+        return []
+    groups: dict = {}
+    for row in passing:
+        groups.setdefault((row['method'], row['speed']), []).append(row)
+    lines = ['Median timed phases, seconds (passing runs). `rebuild_s`, `fsync_s`, `fsync_wait_s` and '
+             "`verify_wait_s` are pgdelta's own timers, inside its transfer:", '',
+             '| method | speed | runs | ' + ' | '.join(columns) + ' |',
+             '|---|---|---|' + '---|' * len(columns)]
+    order = {speed: index for index, speed in enumerate(speeds)}
+    for method, speed in sorted(groups, key=lambda key: (key[0], order.get(key[1], len(order)))):
+        group = groups[(method, speed)]
+        cells = []
+        for column in columns:
+            values = [row[column] for row in group if row.get(column) is not None]
+            cells.append(f'{statistics.median(values):.2f}' if values else '')
+        lines.append(f'| {method} | {speed} | {len(group)} | ' + ' | '.join(cells) + ' |')
+    return lines + ['']
 
 
 def untimed_prefetch(rows) -> list[str]:
