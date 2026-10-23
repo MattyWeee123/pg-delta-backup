@@ -31,6 +31,21 @@ durably, with status "verified" just before the rename and rewritten with
 status "published" once the rename is durable. The rename is the commit
 point: a failure after it never deletes O, and a failure that only costs
 the final acknowledgement to the sender is not a failure of the receiver.
+
+In place (`in_place`, CLI --in-place; owner decision O5): B itself is
+refreshed, with no staging directory and no copying. B is first blocked
+from starting (pgdelta.inplace): a marker, then its global/pg_control
+renamed. Each file of B is opened read-write, only after its digests were
+sent and its leaf requests answered, and patched with the received pages;
+unchanged pages are already in place. After every file is verified, what
+the source lacks is deleted and the source's pg_control is renamed into
+place: that rename is the commit. A failure before it leaves B blocked
+(never rolled back), to be refreshed again or replaced by a full copy.
+
+Where files are fsynced (`fsync`, pgdelta.flush): in the main loop
+("main", default), there with early write-back on Linux ("writeback"), or
+on a background thread ("worker"); publication or the commit waits for
+every fsync either way.
 """
 from __future__ import annotations
 
@@ -51,9 +66,10 @@ import tempfile
 import threading
 import time
 
-from pgdelta import __version__, placement, protocol
+from pgdelta import __version__, flush, inplace, placement, protocol
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
+from pgdelta.flush import DEFAULT_FSYNC, FSYNC_MODES, WRITEBACK_BYTES
 from pgdelta.hashing import DIGEST_SIZE, KEY_SIZE, FilesDigest, Hasher
 from pgdelta.identity import gate, read_identity, reuse_policy
 from pgdelta.inventory import MODE_MASK, parse_entries, require_plain, scan
@@ -198,17 +214,29 @@ class ReceiverSetup:
     reuse_any_basis: bool = False
     # {label: (path, directory identities)} that O and its staging directory must stay out of.
     protected: dict = field(default_factory=dict)
+    # In place: B is refreshed itself (output is B); marker: that of an earlier run that did not commit.
+    in_place: bool = False
+    marker: object = None
 
 
 def prepare_receiver(basis, output, *, identity=None, pg_controldata=None, reuse_any_basis=False,
-                     local_source=None):
+                     local_source=None, in_place=False):
     """Local checks that need no peer: O is new, B is a plain, stopped copy, and O lies outside B.
 
     Pass local_source when S is on this host (local mode) so that O must
     lie outside S as well. Containment is judged by filesystem identity:
     O's parent and every directory above it are compared with B and each
     directory inside it (from B's scan), and with S.
+
+    in_place: B is refreshed itself and output must be None. B may then
+    hold the marker of an earlier in-place run that did not commit; if its
+    global/pg_control is still renamed, B's identity is taken from the
+    marker, since pg_controldata cannot read B.
     """
+    if in_place:
+        if output is not None:
+            raise InvalidInput('an in-place refresh writes B itself and takes no output directory')
+        return _prepare_in_place(Path(basis), identity, pg_controldata, reuse_any_basis, local_source)
     basis, output = Path(basis), Path(output)
     protected = {}
     if local_source is not None:
@@ -224,8 +252,38 @@ def prepare_receiver(basis, output, *, identity=None, pg_controldata=None, reuse
     protected['basis'] = (basis, frozenset(inventory.directory_ids))
     placement.refuse_inside(output.parent, protected, f'output {output}')
     if identity is None and pg_controldata:
-        identity = read_identity(basis, pg_controldata)
+        identity = _basis_identity(basis, pg_controldata)
     return ReceiverSetup(basis, output, inventory, identity, reuse_any_basis, protected)
+
+
+def _basis_identity(basis, pg_controldata, marker=None):
+    """B's identity from pg_controldata or, while an in-place run left B's pg_control renamed, its marker."""
+    if not os.path.lexists(basis / inplace.CONTROL_FILE) and inplace.is_blocked(basis):
+        return (marker or inplace.read_marker(basis)).get('basis_identity')
+    return read_identity(basis, pg_controldata) if pg_controldata else None
+
+
+def _prepare_in_place(basis, identity, pg_controldata, reuse_any_basis, local_source):
+    """The checks of prepare_receiver for an in-place refresh: B is a plain, stopped copy outside S."""
+    protected = {'basis': (basis, {placement.directory_id(basis, 'basis')})}
+    if local_source is not None:
+        source = {'source': (Path(local_source), {placement.directory_id(local_source, 'source')})}
+        placement.refuse_inside(basis, source, f'basis {basis}')
+        placement.refuse_inside(Path(local_source), protected, f'source {local_source}')
+    if not basis.resolve().name:
+        raise InvalidInput(f'basis {basis} has no name, so it has no place for its receipt')
+    receipt = receipt_path(basis)
+    if os.path.lexists(receipt) and not stat.S_ISREG(os.lstat(receipt).st_mode):
+        raise InvalidInput(f'receipt path {receipt} exists and is not a regular file')
+    if os.path.lexists(basis / 'postmaster.pid'):
+        raise InvalidInput(f'basis {basis} contains postmaster.pid; a server may be running on it')
+    inventory = require_plain(scan(basis), 'basis')
+    marker = inplace.read_marker(basis)
+    inplace.check_basis(basis, marker)
+    if identity is None:
+        identity = _basis_identity(basis, pg_controldata, marker)
+    return ReceiverSetup(basis, basis, inventory, identity, reuse_any_basis, protected, in_place=True,
+                         marker=marker)
 
 
 @dataclass
@@ -234,7 +292,9 @@ class _Output:
 
     Copy-then-patch: basis_fd is B's file, and every byte below `copied`
     already holds B's bytes or a received page; B is copied up to copy_limit,
-    the shorter of the two lengths.
+    the shorter of the two lengths. In place, fd is B's file itself.
+    Writeback: [dirty_start, dirty_end) holds the dirty_bytes written since
+    write-back of the file was last started.
     """
     index: int
     fd: int
@@ -244,6 +304,9 @@ class _Output:
     basis_fd: object = None
     copy_limit: int = 0
     copied: int = 0
+    dirty_start: int = 0
+    dirty_end: int = 0
+    dirty_bytes: int = 0
 
     def gaps(self):
         """(first, stop) page ranges that were not received."""
@@ -319,13 +382,25 @@ class _Verifier:
 
 class _Receiver:
     def __init__(self, channel, setup, jobs, hash_backend=DEFAULT_BACKEND, rebuild=DEFAULT_REBUILD,
-                 verify=DEFAULT_VERIFY, prefetch=None):
+                 verify=DEFAULT_VERIFY, prefetch=None, fsync=DEFAULT_FSYNC):
         self.channel, self.setup = channel, setup
         # What the listener's prefetch of B did before the sender connected (pgdelta.prefetch), or None.
         self.prefetch = prefetch
         self.jobs, self.pool = jobs, None
         self.hash_backend, self.rebuild, self.verify = hash_backend, rebuild, verify
         self.verifier, self.copier = None, _Copier()
+        # fsync placement (pgdelta.flush): the mode asked for, the one in effect (known once the run
+        # starts, for "writeback"), and the worker if any.
+        self.fsync, self.syncer = fsync, None
+        self.fsync_effective = None if fsync == 'writeback' else fsync
+        self.writeback = False
+        self.writeback_calls, self.writeback_seconds, self.fsync_wait_seconds = 0, 0.0, 0.0
+        # In place: B was blocked (marker written) and, later, committed (pg_control renamed into place).
+        self.in_place, self.blocked, self.committed = setup.in_place, False, False
+        self.tree_changes = None
+        # Basis files below this index have been read in full by the basis thread (in place: only
+        # those may be written).
+        self.basis_hashed = 0
         self.staging, self.published = None, False
         # published: the staging directory has been renamed to O (the commit point).
         # durable: that rename and the "published" receipt have been fsynced.
@@ -373,6 +448,9 @@ class _Receiver:
             self.stop.set()
             if self.verifier is not None:
                 self.verifier.close(JOIN_SECONDS)
+            if self.syncer is not None:
+                # Files not yet fsynced are closed without it: nothing was published or committed.
+                self.syncer.close(JOIN_SECONDS)
             if self.basis_thread is not None:
                 self.basis_thread.join(JOIN_SECONDS)
             if self.pool is not None:
@@ -397,9 +475,16 @@ class _Receiver:
                 return
             self.error_sent = True
         try:
-            self.channel.send_json(protocol.ERROR, {'exit_code': exit_code, 'message': message})
+            self.channel.send_json(protocol.ERROR, {'exit_code': exit_code,
+                                                    'message': message + self._incomplete_note()})
         except PgDeltaError:
             pass
+
+    def _incomplete_note(self):
+        """In place, once B is blocked and until the commit: what a failure leaves behind."""
+        if self.in_place and self.blocked and not self.committed:
+            return '; ' + inplace.incomplete_note(self.setup.basis)
+        return ''
 
     def _recv(self):
         try:
@@ -421,12 +506,15 @@ class _Receiver:
             raise self.basis_error
         if self.verifier is not None and self.verifier.error is not None:
             raise self.verifier.error
+        if self.syncer is not None and self.syncer.error is not None:
+            raise self.syncer.error
 
     def _check_options(self):
         if type(self.jobs) is not int or self.jobs < 1:
             raise InvalidInput(f'jobs must be a positive integer, not {self.jobs!r}')
         for label, value, choices in (('hash backend', self.hash_backend, BACKENDS),
-                                      ('rebuild', self.rebuild, REBUILDS), ('verify', self.verify, VERIFY_MODES)):
+                                      ('rebuild', self.rebuild, REBUILDS), ('verify', self.verify, VERIFY_MODES),
+                                      ('fsync', self.fsync, FSYNC_MODES)):
             if value not in choices:
                 raise InvalidInput(f'{label} must be one of {", ".join(choices)}, not {value!r}')
 
@@ -440,32 +528,58 @@ class _Receiver:
         if self.verify == 'pipelined' and self.pool.parallel:
             self.verifier = _Verifier(self)
 
+    def _start_fsync(self):
+        """Writeback where the platform has it (else as "main"); a worker thread for "worker"."""
+        if self.fsync == 'writeback':
+            self.writeback = flush.writeback_available()
+            self.fsync_effective = 'writeback' if self.writeback else 'main'
+        elif self.fsync == 'worker':
+            self.syncer = flush.FsyncWorker(stop=self.stop, on_error=self._fsync_failed)
+
+    def _fsync_failed(self, exc):
+        if not self.stop.is_set():
+            self._send_error(exc.exit_code, str(exc))
+
     def switches(self):
-        """The engine settings in effect (verification is sequential without a pool of workers)."""
+        """The engine settings in effect (verification is sequential without a pool of workers).
+
+        In place nothing is copied from B, so `rebuild` says "in-place" whatever was asked for.
+        """
         return {
             'jobs': self.jobs,
             'hash_backend': self.pool.backend if self.pool is not None else None,
-            'rebuild': self.rebuild,
+            'rebuild': 'in-place' if self.in_place else self.rebuild,
             'verify': 'pipelined' if self.verifier is not None else 'sequential',
         }
 
     def _run(self):
         self._check_options()
         self._read_hello()
+        if self.in_place:
+            inplace.check_source(self.files, self.directories)
         self.reuse, self.reason = gate(self.source_identity, self.setup.identity, self.setup.reuse_any_basis)
         self.mode = 'reuse' if self.reuse else 'full'
         basis_map = self.setup.inventory.file_map()
+        # In place, the source's pg_control has no basis: it is always sent whole (see pgdelta.inplace).
         self.basis_files = {index: basis_map[entry.path].size
-                            for index, entry in enumerate(self.files) if entry.path in basis_map}
-        self.channel.send_json(protocol.ACCEPT, {
+                            for index, entry in enumerate(self.files) if entry.path in basis_map
+                            and not (self.in_place and entry.path == inplace.CONTROL_FILE)}
+        accept = {
             'mode': self.mode,
             'reason': self.reason,
             'reuse_policy': self.policy,
             'basis_identity': self.setup.identity,
             'basis_files': [[index, size] for index, size in sorted(self.basis_files.items())],
-        })
+        }
+        if self.in_place:
+            accept['in_place'] = True
+        self.channel.send_json(protocol.ACCEPT, accept)
         self._start_pool()
-        self._create_staging()
+        self._start_fsync()
+        if self.in_place:
+            self._begin_in_place()
+        else:
+            self._create_staging()
         if self.reuse and self.basis_files:
             self.basis_thread = threading.Thread(target=self._hash_basis, name='pgdelta-basis',
                                                  daemon=True)
@@ -530,6 +644,22 @@ class _Receiver:
                 raise InvalidInput(f'cannot create directory {entry.path!r}: it collides with another '
                                    f'path on this filesystem') from exc
 
+    def _begin_in_place(self):
+        """Block B from starting, then give it the source's directories: B changes from here on.
+
+        Order: a receipt of an earlier refresh beside B is removed, the marker
+        is written (durably), and B's global/pg_control is renamed, so that
+        from its first change on B both says it is incomplete and cannot start.
+        """
+        basis, marker = self.setup.basis, self.setup.marker
+        inplace.remove_receipt(receipt_path(basis))
+        record = inplace.new_marker(basis, marker, self.setup.identity, self.source_identity)
+        inplace.write_marker(basis, record)
+        self.blocked = True
+        renamed = inplace.block_startup(basis)
+        self.tree_changes = {'attempt': record['attempt'], 'control_renamed': renamed,
+                             **inplace.prepare_tree(basis, self.directories, self.files)}
+
     def _hash_basis(self):
         try:
             for index, size in sorted(self.basis_files.items()):
@@ -546,6 +676,8 @@ class _Receiver:
                 self.hash_basis_seconds += time.perf_counter() - started
                 if tree.size != size:
                     raise TransferError(f'basis file {path} changed size during the run; B must be immutable')
+                # B's file has been read in full: in place, it may be written from now on.
+                self.basis_hashed = index + 1
                 if keep:
                     with self.cache_lock:
                         self.leaf_cache[index] = tree.leaf_blob
@@ -581,6 +713,9 @@ class _Receiver:
         if (len(nodes) > protocol.max_nodes_per_request(self.node_blocks) or len(set(nodes)) != len(nodes)
                 or any(node >= limit for node in nodes)):
             raise ProtocolError(f'invalid LEAF_REQUEST for {path}')
+        if self.in_place and (index < self.next_file or (index == self.next_file and self.current is not None)):
+            # B's file is being, or has been, overwritten: its digests would no longer be B's.
+            raise ProtocolError(f'LEAF_REQUEST for {path} after it was written in place')
         with self.cache_lock:
             cached = self.leaf_cache.get(index)
         if cached is not None:
@@ -606,22 +741,79 @@ class _Receiver:
             self.counts.leaf_nodes_reread += len(nodes)
         self.channel.send(protocol.LEAF_DIGESTS, protocol.encode_leaf_digests(index, entries))
 
+    def _output_path(self, path):
+        """Where the source file `path` is written: in the staging directory, or in B itself (in place)."""
+        if self.in_place:
+            return self.setup.basis / inplace.target(path)
+        return self.staging / path
+
     def _open(self, index):
         if index != self.next_file:
             raise ProtocolError(f'data for file {index} arrived while file {self.next_file} is pending')
         if self.current is None:
             entry = self.files[index]
-            try:
-                fd = os.open(self.staging / entry.path, _CREATE_FLAGS, 0o600)
-            except FileExistsError as exc:
-                raise InvalidInput(f'cannot create {entry.path!r}: it collides with another path '
-                                   f'on this filesystem') from exc
+            if self.in_place:
+                fd = self._open_in_place(index, entry)
+            else:
+                try:
+                    fd = os.open(self.staging / entry.path, _CREATE_FLAGS, 0o600)
+                except FileExistsError as exc:
+                    raise InvalidInput(f'cannot create {entry.path!r}: it collides with another path '
+                                       f'on this filesystem') from exc
             self.current = _Output(index, fd, page_count(entry.size, self.block))
             basis_size = self.basis_files.get(index) if self.reuse else None
-            if self.rebuild == 'copy-patch' and basis_size and entry.size:
+            if not self.in_place and self.rebuild == 'copy-patch' and basis_size and entry.size:
                 self.current.basis_fd = self._open_basis(entry.path, basis_size)
                 self.current.copy_limit = min(basis_size, entry.size)
         return self.current
+
+    def _open_in_place(self, index, entry):
+        """B's own file, read-write, opened only once the basis thread has read all of it.
+
+        The sender sends a file's pages only after it has that file's basis
+        digests and answers to all its leaf requests, and the receiver answers
+        leaf requests in stream order, so B's file is never written before it
+        was hashed. This guard keeps a misbehaving sender from breaking that.
+        """
+        if self.reuse and index in self.basis_files and index >= self.basis_hashed:
+            raise ProtocolError(f'data for {entry.path} arrived before the basis digests of it were sent; '
+                                f'in place, a file of B is written only after it was hashed')
+        try:
+            fd = inplace.open_for_update(self._output_path(entry.path))
+        except OSError as exc:
+            raise TransferError(f'cannot open basis file {entry.path} for writing in place: {exc}') from exc
+        basis_size = self.basis_files.get(index)
+        if basis_size is not None:
+            try:
+                actual = os.fstat(fd).st_size
+            except BaseException:
+                os.close(fd)
+                raise
+            if actual != basis_size:
+                os.close(fd)
+                raise TransferError(f'basis file {entry.path} changed size during the run; '
+                                    f'only this refresh may change B')
+        return fd
+
+    def _wrote(self, output, offset, length):
+        """Writeback: start write-back of the current file every WRITEBACK_BYTES written to it."""
+        if not self.writeback or not length:
+            return
+        if output.dirty_bytes:
+            output.dirty_start = min(output.dirty_start, offset)
+            output.dirty_end = max(output.dirty_end, offset + length)
+        else:
+            output.dirty_start, output.dirty_end = offset, offset + length
+        output.dirty_bytes += length
+        if output.dirty_bytes < WRITEBACK_BYTES:
+            return
+        started = time.perf_counter()
+        if flush.start_writeback(output.fd, output.dirty_start, output.dirty_end - output.dirty_start):
+            self.writeback_calls += 1
+        else:  # refused on this filesystem: fsync at the end of each file only, as "main" does
+            self.writeback, self.fsync_effective = False, 'main'
+        self.writeback_seconds += time.perf_counter() - started
+        output.dirty_bytes = 0
 
     def _open_basis(self, path, size):
         try:
@@ -650,6 +842,7 @@ class _Receiver:
         except OSError as exc:
             raise TransferError(f'cannot copy basis file {entry.path} into the output: {exc}') from exc
         self.copy_seconds += time.perf_counter() - started
+        self._wrote(output, start, stop - start)
         output.copied = stop
         self.counts.basis_copy_bytes += stop - start
         self.counts.basis_copies += 1
@@ -674,6 +867,7 @@ class _Receiver:
                 self._copy_basis(entry, output, stop)
         _write_all(output.fd, data, offset)
         output.copied = max(output.copied, end)
+        self._wrote(output, offset, length)
         self.rebuild_seconds += time.perf_counter() - started
         if output.runs and output.runs[-1][0] + output.runs[-1][1] == first:
             output.runs[-1] = (output.runs[-1][0], output.runs[-1][1] + count)
@@ -702,18 +896,25 @@ class _Receiver:
                 self._copy_basis(entry, output, output.copy_limit)
             os.close(output.basis_fd)
             output.basis_fd = None
-        elif gaps:
+        elif gaps and not self.in_place:  # in place, the pages not received are already there
             self._fill_from_basis(entry, output, gaps)
         for start, stop in gaps:
             self.counts.pages_copied += stop - start
             self.counts.bytes_copied += min(stop * self.block, size) - start * self.block
+        if self.in_place and os.fstat(output.fd).st_size > size:
+            os.ftruncate(output.fd, size)
         if os.fstat(output.fd).st_size != size:
             raise ProtocolError(f'{entry.path} was rebuilt with the wrong length')
         synced = time.perf_counter()
-        os.fsync(output.fd)
-        self.fsync_seconds += time.perf_counter() - synced
-        os.close(output.fd)
-        self.current = None
+        if self.syncer is not None:
+            # The worker owns the descriptor from here on: it fsyncs and closes it.
+            fd, self.current = output.fd, None
+            self.fsync_wait_seconds += self.syncer.submit(fd, entry.path)
+        else:
+            os.fsync(output.fd)
+            self.fsync_seconds += time.perf_counter() - synced
+            os.close(output.fd)
+            self.current = None
         self.rebuild_seconds += time.perf_counter() - started
         if self.verifier is not None:
             self._accept_file(entry, size, digest)
@@ -745,7 +946,7 @@ class _Receiver:
 
     def _verify_file(self, entry, size, digest, window=None):
         """Re-read the whole output file and compare its digest with the source's; then apply its mode."""
-        path = self.staging / entry.path
+        path = self._output_path(entry.path)
         try:
             tree = hash_file(path, None, self.block, self.node_blocks, keep_leaves=False, hasher=self.hasher,
                              pool=self.pool, stop=self.stop, window=window)
@@ -772,6 +973,7 @@ class _Receiver:
                     except OSError as exc:
                         raise TransferError(f'cannot read basis file {entry.path}: {exc}') from exc
                     _write_all(output.fd, data, offset)
+                    self._wrote(output, offset, len(data))
                     self.counts.basis_copies += 1
                 self.counts.basis_copy_bytes += end - begin
         finally:
@@ -790,11 +992,23 @@ class _Receiver:
             self.verifier.finish()
             self.verify_seconds = self.verifier.busy_seconds
             self.verify_wait_seconds += time.perf_counter() - started
+        if self.syncer is not None:
+            started = time.perf_counter()
+            self.syncer.finish()
+            waited = time.perf_counter() - started
+            self.fsync_wait_seconds += waited
+            self.rebuild_seconds += waited
         self._raise_background_errors()
         if self.counts.files_verified != len(self.files):
             raise TransferError(f'internal error: {self.counts.files_verified} of {len(self.files)} files '
-                                f'were verified; not publishing')
+                                f'were verified; not {"committing" if self.in_place else "publishing"}')
         started = time.perf_counter()
+        if self.in_place:
+            self._finish_in_place()
+            self.rebuild_seconds += time.perf_counter() - started
+            self.final_stats = self.stats()
+            self.channel.send_json(protocol.COMPLETE, {'published': True, 'receiver': self.final_stats})
+            return dict(self.final_stats, acknowledged=True, acknowledgement_error=None)
         for entry in reversed(self.directories):
             path = self.staging / entry.path
             os.chmod(path, entry.mode)
@@ -810,6 +1024,65 @@ class _Receiver:
         self.final_stats = self.stats()
         self.channel.send_json(protocol.COMPLETE, {'published': True, 'receiver': self.final_stats})
         return dict(self.final_stats, acknowledged=True, acknowledgement_error=None)
+
+    def _finish_in_place(self):
+        """After every file is verified: delete what the source lacks, apply modes, fsync, then commit.
+
+        The modes of global/ and of B's root are applied by _commit, after
+        their last change, so a read-only mode there cannot block it.
+        """
+        basis = self.setup.basis
+        self.verified_at = _utc_now()
+        removed_files, removed_directories = inplace.remove_extraneous(basis, self.directories, self.files)
+        self.tree_changes['files_removed'] += removed_files
+        self.tree_changes['directories_removed'] += removed_directories
+        control_directory = inplace.CONTROL_FILE.rpartition('/')[0]
+        for entry in reversed(self.directories):
+            path = basis / entry.path
+            if entry.path != control_directory:
+                os.chmod(path, entry.mode)
+            fsync_dir(path)
+        fsync_dir(basis)
+        self._commit()
+
+    def _commit(self):
+        """Rename the source's pg_control into place, then make that, the marker's removal and the receipt durable.
+
+        The rename is the commit: from it on, B is the refreshed, verified
+        copy and may start. As in _publish, an interrupt after it is held back
+        until the remaining steps are done, and an I/O error then fails the
+        run without undoing the commit.
+        """
+        basis = self.setup.basis
+        control_directory = inplace.CONTROL_FILE.rpartition('/')[0]
+        mode = next(entry.mode for entry in self.directories if entry.path == control_directory)
+        try:
+            inplace.commit_control(basis)
+            self.committed = self.published = True
+        except KeyboardInterrupt:
+            if os.path.lexists(basis / inplace.CONTROL_PENDING):
+                raise  # interrupted before the rename
+            self.committed = self.published = True
+            interrupted = True
+        else:
+            interrupted = False
+        steps = (lambda: os.chmod(basis / control_directory, mode), lambda: fsync_dir(basis / control_directory),
+                 lambda: inplace.remove_marker(basis), lambda: os.chmod(basis, self.root_mode),
+                 lambda: fsync_dir(basis), lambda: self._write_receipt('committed'))
+        for step in steps:
+            while True:
+                try:
+                    step()
+                    break
+                except KeyboardInterrupt:
+                    interrupted = True
+                except OSError as exc:
+                    raise TransferError(f'{basis} was committed in place, but the commit could not be made '
+                                        f'durable: {exc}; every file is verified, but {inplace.MARKER} may '
+                                        f'remain and the receipt may be missing') from exc
+        self.durable = True
+        if interrupted:
+            raise KeyboardInterrupt('after committing')
 
     def _publish(self, output):
         """Rename the verified staging directory to O, then make that and the receipt durable.
@@ -863,6 +1136,9 @@ class _Receiver:
             'files_digest': self.files_digest.hexdigest(),
             'mode': self.mode,
         }
+        if self.in_place:  # written once, after the commit: B (the "output") was refreshed in place
+            del record['published_at']
+            record.update(in_place=True, committed_at=now)
         data = (json.dumps(record, indent=2) + '\n').encode('utf-8')
         # A short name, so a long O name that fits its staging directory also fits here.
         temporary = path.with_name(f'.pgdelta-receipt-{secrets.token_hex(8)}.tmp')
@@ -899,12 +1175,24 @@ class _Receiver:
             'directories': len(self.directories),
             'jobs': self.jobs,
             'switches': self.switches(),
+            # In place: B itself was refreshed; in_place_tree says what happened to its tree (null otherwise).
+            'in_place': self.in_place,
+            'in_place_tree': self.tree_changes,
+            # fsync placement: the mode asked for and the one in effect ("writeback" falls back to "main"
+            # where the platform has no sync_file_range).
+            'fsync': self.fsync,
+            'fsync_effective': self.fsync_effective,
+            'writeback_calls': self.writeback_calls,
             **vars(self.counts),
             'hash_basis_seconds': round(self.hash_basis_seconds + self.hash_leaf_seconds, 6),
             # Writing O: page writes, copies from B, fsyncs, and the final directory fsyncs and rename.
             'rebuild_seconds': round(self.rebuild_seconds, 6),
             'copy_seconds': round(self.copy_seconds, 6),
-            'fsync_seconds': round(self.fsync_seconds, 6),
+            # Time in fsync of the files (worker: on its thread, overlapping the main loop), and how
+            # long the main loop waited for the worker (its queue full, or at COMPLETE).
+            'fsync_seconds': round(self.syncer.busy_seconds if self.syncer is not None else self.fsync_seconds, 6),
+            'fsync_wait_seconds': round(self.fsync_wait_seconds, 6),
+            'writeback_seconds': round(self.writeback_seconds, 6),
             # Time spent re-hashing O; pipelined, it overlaps writing O and verify_wait_seconds is
             # the part the main loop waited for (sequential: the two are equal).
             'verify_seconds': round(self.verify_seconds, 6),
@@ -927,7 +1215,8 @@ def _rounded(seconds):
 
 def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None, pg_controldata=None,
                  reuse_any_basis=False, local_source=None, jobs=DEFAULT_JOBS, hash_backend=DEFAULT_BACKEND,
-                 rebuild=DEFAULT_REBUILD, verify=DEFAULT_VERIFY, prefetch=None):
+                 rebuild=DEFAULT_REBUILD, verify=DEFAULT_VERIFY, prefetch=None, in_place=False,
+                 fsync=DEFAULT_FSYNC):
     """Run one session as the receiver and return its statistics dict.
 
     Pass a ReceiverSetup from prepare_receiver(), or basis and output to run
@@ -941,15 +1230,20 @@ def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None,
     (`if __name__ == '__main__':`), as multiprocessing's spawn requires.
     `prefetch`: the statistics of a prefetch of B made before the channel
     connected (pgdelta.prefetch), reported as they are under "prefetch".
+    `in_place` (with output None) refreshes B itself (see pgdelta.inplace);
+    the source's pg_control is then always sent whole. `fsync` ("main",
+    "writeback" or "worker", pgdelta.flush) chooses where the output files
+    are fsynced; it changes nothing but timings.
     """
     if setup is None:
         try:
             setup = prepare_receiver(basis, output, identity=identity, pg_controldata=pg_controldata,
-                                     reuse_any_basis=reuse_any_basis, local_source=local_source)
+                                     reuse_any_basis=reuse_any_basis, local_source=local_source,
+                                     in_place=in_place)
         except PgDeltaError as exc:
             try:
                 channel.send_json(protocol.ERROR, {'exit_code': exc.exit_code, 'message': str(exc)})
             except PgDeltaError:
                 pass
             raise
-    return _Receiver(channel, setup, jobs, hash_backend, rebuild, verify, prefetch).run()
+    return _Receiver(channel, setup, jobs, hash_backend, rebuild, verify, prefetch, fsync).run()

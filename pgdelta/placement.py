@@ -70,11 +70,15 @@ def check_new_output(output, protected):
 
 
 def check_local(source, basis, output):
-    """Local mode: S and B are distinct, neither lies inside the other, and O lies outside both."""
+    """Local mode: S and B are distinct, neither lies inside the other, and O lies outside both.
+
+    output None: an in-place refresh, which writes B itself and has no O.
+    """
     source, basis = Path(source), Path(basis)
     source_id, basis_id = directory_id(source, 'source'), directory_id(basis, 'basis')
     if source_id == basis_id:
         raise InvalidInput(f'source {source} and basis {basis} overlap: they are the same directory')
     refuse_inside(basis, {'source': (source, {source_id})}, f'basis {basis}')
     refuse_inside(source, {'basis': (basis, {basis_id})}, f'source {source}')
-    check_new_output(output, {'source': (source, {source_id}), 'basis': (basis, {basis_id})})
+    if output is not None:
+        check_new_output(output, {'source': (source, {source_id}), 'basis': (basis, {basis_id})})

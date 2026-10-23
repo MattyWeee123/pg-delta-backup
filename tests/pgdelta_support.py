@@ -136,6 +136,8 @@ VOLATILE_RECEIVER_KEYS = frozenset((
     'verify_wait_seconds', 'pool_start_seconds', 'pool_first_ready_seconds', 'pool_ready_seconds',
     'worker_start_method', 'jobs', 'switches', 'output', 'receipt',
     'acknowledged', 'acknowledgement_error',
+    # where files are fsynced (pgdelta.flush): the switch, and what it did and cost
+    'fsync', 'fsync_effective', 'writeback_calls', 'fsync_wait_seconds', 'writeback_seconds',
     # how O was built, which depends on the rebuild switch, unlike pages_copied and bytes_copied
     'basis_copy_bytes', 'basis_copies'))
 VOLATILE_SENDER_KEYS = frozenset(('timings_seconds', 'jobs', 'hash_backend', 'worker_start_method', 'switches',

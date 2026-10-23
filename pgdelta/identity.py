@@ -61,6 +61,11 @@ def parse_controldata(text):
 
 
 def read_identity(datadir, pg_controldata, timeout=60):
+    return read_controldata(datadir, pg_controldata, timeout)[0]
+
+
+def read_controldata(datadir, pg_controldata, timeout=60):
+    """(identity, output): the identity read_identity returns, and pg_controldata's whole output."""
     env = dict(os.environ, LC_ALL='C', LANG='C', LC_MESSAGES='C')
     command = [str(pg_controldata), '-D', str(Path(datadir))]
     try:
@@ -82,7 +87,16 @@ def read_identity(datadir, pg_controldata, timeout=60):
         # Keep the values for the record, but the gate treats the identity as unknown.
         identity['untrustworthy'] = (f'{pg_controldata} says: {warning}; read this cluster with the '
                                      f'pg_controldata of its own major version')
-    return identity
+    return identity, result.stdout
+
+
+def controldata_value(text, label):
+    """The value pg_controldata printed for `label`, as text, or None."""
+    for line in text.splitlines():
+        name, separator, value = line.partition(':')
+        if separator and name.strip() == label:
+            return value.strip()
+    return None
 
 
 def reuse_policy(reuse_any_basis):
