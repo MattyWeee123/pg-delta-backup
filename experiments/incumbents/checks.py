@@ -160,6 +160,13 @@ def walg_sysid_flag(help_text):
     return match.group(1) if match else None
 
 
+def walg_from_lsn_flag(help_text):
+    """catchup-push's --from-lsn line from its --help, for the record: v3.0.9 says 'uint'
+    (a number only), later versions 'string' (X/Y or a decimal number)."""
+    match = re.search(r'^\s*(--from-lsn\s+\S.*?)\s*$', help_text or '', re.MULTILINE)
+    return match.group(1) if match else None
+
+
 # --------------------------------------------------------------------------
 # Diverged pages
 # --------------------------------------------------------------------------

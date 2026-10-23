@@ -44,6 +44,30 @@ PROBACKUP_REFUSED = """\
 INFO: Catchup start, pg_probackup version: 2.5.16, PostgreSQL version: 17.11, remote: false, catchup-mode: DELTA
 ERROR: Destination is not in source timeline history
 """
+# What WAL-G v3.0.9 prints for `wal-g catchup-push --help`: --from-lsn is a pflag Uint64Var.
+WALG_PUSH_HELP = """\
+Creates incremental backup from lsn
+
+Usage:
+  wal-g catchup-push PGDATA --from-lsn LSN [flags]
+
+Flags:
+      --from-lsn uint   LSN to start incremental backup
+  -h, --help            help for catchup-push
+"""
+# A wal-g stand-in that parses catchup-push's --from-lsn the way v3.0.9 does (pflag's
+# strconv.ParseUint(s, 0, 64)), logs a backup name, and has catchup-fetch leave a mark.
+FAKE_WALG = r"""#!/bin/sh
+case "$1" in
+catchup-push)
+  case "$4" in
+  ''|*[!0-9]*) echo "invalid argument \"$4\" for \"--from-lsn\" flag: strconv.ParseUint: parsing \"$4\": invalid syntax"; exit 1;;
+  esac
+  echo "INFO: Wrote backup with name base_000000020000000000000007_D_000000010000000000000004" >&2;;
+catchup-fetch) touch "$2/fetched-$3";;
+*) exit 1;;
+esac
+"""
 
 
 def page(lsn, fill=b'x'):
@@ -132,9 +156,10 @@ class ParseTest(unittest.TestCase):
                          ['base_000000020000000000000005', 'base_000000020000000000000007'])
         self.assertEqual(checks.parse_walg_list_json('not json'), [])
         self.assertEqual(checks.parse_walg_list_json('{"a": 1}'), [])
-        self.assertIsNone(checks.walg_sysid_flag(
-            'Usage:\n  wal-g catchup-push PGDATA --from-lsn LSN [flags]\n'
-            '      --from-lsn string   LSN to start incremental backup\n'))
+        self.assertIsNone(checks.walg_sysid_flag(WALG_PUSH_HELP))
+        self.assertEqual(checks.walg_from_lsn_flag(WALG_PUSH_HELP),
+                         '--from-lsn uint   LSN to start incremental backup')
+        self.assertIsNone(checks.walg_from_lsn_flag('Usage: wal-g catchup-fetch'))
         self.assertEqual(checks.walg_sysid_flag('      --from-sysid uint   system identifier'),
                          '--from-sysid')
 
@@ -318,12 +343,13 @@ class ProbeTest(unittest.TestCase):
             walg = executable(Path(tmp, 'wal-g'), '#!/bin/sh\ncase "$1" in\n'
                               '--version) echo "wal-g version v3.0.9";;\n'
                               '--help) echo "  catchup-push  Creates incremental backup";;\n'
-                              'catchup-push) echo "      --from-lsn string";;\nesac\n')
+                              'catchup-push) echo "      --from-lsn uint   LSN";;\nesac\n')
             push = tools.probe('walg', pgbin=pgbin, wal_g=str(walg))
             send = tools.probe('walg_send', pgbin=pgbin, wal_g=str(walg))
         self.assertTrue(push['available'])
         self.assertEqual(push['version'], 'wal-g version v3.0.9')
         self.assertIsNone(push['sysid_flag'])
+        self.assertEqual(push['from_lsn_flag'], '--from-lsn uint   LSN')
         self.assertFalse(send['available'])
         self.assertIn('no catchup-send', send['reason'])
 
@@ -368,6 +394,50 @@ class ProbeTest(unittest.TestCase):
             conninfo = tools.last_setting(Path(stale, 'postgresql.auto.conf').read_text(),
                                           'primary_conninfo')
         self.assertEqual(conninfo, 'host=/tmp/pgdsrc port=5555 user=postgres dbname=postgres')
+
+
+def walg_job(tmp, fake, redo='0/415F070'):
+    """A Job for the WAL-G adapters, with a fake source and copy of B (no PostgreSQL)."""
+    job = tools.Job(scenario_id='S2b', scenario_dir=tmp, expected={}, listed_pages=None,
+                    meta={'old_copy': {'redo_location': redo, 'system_identifier': '7'},
+                          'source_backup': {'system_identifier': '7'}},
+                    tool='walg', tool_info={'available': True, 'path': str(fake),
+                                            'sysid_flag': None},
+                    run_dir=Path(tmp, 'run'), pgbin=None, verbose=False)
+    job.logs.mkdir(parents=True)
+    job.work.mkdir(parents=True)
+    job.source = SimpleNamespace(datadir=Path(tmp, 'source'), sockdir=Path('/tmp/pgdsrc'),
+                                 port=5555)
+    job.target = Path(tmp, 'target')
+    job.target.mkdir()
+    return job
+
+
+class WalgAdapterTest(unittest.TestCase):
+    def test_push_command(self):
+        cmd = tools.walg_push_command('wal-g', '/data/s', '0/415F070')
+        self.assertEqual(cmd, ['wal-g', 'catchup-push', '/data/s', '--from-lsn', '68546672'])
+        self.assertEqual(int(cmd[-1]), 0x415F070)
+        self.assertEqual(tools.walg_push_command('wal-g', '/s', '1/0', '--sysid', '7')[-3:],
+                         [str(1 << 32), '--sysid', '7'])
+
+    def test_catchup_push_takes_the_lsn_as_a_number(self):
+        """v3.0.9 rejects --from-lsn 0/415F070 before doing anything; the adapter must
+        pass a number, or every WAL-G run looks like a refusal."""
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = executable(Path(tmp, 'wal-g'), FAKE_WALG)
+            job = walg_job(tmp, fake)
+            run = tools.run_walg(job)
+            fetched = sorted(p.name for p in job.target.iterdir())
+        self.assertEqual(run.returncode, 0, run.output)
+        self.assertEqual(run.commands[0]['command'][-2:], ['--from-lsn', '68546672'])
+        self.assertEqual((run.parsed['from_lsn'], run.parsed['from_lsn_argument']),
+                         ('0/415F070', '68546672'))
+        self.assertEqual(run.parsed['backup_name'],
+                         'base_000000020000000000000007_D_000000010000000000000004')
+        self.assertEqual([c['name'] for c in run.commands], ['catchup-push', 'catchup-fetch'])
+        self.assertEqual(fetched,
+                         ['fetched-base_000000020000000000000007_D_000000010000000000000004'])
 
 
 def result_doc(scenario, tool, **fields):

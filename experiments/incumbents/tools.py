@@ -135,6 +135,7 @@ def probe(tool, *, pgbin, pg_probackup='auto', wal_g='auto'):
         if tool == 'walg':
             _, push_help = first_line([path, 'catchup-push', '--help'])
             info['sysid_flag'] = checks.walg_sysid_flag(push_help)
+            info['from_lsn_flag'] = checks.walg_from_lsn_flag(push_help)
     else:
         raise ValueError(f'unknown tool {tool!r}')
     return info
@@ -284,6 +285,16 @@ def run_pg_probackup(job):
                    checks.parse_pg_probackup(output))
 
 
+def walg_push_command(walg, pgdata, redo_location, sysid_flag=None, sysid=None):
+    """catchup-push's command line. --from-lsn gets B's REDO location as a decimal number:
+    v3.0.9 parses the flag as an unsigned integer and rejects the X/Y form, later versions
+    take either, and WAL-G's own catch-up test passes a decimal number."""
+    cmd = [walg, 'catchup-push', pgdata, '--from-lsn', str(parse_lsn(redo_location))]
+    if sysid_flag:
+        cmd += [sysid_flag, sysid]
+    return cmd
+
+
 def run_walg(job):
     """catchup-push from B's REDO location into local file storage, then catchup-fetch."""
     walg = job.tool_info['path']
@@ -292,12 +303,11 @@ def run_walg(job):
     env = walg_env(job, storage)
     redo = job.meta['old_copy']['redo_location']
     sysid = job.meta['source_backup']['system_identifier']
-    push = [walg, 'catchup-push', job.source.datadir, '--from-lsn', redo]
-    parsed = {'from_lsn': redo, 'source_system_identifier': sysid,
+    parsed = {'from_lsn': redo, 'from_lsn_argument': str(parse_lsn(redo)),
+              'source_system_identifier': sysid,
               'old_copy_system_identifier': job.meta['old_copy']['system_identifier'],
               'sysid_flag': job.tool_info.get('sysid_flag')}
-    if parsed['sysid_flag']:
-        push += [parsed['sysid_flag'], sysid]
+    push = walg_push_command(walg, job.source.datadir, redo, parsed['sysid_flag'], sysid)
     record, stdout, stderr = job.command('catchup-push', push, env=env)
     output = stdout + stderr
     result = ToolRun([record], record['returncode'], record['timed_out'], output,
