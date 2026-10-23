@@ -69,8 +69,13 @@ build_probackup() {
   (cd "$dir" && sha256sum -c "postgresql-$version.tar.bz2.sha256")
   tar -xjf "$dir/postgresql-$version.tar.bz2" -C "$dir"
   git clone --quiet --depth 1 --branch "$PG_PROBACKUP_TAG" "$PROBACKUP_SOURCE" "$dir/pg_probackup"
-  make -C "$dir/pg_probackup" USE_PGXS=1 PG_CONFIG="$PG_BINDIR/pg_config" \
-    top_srcdir="$dir/postgresql-$version"
+  # PGDG's libpq-dev is the newest major's (18 on 2026-10-23), so its internal libpq-int.h
+  # doesn't match a 17 server: take libpq's internal headers from the 17 source instead.
+  # libpgcommon and libpgport live in the server's own lib directory. with_llvm=no skips
+  # the optional JIT bitcode, which would hit the same header mismatch.
+  make -C "$dir/pg_probackup" USE_PGXS=1 PG_CONFIG="$PG_BINDIR/pg_config" with_llvm=no \
+    top_srcdir="$dir/postgresql-$version" \
+    COPT="-I$dir/postgresql-$version/src/interfaces/libpq -I$dir/postgresql-$version/src/include -L$PG_BINDIR/../lib"
   install -m 0755 "$dir/pg_probackup/pg_probackup" "/usr/local/bin/pg_probackup-$PG_MAJOR"
   note "pg_probackup: built from $PROBACKUP_SOURCE tag $PG_PROBACKUP_TAG against" \
     "postgresql-server-dev-$PG_MAJOR and the PostgreSQL $version source" \
