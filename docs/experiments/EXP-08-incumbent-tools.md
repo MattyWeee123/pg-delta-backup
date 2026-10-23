@@ -42,6 +42,16 @@ pgdelta's claimed edge has two halves, and neither has been tested against a rea
 
 Runner: `experiments/incumbents/run_t11.py`.
 
+**`pg_rewind` runs in two arms (added October 23, before the registered run).** A development run of the runner on the Mac, not the registered experiment, showed that `pg_rewind` depends on B still holding its own WAL back to the fork. At 200,000 rows, B's shutdown checkpoint had already recycled that WAL:
+- on S2, `pg_rewind` refused with "could not find previous WAL record";
+- on S2b, its own crash recovery removed the WAL it then needed.
+
+So every scenario runs `pg_rewind` twice:
+- **B as EXP-03 builds it,** with PostgreSQL's default WAL retention;
+- **B with its WAL retained** (`wal_keep_size` of 4 GB on the old primary). This stands in for production's WAL archive with `--restore-target-wal`, which `pg_rewind`'s documentation names for this case.
+
+I4 is judged on the retained arm, the configuration `pg_rewind` documents. The default arm is reported as what happens without retention. The other tools run on both builds too, so every tool sees the same copies.
+
 ### Predictions
 
 | ID | Prediction | Source |
