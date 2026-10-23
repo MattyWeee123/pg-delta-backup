@@ -295,8 +295,9 @@ def _format_address(address):
 def cmd_receive(args):
     try:
         stats = _receive(args)
-    except BaseException:
-        if args.in_place and inplace.is_blocked(args.basis):
+    except BaseException as exc:
+        # Said only while B is blocked indeed (not after the commit), and not while another run holds it.
+        if args.in_place and not isinstance(exc, inplace.BasisBusy) and inplace.is_blocked(args.basis):
             log(f'error: {inplace.incomplete_note(args.basis)}')
         raise
     if args.in_place:
@@ -398,8 +399,8 @@ def _run_sender_command(args, run, protected):
         failure = _failure_stats(exc)
         if args.stats_json:
             _write_stats(args.stats_json, failure)
-        if failure.get('in_place') and 'blocked from starting' not in str(exc):
-            # The receiver accepted an in-place refresh; it says so itself when it got that far.
+        if failure.get('in_place') and not any(said in str(exc) for said in (inplace.BLOCKED, inplace.COMMITTED)):
+            # The receiver accepted an in-place refresh, and has not said whether it left B blocked or committed.
             log('error: the receiver was refreshing B in place, so B may be incomplete and blocked from '
                 'starting: see the receiver\'s log; refresh it again, or replace it with a full copy')
         raise

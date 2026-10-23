@@ -7,7 +7,11 @@ binaries, a receiver refreshing a real cluster in place is killed at
 several points; pg_ctl must refuse the blocked copy, and a rerun must make
 it byte-identical to S and startable.
 """
+import argparse
 import base64
+import contextlib
+import errno
+import io
 import json
 import os
 from pathlib import Path
@@ -22,7 +26,7 @@ import threading
 import unittest
 from unittest import mock
 
-from pgdelta import protocol, receiver as receiver_module
+from pgdelta import cli, inplace as inplace_module, protocol, receiver as receiver_module
 from pgdelta.errors import InvalidInput, PeerError, PgDeltaError, ProtocolError, TransferError, VerificationError
 from pgdelta.identity import read_identity
 from pgdelta.inplace import CONTROL_FILE, CONTROL_PENDING, MARKER
@@ -242,6 +246,21 @@ class FailureTests(InPlaceTestCase):
         self.assert_refreshed(rerun)
         self.assertEqual(rerun.receiver['in_place_tree']['attempt'], 2)
         self.assertFalse(rerun.receiver['in_place_tree']['control_renamed'])  # already renamed
+
+    def test_a_failure_before_pg_control_was_renamed_does_not_say_b_is_blocked(self):
+        self.small_trees()
+
+        def broken(basis):
+            raise OSError(errno.EIO, 'Input/output error (injected)')
+
+        with mock.patch.object(inplace_module, 'block_startup', broken):
+            outcome = transfer(self.source, self.basis, None, receiver_options={'in_place': True})
+        self.assertIsInstance(outcome.receiver_error, TransferError)
+        self.assertIn('injected', str(outcome.sender_error))
+        self.assertNotIn('blocked from starting', str(outcome.sender_error))
+        self.assertTrue(os.path.isfile(self.basis / MARKER))
+        self.assertTrue(os.path.isfile(self.basis / CONTROL_FILE))
+        self.assert_refreshed(transfer(self.source, self.basis, None, receiver_options={'in_place': True}))
 
     def test_a_rerun_takes_b_identity_from_the_marker(self):
         pg_shapes(self.source, self.basis)
@@ -632,6 +651,55 @@ class CliTests(InPlaceTestCase):
                 self.assertIn('not allowed with argument', result.stderr)
                 self.assertNotEqual(run(*command).returncode, 0)
         self.assertFalse(os.path.lexists(self.basis / MARKER))
+
+    def test_a_failure_after_the_commit_does_not_say_b_is_blocked(self):
+        # The commit rename happened, then removing the marker failed: B is complete, verified and startable.
+        pg_shapes(self.source, self.basis)
+        script = textwrap.dedent("""
+            import errno, sys
+            from pgdelta import cli, inplace
+            def broken(basis):
+                raise OSError(errno.EIO, 'Input/output error (injected)')
+            inplace.remove_marker = broken
+            sys.exit(cli.main(sys.argv[1:]))
+        """)
+        process = subprocess.Popen([sys.executable, '-c', script, 'receive', '--stdio', '--basis', str(self.basis),
+                                    '--in-place', '--reuse-any-basis'], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, cwd=REPO_ROOT, env=subprocess_env())
+        channel = Channel(process.stdout, process.stdin)
+        try:
+            with self.assertRaises(PeerError) as caught:
+                run_sender(channel, self.source, node_blocks=4)
+        finally:
+            channel.close()
+        errors = process.stderr.read().decode()
+        process.stderr.close()
+        self.assertEqual(process.wait(timeout=60), 3, errors)
+        self.assertIn('was committed in place', errors)
+        self.assertNotIn('blocked from starting', errors)
+        self.assertNotIn('blocked from starting', str(caught.exception))
+        self.assertTrue(os.path.isfile(self.basis / CONTROL_FILE))
+        self.assertTrue(os.path.isfile(self.basis / MARKER))
+
+    def sender_log(self, exc):
+        """What the sender's command logs when its run fails with `exc` after an in-place ACCEPT."""
+        exc.pgdelta_stats = {'status': 'failed', 'in_place': True}
+
+        def fail():
+            raise exc
+
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(type(exc)):
+            cli._run_sender_command(argparse.Namespace(stats_json=None), fail, {})
+        return errors.getvalue()
+
+    def test_the_sender_warns_that_b_may_be_blocked_only_when_it_may_be(self):
+        warning = 'may be incomplete and blocked'
+        self.assertIn(warning, self.sender_log(protocol.ChannelClosed('the receiver went away')))
+        committed = PeerError('receiver: B was committed in place, but the commit could not be made durable', 3)
+        self.assertNotIn(warning, self.sender_log(committed))
+        blocked = PeerError(f'receiver: verification failed; {inplace_module.incomplete_note("B")}', 4)
+        self.assertNotIn(warning, self.sender_log(blocked))
 
     def test_failed_local_run_exits_with_its_code_and_says_b_is_incomplete(self):
         pg_shapes(self.source, self.basis)

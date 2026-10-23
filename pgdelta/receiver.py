@@ -269,7 +269,7 @@ def prepare_receiver(basis, output, *, identity=None, pg_controldata=None, reuse
 
 def _basis_identity(basis, pg_controldata, marker=None):
     """B's identity from pg_controldata or, while an in-place run left B's pg_control renamed, its marker."""
-    if not os.path.lexists(basis / inplace.CONTROL_FILE) and inplace.is_blocked(basis):
+    if inplace.is_blocked(basis):
         return (marker or inplace.read_marker(basis)).get('basis_identity')
     return read_identity(basis, pg_controldata) if pg_controldata else None
 
@@ -503,8 +503,12 @@ class _Receiver:
             pass
 
     def _incomplete_note(self):
-        """In place, once B is blocked and until the commit: what a failure leaves behind."""
-        if self.in_place and self.blocked and not self.committed:
+        """In place, once B is blocked and until the commit: what a failure leaves behind.
+
+        Said only while B is blocked indeed: not after the commit, nor when
+        renaming its pg_control failed.
+        """
+        if self.in_place and self.blocked and not self.committed and inplace.is_blocked(self.setup.basis):
             return '; ' + inplace.incomplete_note(self.setup.basis)
         return ''
 
@@ -1107,7 +1111,7 @@ class _Receiver:
                 except KeyboardInterrupt:
                     interrupted = True
                 except OSError as exc:
-                    raise TransferError(f'{basis} was committed in place, but the commit could not be made '
+                    raise TransferError(f'{basis} {inplace.COMMITTED}, but the commit could not be made '
                                         f'durable: {exc}; every file is verified, but {inplace.MARKER} may '
                                         f'remain and the receipt may be missing') from exc
         self.durable = True

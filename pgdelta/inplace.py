@@ -43,6 +43,9 @@ MARKER_SCHEMA_VERSION = 1
 CONTROL_FILE = 'global/pg_control'
 CONTROL_PENDING = 'global/pg_control.pgdelta-incomplete'
 RESERVED = (MARKER, CONTROL_PENDING)
+# What the receiver's messages say, by which the sender tells whether B was left blocked or was committed.
+BLOCKED = 'is incomplete and blocked from starting'
+COMMITTED = 'was committed in place'
 _UPDATE_FLAGS = (os.O_RDWR | os.O_CREAT | getattr(os, 'O_CLOEXEC', 0) | getattr(os, 'O_NOFOLLOW', 0))
 _CREATE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0)
                  | getattr(os, 'O_NOFOLLOW', 0))
@@ -66,8 +69,8 @@ def target(path):
 
 
 def incomplete_note(basis):
-    return (f'{basis} is incomplete and blocked from starting (its global/pg_control is renamed and '
-            f'{MARKER} marks it): refresh it again with --in-place, or replace it with a full copy')
+    return (f'{basis} {BLOCKED} (its global/pg_control is renamed and {MARKER} marks it): refresh it again '
+            f'with --in-place, or replace it with a full copy')
 
 
 class BasisBusy(InvalidInput):
@@ -110,8 +113,13 @@ class BasisLock:
 
 
 def is_blocked(basis):
-    """Whether B holds the marker of an in-place refresh that has not committed."""
-    return os.path.lexists(Path(basis) / MARKER)
+    """Whether an in-place refresh left B blocked: its marker is there and its global/pg_control is not.
+
+    A marker beside global/pg_control is a run that stopped before renaming
+    it (B unchanged) or after the commit (B complete): B can start either way.
+    """
+    basis = Path(basis)
+    return os.path.lexists(basis / MARKER) and not os.path.lexists(basis / CONTROL_FILE)
 
 
 def read_marker(basis):
