@@ -6,6 +6,10 @@ page data is in flight. Files are processed in inventory order with up to
 `window` files hashed ahead, so leaf-digest round trips overlap hashing.
 Each file's nodes are hashed on a pool of `jobs` worker processes (or
 threads, for comparison), or in the main thread when jobs is 1.
+
+The source is a finished backup S (`source_kind` "backup", default), or a
+cleanly stopped data directory read directly ("datadir", pgdelta.datadir),
+of which only what pg_basebackup would send is listed.
 """
 from __future__ import annotations
 
@@ -17,7 +21,7 @@ import os
 import threading
 import time
 
-from pgdelta import __version__, matching, protocol
+from pgdelta import __version__, datadir, matching, protocol
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
 from pgdelta.hashing import BLOCK, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key
@@ -166,9 +170,12 @@ def _parse_accept(accept, file_count):
 
 class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
-                 window, key, jobs, hash_backend):
+                 window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None):
         self.started = time.perf_counter()
         self.channel, self.source, self.identity = channel, Path(source), identity
+        self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
+        # Whether the receiver refreshes B in place (from ACCEPT; null until it arrives).
+        self.in_place = None
         self.block, self.node_blocks = block, node_blocks
         self.high_churn = high_churn_node_fraction
         self.window = max(1, window)
@@ -235,6 +242,14 @@ class _Sender:
         return self.block
 
     def _run(self):
+        if self.source_kind not in datadir.SOURCE_KINDS:
+            raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
+                               f'not {self.source_kind!r}')
+        if self.source_kind == 'datadir':
+            # Refuses unless the cluster is cleanly shut down; lists only what pg_basebackup would send.
+            self.selection = datadir.select(self.source, self.pg_controldata)
+            if self.identity is None:
+                self.identity = self.selection.identity
         self.block = self._resolve_block()
         protocol.check_parameters(self.block, self.node_blocks, InvalidInput)
         if self.high_churn is not None and not 0 <= self.high_churn <= 1:
@@ -243,7 +258,7 @@ class _Sender:
             raise InvalidInput(f'jobs must be a positive integer, not {self.jobs!r}')
         if self.hash_backend not in BACKENDS:
             raise InvalidInput(f'hash backend must be one of {", ".join(BACKENDS)}, not {self.hash_backend!r}')
-        inventory = prepare_source(self.source)
+        inventory = prepare_source(self.source) if self.selection is None else self.selection.inventory
         self.directory_count, self.file_count = len(inventory.directories), len(inventory.files)
         key = self.key or new_key()
         self.hasher = Hasher(key)
@@ -268,6 +283,9 @@ class _Sender:
         accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT')
         self.reuse, self.reason, self.policy, self.basis_identity, self.basis_sizes = _parse_accept(
             accept, len(inventory.files))
+        self.in_place = accept.get('in_place', False)
+        if type(self.in_place) is not bool:
+            raise ProtocolError('ACCEPT in_place must be true or false')
         self.mode = 'reuse' if self.reuse else 'full'
         self.max_run = max(1, RUN_BYTES // self.block)
         self.max_request = protocol.max_nodes_per_request(self.node_blocks)
@@ -279,6 +297,9 @@ class _Sender:
                 self._finish(pending.popleft())
         while pending:
             self._finish(pending.popleft())
+        if self.selection is not None:
+            # A server started on the data directory meanwhile: fail before the receiver publishes.
+            datadir.check_unchanged(self.source, self.pg_controldata, self.selection)
         self.channel.send_json(protocol.COMPLETE, {'files': len(inventory.files),
                                                    'directories': self.directory_count})
         try:
@@ -296,10 +317,14 @@ class _Sender:
         self.receiver_stats = receiver if isinstance(receiver, dict) else None
         return self.stats('complete', 0, None)
 
+    def _source_file(self, path):
+        """The file read for the listed `path` (datadir: an unlogged relation's main fork is its init fork)."""
+        return self.source / (path if self.selection is None else self.selection.source_path(path))
+
     def _plan(self, index, entry):
         started = time.perf_counter()
         try:
-            tree = hash_file(self.source / entry.path, None, self.block, self.node_blocks,
+            tree = hash_file(self._source_file(entry.path), None, self.block, self.node_blocks,
                              hasher=self.hasher, pool=self.pool)
         except OSError as exc:
             raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
@@ -342,7 +367,7 @@ class _Sender:
     def _send_pages(self, job, pages):
         sent = 0
         try:
-            fd = open_regular(self.source / job.path)
+            fd = open_regular(self._source_file(job.path))
         except OSError as exc:
             raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
         try:
@@ -397,7 +422,9 @@ class _Sender:
             'protocol': protocol_seconds,
             'rebuild': receiver.get('rebuild_seconds'),  # writing O
             'copy_basis': receiver.get('copy_seconds'),  # of which: copying from B
-            'fsync': receiver.get('fsync_seconds'),  # of which: fsync of O's files
+            # of which: fsync of O's files. With --fsync worker it runs on a background thread alongside
+            # rebuild instead (and may exceed it); rebuild then holds the receiver's fsync_wait_seconds.
+            'fsync': receiver.get('fsync_seconds'),
             'verify': receiver.get('verify_seconds'),  # re-hashing O (overlaps writing it when pipelined)
             'verify_wait': receiver.get('verify_wait_seconds'),  # of which the receiver's main loop waited
             'pool_start': self.pool_start_seconds,
@@ -431,6 +458,10 @@ class _Sender:
             'switches': {'sender': self.switches(), 'receiver': receiver.get('switches')},
             'source_identity': self.identity,
             'basis_identity': self.basis_identity,
+            # A backup (S), or a stopped data directory read directly, and what was left out of it.
+            'source_kind': self.source_kind,
+            'source_excluded': None if self.selection is None else self.selection.excluded_summary(),
+            'in_place': self.in_place,
             'files': dict(self.files),
             'directories': self.directory_count,
             'files_digest': (self.files_digest.hexdigest()
@@ -449,7 +480,7 @@ class _Sender:
 
 def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_BLOCKS,
                high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
-               hash_backend=DEFAULT_BACKEND):
+               hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -459,6 +490,9 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     thread. The digests, and so everything sent, are the same for any value.
     With jobs > 1, a program calling this must guard its main module
     (`if __name__ == '__main__':`), as multiprocessing's spawn requires.
+    `source_kind` "datadir" reads a cleanly stopped data directory directly
+    (pgdelta.datadir) and needs `pg_controldata`; its identity is then read
+    from it unless `identity` is given.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
-                   window, key, jobs, hash_backend).run()
+                   window, key, jobs, hash_backend, source_kind, pg_controldata).run()

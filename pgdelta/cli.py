@@ -10,7 +10,7 @@ import sys
 import tempfile
 import traceback
 
-from pgdelta import placement, prefetch, receiver, sender, transport
+from pgdelta import datadir, flush, inplace, placement, prefetch, receiver, sender, transport
 from pgdelta.errors import EXIT_TRANSFER_FAILURE, InvalidInput, PgDeltaError, TransferError
 from pgdelta.hashing import NODE_BLOCKS
 from pgdelta.identity import read_identity
@@ -148,6 +148,36 @@ def _rebuild_options(parser):
                              'sequential right after writing it. Either way every file is verified '
                              'before O is published; with --jobs 1 it is always sequential '
                              '(default: %(default)s)')
+    # T3 arm (b): where the output files are fsynced.
+    parser.add_argument('--fsync', choices=flush.FSYNC_MODES, default=flush.DEFAULT_FSYNC,
+                        help='where each finished output file is fsynced: main, in the main loop before the '
+                             'next file; writeback, the same, after starting write-back every 8 MiB written '
+                             '(Linux sync_file_range; elsewhere as main); worker, on a background thread '
+                             'while the main loop goes on. Every fsync completes before publication or '
+                             'commit either way (default: %(default)s)')
+
+
+def _target_options(parser):
+    """--output O (a new copy) or --in-place (B itself is refreshed): exactly one."""
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument('--output', type=Path, help='new directory O (must not exist)')
+    # Owner decision O5 (docs/DECISIONS.md); T3 arm (e).
+    target.add_argument('--in-place', action='store_true',
+                        help='refresh B itself instead of building O. B is blocked from starting first '
+                             '(a marker file, and global/pg_control renamed), patched with the changed '
+                             'pages, verified, and unblocked only when every file matches: a failed run '
+                             'leaves B unstartable until a rerun completes or B is replaced by a full copy. '
+                             'B must be a PostgreSQL copy that the identity gate reuses (same cluster, or '
+                             '--reuse-any-basis), with no hard-linked files. --rebuild has no effect')
+
+
+def _source_kind_option(parser):
+    # T8a: read a stopped data directory directly, without a backup taken first.
+    parser.add_argument('--source-kind', choices=datadir.SOURCE_KINDS, default=datadir.DEFAULT_SOURCE_KIND,
+                        help='backup: --source is a finished backup S, sent whole; datadir: --source is a '
+                             'cleanly stopped data directory (needs --pg-controldata, which must report '
+                             '"shut down"), of which only what pg_basebackup would send is sent '
+                             '(default: %(default)s)')
 
 
 def _byte_count(text):
@@ -219,8 +249,8 @@ def build_parser():
     commands = parser.add_subparsers(dest='command', required=True)
 
     receive = commands.add_parser('receive', help='destination side: rebuild O from B and received pages')
-    receive.add_argument('--basis', required=True, type=Path, help='old copy B (never modified)')
-    receive.add_argument('--output', required=True, type=Path, help='new directory O (must not exist)')
+    receive.add_argument('--basis', required=True, type=Path, help='old copy B (read-only unless --in-place)')
+    _target_options(receive)
     channel = receive.add_mutually_exclusive_group(required=True)
     channel.add_argument('--listen', metavar='HOST:PORT', help='accept one TCP connection')
     channel.add_argument('--stdio', action='store_true', help='speak the protocol on stdin/stdout')
@@ -239,15 +269,17 @@ def build_parser():
     send.add_argument('--source', required=True, type=Path, help='new backup S (read-only)')
     send.add_argument('--connect', required=True, metavar='HOST:PORT')
     _sender_options(send)
+    _source_kind_option(send)
     _jobs_option(send, 'S')
     send.set_defaults(func=cmd_send)
 
     local = commands.add_parser('local', help='run both ends on this host, receiver as a child process')
     local.add_argument('--source', required=True, type=Path, help='new backup S (read-only)')
-    local.add_argument('--basis', required=True, type=Path, help='old copy B (never modified)')
-    local.add_argument('--output', required=True, type=Path, help='new directory O (must not exist)')
+    local.add_argument('--basis', required=True, type=Path, help='old copy B (read-only unless --in-place)')
+    _target_options(local)
     _reuse_any_basis_option(local)
     _sender_options(local)
+    _source_kind_option(local)
     _basis_controldata_option(local)
     _jobs_option(local, 'S, and in the receiver B and O (N on each side)', sides=2)
     _rebuild_options(local)
@@ -261,22 +293,44 @@ def _format_address(address):
 
 
 def cmd_receive(args):
+    try:
+        stats = _receive(args)
+    except BaseException as exc:
+        # Said only while B is blocked indeed (not after the commit), and not while another run holds it.
+        if args.in_place and not isinstance(exc, inplace.BasisBusy) and inplace.is_blocked(args.basis):
+            log(f'error: {inplace.incomplete_note(args.basis)}')
+        raise
+    if args.in_place:
+        log(f'committed {args.basis} in place ({stats["mode"]} mode): {stats["files_verified"]} files verified, '
+            f'{stats["pages_received"]} pages received, {stats["pages_copied"]} pages already in place')
+    else:
+        log(f'published {args.output} ({stats["mode"]} mode): {stats["files_verified"]} files verified, '
+            f'{stats["pages_received"]} pages received, {stats["pages_copied"]} pages reused from the basis')
+    if not stats['acknowledged']:
+        # Exit 0 anyway: O is complete, verified, published and durably recorded in its receipt.
+        log(f'warning: {stats["output"]} {"committed" if args.in_place else "published"} but acknowledgement '
+            f'failed ({stats["acknowledgement_error"]}): the sender was not told and will report a failure; '
+            f'the receipt {stats["receipt"]} records the {"commit" if args.in_place else "publication"}')
+    return 0
+
+
+def _receive(args):
     if args.stdio:
         channel = transport.stdio_channel()
         prefetched = prefetch.not_run(args.prefetch_basis, 'stdio: the sender is connected from the start')
         try:
-            stats = receiver.run_receiver(channel, args.basis, args.output,
-                                          pg_controldata=_basis_controldata(args),
-                                          reuse_any_basis=args.reuse_any_basis,
-                                          local_source=args.local_source, prefetch=prefetched,
-                                          **_receiver_engine(args))
+            return receiver.run_receiver(channel, args.basis, args.output,
+                                         pg_controldata=_basis_controldata(args),
+                                         reuse_any_basis=args.reuse_any_basis,
+                                         local_source=args.local_source, prefetch=prefetched,
+                                         in_place=args.in_place, **_receiver_engine(args))
         finally:
             channel.close()
     else:
         host, port = transport.parse_hostport(args.listen)
         setup = receiver.prepare_receiver(args.basis, args.output, pg_controldata=_basis_controldata(args),
                                           reuse_any_basis=args.reuse_any_basis,
-                                          local_source=args.local_source)
+                                          local_source=args.local_source, in_place=args.in_place)
         if not transport.is_loopback(host):
             log('warning: the TCP transport is neither authenticated nor encrypted; '
                 'use it only on a trusted network')
@@ -295,22 +349,14 @@ def cmd_receive(args):
             channel, prefetched = wait(), prefetch.not_run('off', 'switched off (--prefetch-basis off)')
         log(prefetch.describe(prefetched))
         try:
-            stats = receiver.run_receiver(channel, setup=setup, prefetch=prefetched, **_receiver_engine(args))
+            return receiver.run_receiver(channel, setup=setup, prefetch=prefetched, **_receiver_engine(args))
         finally:
             channel.close()
-    log(f'published {args.output} ({stats["mode"]} mode): {stats["files_verified"]} files verified, '
-        f'{stats["pages_received"]} pages received, {stats["pages_copied"]} pages reused from the basis')
-    if not stats['acknowledged']:
-        # Exit 0 anyway: O is complete, verified, published and durably recorded in its receipt.
-        log(f'warning: {args.output} published but acknowledgement failed '
-            f'({stats["acknowledgement_error"]}): the sender was not told and will report a failure; '
-            f'the receipt {stats["receipt"]} records the publication')
-    return 0
 
 
 def _receiver_engine(args):
     return {'jobs': args.jobs, 'hash_backend': args.hash_backend, 'rebuild': args.rebuild,
-            'verify': args.verify}
+            'verify': args.verify, 'fsync': args.fsync}
 
 
 def _basis_controldata(args):
@@ -324,7 +370,18 @@ def _identity(source, pg_controldata):
 def _sender_kwargs(args, identity):
     return {'identity': identity, 'block': args.block, 'node_blocks': args.node_blocks,
             'high_churn_node_fraction': args.high_churn_node_fraction, 'jobs': args.jobs,
-            'hash_backend': args.hash_backend}
+            'hash_backend': args.hash_backend, 'source_kind': args.source_kind,
+            'pg_controldata': args.pg_controldata}
+
+
+def _source_identity(args):
+    """S's identity; for --source-kind datadir the sender reads it with the cluster state (pgdelta.datadir)."""
+    if args.source_kind == 'datadir':
+        if not args.pg_controldata:
+            raise InvalidInput('--source-kind datadir needs --pg-controldata: it reads the cluster state '
+                               'and the REDO WAL file from it')
+        return None
+    return _identity(args.source, args.pg_controldata)
 
 
 def _failure_stats(exc):
@@ -339,13 +396,19 @@ def _run_sender_command(args, run, protected):
     try:
         stats = run()
     except BaseException as exc:
+        failure = _failure_stats(exc)
         if args.stats_json:
-            _write_stats(args.stats_json, _failure_stats(exc))
+            _write_stats(args.stats_json, failure)
+        if failure.get('in_place') and not any(said in str(exc) for said in (inplace.BLOCKED, inplace.COMMITTED)):
+            # The receiver accepted an in-place refresh, and has not said whether it left B blocked or committed.
+            log('error: the receiver was refreshing B in place, so B may be incomplete and blocked from '
+                'starting: see the receiver\'s log; refresh it again, or replace it with a full copy')
         raise
     if args.stats_json:
         _write_stats(args.stats_json, stats)
     pages, up, down = stats['pages'], stats['bytes_source_to_dest'], stats['bytes_dest_to_source']
-    log(f'complete ({stats["mode"]} mode: {stats["gate_reason"]}): {pages["sent"]} of {pages["total"]} '
+    log(f'complete ({stats["mode"]} mode{", in place" if stats.get("in_place") else ""}: '
+        f'{stats["gate_reason"]}): {pages["sent"]} of {pages["total"]} '
         f'pages sent; {up["total"]} bytes to the destination, {down["total"]} bytes back; '
         f'{stats["timings_seconds"]["total"]:.3f} s')
     return 0
@@ -355,7 +418,7 @@ def cmd_send(args):
     host, port = transport.parse_hostport(args.connect)
 
     def run():
-        identity = _identity(args.source, args.pg_controldata)
+        identity = _source_identity(args)
         channel = transport.connect_channel(host, port)
         try:
             return sender.run_sender(channel, args.source, **_sender_kwargs(args, identity))
@@ -368,10 +431,11 @@ def cmd_send(args):
 def cmd_local(args):
     def run():
         placement.check_local(args.source, args.basis, args.output)
-        identity = _identity(args.source, args.pg_controldata)
+        identity = _source_identity(args)
         process, channel = transport.spawn_local_receiver(
             args.basis, args.output, pg_controldata=_basis_controldata(args),
-            reuse_any_basis=args.reuse_any_basis, local_source=args.source, **_receiver_engine(args))
+            reuse_any_basis=args.reuse_any_basis, local_source=args.source, in_place=args.in_place,
+            **_receiver_engine(args))
         try:
             stats = sender.run_sender(channel, args.source, **_sender_kwargs(args, identity))
         finally:
