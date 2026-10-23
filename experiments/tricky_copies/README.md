@@ -137,6 +137,8 @@ T11 reuses this path from Python. `run_tool` takes `output`, `stats_path` and `l
 | `summary.py` | `summary.csv` and `summary.md` |
 | `lsnscan.py` | The LSN-skip analyzer (pre-existing, unchanged) |
 
-`build_scenario(..., extra_conf={...})` adds server settings to every primary a scenario initdbs, and so to its standbys, and records them in `scenario.json` → `extra_conf`. EXP-03 uses none. T11 sets `wal_keep_size`, so the source keeps its WAL since the fork.
+`build_scenario(..., source_conf={...}, old_copy_conf={...})` adds server settings to the cluster that becomes the source, and to the one whose data directory becomes B, each from its creation on. A standby cloned from a primary of the other role gets its own role's settings, and the other role's reset to their built-in defaults. EXP-03 uses neither. T11 gives the source `wal_keep_size`, so it keeps its WAL since the fork, and B keeps EXP-03's settings unless asked otherwise.
+- `old_copy_conf` only applies where B is a cluster of its own: S1, S1b, S2 and S2b. Given for another scenario, its `old_copy_conf_applied` check fails.
+- `scenario.json` → `server_conf` records both, and with which role's settings the source and B's cluster ran: `source_ran_with` and `old_copy_ran_with`. The latter is `null` when B is a base backup, which never ran, and `source` in S3, where B is a copy of the source's own data directory.
 
 Tests: `python -m unittest discover -s tests`. `tests/test_tricky_copies.py` holds unit tests plus one integration test, which builds S1 at 2,000 rows, runs the analysis and evaluates a stand-in tool. It takes about 3 s and is skipped when PostgreSQL 17 is not installed. S2b's page-LSN check and its build are tested in `tests/test_incumbents.py`.

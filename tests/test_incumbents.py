@@ -314,14 +314,45 @@ class S2bCheckTest(unittest.TestCase):
         self.assertIs(spec.checker, scenarios.check_s2b)
         self.assertEqual([s.id for s in run_scenarios.select_scenarios(['s2b', 'S1B', 'S2'])],
                          ['S2b', 'S1b', 'S2'])
+        conf = {'source': {'wal_keep_size': '1GB'}, 'old_copy': {}, 'source_ran_with': 'source',
+                'old_copy_ran_with': 'old_copy'}
         meta = scenarios.scenario_metadata(spec, rows=1, built_ok=True,
                                            source_cluster={'name': 'standby', 'kept': True,
                                                            'datadir': 'pgdwork-x/standby'},
-                                           extra_conf={'wal_keep_size': '1GB'})
+                                           server_conf=conf)
         self.assertEqual(meta['source_cluster']['datadir'], 'pgdwork-x/standby')
-        self.assertEqual(meta['extra_conf'], {'wal_keep_size': '1GB'})
-        self.assertEqual(scenarios.scenario_metadata(spec, rows=1, built_ok=False)['extra_conf'],
-                         {})
+        self.assertEqual(meta['server_conf'], conf)
+        self.assertEqual(scenarios.scenario_metadata(spec, rows=1, built_ok=False)['server_conf'],
+                         {'source': {}, 'old_copy': {}})
+
+    def test_role_settings(self):
+        """A standby cloned from a primary of another role gets its own role's settings,
+        and the primary's role's settings reset to their defaults."""
+        class Recorder:
+            def __init__(self, name):
+                self.name, self.appended, self.queries = name, [], []
+
+            def append_conf(self, settings):
+                self.appended.append(settings)
+
+            def query(self, sql):
+                self.queries.append(sql)
+                return [['wal_keep_size', '0']]
+
+        ctx = SimpleNamespace(role_conf={'source': {'wal_keep_size': '4GB'}, 'old_copy': {}},
+                              step=lambda text: None)
+        switch = scenarios.BuildContext.switch_role_conf
+        primary, standby = Recorder('primary'), Recorder('standby')
+        switch(ctx, standby, primary, 'source', 'old_copy')  # S1: R becomes B
+        self.assertEqual(standby.appended, [{'wal_keep_size': '0'}])
+        self.assertIn("name IN ('wal_keep_size')", primary.queries[0])
+        primary, standby = Recorder('primary'), Recorder('standby')
+        switch(ctx, standby, primary, 'old_copy', 'source')  # S2: P becomes B, R the source
+        self.assertEqual((standby.appended, primary.queries), ([{'wal_keep_size': '4GB'}], []))
+        ctx.role_conf['old_copy'] = {'wal_keep_size': '1GB'}
+        primary, standby = Recorder('primary'), Recorder('standby')
+        switch(ctx, standby, primary, 'source', 'old_copy')
+        self.assertEqual((standby.appended, primary.queries), ([{'wal_keep_size': '1GB'}], []))
 
 
 class FlushWithoutCheckpointTest(unittest.TestCase):
@@ -540,8 +571,11 @@ class DriverTest(unittest.TestCase):
             run_t11.parse_list('S1,S42', list(scenarios.BY_ID), 'scenario')
         with self.assertRaises(SystemExit):
             run_t11.parse_list(' , ', list(tools.TOOLS), 'tool')
-        self.assertEqual(run_t11.server_settings('none'), {})
-        self.assertEqual(run_t11.server_settings('4GB'), {'wal_keep_size': '4GB'})
+        self.assertEqual(run_t11.server_settings('none'), {'source': {}, 'old_copy': {}})
+        self.assertEqual(run_t11.server_settings('4GB', 'none'),
+                         {'source': {'wal_keep_size': '4GB'}, 'old_copy': {}})
+        self.assertEqual(run_t11.server_settings('4GB', '1GB'),
+                         {'source': {'wal_keep_size': '4GB'}, 'old_copy': {'wal_keep_size': '1GB'}})
 
     def test_listed_pages(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -561,15 +595,23 @@ class DriverTest(unittest.TestCase):
         self.assertTrue(info['source'].startswith('computed by run_t11'))
 
     def test_scenario_ready(self):
+        conf = run_t11.server_settings('4GB')
         with tempfile.TemporaryDirectory() as tmp:
-            meta = {'built_ok': True, 'rows': 50, 'extra_conf': {'wal_keep_size': '4GB'},
+            meta = {'built_ok': True, 'rows': 50,
+                    'server_conf': {**conf, 'source_ran_with': 'source',
+                                    'old_copy_ran_with': 'old_copy'},
                     'source_cluster': {'kept': True, 'datadir': 'pgdwork-x/standby'}}
             Path(tmp, 'scenario.json').write_text(json.dumps(meta))
-            self.assertIsNone(run_t11.scenario_ready(tmp, 50, {'wal_keep_size': '4GB'}))
+            self.assertIsNone(run_t11.scenario_ready(tmp, 50, conf))
             write(tmp, 'pgdwork-x/standby/PG_VERSION', b'17\n')
-            self.assertEqual(run_t11.scenario_ready(tmp, 50, {'wal_keep_size': '4GB'}), meta)
-            self.assertIsNone(run_t11.scenario_ready(tmp, 51, {'wal_keep_size': '4GB'}))
-            self.assertIsNone(run_t11.scenario_ready(tmp, 50, {}))
+            self.assertEqual(run_t11.scenario_ready(tmp, 50, conf), meta)
+            self.assertIsNone(run_t11.scenario_ready(tmp, 51, conf))
+            self.assertIsNone(run_t11.scenario_ready(tmp, 50, run_t11.server_settings('none')))
+            self.assertIsNone(run_t11.scenario_ready(tmp, 50, run_t11.server_settings('4GB', '4GB')))
+            # Built before the roles were told apart: every cluster had the settings.
+            del meta['server_conf']
+            Path(tmp, 'scenario.json').write_text(json.dumps({**meta, 'extra_conf': {}}))
+            self.assertIsNone(run_t11.scenario_ready(tmp, 50, run_t11.server_settings('none')))
 
 
 @unittest.skipUnless((PG_BIN / 'initdb').is_file() and (PG_BIN / 'pg_rewind').is_file()
@@ -578,18 +620,29 @@ class PgRewindClusterTest(unittest.TestCase):
     """run_t11 end to end on tiny scenarios: pg_rewind must repair S1 and S2; on S2b it
     must repair too, while the LSN-skip control must be called wrong."""
 
-    def run_t11(self, tmp, scenario_ids, tool_names):
+    def run_t11(self, tmp, scenario_ids, tool_names, *extra):
         quiet = io.StringIO()
         with contextlib.redirect_stdout(quiet):
             status = run_t11.main(['--pg-bin', str(PG_BIN), '--scenarios', scenario_ids,
                                    '--tools', tool_names, '--rows', '2000', '--out', str(tmp),
-                                   '--wal-keep-size', '1GB', '--quiet'])
+                                   '--wal-keep-size', '1GB', '--quiet', *extra])
         self.assertEqual(status, 0, quiet.getvalue()[-3000:])
         return {(r['scenario'], r['tool']): r
                 for r in json.loads(Path(tmp, 'summary.json').read_text())['runs']}
 
     def result(self, tmp, scenario, tool):
         return json.loads(Path(tmp, scenario, tool, 'result.json').read_text())
+
+    def wal_keep_mb(self, tmp, scenario):
+        """wal_keep_size (MB) as B and the kept source cluster would run with it."""
+        directory = Path(tmp, 'scenarios', scenarios.BY_ID[scenario].dirname)
+        meta = json.loads((directory / 'scenario.json').read_text())
+        values = {}
+        for name, datadir in (('old_copy', directory / 'old_copy'),
+                              ('source', directory / meta['source_cluster']['datadir'])):
+            values[name] = pgcluster.run([PG_BIN / 'postgres', '-D', datadir, '-C',
+                                          'wal_keep_size']).stdout.strip()
+        return values, meta['server_conf']
 
     def test_pg_rewind_repairs_s1_and_s2(self):
         tmp = Path(tempfile.mkdtemp(prefix='pgd'))
@@ -608,13 +661,23 @@ class PgRewindClusterTest(unittest.TestCase):
             self.assertGreater(s2['diverged_pages']['listed'], 0)
             self.assertEqual(s2['bring_up']['recovery_conf'], 'tool')
             self.assertFalse(Path(tmp, 'S2', 'pg_rewind', 'work').exists())
+            # Only the source keeps its WAL; B runs with EXP-03's settings, whether it was
+            # the standby (S1) or the old primary (S2).
+            for scenario in ('S1', 'S2'):
+                values, conf = self.wal_keep_mb(tmp, scenario)
+                self.assertEqual(values, {'old_copy': '0', 'source': '1024'}, scenario)
+                self.assertEqual((conf['old_copy_ran_with'], conf['source_ran_with']),
+                                 ('old_copy', 'source'))
+                self.assertEqual((conf['source'], conf['old_copy']),
+                                 ({'wal_keep_size': '1GB'}, {}))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_s2b(self):
         tmp = Path(tempfile.mkdtemp(prefix='pgd'))
         try:
-            runs = self.run_t11(tmp, 'S2b', 'pg_rewind,lsn_skip')
+            runs = self.run_t11(tmp, 'S2b', 'pg_rewind,lsn_skip',
+                                '--old-copy-wal-keep-size', '512MB')
             meta = json.loads(Path(tmp, 'scenarios', scenarios.BY_ID['S2b'].dirname,
                                    'scenario.json').read_text())
             self.assertTrue(meta['built_ok'], meta.get('failed_checks') or meta.get('error'))
@@ -625,7 +688,10 @@ class PgRewindClusterTest(unittest.TestCase):
             self.assertGreaterEqual(observations['post_fork_page_count'],
                                     meta['checks']['diverged_pages_differ'][
                                         'pages_written_after_split'])
-            self.assertEqual(meta['extra_conf'], {'wal_keep_size': '1GB'})
+            self.assertEqual(self.wal_keep_mb(tmp, 'S2b')[0], {'old_copy': '512', 'source': '1024'})
+            self.assertEqual((meta['server_conf']['source'], meta['server_conf']['old_copy']),
+                             ({'wal_keep_size': '1GB'}, {'wal_keep_size': '512MB'}))
+            self.assertTrue(meta['checks']['old_copy_conf_applied']['ok'])
             rewind = self.result(tmp, 'S2b', 'pg_rewind')
             self.assertTrue(rewind['parsed']['crash_recovery_run'])
             self.assertEqual(runs[('S2b', 'pg_rewind')]['verdict'], 'repaired', rewind)

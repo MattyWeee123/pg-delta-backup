@@ -3,7 +3,8 @@
 
     run_t11.py [--pg-bin DIR] [--pg-probackup PATH|auto|none] [--wal-g PATH|auto|none]
                [--scenarios S1,S2,S2b] [--tools pg_rewind,pg_probackup,walg,walg_send,pgdelta]
-               [--out results/t11] [--rows N] [--reuse-scenarios] [--keep-copies]
+               [--out results/t11] [--rows N] [--wal-keep-size SIZE|none]
+               [--old-copy-wal-keep-size SIZE|none] [--reuse-scenarios] [--keep-copies]
 
 Each scenario is built with EXP-03's builder and --keep, so its source cluster stays
 (stopped), under OUT/scenarios/. Every tool then runs on its own copy of B against its
@@ -31,7 +32,10 @@ T11_SCENARIOS = ('S1', 'S2', 'S2b')
 # EXP-03's sources recycle the WAL written since the fork at their next checkpoints, and
 # pg_basebackup's segment switches bring those quickly. pg_rewind's copy, and a standby
 # refreshed by a catch-up tool, replay the source's WAL from before the fork or from the
-# catch-up's start, so T11 keeps it, as a WAL archive or replication slot would.
+# catch-up's start, so T11 keeps it on the source, as a WAL archive or replication slot
+# would. B keeps EXP-03's settings unless --old-copy-wal-keep-size is given: pg_rewind
+# also reads B's own WAL from the last common checkpoint on, and whether B still has it
+# is part of what T11 measures.
 DEFAULT_WAL_KEEP = '4GB'
 DEFAULT_TOOLS = tools.TOOLS
 DEFAULT_OUT = REPO_ROOT / 'results' / 't11'
@@ -63,17 +67,29 @@ def read_json(path):
     return json.loads(path.read_text()) if path.is_file() else None
 
 
-def server_settings(wal_keep_size):
-    return {} if wal_keep_size in (None, '', 'none') else {'wal_keep_size': wal_keep_size}
+def server_settings(wal_keep_size, old_copy_wal_keep_size=None):
+    """The scenario clusters' extra settings by role: {'source': {...}, 'old_copy': {...}}."""
+    def settings(size):
+        return {} if size in (None, '', 'none') else {'wal_keep_size': size}
+    return {'source': settings(wal_keep_size), 'old_copy': settings(old_copy_wal_keep_size)}
 
 
-def scenario_ready(directory, rows, extra_conf):
-    """The scenario's metadata if it is built at ``rows`` with ``extra_conf`` and its
-    source kept, else None."""
+def built_conf(meta):
+    """The settings by role a scenario was built with, or None for a build made before the
+    roles were told apart (it gave every cluster the same settings)."""
+    conf = meta.get('server_conf')
+    if not isinstance(conf, dict):
+        return None
+    return {'source': conf.get('source') or {}, 'old_copy': conf.get('old_copy') or {}}
+
+
+def scenario_ready(directory, rows, conf):
+    """The scenario's metadata if it is built at ``rows`` with the settings ``conf`` (from
+    server_settings) and its source kept, else None."""
     meta = read_json(Path(directory) / 'scenario.json')
     if not meta or not meta.get('built_ok') or meta.get('rows') != rows:
         return None
-    if (meta.get('extra_conf') or {}) != extra_conf:
+    if built_conf(meta) != conf:
         return None
     kept = meta.get('source_cluster') or {}
     if not kept.get('kept') or not (Path(directory) / kept.get('datadir', '') / 'PG_VERSION').is_file():
@@ -81,10 +97,10 @@ def scenario_ready(directory, rows, extra_conf):
     return meta
 
 
-def build_or_reuse(spec, root, *, rows, pgbin, reuse, verbose, extra_conf):
+def build_or_reuse(spec, root, *, rows, pgbin, reuse, verbose, conf):
     directory = Path(root) / spec.dirname
     if reuse:
-        meta = scenario_ready(directory, rows, extra_conf)
+        meta = scenario_ready(directory, rows, conf)
         if meta:
             print(f'== reuse {spec.id} ({directory})', flush=True)
             return directory, meta, True
@@ -92,7 +108,7 @@ def build_or_reuse(spec, root, *, rows, pgbin, reuse, verbose, extra_conf):
           flush=True)
     meta = scenarios.build_scenario(spec, root, rows=rows, bins={pgbin.major: pgbin},
                                     default_bin=pgbin, keep=True, force=True, verbose=verbose,
-                                    extra_conf=extra_conf)
+                                    source_conf=conf['source'], old_copy_conf=conf['old_copy'])
     status = 'built' if meta['built_ok'] else 'NOT BUILT'
     detail = meta.get('error') or ', '.join(meta.get('failed_checks', [])) or ''
     print(f'== {spec.id}: {status} in {meta["build_seconds"]}s {detail}', flush=True)
@@ -150,9 +166,13 @@ def main(argv=None):
                         help='rows in the accounts table, passed to the scenario builder '
                              '(default %(default)s)')
     parser.add_argument('--wal-keep-size', default=DEFAULT_WAL_KEEP,
-                        help="wal_keep_size for the scenario clusters, so the source keeps its "
-                             "WAL since the fork (default %(default)s; 'none' for EXP-03's "
+                        help="wal_keep_size for the cluster that becomes the source, so it keeps "
+                             "its WAL since the fork (default %(default)s; 'none' for EXP-03's "
                              "settings, under which the refreshed standbys cannot catch up)")
+    parser.add_argument('--old-copy-wal-keep-size', default='none',
+                        help="wal_keep_size for the cluster whose data directory becomes B, so B "
+                             "keeps its own WAL since the last common checkpoint, as pg_rewind "
+                             "needs (default %(default)s: EXP-03's settings)")
     parser.add_argument('--reuse-scenarios', action='store_true',
                         help='reuse scenarios already built under OUT/scenarios at --rows')
     parser.add_argument('--keep-copies', action='store_true',
@@ -177,16 +197,17 @@ def main(argv=None):
         state = info['version'] if info['available'] else f"skipped: {info['reason']}"
         print(f'== {name}: {state}', flush=True)
 
+    conf = server_settings(args.wal_keep_size, args.old_copy_wal_keep_size)
     results, scenario_info, ok = [], {}, True
     for spec in chosen:
         directory, meta, reused = build_or_reuse(
             spec, out / 'scenarios', rows=args.rows, pgbin=pgbin, reuse=args.reuse_scenarios,
-            verbose=not args.quiet, extra_conf=server_settings(args.wal_keep_size))
+            verbose=not args.quiet, conf=conf)
         info = {'dir': str(directory), 'built_ok': meta.get('built_ok'), 'rows': meta.get('rows'),
                 'error': meta.get('error'), 'failed_checks': meta.get('failed_checks'),
                 'old_copy_state': (meta.get('old_copy') or {}).get('cluster_state'),
                 'old_copy_redo_lsn': (meta.get('old_copy') or {}).get('redo_location'),
-                'timelines': meta.get('timelines')}
+                'timelines': meta.get('timelines'), 'server_conf': meta.get('server_conf')}
         scenario_info[spec.id] = info
         if not reused:  # earlier results for this scenario describe another build
             shutil.rmtree(out / spec.id, ignore_errors=True)
@@ -213,7 +234,7 @@ def main(argv=None):
 
     context = {'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
                'pg_bin': pgbin.describe(), 'rows': args.rows,
-               'server_settings': server_settings(args.wal_keep_size), 'tools': infos,
+               'server_conf': conf, 'tools': infos,
                'scenarios': scenario_info}
     # The summary covers every result under OUT, so tools run separately share it.
     everything = checks.collect_results(out, [spec.id for spec in scenarios.SCENARIOS],

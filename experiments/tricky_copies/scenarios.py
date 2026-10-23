@@ -130,9 +130,15 @@ SET enable_bitmapscan = off;
 # --------------------------------------------------------------------------
 class BuildContext:
     def __init__(self, scenario_dir, rows, bins, default_bin, keep=False, verbose=True,
-                 extra_conf=None):
+                 source_conf=None, old_copy_conf=None):
         self.scenario_dir = Path(scenario_dir)
-        self.extra_conf = dict(extra_conf or {})
+        # Extra server settings by role (T11; EXP-03 uses none): 'source' for the cluster
+        # that becomes the source, 'old_copy' for the one whose data directory becomes B.
+        # Each cluster runs with its role's settings from its creation on.
+        self.role_conf = {'source': dict(source_conf or {}),
+                          'old_copy': dict(old_copy_conf or {})}
+        self.roles = {}  # cluster name -> the role whose settings it runs with
+        self.old_copy_role = None  # the role of the cluster B was taken from, if B ran
         self.old_copy = self.scenario_dir / 'old_copy'
         self.source_backup = self.scenario_dir / 'source_backup'
         self.rows, self.bins, self.default_bin = rows, bins, default_bin
@@ -168,26 +174,48 @@ class BuildContext:
         return cluster
 
     def new_primary(self, name, checksums=True, conf=None, pgbin=None, load=True, vacuum=True,
-                    db='postgres'):
+                    db='postgres', role='source'):
         cluster = self.new_cluster(name, pgbin)
         flag = 'with' if checksums else 'without'
         self.step(f'initdb {name} ({cluster.pgbin.version_text}, {flag} data checksums)')
         cluster.initdb(checksums=checksums)
-        cluster.append_conf({**BASE_CONF, **self.extra_conf, **(conf or {})})
+        cluster.append_conf({**BASE_CONF, **self.role_conf[role], **(conf or {})})
+        self.roles[name] = role
         cluster.start()
         if load:
             self.step(f'load data on {name} ({self.rows} accounts rows)')
             cluster.psql(load_sql(self.rows, vacuum=vacuum), db)
         return cluster
 
-    def new_standby(self, name, primary):
+    def new_standby(self, name, primary, role=None):
+        """A streaming standby of ``primary``. With a ``role`` other than the primary's, it
+        runs with that role's settings instead of those it copied from the primary."""
         standby = self.new_cluster(name, primary.pgbin)
         self.step(f'create standby {name} with pg_basebackup -R from {primary.name}')
         primary.basebackup(standby.datadir, extra=['-R'])
+        inherited = self.roles.get(primary.name)
+        self.roles[name] = role = role or inherited
+        if role != inherited:
+            self.switch_role_conf(standby, primary, inherited, role)
         standby.start()
         primary.wait_for("SELECT count(*) > 0 FROM pg_stat_replication WHERE state = 'streaming'")
         self.step(f'{name} is streaming from {primary.name}')
         return standby
+
+    def switch_role_conf(self, standby, primary, inherited, role):
+        """Append ``role``'s settings to a fresh clone's postgresql.conf, after resetting
+        those of the primary's role to their built-in defaults (read from the primary)."""
+        wanted = self.role_conf[role]
+        stale = [name for name in self.role_conf.get(inherited, {}) if name not in wanted]
+        defaults = {}
+        if stale:
+            names = ', '.join("'" + name.replace("'", "''") + "'" for name in stale)
+            defaults = dict(primary.query(
+                f'SELECT name, boot_val FROM pg_settings WHERE name IN ({names}) ORDER BY 1'))
+        if defaults or wanted:
+            self.step(f'{standby.name} gets the {role} settings {wanted}'
+                      + (f' and the defaults {defaults}' if defaults else ''))
+            standby.append_conf({**defaults, **wanted})
 
     def wait_replay(self, primary, standby):
         target = primary.scalar('SELECT pg_current_wal_lsn()')
@@ -200,6 +228,7 @@ class BuildContext:
         cluster.basebackup(self.old_copy)
 
     def adopt_datadir_as_old_copy(self, cluster, copy=False):
+        self.old_copy_role = self.roles.get(cluster.name)
         if copy:
             self.step(f'B = copy of {cluster.name} data directory (shutil.copytree)')
             shutil.copytree(cluster.datadir, self.old_copy, symlinks=True)
@@ -303,7 +332,7 @@ def flush_without_checkpoint(cluster, passes=5):
 # --------------------------------------------------------------------------
 def build_s1(ctx, restartpoint=True):
     p = ctx.new_primary('primary')
-    r = ctx.new_standby('standby', p)
+    r = ctx.new_standby('standby', p, role='old_copy')
     ctx.step('writes on P (burst 1), replicated to R')
     p.psql(burst_sql(ctx.rows, 1))
     if restartpoint:
@@ -341,11 +370,11 @@ def check_s1(ctx, old_info, source_info, threshold):
 def build_s2(ctx, crash=False):
     """S2, or with ``crash`` S2b: P flushes its diverged pages without a checkpoint and
     stops with -m immediate, so B's REDO location stays before the fork."""
-    p = ctx.new_primary('primary', conf=NO_CHECKPOINT_CONF if crash else None)
+    p = ctx.new_primary('primary', conf=NO_CHECKPOINT_CONF if crash else None, role='old_copy')
     if crash:
         ctx.step('CREATE EXTENSION pg_buffercache on P, before R is cloned, so R has it too')
         p.psql('CREATE EXTENSION pg_buffercache;')
-    r = ctx.new_standby('standby', p)
+    r = ctx.new_standby('standby', p, role='source')
     ctx.step('writes on P (burst 1), replicated to R')
     p.psql(burst_sql(ctx.rows, 1))
     p.psql('CHECKPOINT;')
@@ -658,7 +687,8 @@ def build_s9(ctx):
     new = ctx.new_cluster('pg18', new_bin)
     ctx.step(f'initdb the 18 cluster ({new_bin.version_text}) with matching settings')
     new.initdb(checksums=True)
-    new.append_conf(BASE_CONF)
+    new.append_conf({**BASE_CONF, **ctx.role_conf['source']})
+    ctx.roles[new.name] = 'source'
     ctx.step('pg_upgrade --link from 17 to 18')
     proc = run([new_bin.tool('pg_upgrade'), '-b', old_bin.bindir, '-B', new_bin.bindir,
                 '-d', old.datadir, '-D', new.datadir, '--link', '-U', 'postgres',
@@ -770,7 +800,7 @@ def describe_copy(path, bins):
 def scenario_metadata(spec, *, rows, built_ok, error=None, threshold=None, old_info=None,
                       source_info=None, binaries=None, checks=None, observations=None,
                       notes=None, quiesce=None, steps=None, seconds=None, source_cluster=None,
-                      extra_conf=None):
+                      server_conf=None):
     """The scenario.json document. Pure, so its shape is easy to test."""
     same_sysid = None
     if old_info and source_info:
@@ -799,7 +829,7 @@ def scenario_metadata(spec, *, rows, built_ok, error=None, threshold=None, old_i
                                    'source_backup': (source_info or {}).get('data_checksum_version')},
         'quiesce': quiesce,
         'source_cluster': source_cluster,
-        'extra_conf': extra_conf or {},
+        'server_conf': server_conf or {'source': {}, 'old_copy': {}},
         'checks': checks or {},
         'observations': observations or {},
         'notes': notes or [],
@@ -822,17 +852,27 @@ def write_json(path, document):
 
 
 def build_scenario(spec, out_root, *, rows=DEFAULT_ROWS, bins, default_bin, keep=False,
-                   force=False, verbose=True, extra_conf=None):
+                   force=False, verbose=True, source_conf=None, old_copy_conf=None):
     """Build one scenario under out_root/<id>-<slug>/ and return its metadata.
 
-    ``extra_conf`` adds server settings to every primary the scenario initdbs (its
-    standbys inherit them); EXP-03 uses none, T11 sets wal_keep_size."""
+    ``source_conf`` adds server settings to the cluster that becomes the source, from its
+    creation on; ``old_copy_conf`` to the one whose data directory becomes B (S1, S1b, S2
+    and S2b, where that is a cluster of its own). EXP-03 uses neither; T11 gives the
+    source wal_keep_size. scenario.json records both, and with which role's settings
+    the source and B's cluster ran."""
     scenario_dir = prepare_scenario_dir(Path(out_root) / spec.dirname, force)
     ctx = BuildContext(scenario_dir, rows, bins, default_bin, keep=keep, verbose=verbose,
-                       extra_conf=extra_conf)
+                       source_conf=source_conf, old_copy_conf=old_copy_conf)
     result = {'built_ok': False}
     try:
         source = spec.builder(ctx)
+        result['source_role'] = ctx.roles.get(source.name)
+        if ctx.role_conf['source']:
+            ctx.check('source_conf_applied', result['source_role'] == 'source',
+                      cluster=source.name, ran_with=result['source_role'])
+        if ctx.role_conf['old_copy']:
+            ctx.check('old_copy_conf_applied', ctx.old_copy_role == 'old_copy',
+                      ran_with=ctx.old_copy_role)
         # With --keep the source stays, stopped, for tools that need a live server (T11).
         result['source_cluster'] = {'name': source.name, 'kept': keep,
                                     'datadir': source.datadir.relative_to(scenario_dir).as_posix()}
@@ -886,7 +926,9 @@ def build_scenario(spec, out_root, *, rows=DEFAULT_ROWS, bins, default_bin, keep
         checks=ctx.checks, observations=ctx.observations, notes=ctx.notes,
         quiesce=result.get('quiesce'), steps=ctx.steps,
         seconds=round(time.monotonic() - ctx.started, 1),
-        source_cluster=result.get('source_cluster'), extra_conf=ctx.extra_conf)
+        source_cluster=result.get('source_cluster'),
+        server_conf={**ctx.role_conf, 'source_ran_with': result.get('source_role'),
+                     'old_copy_ran_with': ctx.old_copy_role})
     if result.get('traceback'):
         meta['traceback'] = result['traceback']
     write_json(scenario_dir / 'scenario.json', meta)

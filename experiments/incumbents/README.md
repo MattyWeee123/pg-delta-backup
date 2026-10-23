@@ -22,6 +22,10 @@ python3 experiments/incumbents/run_t11.py --pg-bin /usr/lib/postgresql/17/bin \
 
 # Another tool later, on the same builds
 python3 experiments/incumbents/run_t11.py --tools walg --reuse-scenarios --rows 20000
+
+# pg_rewind when B also kept its own WAL, in a separate results directory
+python3 experiments/incumbents/run_t11.py --tools pg_rewind --scenarios S2,S2b \
+    --old-copy-wal-keep-size 4GB --out results/t11-b-keeps-wal
 ```
 
 | Option | Default | Meaning |
@@ -33,7 +37,8 @@ python3 experiments/incumbents/run_t11.py --tools walg --reuse-scenarios --rows 
 | `--tools` | `pg_rewind,pg_probackup,walg,walg_send,pgdelta,lsn_skip` | Comma-separated |
 | `--out DIR` | `results/t11` (gitignored) | Results directory |
 | `--rows N` | 200,000 | Passed to EXP-03's scenario builder |
-| `--wal-keep-size` | `4GB` | `wal_keep_size` for the scenario clusters; `none` gives EXP-03's settings (see below) |
+| `--wal-keep-size` | `4GB` | `wal_keep_size` for the cluster that becomes the source; `none` gives EXP-03's settings (see below) |
+| `--old-copy-wal-keep-size` | `none` | `wal_keep_size` for the cluster whose data directory becomes B; `none` is EXP-03's settings (see below) |
 | `--reuse-scenarios` | off | Reuse builds under `OUT/scenarios/` made at the same `--rows` and settings |
 | `--keep-copies` | off | Keep each run's copies of B and of the source |
 | `--tool-timeout`, `--catchup-timeout` | 1800 s, 120 s | Per tool command; for a refreshed standby to reach the source |
@@ -71,7 +76,11 @@ WAL-G runs with `PGHOST`, `PGPORT`, `PGUSER` and `PGDATABASE` pointing at the so
 
 ## Choices that affect the results
 
-- **The source keeps its WAL (`--wal-keep-size 4GB`).** pg_rewind's copy replays the source's WAL from the last common checkpoint, which is before the fork. A copy refreshed by a catch-up tool replays from the catch-up's start. Under EXP-03's own settings, the source's checkpoints after the fork, and the segment switches of `pg_basebackup`, recycle that WAL. pg_rewind then repairs every page, but its copy can't start: the log says "requested WAL segment ... has already been removed". T11 gives the tools the WAL, as an archive or a replication slot would. `--wal-keep-size none` reproduces the other case. The setting doesn't change B, S or the LSN-skip numbers.
+- **The source keeps its WAL (`--wal-keep-size 4GB`); B doesn't, by default.** The setting goes to the cluster that becomes the source, from its creation on: P in S1, R in S2 and S2b. The cluster whose data directory becomes B runs with EXP-03's settings: R in S1 (it gets the default back after cloning P's configuration), P in S2 and S2b. `scenario.json` → `server_conf` records both, and the cluster test checks them with `postgres -C`.
+  - *Why the source keeps its WAL.* pg_rewind's copy replays the source's WAL from the last common checkpoint, which is before the fork. A copy refreshed by a catch-up tool replays from the catch-up's start. Under EXP-03's own settings, the source's checkpoints after the fork, and the segment switches of `pg_basebackup`, recycle that WAL. At 20,000 rows pg_rewind then repairs every page, but its copy can't start: the log says "requested WAL segment ... has already been removed". T11 gives the tools the source's WAL, as an archive or a replication slot would. `--wal-keep-size none` reproduces that case.
+  - *Why B keeps EXP-03's settings.* pg_rewind also reads B's own WAL, from the last common checkpoint up to where B ends, to find the pages B changed after the fork. Whether B still has it is part of what T11 measures. On the Mac at 200,000 rows it is gone, and pg_rewind stops with "could not find previous WAL record". On S2, P's shutdown checkpoint removed it, and pg_rewind exits before touching the copy (`refused`). On S2b, P's crash left the WAL in place, but pg_rewind's own crash recovery ends with a checkpoint that removes it. pg_rewind then exits after that recovery changed the copy (`failed`). At 20,000 rows all of it fits in one segment, and pg_rewind repairs both.
+  - *B with its WAL.* `--old-copy-wal-keep-size 4GB` gives P the same setting. pg_rewind then repairs S2 and S2b at 200,000 rows too. In production, `pg_rewind --restore-target-wal` with a WAL archive plays that role. Use a separate `--out`, so the two runs don't share a summary.
+  - Neither setting changes S or the LSN-skip numbers. B's settings change only which of B's WAL segments are still in `pg_wal`.
 - **Diverged pages are counted right after the tool, before the copy starts.** This counts what the tool itself left. The logical comparison then shows whether those pages matter once the copy has replayed the source's WAL.
 - **amcheck runs after promotion**, on a copy that has already matched the source as a standby. `--heapallindexed` checks that every heap tuple is in its indexes. It doesn't check that every index entry points to a live heap tuple, so a copy can pass amcheck and still fail the logical read.
 - **The logical read goes through the heap.** EXP-03's logical state turns index scans off, so `logical_match` counts and hashes every visible heap tuple, including one that no index entry points to. Read through the primary key, as PostgreSQL 17 plans it by default, such a tuple would be invisible to the comparison.
