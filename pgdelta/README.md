@@ -2,13 +2,17 @@
 
 `pgdelta` rebuilds a new copy O of a fresh physical backup S at a destination that already holds an older copy B. Only pages whose keyed hash differs cross the link. Every output file is re-hashed and checked against the source digest before O is published by a single rename.
 
+Three switches added for T3 and T8a change that, each off by default: `--in-place` refreshes B itself instead of building O, `--fsync` moves where files are flushed, and `--source-kind datadir` reads a stopped data directory instead of a backup. See [Switches for T3 and T8a](#switches-for-t3-and-t8a-added-not-yet-measured).
+
 Python 3.10+, standard library only, POSIX (Linux, macOS). Design: [docs/SPEC.md](../docs/SPEC.md) sections 2 and 4 to 7.
 
 **Status:** tested on synthetic directory pairs and on small PostgreSQL 17 clusters. The cluster tests are skipped when the binaries are missing; set `PGDELTA_TEST_PG_BIN` to point at them. They cover:
 - identity parsing;
 - a copy of the same cluster, where every page is reused;
 - full mode against a different cluster;
-- a stopped cluster refreshed from a stale copy after writes, whose output starts and returns the new rows.
+- a stopped cluster refreshed from a stale copy after writes, whose output starts and returns the new rows;
+- the same refreshed in place (`--in-place`), with the receiver killed (SIGKILL) at four points before the commit, where `pg_ctl start` fails on the blocked copy, and one right after it; each time a rerun makes the copy byte-identical to S and startable;
+- a stopped data directory read directly (`--source-kind datadir`), as a new copy and in place, whose output starts without recovery.
 
 Not yet tested: a reconstructed `pg_basebackup` passing `pg_verifybackup` (gate G2), a restore to a recovery target (G3), or a live workload.
 
@@ -22,6 +26,16 @@ python -m pgdelta local --source S --basis B --output O \
 # Two hosts over TCP: start the receiver first, then the sender.
 python -m pgdelta receive --basis B --output O --listen 0.0.0.0:7000 --pg-controldata .../pg_controldata
 python -m pgdelta send --source S --connect dest-host:7000 --pg-controldata .../pg_controldata --stats-json run.json
+```
+
+`receive` and `local` take exactly one of `--output O` and `--in-place`:
+
+```sh
+# Refresh B itself; B cannot start until the run commits (see "In-place refresh").
+python -m pgdelta local --source S --basis B --in-place --pg-controldata .../pg_controldata
+
+# Read a cleanly stopped data directory D directly instead of a backup.
+python -m pgdelta local --source D --source-kind datadir --basis B --output O --pg-controldata .../pg_controldata
 ```
 
 `receive --stdio` speaks the protocol on stdin and stdout. An SSH transport would run that command through `ssh`, the way `local` runs it as a child process.
@@ -78,6 +92,84 @@ Each switch below can be turned on or off on its own, for [EXP-06](../docs/exper
   - Each worker also exits on its own as soon as its parent process is gone, even after SIGKILL.
 - **Calling pgdelta from Python** with `jobs` above 1 (`run_sender`, `run_receiver`) needs the usual multiprocessing guard in the main module, `if __name__ == '__main__':`. `spawn` and `forkserver` import the main module in every worker. `python -m pgdelta` and `python -m unittest` are already safe.
 
+### Switches for T3 and T8a (added, not yet measured)
+
+Added for [T3](../docs/DECISIONS.md) arms (b) and (e) and for T8a, after the owner's decisions of October 23, 2026 (O5: B may be patched in place). None of them has been measured yet. The defaults keep v0's behaviour. `local` passes the receiver's switches on to its child receiver.
+
+| Switch | Commands | Values (default first) | What it does |
+|---|---|---|---|
+| `--in-place` | `receive`, `local` | off, or on instead of `--output` | Refreshes B itself: blocks it from starting, patches the changed pages into its files, verifies every file, deletes what S lacks, then unblocks it. No staging directory, and no byte of B is copied. `--rebuild` has no effect. T3 (e), with a startup block instead of an undo journal |
+| `--fsync` | `receive`, `local` | `main`, `writeback`, `worker` | Where each finished file is fsynced: in the main loop as before, in the main loop after early write-back, or on a background thread. T3 (b) |
+| `--source-kind` | `send`, `local` | `backup`, `datadir` | `datadir` reads a cleanly stopped data directory directly, without a backup first, and sends only what `pg_basebackup` would. Needs `--pg-controldata`. T8a |
+
+The three combine freely: every `--fsync` mode works for a new copy and in place, and a data directory can refresh B either way. The pages sent are the same for every `--fsync` mode, and for a new copy and in place except that in place pg_control is always sent whole.
+
+#### In-place refresh (`--in-place`)
+
+B becomes the refreshed copy. A failed run may leave B unusable, but PostgreSQL refuses to start on it until a refresh completes (owner decision O5). Nothing is ever rolled back.
+
+1. **Checks before anything changes.** As for a new copy, B must be a plain directory without `postmaster.pid`; in `local`, S and B must not overlap. The receipt path beside B must not be a directory. S must list `global/pg_control` (it is what blocks startup) and must not list the two names below; otherwise the run exits 2 with B untouched.
+2. **Blocking B**, before its first change:
+   - a receipt left beside B by an earlier refresh is removed;
+   - the marker `B/pgdelta-incomplete.json` is written atomically (temporary file, fsync, rename, fsync of B). It holds the schema version (1), the tool version, the start time, B's identity as read at the start, S's identity and the attempt number;
+   - `B/global/pg_control` is renamed to `B/global/pg_control.pgdelta-incomplete` and `global/` is fsynced. PostgreSQL cannot start without `global/pg_control`: `pg_ctl start` fails with "could not find the database system" and leaves no `postmaster.pid`.
+3. **B's tree.** Directories S has and B lacks are created (mode 0700 until the end). Where the type differs, B's entry goes: a file where S has a directory, a directory tree where S has a file. Neither can be a basis file, since files are paired by path.
+4. **Each file of S**, in inventory order:
+   - B's file is opened read-write, without following a symlink, and created (mode 0600) if B lacks it; it is never truncated on opening. A read-only file is made writable by its owner first;
+   - received pages are written at their offsets. Pages not received are already in place, and as for a new copy each must exist in B at the same offset and length;
+   - the file is truncated if S's is shorter, fsynced as `--fsync` says, re-read and verified against S's digest (pipelined or sequential, as for a new copy), and given S's mode;
+   - S's `global/pg_control` has no basis: it is always sent whole (one 8 KiB page) and written to `global/pg_control.pgdelta-incomplete`;
+   - **order:** B's file is written only after its digests were sent and its leaf requests answered. The sender guarantees this (it sends a file's pages only after it has that file's basis digests and every leaf digest it asked for, and the receiver answers leaf requests in stream order). The receiver also enforces it: page data for a file the basis thread has not finished hashing, and a leaf request for a file already being written, are protocol errors.
+5. **At COMPLETE**, once every fsync and every verification has finished: B is scanned again, and every file and directory S doesn't list is deleted, except the marker. Directory modes are applied, and every directory is fsynced.
+6. **The commit:** `global/pg_control.pgdelta-incomplete` is renamed to `global/pg_control`. From that rename on, B is the refreshed, verified copy and may start. Then `global/` is fsynced, the marker is removed, B is fsynced, and the receipt `B.pgdelta-receipt.json` is written beside B with status `committed`. The modes of `global/` and of B itself are applied in these steps, after their last change. As with publishing a new copy, an interrupt during them is held back until they are done, and an I/O error then fails the run (exit 3) but keeps the commit.
+
+**On any failure before the commit,** B keeps the marker and stays blocked. The run exits with the usual code (2, 3 or 4), and the receiver's message, which the sender reports too, says that B is incomplete and must be refreshed again or replaced by a full copy. A receiver killed with SIGKILL leaves the same state.
+
+**A rerun completes a blocked B.** `pg_controldata` cannot read B while its pg_control is renamed, so B's identity is taken from the marker. A marker found next to a `global/pg_control` that was never renamed (a run killed between the two steps) is accepted too, with B's identity read as usual. A marker next to both control files, a renamed control file without a marker, or an unreadable marker is refused (exit 2). A new copy (`--output`) can also be built from a blocked B, since every reused page is verified anyway; B's identity then comes from its marker as well.
+
+**What it costs and saves, unmeasured:** no copy of B and no staging directory, but every file of S is still fsynced and re-read for verification, including files no page of which changed. Statistics: `in_place`, `in_place_tree` (see [Statistics JSON](#statistics-json)) and `switches.receiver.rebuild = "in-place"`.
+
+#### Where files are fsynced (`--fsync`)
+
+- **`main` (default):** each finished file is fsynced in the receiver's main loop before the next file is accepted, as in v0.
+- **`writeback`:** the same, but on Linux write-back of the file being written is started early, with `sync_file_range(fd, offset, nbytes, SYNC_FILE_RANGE_WRITE)` through `ctypes`, every 8 MiB written to it (copies from B and received pages alike). That call only starts the writes and makes nothing durable, so the fsync at the end of each file stays; it should then be short. Elsewhere (macOS), or if the call is refused (`ENOSYS`, `EINVAL`, `ESPIPE`, `EOPNOTSUPP`), it falls back to `main`, and `fsync_effective` says `main`.
+- **`worker`:** each finished file's descriptor goes to one background thread, which fsyncs and closes it while the main loop writes the next file. Verification doesn't wait for it: it reads through the page cache either way. At most 32 files wait; beyond that the main loop waits. COMPLETE waits for every pending fsync before anything is published or committed, and the first fsync error fails the run (exit 3), with nothing published (or B left blocked).
+
+`fsync_seconds` is the time spent in fsync, on the worker's thread for `worker`. `fsync_wait_seconds` is how long the main loop waited for the worker: while its queue was full, and at COMPLETE. Both waits also count in `rebuild_seconds`. `writeback_calls` and `writeback_seconds` count the early write-back calls.
+
+#### Reading a stopped data directory (`--source-kind datadir`)
+
+With `--source-kind datadir` (on `send` and `local`) the sender reads a cluster's data directory directly, with no `pg_basebackup` first. The cluster must be stopped cleanly:
+- `--pg-controldata` is required. The run exits 2 unless it reports `Database cluster state: shut down` (so `shut down in recovery`, a crashed cluster's `in production`, and an untrustworthy reading from another major version are refused), and if `postmaster.pid` exists.
+- Before COMPLETE the sender checks again. If `postmaster.pid` has appeared, or `pg_controldata` reports anything different (a new checkpoint, another state), a server ran meanwhile and the files sent may be inconsistent: the run fails with exit 4 before the receiver publishes or commits.
+
+What is sent follows PostgreSQL 17's base-backup exclusions (`src/backend/backup/basebackup.c`, `sendDir`), applied by name at every depth as `sendDir` applies them. Each rule's name is its key in the statistics:
+
+| Rule | Left out |
+|---|---|
+| `directory_contents` | the contents of `pg_stat_tmp`, `pg_replslot`, `pg_dynshmem`, `pg_notify`, `pg_serial`, `pg_snapshots` and `pg_subtrans`; the directories themselves are sent, empty |
+| `named_files` | `postgresql.auto.conf.tmp`, `current_logfiles.tmp`, `backup_label`, `tablespace_map`, `backup_manifest`, `postmaster.pid`, `postmaster.opts`, and every name starting with `pg_internal.init` |
+| `temporary` | files and directories whose names start with `pgsql_tmp` |
+| `temporary_relations` | in a database directory (`base/<oid>`), temporary relation files (`t<backend>_<relfilenode>...`) |
+| `unlogged_relations` | in a database directory, every fork of an unlogged relation except its `_init` fork; a relation is unlogged when `<relfilenode>_init` exists beside it |
+| `macos` | `.DS_Store` |
+| `wal` | everything in `pg_wal/` but the segment named by `Latest checkpoint's REDO WAL file`, which after a clean shutdown holds the shutdown checkpoint record; `pg_wal/archive_status/` and `pg_wal/summaries/` are sent empty |
+
+So the output starts without recovery: PostgreSQL finds the shutdown checkpoint in the one segment, and rebuilds or clears what was left out at startup. **One addition to `pg_basebackup`'s rules:** `pg_basebackup` can leave out an unlogged relation's main fork because its output always goes through recovery, which ends by copying each init fork over its main fork. A copy that starts without recovery would find no main fork and fail on the first read ("could not open file"). So for each init fork `<relfilenode>_init[.N]`, the main fork `<relfilenode>[.N]` is sent with the init fork's bytes, which is exactly what that reset leaves: the relation exists and is empty. The real main fork, its other segments and its other forks are still left out.
+
+Symlinks among what is sent are refused, as for a backup (a `pg_wal` on another disk, tablespaces). Symlinks inside what is left out don't matter.
+
+**The same selection for a harness:** `pgdelta.datadir.select(datadir, pg_controldata)` returns the inventory, the identity, the REDO segment and what was left out. From the shell:
+
+```sh
+python -m pgdelta.datadir list D --pg-controldata .../pg_controldata            # ["PG_VERSION", "base/1/112", ...]
+python -m pgdelta.datadir list D --pg-controldata .../pg_controldata --sources  # [[path, path read], ...]
+```
+
+`list` prints the relative paths of the files sent, as a JSON list in the order they're sent, and exits 2 on the same refusals. With `--sources` it prints `[path, path read]` pairs, which differ only for the reset main forks: hash the second path on the source side to compare with the copy.
+
+The sender's statistics record `source_kind` and `source_excluded`: the files, directories and bytes left out, in total and under `by_rule`, and `unlogged_main_forks_reset`.
+
 ### Prefetching B while the listener waits
 
 `receive --listen` reads B into the page cache while it waits for the sender to connect. The session key is random per run and arrives in the sender's HELLO, so the receiver can't hash B before then, and the key's security property is unchanged. But it can read B. Without that, its first pass over B, hashing it for the sender, reads B from disk whenever B isn't cached (after a reboot or a cache drop, or when B was written long ago), on the transfer's critical path.
@@ -126,6 +218,8 @@ The receiver refuses in these cases:
 
 `local` also refuses when S and B are the same directory, when one lies inside the other, and when O's parent is S or lies inside S.
 
+`--in-place` refuses an S without `global/pg_control`, an S that lists `pgdelta-incomplete.json` or `global/pg_control.pgdelta-incomplete`, and a B whose marker is unreadable or whose control files are ambiguous; see [In-place refresh](#in-place-refresh---in-place). `--source-kind datadir` refuses a data directory that isn't cleanly shut down or holds `postmaster.pid`, a missing REDO WAL segment, and symlinks or tablespaces among what it sends; see [Reading a stopped data directory](#reading-a-stopped-data-directory---source-kind-datadir).
+
 These checks compare filesystem identity (`st_dev`, `st_ino`), not path strings. So 'Basis' and 'basis/O' on a case-insensitive volume, NFC and NFD spellings, symlinks, bind mounts and hard-linked directories can't disguise one directory as another. The receiver walks from O's parent up to `/` and compares every directory with B, with every directory found in B's scan (which catches a mount of one of B's subdirectories) and, in `local`, with S. It repeats the check just before it creates the staging directory, then checks the new staging directory itself and removes it if it landed inside B or S. One case can't be recognized: a directory reached through two mounts that report different `st_dev`, such as one NFS export mounted twice.
 
 ## Hashes
@@ -160,7 +254,7 @@ Each frame is a 4-byte big-endian payload length, a 1-byte type, then the payloa
 | Type | Direction | Payload | Byte category |
 |---|---|---|---|
 | 1 HELLO | S→D | JSON (see below) | control |
-| 2 ACCEPT | D→S | JSON `{mode, reason, reuse_policy, basis_identity, basis_files: [[index, size], ...]}` | control |
+| 2 ACCEPT | D→S | JSON `{mode, reason, reuse_policy, basis_identity, basis_files: [[index, size], ...]}`, plus `in_place: true` for an in-place refresh | control |
 | 3 BASIS_NODES | D→S | u32 file index, u64 basis size, node digests | node_digests |
 | 4 LEAF_REQUEST | S→D | u32 file index, then a u32 node index per node | leaf_digests |
 | 5 LEAF_DIGESTS | D→S | u32 file index, then per node: u32 node index, u32 leaf count, leaf digests | leaf_digests |
@@ -189,7 +283,7 @@ The receiver rejects missing or unknown HELLO fields. File indexes refer to the 
 6. For each file in turn, it sends PAGE_DATA for the differing and new pages in increasing page order, coalesced into runs of up to 1 MiB, then FILE_DONE.
 7. The receiver writes received pages at their offsets and takes every other page from the same offset in B; see [Building and verifying O](#building-and-verifying-o). A whole unchanged file is a straight copy.
 8. The receiver fsyncs the file, re-hashes all of it, and compares the result with the FILE_DONE digest, either right away or on the workers while it writes the next file. A mismatch is a fatal verification error.
-9. After the sender's COMPLETE, the receiver waits until every file has been verified. Then it applies directory modes and fsyncs every directory. It writes the receipt with status `verified`, renames the staging directory to O, fsyncs O's parent and rewrites the receipt with status `published`. Then it replies COMPLETE with its own statistics.
+9. After the sender's COMPLETE, the receiver waits until every file has been verified (and, with `--fsync worker`, fsynced). Then it applies directory modes and fsyncs every directory. It writes the receipt with status `verified`, renames the staging directory to O, fsyncs O's parent and rewrites the receipt with status `published`. Then it replies COMPLETE with its own statistics. In place, it deletes what S lacks and commits B instead; see [In-place refresh](#in-place-refresh---in-place).
 10. Either side may send ERROR at any point and stop.
 
 Neither side can block the other. The sender drains the small destination-to-source messages on its own reader thread. The receiver's main loop keeps reading while a separate thread sends BASIS_NODES.
@@ -225,7 +319,7 @@ The receiver keeps basis leaf digests from its first pass, up to 64 MiB of diges
 
 O is built in `.<O name>.pgdelta-staging-<random>` next to O, on the same filesystem. Directories and files come from the source inventory only, so files that exist only in B are not carried into O.
 
-Files are created with `O_EXCL | O_NOFOLLOW`. B is only opened read-only, with `O_NOFOLLOW`.
+Files are created with `O_EXCL | O_NOFOLLOW`. B is only opened read-only, with `O_NOFOLLOW`, unless `--in-place` is given.
 
 On any error, interruption (SIGINT or SIGTERM) or lost connection before the rename, the receiver deletes the staging tree and its receipt and never creates O. A receiver killed with SIGKILL leaves its staging directory behind, and maybe a `verified` receipt.
 
@@ -239,6 +333,8 @@ The receipt is `<O>.pgdelta-receipt.json`, a sibling of O and never inside it, s
 - `files_digest`: unkeyed BLAKE2b-256 over every file's path, size and keyed file digest, in inventory order. The sender's statistics carry the same value, which matches a run to its receipt. The session key isn't stored, so the value can't be recomputed from O later.
 
 Reading it: O can only appear through the rename, and the rename happens only after the `verified` receipt is durable. So O existing next to a `verified` or `published` receipt means O is complete and verified. A `verified` receipt with no O means the run stopped before publishing. A receipt left from an earlier run whose O is gone is stale and gets replaced. If the receipt path is a directory or a symlink, the run is refused.
+
+In place, the receipt is `<B>.pgdelta-receipt.json`. An earlier one is removed before B is blocked, and the new one is written once, after the commit, with status `committed`, `in_place: true` and `committed_at` instead of `published_at`; `output` is B. So a `committed` receipt beside a B without `pgdelta-incomplete.json` means B is complete and verified. The marker, not the receipt, is what says B is incomplete.
 
 ### Failures after the rename
 
@@ -255,6 +351,8 @@ Why 0 and not a new exit code: SPEC section 4 defines success as a verified, com
 `--stats-json` holds:
 - `schema_version` (1), `status` (`complete` or `failed`), `exit_code`, `error`
 - `mode`, `gate_reason` and `reuse_policy` (`same-cluster` or `any-basis`), `block`, `node_blocks`, both identities
+- `in_place`: whether the receiver refreshed B in place (from ACCEPT; null before it arrived)
+- `source_kind` (`backup` or `datadir`) and `source_excluded`: what [a data-directory source](#reading-a-stopped-data-directory---source-kind-datadir) left out, `{files, directories, bytes, by_rule: {rule: {files, directories, bytes}}, unlogged_main_forks_reset}`; null for a backup
 - `jobs` and `hash_backend`: the sender's (`serial`, `process` or `thread`)
 - `worker_start_method`: how the sender's worker processes were started (`spawn`; null without them). The receiver's statistics have their own
 - `switches` `{sender: {jobs, hash_backend}, receiver: {jobs, hash_backend, rebuild, verify}}`: the engine settings in effect on each side. `verify` is `sequential` whenever there's no pool of workers. The receiver's part is null until its final statistics arrive
@@ -277,7 +375,10 @@ Why 0 and not a new exit code: SPEC section 4 defines success as a verified, com
   - `total`.
 - `receiver`: the receiver's own view, including its `receipt` path, `files_digest`, `jobs`, `switches` and these timings in seconds. It also holds `pages_copied` and `bytes_copied`, the pages of O taken from B, which are the same for both rebuilds, and `basis_copy_bytes` and `basis_copies`, which depend on the rebuild:
   - **copy-patch:** bytes copied from B, including bytes later overwritten, and one operation per copy-ahead or end-of-file copy;
-  - **gap-fill:** one operation per 1 MiB piece of each gap.
+  - **gap-fill:** one operation per 1 MiB piece of each gap;
+  - **in place:** nothing is copied, so both are 0; `pages_copied` and `bytes_copied` count the pages left in place.
+- `receiver.in_place` and `receiver.in_place_tree`: for an in-place refresh, `{attempt, control_renamed, directories_created, files_removed, directories_removed}` (null for a new copy). `attempt` is 1 on a B without a marker and one more than the marker's on a rerun; `control_renamed` is false when a failed run had already renamed pg_control.
+- `receiver.fsync` and `receiver.fsync_effective`: the `--fsync` mode asked for and the one in effect (`writeback` falls back to `main` without `sync_file_range`); `writeback_calls`; and the timings `fsync_wait_seconds` and `writeback_seconds` (see [Where files are fsynced](#where-files-are-fsynced---fsync)).
 - `receiver.prefetch`: what the [prefetch of B](#prefetching-b-while-the-listener-waits) did before the sender connected (null when `run_receiver` is called without it):
   - `switch` (`on` or `off`), `ran`, and `why_not` when it didn't run (`off`, or `stdio`);
   - `files`, `basis_bytes` and `cap_bytes`: what B holds and the cap;
@@ -295,13 +396,16 @@ Byte counts include the 5-byte frame headers, but not TCP/IP overhead. The categ
 
 - There's no timeline-history check yet (SPEC section 4). The gate compares system identifier, catalog version, pg_control version, block size, blocks per segment and data checksum version, and decides only whether to compare pages.
 - Ownership, extended attributes and timestamps are not carried.
-- `pg_control` and `backup_label` get no special ordering, and no `backup_manifest` is emitted.
+- `pg_control` and `backup_label` get no special ordering, and no `backup_manifest` is emitted. In place, pg_control is the commit, and is always sent whole.
 - Other limits:
   - No resume.
   - No compression.
   - No cross-file matching.
   - No timeouts on a peer that stalls without closing.
 - The HELLO inventory must fit in one 64 MiB frame, which is roughly 700,000 files.
-- The fsync of each output file stays in the receiver's main loop, before the file goes to verification. On Linux, flushing a large file can cost more than writing it; `timings_seconds.fsync` shows how much.
+- By default the fsync of each output file stays in the receiver's main loop, before the file goes to verification. On Linux, flushing a large file can cost more than writing it; `timings_seconds.fsync` shows how much. `--fsync writeback` and `--fsync worker` move it, and are not measured yet.
+- In place, every file of S is fsynced and verified, including files no page of which changed. On ext4 an fsync of a clean file can still flush the device's cache, so this may cost time per file; skipping unchanged files on a first attempt is an option T3 (e) could measure.
+- `--source-kind datadir` reads only stopped clusters (T8a). Backup mode on a running server, WAL streaming and a `backup_manifest` are v1's (T8).
+- `--source-kind datadir` sends one WAL segment, the one where the shutdown checkpoint record starts. A record that starts in the last hundred or so bytes of a segment continues in the next one, which isn't sent, and that copy would not start (a chance of about 1 in 100,000 per shutdown; never seen in the tests, each of which starts its copy).
 - Verification re-reads O through the page cache, as it always has, so it checks what the kernel will write, not the medium itself.
 - With `--jobs N`, `local` runs N workers on each side, 2N in all, on one host.
