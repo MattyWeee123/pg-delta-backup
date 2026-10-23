@@ -2668,6 +2668,81 @@ class OutputVerification(unittest.TestCase):
         self.assertIn('did not start', result['error'])
         self.assertEqual(result['stop'], {'commands': []})
 
+    def test_an_output_that_cannot_be_stopped_is_left_in_place_and_blocks_later_starts(self):
+        class Unstoppable(StubOrchestrator):
+            """pg_ctl start writes postmaster.pid; stop leaves it (the server keeps running)."""
+            clean_method = run_exp04.Orchestrator.clean_method
+
+            def local_command(self, argv, log_name, **kwargs):
+                argv = [str(part) for part in argv]
+                if Path(argv[0]).name == 'pg_ctl':
+                    self.events.append(('dest', argv, log_name))
+                    data = Path(argv[argv.index('-D') + 1])
+                    if argv[-1] == 'start':
+                        (data / 'postmaster.pid').write_text('4242\n')
+                    return {'host': 'dest', 'argv': argv, 'exit_code': 0 if argv[-1] == 'start' else 1,
+                            'wall_seconds': 0.1}
+                if Path(argv[0]).name == 'cp':
+                    Path(argv[-1]).mkdir(parents=True)
+                return super().local_command(argv, log_name, **kwargs)
+
+            def query(self, sql, **kwargs):
+                return 'f' if 'pg_is_in_recovery' in sql else json.dumps(LOGICAL)
+
+            def remove_dest(self, *paths):
+                for path in paths:
+                    self.events.append(('remove_dest', str(path)))
+                    shutil.rmtree(path, ignore_errors=True)
+
+            def verify(self, method, paths, phases):
+                if method in measure.PGBACKREST_METHODS:
+                    return run_exp04.Orchestrator.verify(self, method, paths, phases)
+                return super().verify(method, paths, phases)
+
+        orchestrator = self.orchestrator(Unstoppable)
+        orchestrator.pgbackrest = {'backups': {}}
+        b = orchestrator.outputs / 'pgbackrest_zst'
+        with mock.patch.object(run_exp04, 'Child', FakeChild):
+            record = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), 'pgbackrest_zst', 0, ['pgbackrest_zst'])
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('could not be stopped', record['error'])
+        # Its data directory is still there under the running server, and recorded.
+        self.assertTrue((b / 'postmaster.pid').exists())
+        self.assertEqual(record['output_stuck']['data'], str(b))
+        self.assertEqual([command['argv'][4] for command in record['output_stuck']['stops']], ['fast', 'immediate'])
+        # No later method may start an output or reuse that path; the others run.
+        drops = orchestrator.events.count('drop_caches')
+        for method in ('pgbackrest_zst', 'pgbackrest_none', 'pgdelta_direct'):
+            with self.subTest(method=method), mock.patch.object(run_exp04, 'Child', FakeChild):
+                later = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), method, 0, [method])
+                self.assertEqual(later['status'], 'error')
+                self.assertIn('could not be stopped', later['error'])
+        self.assertEqual(orchestrator.events.count('drop_caches'), drops)
+        self.assertNotIn(('source_script', ('stop-clean',)), [event[:2] for event in orchestrator.events
+                                                              if isinstance(event, tuple)])
+        with mock.patch.object(run_exp04, 'Child', FakeChild):
+            self.assertEqual(orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), 'full', 0, ['full'])['status'], 'pass')
+        self.assertTrue((b / 'postmaster.pid').exists())
+        result = orchestrator.check_output('pgdelta_direct', orchestrator.outputs / 'other', recovery=False)
+        self.assertFalse(result['ok'])
+        self.assertIn('still runs on port 5433', result['error'])
+        # The trial's clean-up removes the other outputs but not that one.
+        (orchestrator.outputs / 'full').mkdir()
+        self.assertEqual(orchestrator.removable_outputs(), [orchestrator.outputs / 'full'])
+
+    def test_a_server_an_earlier_run_left_on_the_output_port_is_found(self):
+        orchestrator = self.orchestrator()
+        self.assertIsNone(orchestrator.stale_output_server())
+        lock = orchestrator.output_socket / '.s.PGSQL.5433.lock'
+        lock.parent.mkdir(parents=True)
+        lock.write_text(f'{os.getpid()}\n/data/exp04/out/pgbackrest_zst\n1761220800\n5433\n')
+        self.assertEqual(orchestrator.stale_output_server(),
+                         f'PID {os.getpid()}, data directory /data/exp04/out/pgbackrest_zst')
+        with mock.patch.object(run_exp04.os, 'kill', side_effect=ProcessLookupError):
+            self.assertIsNone(orchestrator.stale_output_server())
+        lock.write_text('')
+        self.assertIsNone(orchestrator.stale_output_server())
+
     def make_tree(self, name, files):
         root = self.root / name
         for path, data in files.items():

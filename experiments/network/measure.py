@@ -48,6 +48,8 @@ IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace')
 # Methods that patch B, a copy of B0 made before the cache drop and not timed: in a real
 # refresh B already exists. The copy keeps B0 itself unchanged for the next method.
 BASIS_COPY_METHODS = IN_PLACE_METHODS + PGBACKREST_METHODS
+# Methods whose verification starts the output on dest (on run_exp04.OUTPUT_PG_PORT).
+OUTPUT_START_METHODS = PGDELTA_DIRECT_METHODS + PGBACKREST_METHODS
 # The engine each pgdelta method runs, named by its flags, so that no change of pgdelta's
 # defaults can change what a method measures (as compare_methods pins EXP-02's):
 # - pgdelta: EXP-06's choice, which is also the command line's default on these 8-vCPU

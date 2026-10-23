@@ -420,6 +420,9 @@ class Orchestrator:
         self.method_speeds: dict[str, list[str]] = {}  # --method-speeds: method -> speed labels
         self.pgbackrest: dict | None = None  # this trial's pgBackRest set-up and backups
         self.source_down = None  # why the source cluster could not be restarted, if it couldn't
+        # An output started on dest for its verification that pg_ctl could not stop: its data
+        # directory is never removed, and no other output is started while it holds the port.
+        self.output_stuck: dict | None = None
 
     # --- paths -------------------------------------------------------------
 
@@ -688,8 +691,9 @@ class Orchestrator:
         return paths
 
     def clean_method(self, paths: dict) -> None:
+        stuck = (self.output_stuck or {}).get('data')
         self.remove_dest(*[paths[key] for key in ('output', 'increment', 'receipt')
-                           if key in paths])
+                           if key in paths and str(paths[key]) != stuck])
         remote = [paths[key] for key in ('capture', 'stats') if key in paths]
         if remote:
             self.remove_source(*remote)
@@ -1157,6 +1161,9 @@ class Orchestrator:
         result = {'ok': False, 'answer': None, 'error': None}
         started = time.perf_counter()
         try:
+            if self.output_stuck:
+                raise CommandError(f'an output started earlier still runs on port {OUTPUT_PG_PORT} '
+                                   f'({self.output_stuck["data"]}); not starting another')
             argv = self.output_start_argv(data, self.dest_log(f'{method}-output-server.log'))
             start = self.local_command(argv, f'{method}-output-start.log',
                                        timeout=OUTPUT_START_TIMEOUT + 60, env=server_env())
@@ -1176,7 +1183,12 @@ class Orchestrator:
         return result
 
     def stop_output(self, method, data: Path) -> dict:
-        """pg_ctl stop -m fast, then immediate; refuses to return while the output still runs."""
+        """pg_ctl stop -m fast, then immediate; refuses to return while the output still runs.
+
+        If it still runs, the output is marked stuck (output_stuck): run_method and
+        cleanup_trial then never remove its data directory under the running server, and no
+        later output is started on its port.
+        """
         stops = []
         for mode in ('fast', 'immediate'):
             if not (data / 'postmaster.pid').exists():
@@ -1184,8 +1196,32 @@ class Orchestrator:
             stops.append(self.local_command(self.output_stop_argv(data, mode),
                                             f'{method}-output-stop-{mode}.log', env=server_env()))
         if (data / 'postmaster.pid').exists():
+            self.output_stuck = {'data': str(data), 'method': method, 'trial_id': self.trial_id,
+                                 'port': OUTPUT_PG_PORT, 'stops': stops}
+            log(f'  ERROR the output at {data} could not be stopped; it is left in place')
             raise CommandError(f'the output at {data} could not be stopped')
         return {'commands': stops}
+
+    def stale_output_server(self) -> str | None:
+        """A server an earlier, interrupted run left on the output port, from its socket's lock file.
+
+        The lock file holds the postmaster's PID and data directory; None if there is no lock
+        file or its PID no longer runs (PostgreSQL replaces a stale one itself).
+        """
+        lock = self.output_socket / f'.s.PGSQL.{OUTPUT_PG_PORT}.lock'
+        try:
+            lines = lock.read_text().splitlines()
+            pid = int(lines[0])
+        except (OSError, ValueError, IndexError):
+            return None
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            pass
+        data = lines[1] if len(lines) > 1 else 'unknown'
+        return f"PID {pid}, data directory {data}"
 
     def tool_reported(self, method, paths, phases) -> dict:
         transfer = phases.get('transfer')
@@ -1244,6 +1280,11 @@ class Orchestrator:
         daemon_holder: dict = {}
         self.log_prefix = f'r{repeat}-{speed["label"]}-'
         try:
+            stuck = self.output_stuck
+            if stuck and (str(paths['output']) == stuck['data'] or method in measure.OUTPUT_START_METHODS):
+                # Its directory holds the running server, or its verification would start one on its port.
+                raise CommandError(f'an output started on port {OUTPUT_PG_PORT} for an earlier verification '
+                                   f'could not be stopped ({stuck["data"]}); {method} cannot run')
             self.clean_method(paths)
             phases: dict = {}
             record['phases'] = phases
@@ -1310,6 +1351,8 @@ class Orchestrator:
                     record['error'] = (record['error'] + '; ' if record['error'] else '') + \
                         f'the source cluster could not be restarted: {self.source_down}'
                     log(f'  ERROR the source cluster could not be restarted: {self.source_down}')
+            if self.output_stuck and self.output_stuck['data'] == str(paths['output']):
+                record['output_stuck'] = self.output_stuck  # left in place; later output starts refused
             if not self.args.keep_outputs:
                 try:
                     self.clean_method(paths)
@@ -1644,7 +1687,7 @@ class Orchestrator:
                      *([] if self.args.keep_cluster else ['--remove']))),
                  ('fetch source logs', self.fetch_source_logs),
                  ('remove B0 and outputs', lambda: None if self.args.keep_cluster else
-                  self.remove_dest(self.b0, self.outputs)),
+                  self.remove_dest(self.b0, *self.removable_outputs())),
                  ('remove pgBackRest repositories', lambda: None if self.args.keep_cluster
                   or not self.pgbackrest_methods else (self.remove_source(self.pgbackrest_paths['root']),
                                                        self.remove_dest(self.pgbackrest_paths['root']))),
@@ -1655,6 +1698,15 @@ class Orchestrator:
             except Exception as exc:
                 trial.setdefault('cleanup_errors', []).append(f'{name}: {exc}')
                 log(f'{self.trial_id}: cleanup step {name} failed: {exc}')
+
+    def removable_outputs(self) -> list:
+        """The outputs directory, or, while an output server is stuck, everything in it but that output."""
+        stuck = (self.output_stuck or {}).get('data')
+        if not stuck:
+            return [self.outputs]
+        log(f'{self.trial_id}: leaving {stuck}: its server could not be stopped')
+        return [path for path in sorted(self.outputs.iterdir()) if str(path) != stuck] \
+            if self.outputs.is_dir() else []
 
     def fetch_source_logs(self) -> None:
         target = self.out / 'logs' / self.trial_id / 'source'
@@ -1811,6 +1863,10 @@ class Orchestrator:
             raise SystemExit(f'output directory is not empty: {self.out}')
         self.out.mkdir(parents=True, exist_ok=True)
         self.outputs.mkdir(parents=True, exist_ok=True)
+        stale = self.stale_output_server()
+        if stale and any(method in measure.OUTPUT_START_METHODS for method in self.methods):
+            raise SystemExit(f'a server still runs on the output port {OUTPUT_PG_PORT} ({stale}), left by '
+                             'an earlier run: stop it (pg_ctl -D <its data directory> stop) first')
 
         self.source.open()
         try:
