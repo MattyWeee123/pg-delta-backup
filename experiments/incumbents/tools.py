@@ -8,9 +8,13 @@ through EXP-03's evaluate path and never writes to either.
 An accepted copy is brought up the way its tool intends:
 - the incumbents' copies as a standby of the source: recovery configuration (pg_rewind
   writes its own with --write-recovery-conf), start, wait until replay reaches the
-  source's current LSN, compare the logical state as a hot standby, promote, pg_amcheck;
+  source's current LSN, compare the logical state as a hot standby, promote, pg_amcheck,
+  CHECKPOINT and a clean stop;
 - pgdelta's O as EXP-03 restores it: started from a disposable copy until recovery
-  ends, logical state compared, then pg_amcheck.
+  ends, logical state compared, then pg_amcheck, CHECKPOINT and a clean stop.
+B's post-fork pages are compared with the copy twice: right after the tool
+(diverged_before_recovery) and once the copy has stopped cleanly after that bring-up
+(diverged_after_recovery, which the verdict uses).
 """
 from __future__ import annotations
 
@@ -473,7 +477,7 @@ def lsn_skip_copy(source, target, threshold):
 def run_lsn_skip(job):
     """Negative control, not an incumbent: EXP-03's LSN-skip shortcut (threshold: B's
     REDO location, or its backup_label start) from the stopped source onto the copy of B.
-    It keeps B's diverged pages, so the checks must call it wrong on S2 and S2b."""
+    It keeps B's exposed pages, so the checks must call it wrong on S2, S2b and S2c."""
     threshold = job.meta['threshold']['lsn']
     started = time.monotonic()
     job.source.stop('fast')
@@ -571,10 +575,12 @@ def wait_caught_up(job, cluster, target_lsn):
 
 def bring_up_standby(job, copy):
     """Start ``copy`` as a standby of the source, compare it once it has caught up, then
-    promote it and run pg_amcheck. Returns (bring_up, logical, amcheck)."""
+    promote it, run pg_amcheck, CHECKPOINT and stop it cleanly. Returns (bring_up,
+    logical, amcheck); bring_up['stopped_cleanly'] says whether the copy's pages can now
+    be counted after recovery."""
     info = {'mode': 'standby of the source', 'recovery_conf': None, 'started': False,
             'target_lsn': None, 'replay_lsn': None, 'caught_up': False, 'promoted': False,
-            'seconds': None, 'error': None}
+            'checkpointed': False, 'stopped_cleanly': False, 'seconds': None, 'error': None}
     logical, amcheck = None, None
     started = time.monotonic()
     cluster = job.new_server('copy', copy)
@@ -602,7 +608,10 @@ def bring_up_standby(job, copy):
         cluster.wait_for('SELECT NOT pg_is_in_recovery()', timeout=120)
         info['promoted'] = True
         amcheck = run_amcheck(cluster)
+        cluster.psql('CHECKPOINT;')
+        info['checkpointed'] = True
         cluster.stop('fast')
+        info['stopped_cleanly'] = True
     except (CommandError, TimeoutError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         info['error'] = f'{type(exc).__name__}: {exc}'
         info['log_tail'] = checks.tail(log_text(cluster.logfile))
@@ -619,28 +628,58 @@ def log_text(path):
         return ''
 
 
+def count_after_recovery(job, copy, when):
+    """B's listed post-fork pages compared with ``copy`` once it has reached consistency
+    and stopped cleanly, by tuple data (checks.same_tuple_data)."""
+    counted = checks.compare_listed_pages(copy, job.old_copy, job.source_backup,
+                                          job.listed_pages, same=checks.same_tuple_data)
+    return {**counted, 'counted_after': when, 'compared_by': 'tuple data (checks.tuple_data)'}
+
+
 def bring_up_restore(job, output):
     """pgdelta's O, checked as EXP-03 does (byte comparison with S, pg_verifybackup, a
-    restore to the end of recovery and the logical comparison), plus pg_amcheck."""
+    restore to the end of recovery and the logical comparison), plus pg_amcheck, then a
+    CHECKPOINT, a clean stop and the count of B's post-fork pages after recovery.
+    Returns (bring_up, logical, amcheck, pgdelta_checks, diverged_after_recovery)."""
     extra = {'byte_comparison': evaluation.compare_trees(job.source_backup, output)}
     extra['byte_identical'] = extra['byte_comparison']['identical']
     verify = evaluation.verify_backup(output, job.pgbin)
     extra['verifybackup'], extra['verifybackup_detail'] = verify['ok'], verify
     started = time.monotonic()
-    restore = evaluation.restore_and_compare(
-        output, job.expected, job.pgbin, job.work,
-        while_running=lambda cluster: {'amcheck': run_amcheck(cluster)})
+
+    def after_recovery(cluster):
+        found = {'amcheck': run_amcheck(cluster)}
+        try:
+            cluster.psql('CHECKPOINT;')
+            found['checkpointed'] = True
+            cluster.stop('fast')
+            found['stopped_cleanly'] = True
+            if job.listed_pages is not None:
+                found['diverged_after_recovery'] = count_after_recovery(
+                    job, cluster.datadir, 'end of recovery, pg_amcheck, CHECKPOINT and a clean '
+                                          'stop of the restored O')
+        except (CommandError, TimeoutError, OSError, RuntimeError,
+                subprocess.TimeoutExpired) as exc:
+            found['after_recovery_error'] = f'{type(exc).__name__}: {exc}'
+        return found
+
+    restore = evaluation.restore_and_compare(output, job.expected, job.pgbin, job.work,
+                                             while_running=after_recovery)
     info = {'mode': 'restore of O (EXP-03)', 'recovery_conf': None,
             'started': restore['restore_ok'], 'caught_up': restore['restore_ok'],
             'promoted': not restore.get('in_recovery', True),
+            'checkpointed': restore.get('checkpointed', False),
+            'stopped_cleanly': restore.get('stopped_cleanly', False),
             'seconds': round(time.monotonic() - started, 2), 'error': restore.get('error')}
+    if restore.get('after_recovery_error'):
+        info['after_recovery_error'] = restore['after_recovery_error']
     if restore.get('log_tail'):
         info['log_tail'] = restore['log_tail']
     logical = None
     if restore['restore_ok'] and 'differences' in restore:
         logical = {'match': restore['logical_match'], 'differences': restore['differences'],
                    'read_as': 'restored primary'}
-    return info, logical, restore.get('amcheck'), extra
+    return info, logical, restore.get('amcheck'), extra, restore.get('diverged_after_recovery')
 
 
 def run_job(job):
@@ -649,11 +688,13 @@ def run_job(job):
               'scenario_dir': str(job.scenario_dir), 'rows': job.meta.get('rows'),
               'server_conf': job.meta.get('server_conf'),
               'tool_info': job.tool_info, 'started_at': now(), 'commands': [],
+              'arm': checks.arm_of(checks.build_conf(job.meta)),
               'returncode': None, 'seconds': None, 'target_modified': None,
-              'outcome': None, 'outcome_reason': None, 'refusal': None, 'parsed': {},
-              'diverged_pages': None, 'bring_up': None, 'logical_match': None,
-              'logical_differences': [], 'amcheck': None, 'amcheck_ok': None,
-              'verdict': None, 'notes': []}
+              'outcome': None, 'outcome_reason': None, 'refusal': None,
+              'refusal_class': None, 'refusal_class_evidence': None, 'parsed': {},
+              'diverged_before_recovery': None, 'diverged_after_recovery': None,
+              'bring_up': None, 'logical_match': None, 'logical_differences': [],
+              'amcheck': None, 'amcheck_ok': None, 'verdict': None, 'notes': []}
     if not job.tool_info.get('available'):
         result.update(outcome='skipped', outcome_reason=job.tool_info.get('reason'),
                       verdict='skipped', finished_at=now())
@@ -687,7 +728,10 @@ def run_job(job):
                 checks.REFUSAL_PATTERNS.get(job.tool, ()), tool.timed_out,
                 checks.REFUSAL_EXIT_CODES.get(job.tool))
             result.update(outcome=outcome, outcome_reason=reason, refusal=refusal)
-        job.say(f"{result['outcome']}: {result['outcome_reason']}")
+            result['refusal_class'], result['refusal_class_evidence'] = checks.refusal_class(
+                outcome, tool.output, checks.IDENTITY_OR_HISTORY_PATTERNS.get(job.tool, ()))
+        job.say(f"{result['outcome']}: {result['outcome_reason']}"
+                + (f" ({result['refusal_class']})" if result['refusal_class'] else ''))
         if result['outcome'] == 'accepted':
             check_accepted(job, result)
     except Exception as exc:  # noqa: BLE001 - recorded in result.json
@@ -700,36 +744,53 @@ def run_job(job):
         job.close()
     result['verdict'] = checks.verdict(
         result['outcome'], result['logical_match'], result['amcheck_ok'],
-        (result['diverged_pages'] or {}).get('diverged_left'),
-        (result['bring_up'] or {}).get('caught_up'))
-    if result.get('harness_error') and result['verdict'] in ('repaired', 'not_verified', None):
+        (result['diverged_after_recovery'] or {}).get('diverged_left'),
+        (result['bring_up'] or {}).get('caught_up'), job.listed_pages is not None)
+    if result.get('harness_error') and result['verdict'] in ('correct', 'not_verified', None):
         result['verdict'] = 'not_verified'
     result['finished_at'] = now()
     return result
 
 
 def check_accepted(job, result):
-    """Count stale pages in the refreshed copy, then bring it up and check it."""
-    if job.listed_pages is not None:
+    """Count stale pages in the refreshed copy, bring it up and check it, then count the
+    stale pages again once it has reached consistency and stopped cleanly."""
+    listed = job.listed_pages is not None
+    if listed:
         job.say(f'compare the {len(job.listed_pages)} post-fork pages of B with the copy')
-        result['diverged_pages'] = checks.compare_listed_pages(
+        result['diverged_before_recovery'] = checks.compare_listed_pages(
             job.target, job.old_copy, job.source_backup, job.listed_pages)
     if job.tool == 'pgdelta':
-        job.say('check O like EXP-03, restore it, compare, pg_amcheck')
-        bring_up, logical, amcheck, extra = bring_up_restore(job, job.target)
+        job.say('check O like EXP-03, restore it, compare, pg_amcheck, CHECKPOINT, stop')
+        bring_up, logical, amcheck, extra, after = bring_up_restore(job, job.target)
         result['pgdelta_checks'] = extra
     else:
-        job.say('start the copy as a standby of the source, compare, promote, pg_amcheck')
+        job.say('start the copy as a standby of the source, compare, promote, pg_amcheck, '
+                'CHECKPOINT, stop')
         bring_up, logical, amcheck = bring_up_standby(job, job.target)
+        after = None
+        if listed and bring_up.get('stopped_cleanly'):
+            after = count_after_recovery(job, job.target, 'replay up to the source, '
+                                         'promotion, pg_amcheck, CHECKPOINT and a clean stop')
+    if listed and after is None and not bring_up.get('after_recovery_error'):
+        bring_up['after_recovery_error'] = ('the copy never stopped cleanly after reaching '
+                                            "consistency, so B's post-fork pages were not "
+                                            'counted after recovery')
     result['bring_up'] = bring_up
+    result['diverged_after_recovery'] = after
     if logical is not None:
         result['logical_match'] = logical['match']
         result['logical_differences'] = logical['differences']
         result['logical_read_as'] = logical['read_as']
     if amcheck is not None:
         result['amcheck'], result['amcheck_ok'] = amcheck, amcheck['ok']
+    counts = ''
+    if listed:
+        before = result['diverged_before_recovery']['diverged_left']
+        counts = (f", B's diverged pages left {before} before recovery, "
+                  f"{None if after is None else after['diverged_left']} after")
     job.say(f"caught up {bring_up.get('caught_up')}, logical {result['logical_match']}, "
-            f"amcheck {result['amcheck_ok']}"
+            f"amcheck {result['amcheck_ok']}{counts}"
             + (f", error {bring_up['error']}" if bring_up.get('error') else ''))
 
 

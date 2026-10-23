@@ -9,17 +9,25 @@ from __future__ import annotations
 import csv
 import json
 import re
+import struct
 from pathlib import Path
 
-from experiments.tricky_copies.classify import classify_pair
+from experiments.tricky_copies.classify import (HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
+                                                HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID,
+                                                LP_NORMAL, classify_pair, line_pointers,
+                                                page_kind)
 from experiments.tricky_copies.lsnscan import BLOCK, relation_kind
 
-# T11's columns; then what tells a refusal for a stated reason from a tool that stopped
-# with an error, and from a harness error; then the build the run used, since a summary
-# covers every run under OUT, made by any number of invocations.
+# T11's columns (diverged_pages_left is counted after recovery, EXP-08's third check);
+# then what tells a refusal for a stated reason from a tool that stopped with an error,
+# and from a harness error; then the build the run used, since a summary covers every
+# run under OUT, made by any number of invocations; then EXP-08's revisions: B's WAL
+# arm, the refusal class, the count before recovery, and for a tool that refused S2b
+# for another reason than identity or history, the S2c result I3 is judged on instead.
 CSV_COLUMNS = ('scenario', 'tool', 'outcome', 'logical_match', 'amcheck_ok',
                'diverged_pages_left', 'seconds', 'verdict', 'refusal', 'outcome_reason',
-               'rows', 'source_conf', 'old_copy_conf')
+               'rows', 'source_conf', 'old_copy_conf', 'arm', 'refusal_class',
+               'diverged_before_recovery', 'i3_judged_on')
 
 # Messages a tool prints when it declines to touch a copy. A nonzero exit with one of
 # them is a refusal for the stated reason; exit status 0 is always "accepted".
@@ -59,6 +67,37 @@ REFUSAL_PATTERNS = {
 # section 3: 2 is invalid or unsupported input; 3, a transfer or I/O failure, and 4, a
 # verification failure, are failures).
 REFUSAL_EXIT_CODES = {'pgdelta': (2,)}
+
+# EXP-08's refusal classes. A refusal is 'identity_or_history' when the tool's output
+# holds one of these messages: the tool found that B isn't on the source's system,
+# timeline or history (B forked off it, or is ahead of it). Every other refusal is
+# 'other', e.g. a destination that wasn't shut down cleanly, or WAL that is gone. Only
+# the first class counts as "refuses" in EXP-08's I2 and I3. Each entry is (pattern,
+# what it detects); the texts are from pg_rewind (PostgreSQL 17), pg_probackup's
+# catchup.c (2.5) and WAL-G's catchup_send_recieve_handler.go (v3.0). WAL-G's
+# catchup-push checks nothing, and pgdelta doesn't refuse a basis from another history:
+# it stops reusing it.
+IDENTITY_OR_HISTORY_PATTERNS = {
+    'pg_rewind': (
+        (r'source and target clusters are from different systems', 'system identifier'),
+        (r'could not find common ancestor of the source and target cluster', 'timeline history'),
+    ),
+    'pg_probackup': (
+        (r'Database identifiers mismatch', 'system identifier'),
+        (r'Destination is not in source timeline history', 'timeline history'),
+        (r'Source is behind destination in timeline history', 'timeline history'),
+        (r'Current START LSN \S+ is lower than SYNC LSN', 'divergence: B is ahead of the source'),
+    ),
+    'walg': (),
+    'walg_send': (
+        (r'System identifiers do not match', 'system identifier'),
+        (r'Destination is on timeline \d+, but we are on \d+', 'timeline'),
+        (r'Catchup destination is already ahead', 'divergence: B is ahead of the source'),
+    ),
+    'pgdelta': (),
+    'lsn_skip': (),
+}
+REFUSAL_CLASSES = ('identity_or_history', 'other')
 
 
 def tail(text, lines=20):
@@ -114,14 +153,29 @@ def classify_outcome(returncode, target_modified, output, patterns=(), timed_out
     return 'failed', f'exit status {returncode} after the copy was modified{detail}', None
 
 
-def verdict(outcome, logical_match, amcheck_ok, diverged_left, caught_up):
-    """What an accepted run left behind.
+def refusal_class(outcome, output, patterns=()):
+    """(class, evidence) of a run: (None, None) unless ``outcome`` is 'refused'; else
+    ('identity_or_history', the first output line matching one of ``patterns``, entries of
+    IDENTITY_OR_HISTORY_PATTERNS) or ('other', None)."""
+    if outcome != 'refused':
+        return None, None
+    for line in (output or '').splitlines():
+        if any(re.search(pattern, line) for pattern, _what in patterns):
+            return 'identity_or_history', line.strip()
+    return 'other', None
 
-    'wrong_data' when any check found a problem (a logical mismatch, amcheck errors, or
-    pages still holding B's diverged bytes), even if the copy never came up; 'repaired'
-    when the copy came up, reached the source, matched it and passed amcheck;
-    'not_verified' when it couldn't be checked, or when the harness, not the tool, failed
-    ('harness_error'). Runs that weren't accepted keep their outcome.
+
+def verdict(outcome, logical_match, amcheck_ok, diverged_left, caught_up, pages_listed=False):
+    """What an accepted run left behind, by EXP-08's three checks.
+
+    ``diverged_left`` is the number of B's post-fork pages that still hold B's diverged
+    bytes once the copy reached consistency (diverged_after_recovery), or None when it
+    wasn't counted; ``pages_listed`` says whether B had post-fork pages to count (S2, S2b,
+    S2c). 'wrong_data' when any check found a problem (a logical mismatch, amcheck errors,
+    or such pages); 'correct' when the copy came up, reached the source, matched it, passed
+    amcheck and, if pages were listed, none still holds B's bytes; 'not_verified' when it
+    couldn't be checked, or when the harness, not the tool, failed ('harness_error'). Runs
+    that weren't accepted keep their outcome.
     """
     if outcome == 'harness_error':
         return 'not_verified'
@@ -129,8 +183,8 @@ def verdict(outcome, logical_match, amcheck_ok, diverged_left, caught_up):
         return outcome
     if logical_match is False or amcheck_ok is False or (diverged_left or 0) > 0:
         return 'wrong_data'
-    if caught_up and logical_match and amcheck_ok:
-        return 'repaired'
+    if caught_up and logical_match and amcheck_ok and (diverged_left == 0 or not pages_listed):
+        return 'correct'
     return 'not_verified'
 
 
@@ -217,13 +271,56 @@ def read_page(root, relpath, block):
     return page if len(page) == BLOCK else None
 
 
-def compare_listed_pages(copy, old, source, pages, examples=10):
-    """For each page of B listed in ``pages`` ({'file', 'block'}), say what the refreshed
-    ``copy`` holds at that place.
+HINT_BITS = HEAP_XMIN_COMMITTED | HEAP_XMIN_INVALID | HEAP_XMAX_COMMITTED | HEAP_XMAX_INVALID
+TUPLE_HEADER = 23  # offsetof(HeapTupleHeaderData, t_bits); t_infomask is at offset 20
 
-    - ``diverged_left``: the copy still holds B's bytes there, and S holds other bytes or
+
+def tuple_data(page, kind='main'):
+    """A page as diverged_after_recovery compares it: pd_lsn and pd_checksum zeroed and, on
+    a heap page (a sequence page holds one heap tuple), the four hint bits of every normal
+    tuple's t_infomask (xmin and xmax committed and invalid) cleared. On a main-fork heap,
+    sequence or btree page, the free space between pd_lower and pd_upper is zeroed too:
+    it holds no tuple, only whatever bytes the page held there before (replaying a prune
+    leaves other leftovers than the original prune did). FSM and VM pages keep their data
+    in that area, so ``kind`` (the relation fork) must say 'main' for it to be zeroed.
+    What's left is the page's tuple data and layout, which a later hint bit, checksum or
+    page LSN on the same page doesn't change."""
+    buf = bytearray(page)
+    struct.pack_into('<IIH', buf, 0, 0, 0, 0)
+    layout = page_kind(page)
+    if kind == 'main' and layout in ('heap', 'sequence', 'btree'):
+        lower, upper = struct.unpack_from('<HH', page, 12)  # page_kind checked the bounds
+        buf[lower:upper] = bytes(upper - lower)
+    if layout in ('heap', 'sequence'):
+        for _position, offset, flags, length in line_pointers(page):
+            if flags != LP_NORMAL or length < TUPLE_HEADER or offset + TUPLE_HEADER > BLOCK:
+                continue
+            infomask = struct.unpack_from('<H', buf, offset + 20)[0]
+            struct.pack_into('<H', buf, offset + 20, infomask & ~HINT_BITS)
+    return bytes(buf)
+
+
+def same_tuple_data(left, right, kind='main'):
+    """Whether two pages of a ``kind`` fork hold the same tuple data (tuple_data); False if
+    either is None."""
+    return (left is not None and right is not None
+            and tuple_data(left, kind) == tuple_data(right, kind))
+
+
+def same_bytes(left, right, kind=None):
+    return left is not None and left == right
+
+
+def compare_listed_pages(copy, old, source, pages, examples=10, same=same_bytes):
+    """For each page of B listed in ``pages`` ({'file', 'block'}), say what the refreshed
+    ``copy`` holds at that place. Pages are compared with ``same(left, right, fork)``:
+    byte for byte by default (diverged_before_recovery), or with same_tuple_data after
+    recovery, so that hint bits, checksums, page LSNs and free-space leftovers written
+    since don't count.
+
+    - ``diverged_left``: the copy still holds B's page there, and S holds another page or
       no page at all. These are the stale pages.
-    - ``same_as_source``: the copy holds S's bytes.
+    - ``same_as_source``: the copy holds S's page.
     - ``other``: neither, e.g. the source changed the page after S was taken.
     - ``missing_in_copy``: the copy has no page there (the file was truncated or removed).
     - ``not_diverged``: B's page equals S's, so the page says nothing either way.
@@ -234,24 +331,24 @@ def compare_listed_pages(copy, old, source, pages, examples=10):
     for page in pages:
         counts['listed'] += 1
         relpath, block = page['file'], int(page['block'])
+        kind = relation_kind(relpath) or 'other'
         old_page = read_page(old, relpath, block)
         source_page = read_page(source, relpath, block)
-        if old_page is not None and old_page == source_page:
+        if same(old_page, source_page, kind):
             counts['not_diverged'] += 1
             continue
         current = read_page(copy, relpath, block)
         if current is None:
             counts['missing_in_copy'] += 1
-        elif current == old_page:
+        elif same(current, old_page, kind):
             counts['diverged_left'] += 1
-            kind = relation_kind(relpath) or 'other'
             cause = ('absent_in_source' if source_page is None
                      else classify_pair(kind, source_page, old_page))
             left_by_kind[kind] = left_by_kind.get(kind, 0) + 1
             left_by_cause[cause] = left_by_cause.get(cause, 0) + 1
             if len(left_examples) < examples:
                 left_examples.append({'file': relpath, 'block': block, 'cause': cause})
-        elif current == source_page:
+        elif same(current, source_page, kind):
             counts['same_as_source'] += 1
         else:
             counts['other'] += 1
@@ -262,6 +359,11 @@ def compare_listed_pages(copy, old, source, pages, examples=10):
 # --------------------------------------------------------------------------
 # Summary
 # --------------------------------------------------------------------------
+# EXP-08's two pg_rewind arms: B with PostgreSQL's default WAL retention, as EXP-03 builds
+# it, or B keeping its WAL (wal_keep_size on the cluster whose data directory becomes B).
+ARMS = ('default', 'retained')
+
+
 def build_conf(document):
     """The scenario settings by role a scenario.json or result.json records, or None if it
     predates them."""
@@ -271,24 +373,69 @@ def build_conf(document):
     return {'source': conf.get('source') or {}, 'old_copy': conf.get('old_copy') or {}}
 
 
+def arm_of(conf):
+    """'retained' when the settings by role give B a wal_keep_size, 'default' when they
+    don't, None when they aren't recorded."""
+    if conf is None:
+        return None
+    return 'retained' if (conf.get('old_copy') or {}).get('wal_keep_size') else 'default'
+
+
 def conf_text(settings):
     """'name=value;...' for a CSV cell; '' for no settings."""
     return ';'.join(f'{name}={value}' for name, value in sorted((settings or {}).items()))
 
 
-def summary_row(result):
-    """One run as the CSV's columns, from its result.json document."""
-    diverged = result.get('diverged_pages') or {}
+def diverged_counts(result):
+    """(diverged_before_recovery, diverged_after_recovery) counts of a result.json document.
+    A result written before the after-recovery count existed has its one count, taken
+    before recovery, under 'diverged_pages'."""
+    before = result.get('diverged_before_recovery') or result.get('diverged_pages') or {}
+    after = result.get('diverged_after_recovery') or {}
+    return before.get('diverged_left'), after.get('diverged_left')
+
+
+def i3_pointers(results):
+    """{(scenario, tool, arm): the S2c run} for each S2b run refused for another reason
+    than identity or history. EXP-08: only identity-or-history refusals count as "refuses"
+    in I3; when a tool refuses S2b for another reason (e.g. B wasn't shut down cleanly),
+    its I3 verdict comes from S2c. The pointer names S2c with its outcome and verdict, or
+    says it hasn't run."""
+    by_key = {(r.get('scenario'), r.get('tool'), arm_of(build_conf(r))): r for r in results}
+    pointers = {}
+    for (scenario, tool, arm), result in by_key.items():
+        if (scenario != 'S2b' or result.get('outcome') != 'refused'
+                or result.get('refusal_class') != 'other'):
+            continue
+        s2c = by_key.get(('S2c', tool, arm))
+        pointers[(scenario, tool, arm)] = {
+            'scenario': 'S2c', 'tool': tool, 'arm': arm,
+            'outcome': (s2c or {}).get('outcome'), 'verdict': (s2c or {}).get('verdict'),
+            'why': 'S2b was refused for another reason than identity or history (EXP-08)'}
+    return pointers
+
+
+def pointer_text(pointer):
+    if not pointer:
+        return None
+    return f"S2c ({pointer['verdict'] or 'not run'})"
+
+
+def summary_row(result, pointer=None):
+    """One run as the CSV's columns, from its result.json document. ``pointer`` is its
+    entry from i3_pointers, if any."""
+    before, after = diverged_counts(result)
     conf = build_conf(result)
     return {'scenario': result.get('scenario'), 'tool': result.get('tool'),
             'outcome': result.get('outcome'), 'logical_match': result.get('logical_match'),
-            'amcheck_ok': result.get('amcheck_ok'),
-            'diverged_pages_left': diverged.get('diverged_left'),
+            'amcheck_ok': result.get('amcheck_ok'), 'diverged_pages_left': after,
             'seconds': result.get('seconds'), 'verdict': result.get('verdict'),
             'refusal': result.get('refusal'), 'outcome_reason': result.get('outcome_reason'),
             'rows': result.get('rows'),
             'source_conf': None if conf is None else conf_text(conf['source']),
-            'old_copy_conf': None if conf is None else conf_text(conf['old_copy'])}
+            'old_copy_conf': None if conf is None else conf_text(conf['old_copy']),
+            'arm': arm_of(conf), 'refusal_class': result.get('refusal_class'),
+            'diverged_before_recovery': before, 'i3_judged_on': pointer_text(pointer)}
 
 
 def other_builds(results, rows, conf):
@@ -300,14 +447,18 @@ def other_builds(results, rows, conf):
             and (r.get('rows') != rows or build_conf(r) != conf)]
 
 
-def run_summary(result):
+def run_summary(result, pointer=None):
     """One run for summary.json: the CSV columns plus the bring-up, the notes, the tool's
-    version and the build's settings."""
+    version, the build's settings, what the refusal class rests on and, for an S2b run
+    refused for another reason, the S2c run I3 is judged on."""
     bring_up = result.get('bring_up') or {}
-    return {**summary_row(result), 'server_conf': build_conf(result),
+    return {**summary_row(result, pointer), 'i3_judged_on': pointer,
+            'server_conf': build_conf(result),
             'tool_version': (result.get('tool_info') or {}).get('version'),
             'harness_error': result.get('harness_error'),
+            'refusal_class_evidence': result.get('refusal_class_evidence'),
             'caught_up': bring_up.get('caught_up'), 'bring_up_error': bring_up.get('error'),
+            'after_recovery_error': bring_up.get('after_recovery_error'),
             'logical_differences': (result.get('logical_differences') or [])[:5],
             'notes': result.get('notes') or []}
 
@@ -335,12 +486,18 @@ def write_summary(out, results, context):
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     json_path, csv_path = out / 'summary.json', out / 'summary.csv'
-    json_path.write_text(json.dumps({**context, 'runs': [run_summary(r) for r in results]},
+    pointers = i3_pointers(results)
+
+    def pointer(result):
+        return pointers.get((result.get('scenario'), result.get('tool'),
+                             arm_of(build_conf(result))))
+    json_path.write_text(json.dumps({**context, 'runs': [run_summary(r, pointer(r))
+                                                         for r in results]},
                                     indent=2) + '\n')
     with csv_path.open('w', newline='') as handle:
         writer = csv.DictWriter(handle, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for result in results:
             writer.writerow({key: '' if value is None else value
-                             for key, value in summary_row(result).items()})
+                             for key, value in summary_row(result, pointer(result)).items()})
     return json_path, csv_path

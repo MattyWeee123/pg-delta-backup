@@ -1,12 +1,15 @@
-"""Tests for T11's incumbent-tool harness (experiments/incumbents) and EXP-03's S2b."""
+"""Tests for T11's incumbent-tool harness (experiments/incumbents) and EXP-03's S2b and
+S2c."""
 
 import contextlib
 import csv
 import io
 import json
 import os
+import re
 import shutil
 import stat
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,7 +19,7 @@ from unittest import mock
 from experiments.incumbents import checks, run_t11, tools
 from experiments.tricky_copies import lsnscan, pgcluster, run_scenarios, scenarios
 from experiments.tricky_copies.lsnscan import BLOCK
-from test_tricky_copies import heap_page
+from test_tricky_copies import btree_leaf, heap_page
 
 PG_BIN = Path(os.environ.get('PGDELTA_TEST_PG_BIN', '/opt/homebrew/opt/postgresql@17/bin'))
 
@@ -141,16 +144,197 @@ class OutcomeTest(unittest.TestCase):
             "cluster's timelines", checks.REFUSAL_PATTERNS['pg_rewind']))
 
     def test_verdict(self):
-        self.assertEqual(checks.verdict('accepted', True, True, 0, True), 'repaired')
-        self.assertEqual(checks.verdict('accepted', True, True, None, True), 'repaired')
+        """EXP-08's three checks: logical match, pg_amcheck and, where B has post-fork
+        pages, none of them left after recovery."""
+        self.assertEqual(checks.verdict('accepted', True, True, 0, True, True), 'correct')
+        # S1: B has no post-fork pages, so the third check doesn't apply.
+        self.assertEqual(checks.verdict('accepted', True, True, None, True), 'correct')
+        # Listed pages that were never counted after recovery: not correct.
+        self.assertEqual(checks.verdict('accepted', True, True, None, True, True),
+                         'not_verified')
         self.assertEqual(checks.verdict('accepted', False, True, 0, True), 'wrong_data')
         self.assertEqual(checks.verdict('accepted', True, False, None, True), 'wrong_data')
-        # Stale pages are wrong data even when the copy never came up.
-        self.assertEqual(checks.verdict('accepted', None, None, 3, False), 'wrong_data')
+        self.assertEqual(checks.verdict('accepted', True, True, 2, True, True), 'wrong_data')
+        # Pages left after recovery are wrong data whatever else the copy did.
+        self.assertEqual(checks.verdict('accepted', None, None, 3, False, True), 'wrong_data')
         self.assertEqual(checks.verdict('accepted', None, None, 0, False), 'not_verified')
         for outcome in ('refused', 'failed', 'skipped'):
             self.assertEqual(checks.verdict(outcome, None, None, None, None), outcome)
         self.assertEqual(checks.verdict('harness_error', None, None, None, None), 'not_verified')
+
+
+# Refusal messages as the tools print them: (tool, output, expected class).
+REFUSALS = [
+    ('pg_rewind', 'pg_rewind: error: source and target clusters are from different systems',
+     'identity_or_history'),
+    ('pg_rewind', "pg_rewind: error: could not find common ancestor of the source and target "
+                  "cluster's timelines", 'identity_or_history'),
+    ('pg_probackup', 'ERROR: Database identifiers mismatch: we connected to DB id '
+                     '7699400495508172219, but in "/data/b" we found id 7699402729295060974',
+     'identity_or_history'),
+    ('pg_probackup', 'ERROR: Destination is not in source timeline history',
+     'identity_or_history'),
+    ('pg_probackup', 'ERROR: Source is behind destination in timeline history',
+     'identity_or_history'),
+    ('pg_probackup', 'ERROR: Current START LSN 0/5000028 is lower than SYNC LSN 0/6000060, it '
+                     'may indicate that we are trying to catchup with PostgreSQL instance from '
+                     'the past', 'identity_or_history'),
+    ('walg_send', 'ERROR: 2026/10/23 12:00:00.000000 System identifiers do not match',
+     'identity_or_history'),
+    ('walg_send', 'ERROR: 2026/10/23 12:00:00.000000 Destination is on timeline 1, but we are '
+                  'on 2', 'identity_or_history'),
+    ('walg_send', 'ERROR: 2026/10/23 12:00:00.000000 Catchup destination is already ahead (our '
+                  'LSN 83886080, destination LSN 100663296).', 'identity_or_history'),
+    # Refusals for another reason.
+    ('pg_rewind', 'pg_rewind: error: target server must be shut down cleanly', 'other'),
+    ('pg_rewind', 'pg_rewind: servers diverged at WAL location 0/8D10130 on timeline 1\n'
+                  'pg_rewind: error: could not find previous WAL record at 0/8D10130', 'other'),
+    ('pg_probackup', 'ERROR: Postmaster with pid 4242 is running in destination directory '
+                     '"/data/b"', 'other'),
+    ('pg_probackup', 'ERROR: Cannot get source timeline history', 'other'),
+    ('pg_probackup', 'ERROR: Destination directory contains "backup_label" file', 'other'),
+    ('walg_send', 'ERROR: Our system lacks System Identifier, cannot proceed', 'other'),
+    ('walg', 'ERROR: System identifiers do not match', 'other'),  # catchup-push checks none
+    ('pgdelta', 'pgdelta: error: unsafe path', 'other'),
+]
+
+
+class RefusalClassTest(unittest.TestCase):
+    def test_table(self):
+        """Every tool has an entry, and every pattern of the table has a message above."""
+        self.assertEqual(set(checks.IDENTITY_OR_HISTORY_PATTERNS), set(tools.TOOLS))
+        for tool, entries in checks.IDENTITY_OR_HISTORY_PATTERNS.items():
+            for pattern, what in entries:
+                self.assertTrue(what)
+                self.assertTrue(any(re.search(pattern, output) for t, output, expected
+                                    in REFUSALS if t == tool), (tool, pattern))
+
+    def test_classes(self):
+        for tool, output, expected in REFUSALS:
+            with self.subTest(tool=tool, output=output):
+                outcome, _reason, refusal = checks.classify_outcome(
+                    2 if tool == 'pgdelta' else 1, False, output,
+                    checks.REFUSAL_PATTERNS.get(tool, ()),
+                    refusal_codes=checks.REFUSAL_EXIT_CODES.get(tool))
+                self.assertEqual(outcome, 'refused')
+                if expected == 'identity_or_history':
+                    # Also one of the tool's refusal messages: refused for a stated reason.
+                    self.assertEqual(refusal, 'message')
+                found, evidence = checks.refusal_class(
+                    outcome, output, checks.IDENTITY_OR_HISTORY_PATTERNS[tool])
+                self.assertEqual(found, expected)
+                if expected == 'identity_or_history':
+                    self.assertIn(evidence, output)
+                else:
+                    self.assertIsNone(evidence)
+
+    def test_only_refusals_have_a_class(self):
+        patterns = checks.IDENTITY_OR_HISTORY_PATTERNS['pg_probackup']
+        output = 'ERROR: Destination is not in source timeline history'
+        for outcome in ('accepted', 'failed', 'skipped', 'harness_error'):
+            self.assertEqual(checks.refusal_class(outcome, output, patterns), (None, None))
+        self.assertEqual(checks.refusal_class('refused', '', patterns), ('other', None))
+
+
+def flip_hint_bits(page, bits=0x0900):
+    """``page`` with ``bits`` of its one tuple's t_infomask set (heap_page's layout); by
+    default HEAP_XMIN_COMMITTED and HEAP_XMAX_INVALID, as a read sets them."""
+    buf = bytearray(page)
+    offset = struct.unpack_from('<I', buf, 24)[0] & 0x7FFF
+    infomask = struct.unpack_from('<H', buf, offset + 20)[0]
+    struct.pack_into('<H', buf, offset + 20, infomask | bits)
+    return bytes(buf)
+
+
+class TupleDataTest(unittest.TestCase):
+    """The comparison diverged_after_recovery uses."""
+
+    def test_same_tuple_data(self):
+        base = heap_page(0x900, infomask=0, data=b'diverged')
+        # Hint bits, a later page LSN and a checksum don't change the tuple data.
+        later = flip_hint_bits(heap_page(0x5000, infomask=0, data=b'diverged', checksum=77))
+        self.assertNotEqual(base, later)
+        self.assertTrue(checks.same_tuple_data(base, later))
+        self.assertEqual(checks.tuple_data(base), checks.tuple_data(later))
+        self.assertEqual(checks.tuple_data(later)[:10], bytes(10))
+        # Other tuple data, other infomask bits than the hint bits, or no page: different.
+        self.assertFalse(checks.same_tuple_data(base, heap_page(0x900, infomask=0,
+                                                                data=b'source!!')))
+        self.assertFalse(checks.same_tuple_data(base, flip_hint_bits(base, 0x0010)))
+        self.assertFalse(checks.same_tuple_data(base, None))
+        self.assertFalse(checks.same_tuple_data(None, None))
+        # All four bits are masked, so a frozen tuple (xmin committed and invalid) is
+        # still the same tuple data: it still holds B's row.
+        self.assertTrue(checks.same_tuple_data(base, flip_hint_bits(base, checks.HINT_BITS)))
+        # Page header flags are not hint bits of a tuple.
+        flagged = bytearray(base)
+        struct.pack_into('<H', flagged, 10, 0x0002)  # PD_PAGE_FULL
+        self.assertFalse(checks.same_tuple_data(base, bytes(flagged)))
+
+    def test_free_space_leftovers(self):
+        """Bytes between pd_lower and pd_upper hold no tuple on a main-fork page; an FSM
+        or VM page keeps its data there, so only the main fork ignores them."""
+        base = heap_page(0x900, infomask=0, data=b'diverged')
+        leftovers = bytearray(base)
+        leftovers[100:110] = b'old tuple!'  # heap_page: pd_lower 28, pd_upper near the end
+        self.assertTrue(checks.same_tuple_data(base, bytes(leftovers)))
+        self.assertTrue(checks.same_tuple_data(base, bytes(leftovers), 'main'))
+        for fork in ('fsm', 'vm', 'init'):
+            self.assertFalse(checks.same_tuple_data(base, bytes(leftovers), fork), fork)
+        # An FSM page: a bare header, its tree stored right after it.
+        fsm = bytearray(BLOCK)
+        struct.pack_into('<HHHH', fsm, 12, 24, BLOCK, BLOCK, BLOCK | 4)
+        other = bytearray(fsm)
+        other[40] = 0x7F
+        self.assertFalse(checks.same_tuple_data(bytes(fsm), bytes(other), 'fsm'))
+        self.assertTrue(checks.same_tuple_data(bytes(fsm), bytes(other), 'main'))
+        # A btree page's leftovers are masked too; its line pointers are not.
+        leaf = bytearray(btree_leaf(0x900))
+        leaf[200:204] = b'junk'
+        self.assertTrue(checks.same_tuple_data(btree_leaf(0x900), bytes(leaf)))
+
+    def test_other_pages_ignore_only_lsn_and_checksum(self):
+        leaf = btree_leaf(0x900)
+        moved = bytearray(btree_leaf(0x5000))
+        struct.pack_into('<H', moved, 8, 1234)
+        self.assertTrue(checks.same_tuple_data(leaf, bytes(moved)))
+        self.assertFalse(checks.same_tuple_data(leaf, btree_leaf(0x900, lp_flags=3)))
+        fsm = page(0x10, b'f')
+        self.assertTrue(checks.same_tuple_data(fsm, page(0x99, b'f')))
+        self.assertFalse(checks.same_tuple_data(fsm, page(0x10, b'g')))
+
+    def test_compare_after_recovery(self):
+        """After recovery a page counts as left when it holds B's tuple data, whatever
+        hint bits, LSN and checksum it has since gained, and S's tuple data differ."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old, source, copy = Path(tmp, 'b'), Path(tmp, 's'), Path(tmp, 'c')
+            rel = 'base/5/16384'
+            stale = [heap_page(0x900, infomask=0, data=f'stale{i}!'.encode()) for i in range(4)]
+            fresh = [heap_page(0x80, infomask=0, data=f'fresh{i}!'.encode()) for i in range(4)]
+            # Block 3: B and S differ only in hint bits and LSN, so it isn't diverged.
+            write(old, rel, b''.join(stale[:3]) + fresh[3])
+            write(source, rel, b''.join(fresh[:3]) + flip_hint_bits(heap_page(0x70, infomask=0,
+                                                                               data=b'fresh3!')))
+            # 0: B's tuples with hint bits and a new LSN; 1: S's with hint bits; 2: neither.
+            write(copy, rel, flip_hint_bits(heap_page(0x7000, infomask=0, data=b'stale0!'))
+                  + flip_hint_bits(heap_page(0x7000, infomask=0, data=b'fresh1!'))
+                  + heap_page(0x7000, infomask=0, data=b'pruned!') + fresh[3])
+            pages = [{'file': rel, 'block': block} for block in range(4)]
+            before = checks.compare_listed_pages(copy, old, source, pages)
+            after = checks.compare_listed_pages(copy, old, source, pages,
+                                                same=checks.same_tuple_data)
+        keys = ('diverged_left', 'same_as_source', 'other', 'not_diverged')
+        self.assertEqual({k: after[k] for k in keys},
+                         {'diverged_left': 1, 'same_as_source': 1, 'other': 1,
+                          'not_diverged': 1})
+        self.assertEqual(after['diverged_left_examples'], [{'file': rel, 'block': 0,
+                                                            'cause': 'content'}])
+        # Byte for byte, the copy's first three pages are neither B's nor S's any more, and
+        # block 3, where B and S differ only in hint bits and LSN, counts as left.
+        self.assertEqual({k: before[k] for k in keys},
+                         {'diverged_left': 1, 'same_as_source': 0, 'other': 3,
+                          'not_diverged': 0})
+        self.assertEqual(before['diverged_left_by_cause'], {'hint_bits_and_lsn': 1})
 
 
 class ParseTest(unittest.TestCase):
@@ -293,20 +477,28 @@ class S2bCheckTest(unittest.TestCase):
             {'file': 'base/5/16384_fsm', 'block': 0, 'kind': 'fsm', 'lsn': '0/6000'}])
 
     def make(self, tmp, *, state='in production', redo='0/700', checkpoint='0/750',
-             on_disk_lsn=0x900):
+             on_disk_lsn=0x900, source_lsns=(0x80, 0x90), checker=scenarios.check_s2b,
+             untouched_lsn=None):
+        """B's accounts blocks 1 and 2 diverged after the fork at 0/800; with
+        ``untouched_lsn``, so did block 0 of another table (tags), which S left alone."""
         ctx = FakeContext(tmp)
         rel = 'base/5/16384'
         write(ctx.old_copy, rel, heap_page(0x100) + heap_page(on_disk_lsn, data=b'diverged')
               + heap_page(0x950, data=b'diverged'))
-        write(ctx.source_backup, rel, heap_page(0x100) + heap_page(0x80) + heap_page(0x90))
+        write(ctx.source_backup, rel, heap_page(0x100) + heap_page(source_lsns[0])
+              + heap_page(source_lsns[1]))
         write(ctx.source_backup, 'pg_wal/00000002.history',
               b'1\t0/800\tno recovery target specified\n')
         ctx.facts = {'diverged': {'file': rel, 'blocks': [1, 2]}, 'split_lsn': '0/800',
                      'old_primary_end_lsn': '0/960', 'flush': {'clean': True}}
+        if untouched_lsn is not None:
+            write(ctx.old_copy, 'base/5/16408', heap_page(untouched_lsn, data=b'TAGS'))
+            write(ctx.source_backup, 'base/5/16408', heap_page(0x60, data=b'tags'))
+            ctx.facts['untouched'] = {'table': 'tags', 'file': 'base/5/16408', 'blocks': [0]}
         old = {'timeline': 1, 'system_identifier': '7', 'cluster_state': state,
-               'redo_location': redo, 'checkpoint_location': checkpoint}
-        scenarios.check_s2b(ctx, old, {'timeline': 2, 'system_identifier': '7'},
-                            {'lsn': redo})
+               'redo_location': redo, 'checkpoint_location': checkpoint,
+               'min_recovery_location': '0/960'}
+        checker(ctx, old, {'timeline': 2, 'system_identifier': '7'}, {'lsn': redo})
         return ctx
 
     def test_check_s2b(self):
@@ -315,14 +507,19 @@ class S2bCheckTest(unittest.TestCase):
         failed = [name for name, check in ctx.checks.items() if not check['ok']]
         self.assertEqual(failed, [])
         self.assertEqual(set(ctx.checks), {'diverged_pages_differ', 'timeline_switched',
-                                           'same_system_identifier', 'old_copy_crashed',
-                                           'no_checkpoint_after_fork',
+                                           'same_system_identifier', 'exposed_pages',
+                                           'old_copy_crashed', 'no_checkpoint_after_fork',
                                            'diverged_pages_on_disk_after_fork'})
         self.assertEqual(ctx.observations['fork_lsn'], '0/800')
         self.assertEqual(ctx.observations['old_copy_redo_lsn'], '0/700')
+        self.assertEqual(ctx.observations['old_copy_min_recovery_lsn'], '0/960')
         self.assertEqual(ctx.observations['post_fork_page_count'], 2)
-        self.assertEqual([(p['block'], p['lsn']) for p in ctx.observations['post_fork_pages']],
-                         [(1, '0/900'), (2, '0/950')])
+        self.assertEqual([(p['block'], p['lsn'], p['source_lsn'], p['exposed'])
+                          for p in ctx.observations['post_fork_pages']],
+                         [(1, '0/900', '0/80', True), (2, '0/950', '0/90', True)])
+        self.assertEqual(ctx.observations['exposed_pages'], 2)
+        self.assertEqual(ctx.observations['exposed_pages_by_kind'], {'main': 2})
+        self.assertEqual(ctx.checks['exposed_pages']['exposed_pages'], 2)
 
     def test_check_s2b_failures(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -336,6 +533,55 @@ class S2bCheckTest(unittest.TestCase):
         self.assertEqual(unflushed.checks['diverged_pages_on_disk_after_fork'][
             'pages_with_lsn_after_fork'], 1)
 
+    def test_no_exposed_page_fails_the_build(self):
+        """When the source rewrote every block B diverged on after B's REDO location, an
+        LSN-threshold tool skips none of them: the scenario must not count as built. A
+        table the source never writes after the fork restores the exposure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            covered = self.make(Path(tmp, 'a'), source_lsns=(0x880, 0x890))
+            untouched = self.make(Path(tmp, 'b'), source_lsns=(0x880, 0x890),
+                                  untouched_lsn=0x940)
+        self.assertFalse(covered.checks['exposed_pages']['ok'])
+        self.assertEqual(covered.observations['exposed_pages'], 0)
+        self.assertTrue(covered.checks['diverged_pages_on_disk_after_fork']['ok'])
+        self.assertTrue(untouched.checks['exposed_pages']['ok'])
+        self.assertEqual(untouched.observations['exposed_pages_by_file'], {'base/5/16408': 1})
+        self.assertEqual(untouched.checks['diverged_pages_on_disk_after_fork'][
+            'pages_written_after_split'], 3)
+
+    def test_mark_exposed_pages(self):
+        """Exposed: S holds the block with an LSN at or below B's REDO and other bytes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            old, source = Path(tmp, 'b'), Path(tmp, 's')
+            write(old, 'base/5/1', page(0x900, b'b') * 5)
+            write(source, 'base/5/1', page(0x700, b's') + page(0x701, b's') + page(0x600, b'b')
+                  + page(0x900, b'b'))  # no block 4
+            pages = [{'file': 'base/5/1', 'block': b, 'kind': 'main', 'lsn': '0/900'}
+                     for b in range(5)]
+            exposed = scenarios.mark_exposed_pages(old, source, pages, 0x700)
+        self.assertEqual(exposed, 2)
+        self.assertEqual([(p['source_lsn'], p['exposed']) for p in pages],
+                         [('0/700', True), ('0/701', False), ('0/600', True),
+                          ('0/900', False), (None, False)])
+
+    def test_check_s2c(self):
+        """S2c: B is a standby stopped cleanly, with REDO before the fork."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = self.make(Path(tmp, 'a'), state='shut down in recovery',
+                            checker=scenarios.check_s2c, untouched_lsn=0x940)
+            crashed = self.make(Path(tmp, 'b'), checker=scenarios.check_s2c)
+        failed = [name for name, check in ctx.checks.items() if not check['ok']]
+        self.assertEqual(failed, [])
+        self.assertEqual(set(ctx.checks), {'diverged_pages_differ', 'timeline_switched',
+                                           'same_system_identifier', 'exposed_pages',
+                                           'old_copy_is_stopped_standby',
+                                           'no_checkpoint_after_fork',
+                                           'diverged_pages_on_disk_after_fork'})
+        self.assertEqual(ctx.observations['exposed_pages'], 3)
+        self.assertFalse(crashed.checks['old_copy_is_stopped_standby']['ok'])
+        self.assertEqual(crashed.checks['old_copy_is_stopped_standby']['cluster_state'],
+                         'in production')
+
     def test_evict_sql_by_version(self):
         self.assertIn('FILTER (WHERE pg_buffercache_evict(b.bufferid))',
                       scenarios.evict_dirty_user_buffers_sql(17))
@@ -346,8 +592,19 @@ class S2bCheckTest(unittest.TestCase):
         spec = scenarios.BY_ID['S2b']
         self.assertEqual(spec.dirname, 'S2b-ex-primary-no-checkpoint-after-fork')
         self.assertIs(spec.checker, scenarios.check_s2b)
-        self.assertEqual([s.id for s in run_scenarios.select_scenarios(['s2b', 'S1B', 'S2'])],
-                         ['S2b', 'S1b', 'S2'])
+        s2c = scenarios.BY_ID['S2c']
+        self.assertEqual(s2c.dirname, 'S2c-standby-of-ex-primary-after-fork')
+        self.assertIs(s2c.builder, scenarios.build_s2c)
+        self.assertIs(s2c.checker, scenarios.check_s2c)
+        self.assertEqual(s2c.lsn_prediction, 'wrong')
+        self.assertEqual([s.id for s in run_scenarios.select_scenarios(['s2b', 'S1B', 'S2',
+                                                                        's2C'])],
+                         ['S2b', 'S1b', 'S2', 'S2c'])
+        self.assertEqual(run_t11.T11_SCENARIOS, ('S1', 'S2', 'S2b', 'S2c'))
+        # S2b and S2c update a table burst_sql never writes; S2 keeps EXP-03's writes.
+        self.assertNotIn(scenarios.UNTOUCHED_TABLE, scenarios.burst_sql(200_000, 2))
+        self.assertIn(f'UPDATE {scenarios.UNTOUCHED_TABLE} ', scenarios.UNTOUCHED_DIVERGING_SQL)
+        self.assertNotIn(scenarios.UNTOUCHED_TABLE, scenarios.diverging_sql(200_000))
         conf = {'source': {'wal_keep_size': '1GB'}, 'old_copy': {}, 'source_ran_with': 'source',
                 'old_copy_ran_with': 'old_copy'}
         meta = scenarios.scenario_metadata(spec, rows=1, built_ok=True,
@@ -607,9 +864,9 @@ class WalgAdapterTest(unittest.TestCase):
 
 
 def result_doc(scenario, tool, **fields):
-    return {'scenario': scenario, 'tool': tool, 'outcome': 'accepted', 'verdict': 'repaired',
+    return {'scenario': scenario, 'tool': tool, 'outcome': 'accepted', 'verdict': 'correct',
             'logical_match': True, 'amcheck_ok': True, 'seconds': 1.5,
-            'diverged_pages': None, **fields}
+            'diverged_before_recovery': None, 'diverged_after_recovery': None, **fields}
 
 
 class SummaryTest(unittest.TestCase):
@@ -618,7 +875,8 @@ class SummaryTest(unittest.TestCase):
             out = Path(tmp)
             documents = [
                 result_doc('S2b', 'walg', outcome='accepted', verdict='wrong_data',
-                           logical_match=False, diverged_pages={'diverged_left': 7}),
+                           logical_match=False, diverged_before_recovery={'diverged_left': 9},
+                           diverged_after_recovery={'diverged_left': 7}),
                 result_doc('S2', 'pg_probackup', outcome='refused', verdict='refused',
                            logical_match=None, amcheck_ok=None, seconds=0.2, refusal='message',
                            outcome_reason='exit status 1: ERROR: Destination is not in source '
@@ -650,9 +908,69 @@ class SummaryTest(unittest.TestCase):
                                         'timeline history'])
         self.assertEqual(rows[4][:9], ['S2b', 'walg', 'accepted', 'False', 'True', '7', '1.5',
                                        'wrong_data', ''])
+        by_name = dict(zip(rows[0], rows[4]))
+        self.assertEqual((by_name['diverged_before_recovery'], by_name['refusal_class'],
+                          by_name['arm'], by_name['i3_judged_on']), ('9', '', '', ''))
         self.assertEqual(summary['rows'], 5)
         self.assertEqual(summary['runs'][3]['verdict'], 'wrong_data')
         self.assertTrue(summary['runs'][0]['caught_up'])
+
+    def test_result_written_before_the_after_recovery_count(self):
+        """Its one count, under 'diverged_pages', was taken before recovery."""
+        old = {'scenario': 'S2', 'tool': 'lsn_skip', 'diverged_pages': {'diverged_left': 4}}
+        row = checks.summary_row(old)
+        self.assertEqual((row['diverged_before_recovery'], row['diverged_pages_left']), (4, None))
+
+    def test_refusal_class_arm_and_i3_pointer(self):
+        """S2b refused for another reason than identity or history: the summary points to
+        the tool's S2c result in the same arm, which I3 is judged on."""
+        default = {**run_t11.server_settings('4GB'), 'source_ran_with': 'source',
+                   'old_copy_ran_with': 'old_copy'}
+        retained = {**run_t11.server_settings('4GB', '4GB'), 'source_ran_with': 'source',
+                    'old_copy_ran_with': 'old_copy'}
+        refused = {'outcome': 'refused', 'verdict': 'refused', 'refusal': 'message',
+                   'logical_match': None, 'amcheck_ok': None}
+        documents = [
+            result_doc('S2b', 'pg_probackup', server_conf=default, refusal_class='other',
+                       outcome_reason='exit status 1: ERROR: Postmaster with pid 1 is running '
+                                      'in destination directory', **refused),
+            result_doc('S2c', 'pg_probackup', server_conf=default, verdict='wrong_data',
+                       logical_match=False, diverged_after_recovery={'diverged_left': 3}),
+            result_doc('S2b', 'walg_send', server_conf=default, refusal_class='identity_or_history',
+                       refusal_class_evidence='ERROR: Destination is on timeline 1, but we are '
+                                              'on 2', **refused),
+            result_doc('S2b', 'pg_rewind', server_conf=retained, refusal_class='other',
+                       **refused),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            for document in documents:
+                tools.write_result(Path(tmp, document['scenario'], document['tool']), document)
+            results = checks.collect_results(tmp, ['S2b', 'S2c'], tools.TOOLS)
+            json_path, csv_path = checks.write_summary(tmp, results, {})
+            runs = {(r['scenario'], r['tool']): r
+                    for r in json.loads(json_path.read_text())['runs']}
+            with csv_path.open() as handle:
+                rows = {(r['scenario'], r['tool']): r for r in csv.DictReader(handle)}
+        probackup = runs[('S2b', 'pg_probackup')]
+        self.assertEqual(probackup['i3_judged_on'],
+                         {'scenario': 'S2c', 'tool': 'pg_probackup', 'arm': 'default',
+                          'outcome': 'accepted', 'verdict': 'wrong_data',
+                          'why': 'S2b was refused for another reason than identity or history '
+                                 '(EXP-08)'})
+        self.assertEqual(rows[('S2b', 'pg_probackup')]['i3_judged_on'], 'S2c (wrong_data)')
+        self.assertEqual(rows[('S2b', 'pg_probackup')]['refusal_class'], 'other')
+        self.assertEqual(rows[('S2c', 'pg_probackup')]['i3_judged_on'], '')
+        # An identity-or-history refusal counts as "refuses" itself.
+        self.assertIsNone(runs[('S2b', 'walg_send')]['i3_judged_on'])
+        self.assertEqual(runs[('S2b', 'walg_send')]['refusal_class'], 'identity_or_history')
+        self.assertIn('timeline 1', runs[('S2b', 'walg_send')]['refusal_class_evidence'])
+        # No S2c run in the retained arm for pg_rewind yet.
+        self.assertEqual(rows[('S2b', 'pg_rewind')]['i3_judged_on'], 'S2c (not run)')
+        self.assertEqual({key: row['arm'] for key, row in rows.items()},
+                         {('S2b', 'pg_probackup'): 'default', ('S2c', 'pg_probackup'): 'default',
+                          ('S2b', 'walg_send'): 'default', ('S2b', 'pg_rewind'): 'retained'})
+        self.assertEqual(rows[('S2c', 'pg_probackup')]['diverged_pages_left'], '3')
+        self.assertIsNone(checks.arm_of(None))
 
 
     def test_each_run_carries_its_build(self):
@@ -705,6 +1023,35 @@ class DriverTest(unittest.TestCase):
         self.assertEqual(run_t11.server_settings('4GB', '1GB'),
                          {'source': {'wal_keep_size': '4GB'}, 'old_copy': {'wal_keep_size': '1GB'}})
 
+    def test_arms(self):
+        """EXP-08's two arms of B's WAL retention, each into its own default directory."""
+        self.assertEqual(run_t11.resolve_arm(None, None), ('default', None))
+        self.assertEqual(run_t11.resolve_arm(None, 'none'), ('default', None))
+        self.assertEqual(run_t11.resolve_arm('default', None), ('default', None))
+        self.assertEqual(run_t11.resolve_arm('retained', None), ('retained', '4GB'))
+        self.assertEqual(run_t11.resolve_arm('retained', '1GB'), ('retained', '1GB'))
+        self.assertEqual(run_t11.resolve_arm(None, '512MB'), ('retained', '512MB'))
+        with self.assertRaises(SystemExit):
+            run_t11.resolve_arm('default', '4GB')
+        for arm, size in (('default', None), ('retained', '4GB')):
+            conf = run_t11.server_settings('4GB', size)
+            self.assertEqual(checks.arm_of(conf), arm)
+        self.assertEqual(checks.ARMS, ('default', 'retained'))
+
+    def test_scenario_facts(self):
+        meta = {'built_ok': True, 'rows': 7,
+                'old_copy': {'cluster_state': 'shut down in recovery', 'redo_location': '0/700',
+                             'checkpoint_location': '0/750', 'min_recovery_location': '0/960'},
+                'server_conf': run_t11.server_settings('4GB', '4GB'),
+                'observations': {'fork_lsn': '0/800', 'exposed_pages': 3,
+                                 'post_fork_page_count': 5, 'post_fork_pages': [{}] * 5}}
+        facts = run_t11.scenario_facts('/x', meta)
+        self.assertEqual((facts['old_copy_state'], facts['old_copy_redo_lsn'],
+                          facts['old_copy_min_recovery_lsn'], facts['fork_lsn'],
+                          facts['exposed_pages'], facts['arm']),
+                         ('shut down in recovery', '0/700', '0/960', '0/800', 3, 'retained'))
+        self.assertNotIn('post_fork_pages', facts)
+
     def test_listed_pages(self):
         with tempfile.TemporaryDirectory() as tmp:
             stored = {'observations': {'post_fork_pages': [{'file': 'f', 'block': 1}],
@@ -745,8 +1092,8 @@ class DriverTest(unittest.TestCase):
 @unittest.skipUnless((PG_BIN / 'initdb').is_file() and (PG_BIN / 'pg_rewind').is_file()
                      and (PG_BIN / 'pg_amcheck').is_file(), f'{PG_BIN} has no PostgreSQL')
 class PgRewindClusterTest(unittest.TestCase):
-    """run_t11 end to end on tiny scenarios: pg_rewind must repair S1 and S2; on S2b it
-    must repair too, while the LSN-skip control must be called wrong."""
+    """run_t11 end to end on tiny scenarios: pg_rewind must repair S1 and S2; on S2b and
+    S2c it must repair too, while the LSN-skip control must be called wrong."""
 
     def run_t11(self, tmp, scenario_ids, tool_names, *extra):
         quiet = io.StringIO()
@@ -761,6 +1108,10 @@ class PgRewindClusterTest(unittest.TestCase):
     def result(self, tmp, scenario, tool):
         return json.loads(Path(tmp, scenario, tool, 'result.json').read_text())
 
+    def meta(self, tmp, scenario):
+        return json.loads(Path(tmp, 'scenarios', scenarios.BY_ID[scenario].dirname,
+                               'scenario.json').read_text())
+
     def wal_keep_mb(self, tmp, scenario):
         """wal_keep_size (MB) as B and the kept source cluster would run with it."""
         directory = Path(tmp, 'scenarios', scenarios.BY_ID[scenario].dirname)
@@ -772,23 +1123,54 @@ class PgRewindClusterTest(unittest.TestCase):
                                           'wal_keep_size']).stdout.strip()
         return values, meta['server_conf']
 
+    def assert_post_fork_facts(self, meta):
+        """B's REDO and checkpoint lie before the fork, its post-fork pages are on disk,
+        and some of them are exposed to an LSN-threshold tool."""
+        self.assertTrue(meta['built_ok'], meta.get('failed_checks') or meta.get('error'))
+        observations = meta['observations']
+        fork = lsnscan.parse_lsn(observations['fork_lsn'])
+        self.assertLess(lsnscan.parse_lsn(observations['old_copy_redo_lsn']), fork)
+        self.assertLess(lsnscan.parse_lsn(observations['old_copy_checkpoint_lsn']), fork)
+        on_disk = meta['checks']['diverged_pages_on_disk_after_fork']
+        self.assertTrue(on_disk['ok'])
+        self.assertEqual(on_disk['pages_with_lsn_after_fork'], on_disk['pages_written_after_split'])
+        # Both the accounts pages and those of the table the source never writes.
+        self.assertEqual(set(on_disk['flush']['by_table']), {'accounts', 'tags'})
+        self.assertGreaterEqual(observations['post_fork_page_count'],
+                                on_disk['pages_written_after_split'])
+        self.assertGreater(observations['exposed_pages'], 0)
+        self.assertTrue(meta['checks']['exposed_pages']['ok'])
+        self.assertEqual(observations['exposed_pages'],
+                         sum(p['exposed'] for p in observations['post_fork_pages']))
+
     def test_pg_rewind_repairs_s1_and_s2(self):
         tmp = Path(tempfile.mkdtemp(prefix='pgd'))
         try:
             runs = self.run_t11(tmp, 'S1,S2', 'pg_rewind')
             for scenario in ('S1', 'S2'):
                 run = runs[(scenario, 'pg_rewind')]
-                self.assertEqual((run['outcome'], run['verdict']), ('accepted', 'repaired'),
+                self.assertEqual((run['outcome'], run['verdict']), ('accepted', 'correct'),
                                  self.result(tmp, scenario, 'pg_rewind'))
                 self.assertTrue(run['logical_match'] and run['amcheck_ok'] and run['caught_up'])
+                self.assertEqual(run['arm'], 'default')
             s1, s2 = self.result(tmp, 'S1', 'pg_rewind'), self.result(tmp, 'S2', 'pg_rewind')
             self.assertTrue(s1['parsed']['no_rewind_required'])
-            self.assertIsNone(s1['diverged_pages'])
+            self.assertIsNone(s1['diverged_before_recovery'])
+            self.assertIsNone(s1['diverged_after_recovery'])
             self.assertEqual(s2['parsed']['diverged_on_timeline'], 1)
-            self.assertEqual(s2['diverged_pages']['diverged_left'], 0)
-            self.assertGreater(s2['diverged_pages']['listed'], 0)
+            self.assertEqual(s2['diverged_before_recovery']['diverged_left'], 0)
+            self.assertGreater(s2['diverged_before_recovery']['listed'], 0)
+            self.assertEqual(s2['diverged_after_recovery']['diverged_left'], 0)
+            self.assertTrue(s2['bring_up']['checkpointed'] and s2['bring_up']['stopped_cleanly'])
             self.assertEqual(s2['bring_up']['recovery_conf'], 'tool')
             self.assertFalse(Path(tmp, 'S2', 'pg_rewind', 'work').exists())
+            # S2 now records its post-fork pages: its REDO lies after the fork, so every one
+            # whose block S didn't rewrite past that point is exposed.
+            s2_meta = self.meta(tmp, 'S2')
+            self.assertGreater(s2_meta['observations']['exposed_pages'], 0)
+            self.assertGreater(lsnscan.parse_lsn(s2_meta['observations']['old_copy_redo_lsn']),
+                               lsnscan.parse_lsn(s2_meta['observations']['fork_lsn']))
+            self.assertEqual(s2['post_fork_pages']['source'], 'scenario.json')
             # Only the source keeps its WAL; B runs with EXP-03's settings, whether it was
             # the standby (S1) or the old primary (S2).
             for scenario in ('S1', 'S2'):
@@ -806,33 +1188,70 @@ class PgRewindClusterTest(unittest.TestCase):
         try:
             runs = self.run_t11(tmp, 'S2b', 'pg_rewind,lsn_skip',
                                 '--old-copy-wal-keep-size', '512MB')
-            meta = json.loads(Path(tmp, 'scenarios', scenarios.BY_ID['S2b'].dirname,
-                                   'scenario.json').read_text())
-            self.assertTrue(meta['built_ok'], meta.get('failed_checks') or meta.get('error'))
-            observations = meta['observations']
-            self.assertLess(int(observations['old_copy_redo_lsn'].replace('/', ''), 16),
-                            int(observations['fork_lsn'].replace('/', ''), 16))
+            meta = self.meta(tmp, 'S2b')
+            self.assert_post_fork_facts(meta)
             self.assertEqual(meta['old_copy']['cluster_state'], 'in production')
-            self.assertGreaterEqual(observations['post_fork_page_count'],
-                                    meta['checks']['diverged_pages_differ'][
-                                        'pages_written_after_split'])
             self.assertEqual(self.wal_keep_mb(tmp, 'S2b')[0], {'old_copy': '512', 'source': '1024'})
             self.assertEqual((meta['server_conf']['source'], meta['server_conf']['old_copy']),
                              ({'wal_keep_size': '1GB'}, {'wal_keep_size': '512MB'}))
             self.assertTrue(meta['checks']['old_copy_conf_applied']['ok'])
             rewind = self.result(tmp, 'S2b', 'pg_rewind')
             self.assertTrue(rewind['parsed']['crash_recovery_run'])
-            self.assertEqual(runs[('S2b', 'pg_rewind')]['verdict'], 'repaired', rewind)
-            self.assertEqual(rewind['diverged_pages']['diverged_left'], 0)
+            self.assertEqual(runs[('S2b', 'pg_rewind')]['verdict'], 'correct', rewind)
+            self.assertEqual(rewind['diverged_before_recovery']['diverged_left'], 0)
+            self.assertEqual(rewind['diverged_after_recovery']['diverged_left'], 0)
             self.assertEqual((runs[('S2b', 'pg_rewind')]['rows'],
-                              runs[('S2b', 'pg_rewind')]['old_copy_conf']),
-                             (2000, 'wal_keep_size=512MB'))
+                              runs[('S2b', 'pg_rewind')]['old_copy_conf'],
+                              runs[('S2b', 'pg_rewind')]['arm']),
+                             (2000, 'wal_keep_size=512MB', 'retained'))
             summary = json.loads(Path(tmp, 'summary.json').read_text())
             self.assertEqual(summary['runs_from_other_builds'], [])
+            self.assertEqual(summary['invocation']['arm'], 'retained')
             control = runs[('S2b', 'lsn_skip')]
             self.assertEqual(control['verdict'], 'wrong_data')
             self.assertGreater(control['diverged_pages_left'], 0)
             self.assertFalse(control['logical_match'])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_s2c(self):
+        """S2c on PostgreSQL 17: B is a standby of the old primary that replayed and wrote
+        its diverged pages, stopped cleanly with REDO before the fork."""
+        tmp = Path(tempfile.mkdtemp(prefix='pgd'))
+        try:
+            runs = self.run_t11(tmp, 'S2c', 'pg_rewind,lsn_skip')
+            meta = self.meta(tmp, 'S2c')
+            self.assertEqual(meta['postgresql']['old_copy']['major'], 17)
+            self.assert_post_fork_facts(meta)
+            self.assertEqual(meta['old_copy']['cluster_state'], 'shut down in recovery')
+            self.assertTrue(meta['checks']['old_copy_is_stopped_standby']['ok'])
+            flush = meta['checks']['diverged_pages_on_disk_after_fork']['flush']
+            self.assertEqual(flush['flushed_on'], 'follower')
+            self.assertTrue(flush['clean'])
+            # The flush ran no restartpoint on the standby.
+            self.assertEqual(flush['checkpoint_lsn_before_flush'],
+                             flush['checkpoint_lsn_after_flush'])
+            # Q replayed the diverged writes, so its minimum recovery point lies past them.
+            observations = meta['observations']
+            self.assertGreaterEqual(lsnscan.parse_lsn(observations['old_copy_min_recovery_lsn']),
+                                    lsnscan.parse_lsn(observations['old_primary_end_lsn']))
+            self.assertEqual(meta['timelines'], {'old_copy': 1, 'source_backup': 2})
+            # P was discarded: only R (the source) is kept.
+            work = Path(tmp, 'scenarios', scenarios.BY_ID['S2c'].dirname,
+                        meta['source_cluster']['datadir']).parent
+            self.assertEqual(sorted(p.name for p in work.iterdir() if p.name != 'logs'),
+                             ['standby'])
+            self.assertEqual(self.wal_keep_mb(tmp, 'S2c')[0], {'old_copy': '0', 'source': '1024'})
+            rewind = runs[('S2c', 'pg_rewind')]
+            self.assertEqual((rewind['outcome'], rewind['verdict'], rewind['arm']),
+                             ('accepted', 'correct', 'default'),
+                             self.result(tmp, 'S2c', 'pg_rewind'))
+            self.assertEqual(rewind['diverged_pages_left'], 0)
+            control = runs[('S2c', 'lsn_skip')]
+            self.assertEqual(control['verdict'], 'wrong_data')
+            self.assertGreater(control['diverged_pages_left'], 0)
+            self.assertGreaterEqual(control['diverged_before_recovery'],
+                                    control['diverged_pages_left'])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

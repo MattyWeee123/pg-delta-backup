@@ -2,7 +2,7 @@
 """EXP-03 driver: build tricky old copies, evaluate the tool on them, summarize.
 
     run_scenarios.py list
-    run_scenarios.py build [S1 S1b S2 S2b ... S9 | all] [--out results/exp03] [--rows N] [--keep]
+    run_scenarios.py build [S1 S1b S2 S2b S2c ... S9 | all] [--out results/exp03] [--rows N] [--keep]
     run_scenarios.py evaluate SCENARIO_DIR [...] [--tool-cmd CMD] [--tool-args=ARGS]
     run_scenarios.py aggregate RESULTS_DIR
     run_scenarios.py run [S1 ... S9 | all]      (build, evaluate, aggregate)
@@ -44,7 +44,7 @@ def make_bins(args):
 def select_scenarios(names):
     if not names or [n.lower() for n in names] == ['all']:
         return list(scenarios.SCENARIOS)
-    by_key = {spec.id.upper(): spec for spec in scenarios.SCENARIOS}  # S1b, S2b: any case
+    by_key = {spec.id.upper(): spec for spec in scenarios.SCENARIOS}  # S1b, S2b, S2c: any case
     chosen = []
     for name in names:
         key = name.upper().split('-')[0]

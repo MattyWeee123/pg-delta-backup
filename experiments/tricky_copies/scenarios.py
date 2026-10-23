@@ -33,7 +33,7 @@ from experiments.tricky_copies.pgcluster import (REDO_KEY, Cluster, PgBin, clean
                                                  select_threshold, short_tempdir, tree_size)
 
 BASE_CONF = {'autovacuum': 'off', 'checkpoint_timeout': '30min'}
-# S2b: no time- or size-triggered checkpoint may run on P after the fork.
+# S2b and S2c: no time- or size-triggered checkpoint may run on P after the fork.
 NO_CHECKPOINT_CONF = {'checkpoint_timeout': '1d', 'max_wal_size': '10GB'}
 DEFAULT_ROWS = 200_000
 SEGMENT_BLOCKS = 131072  # 1 GiB segments of 8 KiB blocks
@@ -94,6 +94,14 @@ INSERT INTO accounts VALUES ({rows + 1}, 0, 'written only on the old primary');
 
 DIVERGED_BLOCKS_SQL = ("SELECT DISTINCT ((ctid::text)::point)[0]::bigint FROM accounts "
                        "WHERE id % 200 = 3 ORDER BY 1;")
+# S2b and S2c (T11) also update a table that burst_sql never writes, so the source leaves
+# those pages as they were before the fork. Their blocks in S keep LSNs below B's REDO
+# location, so an LSN-threshold tool skips them and keeps B's diverged bytes: the
+# scenarios expose such pages by construction, whatever burst 2 rewrites in accounts.
+UNTOUCHED_TABLE = 'tags'
+UNTOUCHED_DIVERGING_SQL = "UPDATE tags SET v = upper(v) WHERE k = 3;\n"
+UNTOUCHED_BLOCKS_SQL = ("SELECT DISTINCT ((ctid::text)::point)[0]::bigint FROM tags "
+                        "WHERE k = 3 ORDER BY 1;")
 
 
 def evict_dirty_user_buffers_sql(major):
@@ -303,6 +311,37 @@ def pages_after_lsn(root, lsn):
     return pages
 
 
+def read_segment_page(root, relpath, block):
+    """One 8 KiB page of one segment file, or None if the file or the block is absent."""
+    path = Path(root, relpath)
+    if not path.is_file():
+        return None
+    with path.open('rb') as handle:
+        handle.seek(block * lsnscan.BLOCK)
+        page = handle.read(lsnscan.BLOCK)
+    return page if len(page) == lsnscan.BLOCK else None
+
+
+def mark_exposed_pages(old, source, pages, redo):
+    """Mark each of B's post-fork pages (from pages_after_lsn) with what S holds at the same
+    file and block, and return how many are exposed.
+
+    A page is exposed when S has that block with a page LSN at or below ``redo`` (B's REDO
+    location, an integer) and other bytes than B: a tool that sends only the pages newer
+    than B's REDO location skips it, and the copy keeps B's diverged bytes. Each entry
+    gains 'source_lsn' (None when S has no such page) and 'exposed'."""
+    exposed = 0
+    for page in pages:
+        source_page = read_segment_page(source, page['file'], page['block'])
+        source_lsn = None if source_page is None else lsnscan.page_lsn(source_page)
+        page['source_lsn'] = None if source_lsn is None else lsnscan.format_lsn(source_lsn)
+        page['exposed'] = bool(
+            source_lsn is not None and source_lsn <= redo
+            and read_segment_page(old, page['file'], page['block']) != source_page)
+        exposed += page['exposed']
+    return exposed
+
+
 def history_switchpoint(text):
     """LSN where the newest timeline of a timeline history file forked from its parent.
 
@@ -367,9 +406,90 @@ def check_s1(ctx, old_info, source_info, threshold):
               cluster_state=old_info['cluster_state'])
 
 
+def record_diverged_blocks(ctx, primary, untouched=False):
+    """Before the diverging writes: the accounts blocks they will update, and with
+    ``untouched`` those of UNTOUCHED_TABLE too, in ctx.facts."""
+    relpath = primary.scalar("SELECT pg_relation_filepath('accounts')")
+    blocks = [int(row[0]) for row in primary.query(DIVERGED_BLOCKS_SQL)]
+    ctx.facts['diverged'] = {'file': relpath, 'blocks': blocks}
+    if untouched:
+        ctx.facts['untouched'] = {
+            'table': UNTOUCHED_TABLE,
+            'file': primary.scalar(f"SELECT pg_relation_filepath('{UNTOUCHED_TABLE}')"),
+            'blocks': [int(row[0]) for row in primary.query(UNTOUCHED_BLOCKS_SQL)]}
+
+
+def diverging_writes(ctx, primary, untouched=False):
+    """S2's diverging writes on the old primary, plus, with ``untouched``, an update of
+    UNTOUCHED_TABLE, which the source never writes after the fork. Returns the LSN just
+    before them: the standby that becomes the source has stopped, so everything written
+    from there on lies after the fork."""
+    before = primary.scalar('SELECT pg_current_wal_lsn()')
+    accounts = len(ctx.facts['diverged']['blocks'])
+    extra = ctx.facts.get('untouched') if untouched else None
+    ctx.step(f'DIVERGING writes on {primary.name}: update rows in {accounts} pages of accounts '
+             'and insert one' + (f", update rows in {len(extra['blocks'])} pages of "
+                                  f"{extra['table']}" if extra else ''))
+    primary.psql(diverging_sql(ctx.rows) + (UNTOUCHED_DIVERGING_SQL if untouched else ''))
+    ctx.facts['old_primary_end_lsn'] = primary.scalar('SELECT pg_current_wal_lsn()')
+    return before
+
+
+def diverged_locations(ctx):
+    """[(table, relation file, block)] of every page the diverging writes updated."""
+    found = []
+    for name, table in (('diverged', 'accounts'), ('untouched', None)):
+        facts = ctx.facts.get(name)
+        if facts:
+            found += [(table or facts['table'], facts['file'], block) for block in facts['blocks']]
+    return found
+
+
+def flush_diverged_pages(ctx, cluster, before):
+    """Write the dirty buffers of the user relations of ``cluster`` (the old primary in
+    S2b, its hot standby in S2c) to disk without a checkpoint or restartpoint, then read
+    the diverged pages back from disk: each must carry an LSN after ``before``."""
+    ctx.step(f'write every dirty buffer of the user relations of {cluster.name} to disk with '
+             'pg_buffercache_evict(), without a checkpoint or restartpoint')
+    checkpoint_sql = 'SELECT checkpoint_lsn FROM pg_control_checkpoint()'
+    checkpoint_before = cluster.scalar(checkpoint_sql)
+    flush = flush_without_checkpoint(cluster)
+    checkpoint_after = cluster.scalar(checkpoint_sql)
+    threshold = lsnscan.parse_lsn(before)
+    by_table = {}
+    for table, relpath, block in diverged_locations(ctx):
+        lsn = lsnscan.page_lsn(read_block(cluster.datadir / relpath, block) or b'')
+        counts = by_table.setdefault(table, {'pages': 0, 'on_disk_after_that_lsn': 0})
+        counts['pages'] += 1
+        counts['on_disk_after_that_lsn'] += lsn is not None and lsn > threshold
+    total = sum(c['pages'] for c in by_table.values())
+    flushed = sum(c['on_disk_after_that_lsn'] for c in by_table.values())
+    ctx.facts['flush'] = {**flush, 'flushed_on': cluster.name,
+                          'lsn_before_diverging_writes': before,
+                          'checkpoint_lsn_before_flush': checkpoint_before,
+                          'checkpoint_lsn_after_flush': checkpoint_after,
+                          'diverged_pages': total,
+                          'diverged_pages_on_disk_after_that_lsn': flushed, 'by_table': by_table}
+    ctx.step(f'{flushed} of {total} diverged pages carry a later LSN on disk of {cluster.name}; '
+             f'its pg_control checkpoint went from {checkpoint_before} to {checkpoint_after}')
+    return ctx.facts['flush']
+
+
+def promote_and_write(ctx, r):
+    """Start R alone, promote it to a new timeline and write burst 2 on it."""
+    ctx.step('start R alone and promote it (new timeline)')
+    r.start()
+    r.promote()
+    r.wait_for('SELECT NOT pg_is_in_recovery()')
+    ctx.step('writes on the new primary R (burst 2)')
+    r.psql(burst_sql(ctx.rows, 2))
+    return r
+
+
 def build_s2(ctx, crash=False):
     """S2, or with ``crash`` S2b: P flushes its diverged pages without a checkpoint and
-    stops with -m immediate, so B's REDO location stays before the fork."""
+    stops with -m immediate, so B's REDO location stays before the fork. S2b's diverging
+    writes also update UNTOUCHED_TABLE (EXP-08's exposed pages); S2's are EXP-03's."""
     p = ctx.new_primary('primary', conf=NO_CHECKPOINT_CONF if crash else None, role='old_copy')
     if crash:
         ctx.step('CREATE EXTENSION pg_buffercache on P, before R is cloned, so R has it too')
@@ -382,41 +502,55 @@ def build_s2(ctx, crash=False):
     ctx.step('stop R cleanly: this is the split point')
     r.stop('fast')
     ctx.facts['split_lsn'] = split
-    relpath = p.scalar("SELECT pg_relation_filepath('accounts')")
-    blocks = [int(row[0]) for row in p.query(DIVERGED_BLOCKS_SQL)]
-    ctx.facts['diverged'] = {'file': relpath, 'blocks': blocks}
-    # R stopped before this, so everything P writes from here on lies after the fork.
-    before = p.scalar('SELECT pg_current_wal_lsn()')
-    ctx.step(f'DIVERGING writes on P: update rows in {len(blocks)} pages of accounts and insert one')
-    p.psql(diverging_sql(ctx.rows))
-    ctx.facts['old_primary_end_lsn'] = p.scalar('SELECT pg_current_wal_lsn()')
+    record_diverged_blocks(ctx, p, untouched=crash)
+    before = diverging_writes(ctx, p, untouched=crash)
     if crash:
-        ctx.step('write every dirty buffer of the user relations to disk with '
-                 'pg_buffercache_evict(), without a checkpoint')
-        flush = flush_without_checkpoint(p)
-        on_disk = [lsnscan.page_lsn(read_block(p.datadir / relpath, block) or b'')
-                   for block in blocks]
-        flushed = sum(lsn is not None and lsn > lsnscan.parse_lsn(before) for lsn in on_disk)
-        ctx.facts['flush'] = {**flush, 'lsn_before_diverging_writes': before,
-                              'diverged_pages': len(blocks),
-                              'diverged_pages_on_disk_after_that_lsn': flushed}
-        ctx.step(f'{flushed} of {len(blocks)} diverged pages carry a later LSN on disk; '
-                 'stop P with -m immediate (no shutdown checkpoint)')
+        flush_diverged_pages(ctx, p, before)
+        ctx.step('stop P with -m immediate (no shutdown checkpoint)')
         p.stop('immediate')
     else:
         ctx.step('stop P cleanly (-m fast)')
         p.stop('fast')
     ctx.adopt_datadir_as_old_copy(p)
-    ctx.step('start R alone and promote it (new timeline)')
-    r.start()
-    r.promote()
-    r.wait_for('SELECT NOT pg_is_in_recovery()')
-    ctx.step('writes on the new primary R (burst 2)')
-    r.psql(burst_sql(ctx.rows, 2))
-    return r
+    return promote_and_write(ctx, r)
+
+
+def build_s2c(ctx):
+    """S2c: B is a hot standby Q of the old primary P. Q replays P's diverging writes,
+    writes them to disk without a restartpoint and stops cleanly. P never checkpoints after
+    the fork, so Q's shutdown restartpoint keeps the REDO location of the last checkpoint
+    it replayed, from before the fork: B is "shut down in recovery" with REDO before the
+    fork and post-fork pages on disk. P is then discarded, and R becomes the source."""
+    p = ctx.new_primary('primary', conf=NO_CHECKPOINT_CONF, role='source')
+    ctx.step('CREATE EXTENSION pg_buffercache on P, before R and Q are cloned, so they have it')
+    p.psql('CREATE EXTENSION pg_buffercache;')
+    r = ctx.new_standby('standby', p, role='source')
+    q = ctx.new_standby('follower', p, role='old_copy')
+    ctx.step('writes on P (burst 1), replicated to R and Q')
+    p.psql(burst_sql(ctx.rows, 1))
+    p.psql('CHECKPOINT;')
+    split = ctx.wait_replay(p, r)
+    ctx.wait_replay(p, q)
+    ctx.step('stop R cleanly: this is the split point')
+    r.stop('fast')
+    ctx.facts['split_lsn'] = split
+    record_diverged_blocks(ctx, p, untouched=True)
+    before = diverging_writes(ctx, p, untouched=True)
+    ctx.facts['follower_replay_lsn'] = ctx.wait_replay(p, q)
+    flush_diverged_pages(ctx, q, before)
+    ctx.step('stop Q cleanly (-m fast), before P can write a checkpoint record Q would replay')
+    q.stop('fast')
+    ctx.step('stop P with -m immediate and discard it')
+    p.stop('immediate')
+    ctx.clusters.remove(p)
+    shutil.rmtree(p.datadir, ignore_errors=True)
+    ctx.adopt_datadir_as_old_copy(q)
+    return promote_and_write(ctx, r)
 
 
 def check_s2(ctx, old_info, source_info, threshold):
+    """EXP-03's S2 checks, plus B's post-fork pages and how many of them are exposed (see
+    record_post_fork_pages). Returns (fork LSN as an integer, post-fork pages)."""
     facts = ctx.facts['diverged']
     redo = lsnscan.parse_lsn(threshold['lsn'])
     differing, missing, below = 0, 0, 0
@@ -440,32 +574,73 @@ def check_s2(ctx, old_info, source_info, threshold):
     ctx.observations['timeline_history'] = {h.name: h.read_text().strip() for h in history}
     ctx.observations['split_lsn'] = ctx.facts['split_lsn']
     ctx.observations['old_primary_end_lsn'] = ctx.facts['old_primary_end_lsn']
+    return record_post_fork_pages(ctx, old_info, source_info)
+
+
+def record_post_fork_pages(ctx, old_info, source_info):
+    """Record the fork LSN (from S's timeline history file), B's REDO, checkpoint and
+    minimum recovery locations, and every page of B whose on-disk LSN is after the fork,
+    each marked with S's LSN at that block and whether it is exposed (mark_exposed_pages).
+    The 'exposed_pages' check fails the build when none is: the scenario could then not
+    show an LSN-threshold tool keeping B's diverged bytes."""
+    history = ctx.source_backup / 'pg_wal' / f"{source_info['timeline']:08X}.history"
+    fork = history_switchpoint(history.read_text())
+    fork_value = lsnscan.parse_lsn(fork)
+    redo = old_info['redo_location']
+    post_fork = pages_after_lsn(ctx.old_copy, fork_value)
+    exposed = mark_exposed_pages(ctx.old_copy, ctx.source_backup, post_fork,
+                                 lsnscan.parse_lsn(redo))
+    by_kind, by_file = {}, {}
+    for page in post_fork:
+        if page['exposed']:
+            by_kind[page['kind']] = by_kind.get(page['kind'], 0) + 1
+            by_file[page['file']] = by_file.get(page['file'], 0) + 1
+    ctx.observations.update(
+        fork_lsn=fork, fork_lsn_source=f'pg_wal/{history.name} of S', old_copy_redo_lsn=redo,
+        old_copy_checkpoint_lsn=old_info['checkpoint_location'],
+        old_copy_min_recovery_lsn=old_info.get('min_recovery_location'),
+        post_fork_page_count=len(post_fork), exposed_pages=exposed,
+        exposed_pages_by_kind=by_kind, exposed_pages_by_file=by_file,
+        exposed_rule="S holds the block with a page LSN at or below B's REDO location, "
+                     'and other bytes than B', post_fork_pages=post_fork)
+    ctx.check('exposed_pages', exposed > 0, exposed_pages=exposed,
+              post_fork_pages=len(post_fork), redo_lsn=redo, fork_lsn=fork)
+    return fork_value, post_fork
+
+
+def check_after_fork(ctx, old_info, fork_value, post_fork):
+    """S2b's and S2c's checks: B's REDO and checkpoint locations lie before the fork, and
+    every page the diverging writes updated is on B's disk with an LSN after it."""
+    redo, checkpoint = old_info['redo_location'], old_info['checkpoint_location']
+    ctx.check('no_checkpoint_after_fork', lsnscan.parse_lsn(redo) < fork_value
+              and lsnscan.parse_lsn(checkpoint) < fork_value,
+              fork_lsn=lsnscan.format_lsn(fork_value), redo_lsn=redo, checkpoint_lsn=checkpoint)
+    listed = {(page['file'], page['block']) for page in post_fork}
+    written = diverged_locations(ctx)
+    found = sum(segment_location(relpath, block) in listed for _table, relpath, block in written)
+    ctx.check('diverged_pages_on_disk_after_fork', written and found == len(written),
+              pages_written_after_split=len(written), pages_with_lsn_after_fork=found,
+              flush=ctx.facts.get('flush'))
 
 
 def check_s2b(ctx, old_info, source_info, threshold):
     """S2's checks, plus: B crashed, its REDO and checkpoint lie before the fork, and the
-    pages P wrote after the fork are on disk. Records the fork LSN and those pages."""
-    check_s2(ctx, old_info, source_info, threshold)
-    history = ctx.source_backup / 'pg_wal' / f"{source_info['timeline']:08X}.history"
-    fork = history_switchpoint(history.read_text())
-    fork_value = lsnscan.parse_lsn(fork)
-    redo, checkpoint = old_info['redo_location'], old_info['checkpoint_location']
-    post_fork = pages_after_lsn(ctx.old_copy, fork_value)
-    ctx.observations.update(fork_lsn=fork, fork_lsn_source=f'pg_wal/{history.name} of S',
-                            old_copy_redo_lsn=redo, old_copy_checkpoint_lsn=checkpoint,
-                            post_fork_page_count=len(post_fork), post_fork_pages=post_fork)
+    pages P wrote after the fork are on disk."""
+    fork_value, post_fork = check_s2(ctx, old_info, source_info, threshold)
     ctx.check('old_copy_crashed', old_info['cluster_state'] == 'in production',
               cluster_state=old_info['cluster_state'])
-    ctx.check('no_checkpoint_after_fork', lsnscan.parse_lsn(redo) < fork_value
-              and lsnscan.parse_lsn(checkpoint) < fork_value,
-              fork_lsn=fork, redo_lsn=redo, checkpoint_lsn=checkpoint)
-    listed = {(page['file'], page['block']) for page in post_fork}
-    diverged = ctx.facts['diverged']
-    found = sum(segment_location(diverged['file'], block) in listed
-                for block in diverged['blocks'])
-    ctx.check('diverged_pages_on_disk_after_fork', diverged['blocks'] and found == len(
-        diverged['blocks']), pages_written_after_split=len(diverged['blocks']),
-        pages_with_lsn_after_fork=found, flush=ctx.facts.get('flush'))
+    check_after_fork(ctx, old_info, fork_value, post_fork)
+
+
+def check_s2c(ctx, old_info, source_info, threshold):
+    """S2's checks, plus: B is a standby stopped cleanly ("shut down in recovery"), its
+    REDO and checkpoint lie before the fork, and the pages it replayed after the fork are
+    on disk."""
+    fork_value, post_fork = check_s2(ctx, old_info, source_info, threshold)
+    ctx.check('old_copy_is_stopped_standby', old_info['cluster_state'] == 'shut down in recovery',
+              cluster_state=old_info['cluster_state'])
+    ctx.observations['follower_replay_lsn'] = ctx.facts.get('follower_replay_lsn')
+    check_after_fork(ctx, old_info, fork_value, post_fork)
 
 
 def build_s3(ctx):
@@ -743,6 +918,12 @@ SCENARIOS = [
              'pages were written out without a checkpoint (REDO before the fork)',
              'wrong', 'correct; diverged pages detected and re-sent',
              partial(build_s2, crash=True), check_s2b),
+    Scenario('S2c', 'standby-of-ex-primary-after-fork',
+             'Standby that followed the ex-primary past a failover, stopped cleanly',
+             'data directory of a hot standby of the old primary that replayed its diverged '
+             'writes, wrote them to disk without a restartpoint and stopped with -m fast '
+             '(shut down in recovery, REDO before the fork)',
+             'wrong', 'correct; diverged pages detected and re-sent', build_s2c, check_s2c),
     Scenario('S3', 'crash-consistent-copy', 'Crash-consistent copy',
              'copy of the data directory of a primary stopped with -m immediate mid-write',
              'correct', 'correct', build_s3, check_s3),
@@ -789,6 +970,7 @@ def describe_copy(path, bins):
         'backup_label_timeline': int(label['START TIMELINE']) if label else None,
         'redo_location': fields[REDO_KEY],
         'checkpoint_location': fields['Latest checkpoint location'],
+        'min_recovery_location': fields.get('Minimum recovery ending location'),
         'data_checksum_version': int(fields['Data page checksum version']),
         'wal_log_hints': fields.get('wal_log_hints setting'),
         'catalog_version': fields.get('Catalog version number'),
@@ -856,8 +1038,8 @@ def build_scenario(spec, out_root, *, rows=DEFAULT_ROWS, bins, default_bin, keep
     """Build one scenario under out_root/<id>-<slug>/ and return its metadata.
 
     ``source_conf`` adds server settings to the cluster that becomes the source, from its
-    creation on; ``old_copy_conf`` to the one whose data directory becomes B (S1, S1b, S2
-    and S2b, where that is a cluster of its own). EXP-03 uses neither; T11 gives the
+    creation on; ``old_copy_conf`` to the one whose data directory becomes B (S1, S1b, S2,
+    S2b and S2c, where that is a cluster of its own). EXP-03 uses neither; T11 gives the
     source wal_keep_size. scenario.json records both, and with which role's settings
     the source and B's cluster ran."""
     scenario_dir = prepare_scenario_dir(Path(out_root) / spec.dirname, force)

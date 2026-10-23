@@ -196,13 +196,14 @@ class LogicalStateTest(unittest.TestCase):
 class ScenarioMetadataTest(unittest.TestCase):
     def test_registry_matches_exp03(self):
         # S1b is S1 without a replayed checkpoint, added after the review (see EXP-03);
-        # S2b is S2 without a checkpoint after the fork, added for T11.
+        # S2b is S2 without a checkpoint after the fork, and S2c a standby of the
+        # ex-primary stopped cleanly after it, both added for T11 (EXP-08).
         self.assertEqual([s.id for s in scenarios.SCENARIOS],
-                         ['S1', 'S1b', 'S2', 'S2b'] + [f'S{i}' for i in range(3, 10)])
-        self.assertEqual(len({s.dirname for s in scenarios.SCENARIOS}), 11)
+                         ['S1', 'S1b', 'S2', 'S2b', 'S2c'] + [f'S{i}' for i in range(3, 10)])
+        self.assertEqual(len({s.dirname for s in scenarios.SCENARIOS}), 12)
         predictions = {s.id: s.lsn_prediction for s in scenarios.SCENARIOS}
         self.assertEqual({k for k, v in predictions.items() if v == 'wrong'},
-                         {'S2', 'S2b', 'S5', 'S6', 'S7'})
+                         {'S2', 'S2b', 'S2c', 'S5', 'S6', 'S7'})
         self.assertEqual({k for k, v in predictions.items() if v == 'correct'},
                          {'S1', 'S1b', 'S3', 'S4'})
         self.assertEqual({k for k, v in predictions.items() if v == 'n/a'}, {'S8', 'S9'})

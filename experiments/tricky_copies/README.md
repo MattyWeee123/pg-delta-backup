@@ -1,6 +1,6 @@
 # EXP-03 tooling: tricky old copies
 
-This folder builds the nine old-copy situations of [EXP-03](../../docs/experiments/EXP-03-tricky-copies.md) on real PostgreSQL clusters, plus two variants: S1b (EXP-03's review) and S2b (for T11, see [experiments/incumbents](../incumbents/README.md)). For each one it records what an LSN-skipping shortcut would get wrong, and it checks the tool's rebuilt copy once the tool exists.
+This folder builds the nine old-copy situations of [EXP-03](../../docs/experiments/EXP-03-tricky-copies.md) on real PostgreSQL clusters, plus three variants: S1b (EXP-03's review), and S2b and S2c (for T11, see [experiments/incumbents](../incumbents/README.md)). For each one it records what an LSN-skipping shortcut would get wrong, and it checks the tool's rebuilt copy once the tool exists.
 
 Requirements: Python 3.10 or newer, standard library only. You need PostgreSQL 17 and 18 bin directories; the defaults are the Homebrew paths `/opt/homebrew/opt/postgresql@17/bin` and `/opt/homebrew/opt/postgresql@18/bin`. Nothing is taken from `PATH`. Every server runs as the current (non-root) user. Each one listens only on a Unix socket in a short private `/tmp/pgd*` directory, on a port picked at run time.
 
@@ -27,7 +27,8 @@ P is the primary, R the standby, B the old copy, and S the fresh backup of the s
 |---|---|---|---|
 | S1 | P with checksums, standby R from `pg_basebackup -R`, streaming. Burst of writes on P, `CHECKPOINT` on P, wait for R to replay it, stop R with `-m fast`. B is R's data directory. | More writes on P; S from P | correct |
 | S2 | As S1 up to stopping R (the split point). Then diverging writes on P: an update touching about a third of the `accounts` pages, plus an insert. Stop P cleanly. B is P's data directory. | Start R alone, promote it (timeline 2), write on R; S from R | wrong |
-| S2b | As S2, but P runs with `checkpoint_timeout = 1d` and `max_wal_size = 10GB`, and `pg_buffercache` is created before R is cloned. After the diverging writes, `pg_buffercache_evict()` (PostgreSQL 17 and later; it returns a boolean in 17 and a record in 18) writes every dirty buffer of the user relations (OID 16384 and up, all forks) to disk without a checkpoint; the diverged pages are read back from disk to check their LSNs. Then `pg_ctl stop -m immediate`. B is P's data directory: crashed, with its REDO location before the fork and post-fork pages on disk. | As S2 | wrong |
+| S2b | As S2, but P runs with `checkpoint_timeout = 1d` and `max_wal_size = 10GB`, and `pg_buffercache` is created before R is cloned. After the diverging writes, `pg_buffercache_evict()` (PostgreSQL 17 and later; it returns a boolean in 17 and a record in 18) writes every dirty buffer of the user relations (OID 16384 and up, all forks) to disk without a checkpoint; the diverged pages are read back from disk to check their LSNs. Then `pg_ctl stop -m immediate`. B is P's data directory: crashed, with its REDO location before the fork and post-fork pages on disk. The diverging writes also update `tags` (see below). | As S2 | wrong |
+| S2c | P as in S2b (no checkpoint after the fork, `pg_buffercache`), with two standbys cloned from it: R and Q. Burst on P, `CHECKPOINT`, wait until R and Q replay it, stop R cleanly (the split point). Diverging writes on P as in S2b; wait until Q replays them. On Q, a hot standby, `pg_buffercache_evict()` writes the dirty buffers of the user relations to disk without a restartpoint (Q's `pg_control_checkpoint()` is read before and after), and the diverged pages are read back from Q's disk. Stop Q with `-m fast`, then stop P with `-m immediate` and delete it. B is Q's data directory: "shut down in recovery", with its REDO location before the fork (its shutdown restartpoint is at the last checkpoint it replayed) and post-fork pages on disk. | Start R alone, promote it (timeline 2), write on R; S from R | wrong |
 | S3 | P with checksums; pgbench writes in 2 sessions, a `CHECKPOINT` mid-run, then `pg_ctl stop -m immediate` while pgbench is still writing. B is a `shutil.copytree` of the data directory. | Restart P (crash recovery), more writes; S from P | correct |
 | S4 | B is a base backup of P. | Delete the upper half of `accounts`, `VACUUM accounts`; the heap file is checked to be shorter in S than in B; S from P | correct |
 | S5 | Template database `tmpl` with data, then `app` created from it and written to. B is a base backup. | `CREATE DATABASE app2 TEMPLATE tmpl STRATEGY FILE_COPY`; drop `app` and recreate it the same way; S from P | wrong |
@@ -36,15 +37,18 @@ P is the primary, R the standby, B the old copy, and S the fresh backup of the s
 | S8 | Cluster X built with the same procedure. B is a base backup of X. | A second cluster Y; S from Y | n/a |
 | S9 | A PG17 cluster with checksums. B is a PG17 base backup. | Stop it, `initdb` a PG18 cluster with matching settings, `pg_upgrade --link`, start the 18 cluster; S with PG18 `pg_basebackup` | n/a |
 
-S2b's `scenario.json` → `observations` also records:
+For S2, S2b and S2c, `scenario.json` → `observations` also records:
 - `fork_lsn`: the switchpoint in S's timeline history file;
-- `old_copy_redo_lsn` and `old_copy_checkpoint_lsn`;
-- `post_fork_pages`: every relation page of B whose on-disk LSN is after the fork, as `{file, block, kind, lsn}`, with `block` counted within its segment file.
+- `old_copy_redo_lsn`, `old_copy_checkpoint_lsn` and `old_copy_min_recovery_lsn` (B's `pg_controldata`; the last is `0/0` for a primary);
+- `post_fork_pages`: every relation page of B whose on-disk LSN is after the fork, as `{file, block, kind, lsn, source_lsn, exposed}`, with `block` counted within its segment file. `source_lsn` is S's page LSN at that block (`null` if S has no such page);
+- `exposed_pages`, with `exposed_pages_by_kind` and `exposed_pages_by_file`: how many of those pages are **exposed**. S holds that block with a page LSN at or below B's REDO location, and other bytes than B, so a tool that sends only the pages newer than B's REDO location skips it and keeps B's diverged bytes.
 
-Its checks add:
-- `old_copy_crashed`;
+The check `exposed_pages` fails the build when none is. In S2, B's REDO location (its shutdown checkpoint) lies after the fork, so the exposure comes from the diverging writes themselves. In S2b and S2c it lies before the fork. There, a page is exposed only if the source didn't rewrite its block after the fork, so the diverging writes also update a table that `burst_sql` never writes (`UPDATE tags SET v = upper(v) WHERE k = 3`): its pages are exposed by construction, however many `accounts` pages burst 2 rewrites. S2 keeps EXP-03's diverging writes.
+
+S2b's and S2c's checks add:
+- `old_copy_crashed` (S2b) or `old_copy_is_stopped_standby` (S2c: the state is "shut down in recovery");
 - `no_checkpoint_after_fork`: B's REDO and checkpoint locations are both before the fork;
-- `diverged_pages_on_disk_after_fork`: every `accounts` page the diverging update touched is on that list. Its `flush` field holds the eviction's counts.
+- `diverged_pages_on_disk_after_fork`: every `accounts` and `tags` page the diverging writes updated is on that list. Its `flush` field holds the eviction's counts by table, the cluster it ran on, and its `pg_control_checkpoint()` location before and after the eviction, which must be equal.
 
 The workload is deterministic SQL (`generate_series`, `md5`) over four tables:
 - `accounts` has a primary key and a secondary index.
@@ -118,7 +122,7 @@ T11 reuses this path from Python. `run_tool` takes `output`, `stats_path` and `l
 
 ## Choices that affect the numbers
 
-- **No background activity.** Autovacuum is off and `checkpoint_timeout` is 30 minutes in every cluster (a day in S2b). The only checkpoints and vacuums are the ones a scenario runs, so repeated builds give the same counts. S3 is the exception, because it depends on pgbench timing.
+- **No background activity.** Autovacuum is off and `checkpoint_timeout` is 30 minutes in every cluster (a day in S2b and S2c). The only checkpoints and vacuums are the ones a scenario runs, so repeated builds give the same counts. S3 is the exception, because it depends on pgbench timing.
 - **S1's threshold.** `CHECKPOINT` runs on P before R stops, so B's REDO location is a restartpoint after the first burst, as on any standby that has run through a checkpoint. Without it, the threshold falls back to the start of the base backup R was cloned from. A check during development found 0 wrongly-skipped pages in that variant, against 59 with the checkpoint, all of them hint bits and FSM pages.
 - **S5's database OIDs.** The recreated databases get new OIDs, so their files live under different `base/<oid>` paths than anything in B. The path-matched analysis never compares them. `scenario.json` → `observations.databases` records, per database, whether its directory exists in B and how many of its pages carry LSNs below the threshold. Reusing the old OID would make the paths coincide, but the scenario deliberately does not force that.
 - **S8.** Both clusters run the same deterministic procedure, so most differing pages differ only in `pd_lsn` (`lsn_only`). Only the pages ANALYZE samples randomly differ in content.
@@ -129,7 +133,7 @@ T11 reuses this path from Python. `run_tool` takes `output`, `stats_path` and `l
 | File | Role |
 |---|---|
 | `run_scenarios.py` | CLI: `list`, `build`, `evaluate`, `aggregate`, `run` |
-| `scenarios.py` | Workload SQL, the nine builders and their checks, `build_scenario` |
+| `scenarios.py` | Workload SQL, the builders and their checks, `build_scenario` |
 | `pgcluster.py` | initdb/pg_ctl/psql/pg_basebackup wrappers, `pg_controldata` and `backup_label` parsing, threshold selection |
 | `logical.py` | Logical state and its comparison |
 | `evaluate.py` | Tool run, tree comparison, `pg_verifybackup`, restore check |
@@ -138,7 +142,7 @@ T11 reuses this path from Python. `run_tool` takes `output`, `stats_path` and `l
 | `lsnscan.py` | The LSN-skip analyzer (pre-existing, unchanged) |
 
 `build_scenario(..., source_conf={...}, old_copy_conf={...})` adds server settings to the cluster that becomes the source, and to the one whose data directory becomes B, each from its creation on. A standby cloned from a primary of the other role gets its own role's settings, and the other role's reset to their built-in defaults. EXP-03 uses neither. T11 gives the source `wal_keep_size`, so it keeps its WAL since the fork, and B keeps EXP-03's settings unless asked otherwise.
-- `old_copy_conf` only applies where B is a cluster of its own: S1, S1b, S2 and S2b. Given for another scenario, its `old_copy_conf_applied` check fails.
+- `old_copy_conf` only applies where B is a cluster of its own: S1, S1b, S2, S2b and S2c (Q, the standby that becomes B; P, which is discarded, and R run with the source's settings). Given for another scenario, its `old_copy_conf_applied` check fails.
 - `scenario.json` → `server_conf` records both, and with which role's settings the source and B's cluster ran: `source_ran_with` and `old_copy_ran_with`. The latter is `null` when B is a base backup, which never ran, and `source` in S3, where B is a copy of the source's own data directory.
 
-Tests: `python -m unittest discover -s tests`. `tests/test_tricky_copies.py` holds unit tests plus one integration test, which builds S1 at 2,000 rows, runs the analysis and evaluates a stand-in tool. It takes about 3 s and is skipped when PostgreSQL 17 is not installed. S2b's page-LSN check and its build are tested in `tests/test_incumbents.py`.
+Tests: `python -m unittest discover -s tests`. `tests/test_tricky_copies.py` holds unit tests plus one integration test, which builds S1 at 2,000 rows, runs the analysis and evaluates a stand-in tool. It takes about 3 s and is skipped when PostgreSQL 17 is not installed. S2b's and S2c's checks, the exposed pages, and the builds of S2b and S2c are tested in `tests/test_incumbents.py`.

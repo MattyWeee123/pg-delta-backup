@@ -2,14 +2,16 @@
 """T11 driver: run the incumbent refresh tools on EXP-03's tricky old copies.
 
     run_t11.py [--pg-bin DIR] [--pg-probackup PATH|auto|none] [--wal-g PATH|auto|none]
-               [--scenarios S1,S2,S2b] [--tools pg_rewind,pg_probackup,walg,walg_send,pgdelta]
-               [--out results/t11] [--rows N] [--wal-keep-size SIZE|none]
-               [--old-copy-wal-keep-size SIZE|none] [--reuse-scenarios] [--keep-copies]
+               [--scenarios S1,S2,S2b,S2c] [--tools pg_rewind,pg_probackup,walg,...]
+               [--arm default|retained] [--out results/t11/ARM] [--rows N]
+               [--wal-keep-size SIZE|none] [--old-copy-wal-keep-size SIZE|none]
+               [--reuse-scenarios] [--keep-copies]
 
 Each scenario is built with EXP-03's builder and --keep, so its source cluster stays
 (stopped), under OUT/scenarios/. Every tool then runs on its own copy of B against its
 own copy of that source. Writes OUT/<scenario>/<tool>/result.json, OUT/summary.json and
-OUT/summary.csv. See README.md next to this file.
+OUT/summary.csv. EXP-08 runs everything twice, once per arm of B's WAL retention:
+--arm default and --arm retained, each into its own OUT. See README.md next to this file.
 """
 from __future__ import annotations
 
@@ -28,7 +30,7 @@ from experiments.tricky_copies import lsnscan, scenarios  # noqa: E402
 from experiments.tricky_copies.evaluate import REPO_ROOT  # noqa: E402
 from experiments.tricky_copies.pgcluster import DEFAULT_PG17, PgBin  # noqa: E402
 
-T11_SCENARIOS = ('S1', 'S2', 'S2b')
+T11_SCENARIOS = ('S1', 'S2', 'S2b', 'S2c')
 # EXP-03's sources recycle the WAL written since the fork at their next checkpoints, and
 # pg_basebackup's segment switches bring those quickly. pg_rewind's copy, and a standby
 # refreshed by a catch-up tool, replay the source's WAL from before the fork or from the
@@ -37,8 +39,11 @@ T11_SCENARIOS = ('S1', 'S2', 'S2b')
 # also reads B's own WAL from the last common checkpoint on, and whether B still has it
 # is part of what T11 measures.
 DEFAULT_WAL_KEEP = '4GB'
+# EXP-08's retained arm: B keeps its own WAL, standing in for production's WAL archive
+# with pg_rewind --restore-target-wal.
+RETAINED_WAL_KEEP = '4GB'
 DEFAULT_TOOLS = tools.TOOLS
-DEFAULT_OUT = REPO_ROOT / 'results' / 't11'
+DEFAULT_OUT = REPO_ROOT / 'results' / 't11'  # one subdirectory per arm
 DEBIAN_PG17 = Path('/usr/lib/postgresql/17/bin')
 
 
@@ -65,6 +70,25 @@ def parse_list(text, allowed, what):
 def read_json(path):
     path = Path(path)
     return json.loads(path.read_text()) if path.is_file() else None
+
+
+def resolve_arm(arm, old_copy_wal_keep_size):
+    """(arm, B's wal_keep_size or None) from --arm and --old-copy-wal-keep-size.
+
+    Without --arm the arm follows the size: 'retained' when one is given, else 'default'.
+    --arm retained gives B RETAINED_WAL_KEEP unless a size is given; --arm default with a
+    size is a contradiction."""
+    size = None if old_copy_wal_keep_size in (None, '', 'none') else old_copy_wal_keep_size
+    if arm is None:
+        return ('retained' if size else 'default'), size
+    if arm == 'default':
+        if size:
+            raise SystemExit(f'--arm default keeps B at the default WAL retention, but '
+                             f'--old-copy-wal-keep-size {size} was given; use --arm retained')
+        return 'default', None
+    if arm == 'retained':
+        return 'retained', size or RETAINED_WAL_KEEP
+    raise SystemExit(f'unknown arm {arm!r}; choose from {", ".join(checks.ARMS)}')
 
 
 def server_settings(wal_keep_size, old_copy_wal_keep_size=None):
@@ -109,8 +133,9 @@ def build_or_reuse(spec, root, *, rows, pgbin, reuse, verbose, conf):
 
 def listed_pages(directory, meta):
     """(B's pages with an LSN after the fork, where the list came from), or (None, None)
-    when B and S share a timeline. S2b's scenario.json holds the list; for S2 it is
-    computed here the same way, from S's timeline history file and B's pages."""
+    when B and S share a timeline. scenario.json holds the list for S2, S2b and S2c; for
+    a build made before S2 recorded it, it is computed here the same way, from S's
+    timeline history file and B's pages."""
     observations = meta.get('observations') or {}
     if 'post_fork_pages' in observations:
         return observations['post_fork_pages'], {
@@ -126,15 +151,37 @@ def listed_pages(directory, meta):
                    'fork_lsn': fork, 'count': len(pages)}
 
 
+def scenario_facts(directory, meta):
+    """What summary.json says about one build: B's state, its REDO, checkpoint and minimum
+    recovery locations, the timelines, the settings, the fork and the exposed pages."""
+    old = meta.get('old_copy') or {}
+    observations = meta.get('observations') or {}
+    return {'dir': str(directory), 'built_ok': meta.get('built_ok'), 'rows': meta.get('rows'),
+            'error': meta.get('error'), 'failed_checks': meta.get('failed_checks'),
+            'old_copy_state': old.get('cluster_state'),
+            'old_copy_redo_lsn': old.get('redo_location'),
+            'old_copy_checkpoint_lsn': old.get('checkpoint_location'),
+            'old_copy_min_recovery_lsn': old.get('min_recovery_location'),
+            'timelines': meta.get('timelines'), 'server_conf': meta.get('server_conf'),
+            'arm': checks.arm_of(checks.build_conf(meta)),
+            'fork_lsn': observations.get('fork_lsn'),
+            'post_fork_page_count': observations.get('post_fork_page_count'),
+            'exposed_pages': observations.get('exposed_pages'),
+            'exposed_pages_by_kind': observations.get('exposed_pages_by_kind')}
+
+
 def print_table(results):
-    print(f"{'scenario':8} {'tool':12} {'outcome':9} {'verdict':12} {'logical':7} "
-          f"{'amcheck':7} {'left':>5} {'seconds':>8}")
+    """One line per run: 'before' and 'after' count B's diverged pages the copy still holds
+    right after the tool and after recovery; 'class' is the refusal class."""
+    print(f"{'scenario':8} {'tool':12} {'arm':8} {'outcome':9} {'class':19} {'verdict':12} "
+          f"{'logical':7} {'amcheck':7} {'before':>6} {'after':>5} {'seconds':>8}")
     for result in results:
         row = checks.summary_row(result)
-        print(f"{row['scenario']:8} {row['tool']:12} {row['outcome'] or '':9} "
+        print(f"{row['scenario']:8} {row['tool']:12} {row['arm'] or '':8} "
+              f"{row['outcome'] or '':9} {row['refusal_class'] or '':19} "
               f"{result.get('verdict') or '':12} {str(row['logical_match']):7} "
-              f"{str(row['amcheck_ok']):7} {str(row['diverged_pages_left']):>5} "
-              f"{str(row['seconds']):>8}")
+              f"{str(row['amcheck_ok']):7} {str(row['diverged_before_recovery']):>6} "
+              f"{str(row['diverged_pages_left']):>5} {str(row['seconds']):>8}")
 
 
 def main(argv=None):
@@ -153,7 +200,13 @@ def main(argv=None):
                         help='comma-separated EXP-03 scenario ids (default %(default)s)')
     parser.add_argument('--tools', default=','.join(DEFAULT_TOOLS),
                         help='comma-separated tools (default %(default)s)')
-    parser.add_argument('--out', default=str(DEFAULT_OUT), help='results directory')
+    parser.add_argument('--arm', choices=checks.ARMS, default=None,
+                        help="EXP-08's arm of B's WAL retention: 'default' (EXP-03's settings) "
+                             f"or 'retained' (B gets wal_keep_size {RETAINED_WAL_KEEP}, or "
+                             '--old-copy-wal-keep-size). Default: retained if '
+                             '--old-copy-wal-keep-size is given, else default')
+    parser.add_argument('--out', default=None,
+                        help='results directory (default results/t11/ARM in this checkout)')
     parser.add_argument('--rows', type=int, default=scenarios.DEFAULT_ROWS,
                         help='rows in the accounts table, passed to the scenario builder '
                              '(default %(default)s)')
@@ -161,10 +214,11 @@ def main(argv=None):
                         help="wal_keep_size for the cluster that becomes the source, so it keeps "
                              "its WAL since the fork (default %(default)s; 'none' for EXP-03's "
                              "settings, under which the refreshed standbys cannot catch up)")
-    parser.add_argument('--old-copy-wal-keep-size', default='none',
+    parser.add_argument('--old-copy-wal-keep-size', default=None,
                         help="wal_keep_size for the cluster whose data directory becomes B, so B "
                              "keeps its own WAL since the last common checkpoint, as pg_rewind "
-                             "needs (default %(default)s: EXP-03's settings)")
+                             "needs (default: none, EXP-03's settings, or with --arm retained "
+                             f"{RETAINED_WAL_KEEP})")
     parser.add_argument('--reuse-scenarios', action='store_true',
                         help='reuse scenarios already built under OUT/scenarios at --rows')
     parser.add_argument('--keep-copies', action='store_true',
@@ -175,7 +229,8 @@ def main(argv=None):
     parser.add_argument('--quiet', action='store_true', help='print one line per run')
     args = parser.parse_args(argv)
 
-    out = Path(args.out).resolve()
+    arm, old_copy_wal_keep = resolve_arm(args.arm, args.old_copy_wal_keep_size)
+    out = Path(args.out or DEFAULT_OUT / arm).resolve()
     out.mkdir(parents=True, exist_ok=True)
     pgbin = PgBin(args.pg_bin)
     if not pgbin.available():
@@ -189,17 +244,15 @@ def main(argv=None):
         state = info['version'] if info['available'] else f"skipped: {info['reason']}"
         print(f'== {name}: {state}', flush=True)
 
-    conf = server_settings(args.wal_keep_size, args.old_copy_wal_keep_size)
+    conf = server_settings(args.wal_keep_size, old_copy_wal_keep)
+    print(f'== arm {arm}: B runs with {conf["old_copy"] or "the default settings"}; '
+          f'results in {out}', flush=True)
     results, scenario_info, ok = [], {}, True
     for spec in chosen:
         directory, meta, reused = build_or_reuse(
             spec, out / 'scenarios', rows=args.rows, pgbin=pgbin, reuse=args.reuse_scenarios,
             verbose=not args.quiet, conf=conf)
-        info = {'dir': str(directory), 'built_ok': meta.get('built_ok'), 'rows': meta.get('rows'),
-                'error': meta.get('error'), 'failed_checks': meta.get('failed_checks'),
-                'old_copy_state': (meta.get('old_copy') or {}).get('cluster_state'),
-                'old_copy_redo_lsn': (meta.get('old_copy') or {}).get('redo_location'),
-                'timelines': meta.get('timelines'), 'server_conf': meta.get('server_conf')}
+        info = scenario_facts(directory, meta)
         scenario_info[spec.id] = info
         if not reused:  # earlier results for this scenario describe another build
             shutil.rmtree(out / spec.id, ignore_errors=True)
@@ -232,7 +285,7 @@ def main(argv=None):
     others = checks.other_builds(everything, args.rows, conf)
     context = {'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds'),
                'pg_bin': pgbin.describe(),
-               'invocation': {'rows': args.rows, 'server_conf': conf,
+               'invocation': {'rows': args.rows, 'server_conf': conf, 'arm': arm,
                               'scenarios': [spec.id for spec in chosen], 'tools': tool_names},
                'tools': infos, 'scenarios': scenario_info, 'runs_from_other_builds': others}
     json_path, csv_path = checks.write_summary(out, everything, context)
