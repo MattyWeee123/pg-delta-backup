@@ -413,6 +413,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 - **Proves it wrong:** if pgdelta's loss is no higher than the full copy's where it wins on time, source CPU isn't a blocker. If it is higher, report slowdown next to time and move T5 ahead of T8. Any wrong output stops speed work.
 
 ### T11 Incumbent tools where pgdelta claims its edge
+- **Pre-registered in full as [EXP-08](experiments/EXP-08-incumbent-tools.md)** (October 23, 2026), with the arms and predictions added there before running.
 - **Question:**
   - **On the Mac:** run pg_rewind and pg_probackup catchup (and WAL-G catchup if it builds) on EXP-03's S1 and S2, plus a new S2b: an ex-primary that flushed pages after the fork without a checkpoint.
   - **On the VMs:** pgBackRest backup and `restore --delta` from an existing repository, counting the backup as already paid.
@@ -425,6 +426,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
   - If pgBackRest also wins on bytes for scattered changes, the pitch to Omni users must be "no repository needed".
 
 ### T8a Cold direct read without a capture
+- **Pre-registered in full as [EXP-09](experiments/EXP-09-direct-read.md)** (October 23, 2026), with the arms and predictions added there before running.
 - **Question:** how fast is pgdelta when its sender reads a stopped source's data directory directly, with caches dropped on both sides and today's write path? It doesn't test backup mode, WAL or a busy source.
 - **Prediction:** 0.2-0.6 s slower than today's warm transfer. At 5 Gbit/s, 4.6-5.0 s for local changes and 5.2-5.6 s for uniform, against the full copy's 5.07 s.
 - **Proves it wrong:** if it is slower than the full copy at 5 Gbit/s in all three workloads, fix the write path (T3) before building backup-mode reads.
@@ -443,6 +445,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
   - zstd gives 2 times or more: compression must be added to both sides before claiming slow-link wins.
 
 ### T3 Destination write path on Linux
+- **Pre-registered in full as [EXP-10](experiments/EXP-10-write-path.md)** (October 23, 2026), with the arms and predictions added there before running.
 - **Arms**, at 4 workers, 5 repeats, reporting median and maximum:
   - (a) copy-then-patch vs gap-fill, with sequential verification;
   - (b) fsync in the main loop vs early write-back vs fsync on a worker;
