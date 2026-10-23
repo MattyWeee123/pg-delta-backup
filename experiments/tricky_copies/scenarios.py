@@ -33,8 +33,11 @@ from experiments.tricky_copies.pgcluster import (REDO_KEY, Cluster, PgBin, clean
                                                  select_threshold, short_tempdir, tree_size)
 
 BASE_CONF = {'autovacuum': 'off', 'checkpoint_timeout': '30min'}
+# S2b: no time- or size-triggered checkpoint may run on P after the fork.
+NO_CHECKPOINT_CONF = {'checkpoint_timeout': '1d', 'max_wal_size': '10GB'}
 DEFAULT_ROWS = 200_000
 SEGMENT_BLOCKS = 131072  # 1 GiB segments of 8 KiB blocks
+FIRST_NORMAL_OID = 16384  # relations created by users, with their indexes and TOAST
 USER_TABLES = ('accounts', 'history', 'docs', 'tags')
 
 
@@ -92,6 +95,22 @@ INSERT INTO accounts VALUES ({rows + 1}, 0, 'written only on the old primary');
 DIVERGED_BLOCKS_SQL = ("SELECT DISTINCT ((ctid::text)::point)[0]::bigint FROM accounts "
                        "WHERE id % 200 = 3 ORDER BY 1;")
 
+
+def evict_dirty_user_buffers_sql(major):
+    """(dirty buffers, buffers evicted) for the user relations of the current database.
+
+    pg_buffercache_evict() writes a dirty buffer out before evicting it, so it puts pages
+    on disk without a checkpoint. It returns a boolean in PostgreSQL 17 and a record
+    (buffer_evicted, buffer_flushed) from 18 on."""
+    evicted = ('pg_buffercache_evict(b.bufferid)' if major < 18
+               else '(pg_buffercache_evict(b.bufferid)).buffer_evicted')
+    return f"""SELECT count(*), count(*) FILTER (WHERE {evicted})
+FROM pg_buffercache b
+JOIN pg_class c ON b.relfilenode = pg_relation_filenode(c.oid)
+WHERE b.isdirty AND c.oid >= {FIRST_NORMAL_OID}
+  AND b.reldatabase = (SELECT oid FROM pg_database WHERE datname = current_database());"""
+
+
 CRASH_PGBENCH = r"""\set aid random(1, :rows)
 BEGIN;
 UPDATE accounts SET bal = bal + 1 WHERE id = :aid;
@@ -110,8 +129,16 @@ SET enable_bitmapscan = off;
 # Build context
 # --------------------------------------------------------------------------
 class BuildContext:
-    def __init__(self, scenario_dir, rows, bins, default_bin, keep=False, verbose=True):
+    def __init__(self, scenario_dir, rows, bins, default_bin, keep=False, verbose=True,
+                 source_conf=None, old_copy_conf=None):
         self.scenario_dir = Path(scenario_dir)
+        # Extra server settings by role (T11; EXP-03 uses none): 'source' for the cluster
+        # that becomes the source, 'old_copy' for the one whose data directory becomes B.
+        # Each cluster runs with its role's settings from its creation on.
+        self.role_conf = {'source': dict(source_conf or {}),
+                          'old_copy': dict(old_copy_conf or {})}
+        self.roles = {}  # cluster name -> the role whose settings it runs with
+        self.old_copy_role = None  # the role of the cluster B was taken from, if B ran
         self.old_copy = self.scenario_dir / 'old_copy'
         self.source_backup = self.scenario_dir / 'source_backup'
         self.rows, self.bins, self.default_bin = rows, bins, default_bin
@@ -147,26 +174,48 @@ class BuildContext:
         return cluster
 
     def new_primary(self, name, checksums=True, conf=None, pgbin=None, load=True, vacuum=True,
-                    db='postgres'):
+                    db='postgres', role='source'):
         cluster = self.new_cluster(name, pgbin)
         flag = 'with' if checksums else 'without'
         self.step(f'initdb {name} ({cluster.pgbin.version_text}, {flag} data checksums)')
         cluster.initdb(checksums=checksums)
-        cluster.append_conf({**BASE_CONF, **(conf or {})})
+        cluster.append_conf({**BASE_CONF, **self.role_conf[role], **(conf or {})})
+        self.roles[name] = role
         cluster.start()
         if load:
             self.step(f'load data on {name} ({self.rows} accounts rows)')
             cluster.psql(load_sql(self.rows, vacuum=vacuum), db)
         return cluster
 
-    def new_standby(self, name, primary):
+    def new_standby(self, name, primary, role=None):
+        """A streaming standby of ``primary``. With a ``role`` other than the primary's, it
+        runs with that role's settings instead of those it copied from the primary."""
         standby = self.new_cluster(name, primary.pgbin)
         self.step(f'create standby {name} with pg_basebackup -R from {primary.name}')
         primary.basebackup(standby.datadir, extra=['-R'])
+        inherited = self.roles.get(primary.name)
+        self.roles[name] = role = role or inherited
+        if role != inherited:
+            self.switch_role_conf(standby, primary, inherited, role)
         standby.start()
         primary.wait_for("SELECT count(*) > 0 FROM pg_stat_replication WHERE state = 'streaming'")
         self.step(f'{name} is streaming from {primary.name}')
         return standby
+
+    def switch_role_conf(self, standby, primary, inherited, role):
+        """Append ``role``'s settings to a fresh clone's postgresql.conf, after resetting
+        those of the primary's role to their built-in defaults (read from the primary)."""
+        wanted = self.role_conf[role]
+        stale = [name for name in self.role_conf.get(inherited, {}) if name not in wanted]
+        defaults = {}
+        if stale:
+            names = ', '.join("'" + name.replace("'", "''") + "'" for name in stale)
+            defaults = dict(primary.query(
+                f'SELECT name, boot_val FROM pg_settings WHERE name IN ({names}) ORDER BY 1'))
+        if defaults or wanted:
+            self.step(f'{standby.name} gets the {role} settings {wanted}'
+                      + (f' and the defaults {defaults}' if defaults else ''))
+            standby.append_conf({**defaults, **wanted})
 
     def wait_replay(self, primary, standby):
         target = primary.scalar('SELECT pg_current_wal_lsn()')
@@ -179,6 +228,7 @@ class BuildContext:
         cluster.basebackup(self.old_copy)
 
     def adopt_datadir_as_old_copy(self, cluster, copy=False):
+        self.old_copy_role = self.roles.get(cluster.name)
         if copy:
             self.step(f'B = copy of {cluster.name} data directory (shutil.copytree)')
             shutil.copytree(cluster.datadir, self.old_copy, symlinks=True)
@@ -226,12 +276,63 @@ def read_block(path, block):
     return page if len(page) == lsnscan.BLOCK else None
 
 
+def segment_location(relpath, block):
+    """(segment file, block within it) of a relation block, e.g. ('base/5/16384.1', 3)."""
+    segment, offset = divmod(block, SEGMENT_BLOCKS)
+    return (relpath if segment == 0 else f'{relpath}.{segment}'), offset
+
+
+def pages_after_lsn(root, lsn):
+    """Every relation page under root whose pd_lsn is beyond ``lsn`` (an integer), as
+    [{'file', 'block', 'kind', 'lsn'}]; ``block`` counts within that segment file."""
+    root = Path(root)
+    pages = []
+    for path in sorted(p for p in root.rglob('*') if p.is_file() and not p.is_symlink()):
+        relpath = path.relative_to(root).as_posix()
+        kind = lsnscan.relation_kind(relpath)
+        if kind is None:
+            continue
+        with path.open('rb') as handle:
+            block = 0
+            while len(page := handle.read(lsnscan.BLOCK)) == lsnscan.BLOCK:
+                page_lsn = lsnscan.page_lsn(page)
+                if page_lsn > lsn:
+                    pages.append({'file': relpath, 'block': block, 'kind': kind,
+                                  'lsn': lsnscan.format_lsn(page_lsn)})
+                block += 1
+    return pages
+
+
+def history_switchpoint(text):
+    """LSN where the newest timeline of a timeline history file forked from its parent.
+
+    Each line is "parentTLI<tab>switchpoint<tab>reason"; the last one is the newest fork."""
+    entries = [line.split() for line in text.splitlines()
+               if line.strip() and not line.lstrip().startswith('#')]
+    if not entries or len(entries[-1]) < 2:
+        raise ValueError('no switchpoint in timeline history')
+    return lsnscan.format_lsn(lsnscan.parse_lsn(entries[-1][1]))
+
+
+def flush_without_checkpoint(cluster, passes=5):
+    """Write every dirty buffer of a user relation (all forks, indexes and TOAST included)
+    to disk with pg_buffercache_evict(), until a pass finds none; no checkpoint runs."""
+    sql = evict_dirty_user_buffers_sql(cluster.pgbin.major)
+    evicted = 0
+    for done_passes in range(1, passes + 1):
+        dirty, written = (int(v) for v in cluster.query(sql)[0])
+        evicted += written
+        if dirty == 0:
+            return {'passes': done_passes, 'buffers_evicted': evicted, 'clean': True}
+    return {'passes': passes, 'buffers_evicted': evicted, 'clean': False}
+
+
 # --------------------------------------------------------------------------
 # Scenarios
 # --------------------------------------------------------------------------
 def build_s1(ctx, restartpoint=True):
     p = ctx.new_primary('primary')
-    r = ctx.new_standby('standby', p)
+    r = ctx.new_standby('standby', p, role='old_copy')
     ctx.step('writes on P (burst 1), replicated to R')
     p.psql(burst_sql(ctx.rows, 1))
     if restartpoint:
@@ -266,9 +367,14 @@ def check_s1(ctx, old_info, source_info, threshold):
               cluster_state=old_info['cluster_state'])
 
 
-def build_s2(ctx):
-    p = ctx.new_primary('primary')
-    r = ctx.new_standby('standby', p)
+def build_s2(ctx, crash=False):
+    """S2, or with ``crash`` S2b: P flushes its diverged pages without a checkpoint and
+    stops with -m immediate, so B's REDO location stays before the fork."""
+    p = ctx.new_primary('primary', conf=NO_CHECKPOINT_CONF if crash else None, role='old_copy')
+    if crash:
+        ctx.step('CREATE EXTENSION pg_buffercache on P, before R is cloned, so R has it too')
+        p.psql('CREATE EXTENSION pg_buffercache;')
+    r = ctx.new_standby('standby', p, role='source')
     ctx.step('writes on P (burst 1), replicated to R')
     p.psql(burst_sql(ctx.rows, 1))
     p.psql('CHECKPOINT;')
@@ -279,11 +385,27 @@ def build_s2(ctx):
     relpath = p.scalar("SELECT pg_relation_filepath('accounts')")
     blocks = [int(row[0]) for row in p.query(DIVERGED_BLOCKS_SQL)]
     ctx.facts['diverged'] = {'file': relpath, 'blocks': blocks}
+    # R stopped before this, so everything P writes from here on lies after the fork.
+    before = p.scalar('SELECT pg_current_wal_lsn()')
     ctx.step(f'DIVERGING writes on P: update rows in {len(blocks)} pages of accounts and insert one')
     p.psql(diverging_sql(ctx.rows))
     ctx.facts['old_primary_end_lsn'] = p.scalar('SELECT pg_current_wal_lsn()')
-    ctx.step('stop P cleanly (-m fast)')
-    p.stop('fast')
+    if crash:
+        ctx.step('write every dirty buffer of the user relations to disk with '
+                 'pg_buffercache_evict(), without a checkpoint')
+        flush = flush_without_checkpoint(p)
+        on_disk = [lsnscan.page_lsn(read_block(p.datadir / relpath, block) or b'')
+                   for block in blocks]
+        flushed = sum(lsn is not None and lsn > lsnscan.parse_lsn(before) for lsn in on_disk)
+        ctx.facts['flush'] = {**flush, 'lsn_before_diverging_writes': before,
+                              'diverged_pages': len(blocks),
+                              'diverged_pages_on_disk_after_that_lsn': flushed}
+        ctx.step(f'{flushed} of {len(blocks)} diverged pages carry a later LSN on disk; '
+                 'stop P with -m immediate (no shutdown checkpoint)')
+        p.stop('immediate')
+    else:
+        ctx.step('stop P cleanly (-m fast)')
+        p.stop('fast')
     ctx.adopt_datadir_as_old_copy(p)
     ctx.step('start R alone and promote it (new timeline)')
     r.start()
@@ -318,6 +440,32 @@ def check_s2(ctx, old_info, source_info, threshold):
     ctx.observations['timeline_history'] = {h.name: h.read_text().strip() for h in history}
     ctx.observations['split_lsn'] = ctx.facts['split_lsn']
     ctx.observations['old_primary_end_lsn'] = ctx.facts['old_primary_end_lsn']
+
+
+def check_s2b(ctx, old_info, source_info, threshold):
+    """S2's checks, plus: B crashed, its REDO and checkpoint lie before the fork, and the
+    pages P wrote after the fork are on disk. Records the fork LSN and those pages."""
+    check_s2(ctx, old_info, source_info, threshold)
+    history = ctx.source_backup / 'pg_wal' / f"{source_info['timeline']:08X}.history"
+    fork = history_switchpoint(history.read_text())
+    fork_value = lsnscan.parse_lsn(fork)
+    redo, checkpoint = old_info['redo_location'], old_info['checkpoint_location']
+    post_fork = pages_after_lsn(ctx.old_copy, fork_value)
+    ctx.observations.update(fork_lsn=fork, fork_lsn_source=f'pg_wal/{history.name} of S',
+                            old_copy_redo_lsn=redo, old_copy_checkpoint_lsn=checkpoint,
+                            post_fork_page_count=len(post_fork), post_fork_pages=post_fork)
+    ctx.check('old_copy_crashed', old_info['cluster_state'] == 'in production',
+              cluster_state=old_info['cluster_state'])
+    ctx.check('no_checkpoint_after_fork', lsnscan.parse_lsn(redo) < fork_value
+              and lsnscan.parse_lsn(checkpoint) < fork_value,
+              fork_lsn=fork, redo_lsn=redo, checkpoint_lsn=checkpoint)
+    listed = {(page['file'], page['block']) for page in post_fork}
+    diverged = ctx.facts['diverged']
+    found = sum(segment_location(diverged['file'], block) in listed
+                for block in diverged['blocks'])
+    ctx.check('diverged_pages_on_disk_after_fork', diverged['blocks'] and found == len(
+        diverged['blocks']), pages_written_after_split=len(diverged['blocks']),
+        pages_with_lsn_after_fork=found, flush=ctx.facts.get('flush'))
 
 
 def build_s3(ctx):
@@ -539,7 +687,8 @@ def build_s9(ctx):
     new = ctx.new_cluster('pg18', new_bin)
     ctx.step(f'initdb the 18 cluster ({new_bin.version_text}) with matching settings')
     new.initdb(checksums=True)
-    new.append_conf(BASE_CONF)
+    new.append_conf({**BASE_CONF, **ctx.role_conf['source']})
+    ctx.roles[new.name] = 'source'
     ctx.step('pg_upgrade --link from 17 to 18')
     proc = run([new_bin.tool('pg_upgrade'), '-b', old_bin.bindir, '-B', new_bin.bindir,
                 '-d', old.datadir, '-D', new.datadir, '--link', '-U', 'postgres',
@@ -588,6 +737,12 @@ SCENARIOS = [
     Scenario('S2', 'ex-primary-after-failover', 'Ex-primary that kept writing after a failover',
              'data directory of the old primary, stopped cleanly after diverging writes',
              'wrong', 'correct; diverged pages detected and re-sent', build_s2, check_s2),
+    Scenario('S2b', 'ex-primary-no-checkpoint-after-fork',
+             'Ex-primary that flushed diverged pages after a failover without a checkpoint',
+             'data directory of the old primary, stopped with -m immediate after its diverged '
+             'pages were written out without a checkpoint (REDO before the fork)',
+             'wrong', 'correct; diverged pages detected and re-sent',
+             partial(build_s2, crash=True), check_s2b),
     Scenario('S3', 'crash-consistent-copy', 'Crash-consistent copy',
              'copy of the data directory of a primary stopped with -m immediate mid-write',
              'correct', 'correct', build_s3, check_s3),
@@ -644,7 +799,8 @@ def describe_copy(path, bins):
 
 def scenario_metadata(spec, *, rows, built_ok, error=None, threshold=None, old_info=None,
                       source_info=None, binaries=None, checks=None, observations=None,
-                      notes=None, quiesce=None, steps=None, seconds=None):
+                      notes=None, quiesce=None, steps=None, seconds=None, source_cluster=None,
+                      server_conf=None):
     """The scenario.json document. Pure, so its shape is easy to test."""
     same_sysid = None
     if old_info and source_info:
@@ -672,6 +828,8 @@ def scenario_metadata(spec, *, rows, built_ok, error=None, threshold=None, old_i
         'data_checksum_versions': {'old_copy': (old_info or {}).get('data_checksum_version'),
                                    'source_backup': (source_info or {}).get('data_checksum_version')},
         'quiesce': quiesce,
+        'source_cluster': source_cluster,
+        'server_conf': server_conf or {'source': {}, 'old_copy': {}},
         'checks': checks or {},
         'observations': observations or {},
         'notes': notes or [],
@@ -694,13 +852,30 @@ def write_json(path, document):
 
 
 def build_scenario(spec, out_root, *, rows=DEFAULT_ROWS, bins, default_bin, keep=False,
-                   force=False, verbose=True):
-    """Build one scenario under out_root/<id>-<slug>/ and return its metadata."""
+                   force=False, verbose=True, source_conf=None, old_copy_conf=None):
+    """Build one scenario under out_root/<id>-<slug>/ and return its metadata.
+
+    ``source_conf`` adds server settings to the cluster that becomes the source, from its
+    creation on; ``old_copy_conf`` to the one whose data directory becomes B (S1, S1b, S2
+    and S2b, where that is a cluster of its own). EXP-03 uses neither; T11 gives the
+    source wal_keep_size. scenario.json records both, and with which role's settings
+    the source and B's cluster ran."""
     scenario_dir = prepare_scenario_dir(Path(out_root) / spec.dirname, force)
-    ctx = BuildContext(scenario_dir, rows, bins, default_bin, keep=keep, verbose=verbose)
+    ctx = BuildContext(scenario_dir, rows, bins, default_bin, keep=keep, verbose=verbose,
+                       source_conf=source_conf, old_copy_conf=old_copy_conf)
     result = {'built_ok': False}
     try:
         source = spec.builder(ctx)
+        result['source_role'] = ctx.roles.get(source.name)
+        if ctx.role_conf['source']:
+            ctx.check('source_conf_applied', result['source_role'] == 'source',
+                      cluster=source.name, ran_with=result['source_role'])
+        if ctx.role_conf['old_copy']:
+            ctx.check('old_copy_conf_applied', ctx.old_copy_role == 'old_copy',
+                      ran_with=ctx.old_copy_role)
+        # With --keep the source stays, stopped, for tools that need a live server (T11).
+        result['source_cluster'] = {'name': source.name, 'kept': keep,
+                                    'datadir': source.datadir.relative_to(scenario_dir).as_posix()}
         ctx.step(f'source is {source.name}; check it is quiesced, then take S')
         xid_before, others = xid_horizon(source), other_sessions(source)
         source.basebackup(ctx.source_backup)
@@ -750,7 +925,10 @@ def build_scenario(spec, out_root, *, rows=DEFAULT_ROWS, bins, default_bin, keep
         source_info=result.get('source_info'), binaries=result.get('binaries'),
         checks=ctx.checks, observations=ctx.observations, notes=ctx.notes,
         quiesce=result.get('quiesce'), steps=ctx.steps,
-        seconds=round(time.monotonic() - ctx.started, 1))
+        seconds=round(time.monotonic() - ctx.started, 1),
+        source_cluster=result.get('source_cluster'),
+        server_conf={**ctx.role_conf, 'source_ran_with': result.get('source_role'),
+                     'old_copy_ran_with': ctx.old_copy_role})
     if result.get('traceback'):
         meta['traceback'] = result['traceback']
     write_json(scenario_dir / 'scenario.json', meta)

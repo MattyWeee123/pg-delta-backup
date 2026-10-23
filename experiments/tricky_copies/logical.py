@@ -2,8 +2,10 @@
 
 The md5 is taken over the md5 of every row's text form, in primary-key order
 (or ordered by the whole row's text when a table has no primary key), with the
-session settings that affect text output pinned. Unlogged and temporary tables
-are listed separately and not hashed, because a restored backup resets them.
+session settings that affect text output pinned. Index scans are off, so every
+table is read from its heap: through an index, the count and the md5 would miss
+heap tuples that no index entry points to. Unlogged and temporary tables are
+listed separately and not hashed, because a restored backup resets them.
 
 ``compute_logical_state`` takes a ``query(sql, db) -> rows`` callable so it can
 run against any server (or a fake in tests).
@@ -16,6 +18,9 @@ SET IntervalStyle = 'postgres';
 SET TimeZone = 'UTC';
 SET bytea_output = 'hex';
 SET statement_timeout = 0;
+SET enable_indexscan = off;
+SET enable_indexonlyscan = off;
+SET enable_bitmapscan = off;
 """
 
 DATABASES_SQL = 'SELECT datname, datallowconn FROM pg_database ORDER BY datname;'
