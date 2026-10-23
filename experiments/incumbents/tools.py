@@ -8,13 +8,17 @@ through EXP-03's evaluate path and never writes to either.
 An accepted copy is brought up the way its tool intends:
 - the incumbents' copies as a standby of the source: recovery configuration (pg_rewind
   writes its own with --write-recovery-conf), start, wait until replay reaches the
-  source's current LSN, compare the logical state as a hot standby, promote, pg_amcheck,
-  CHECKPOINT and a clean stop;
+  source's current LSN, compare the logical state as a hot standby, promote, CHECKPOINT
+  and a clean stop; then a restart for pg_amcheck;
 - pgdelta's O as EXP-03 restores it: started from a disposable copy until recovery
-  ends, logical state compared, then pg_amcheck, CHECKPOINT and a clean stop.
+  ends, then CHECKPOINT and a clean stop; then a restart for the logical comparison and
+  pg_amcheck.
 B's post-fork pages are compared with the copy twice: right after the tool
-(diverged_before_recovery) and once the copy has stopped cleanly after that bring-up
-(diverged_after_recovery, which the verdict uses).
+(diverged_before_recovery) and at the clean stop after it reached consistency
+(diverged_after_recovery, which the verdict uses). The second count comes before
+anything reads the copy's tables as a primary: such reads, pg_amcheck --heapallindexed's
+heap scans among them, prune pages (heap_page_prune_opt), which would remove B's dead
+tuples from its stale pages and hide them from the count. A hot standby doesn't prune.
 """
 from __future__ import annotations
 
@@ -573,15 +577,20 @@ def wait_caught_up(job, cluster, target_lsn):
         time.sleep(0.25)
 
 
-def bring_up_standby(job, copy):
-    """Start ``copy`` as a standby of the source, compare it once it has caught up, then
-    promote it, run pg_amcheck, CHECKPOINT and stop it cleanly. Returns (bring_up,
-    logical, amcheck); bring_up['stopped_cleanly'] says whether the copy's pages can now
-    be counted after recovery."""
+def bring_up_standby(job, copy, at_consistency=None):
+    """Start ``copy`` as a standby of the source and, once it has caught up, compare its
+    logical state as a hot standby (which doesn't prune pages). Then promote it, CHECKPOINT,
+    stop it cleanly and call ``at_consistency(copy)``, which counts B's post-fork pages
+    before anything reads the tables of the promoted copy. Then start it again for
+    pg_amcheck, whose heap scans prune pages, and stop it. Returns (bring_up, logical,
+    amcheck, what at_consistency returned); bring_up['stopped_cleanly'] says whether the
+    copy reached that clean stop, and bring_up['after_recovery_error'] holds an error of
+    at_consistency."""
     info = {'mode': 'standby of the source', 'recovery_conf': None, 'started': False,
             'target_lsn': None, 'replay_lsn': None, 'caught_up': False, 'promoted': False,
-            'checkpointed': False, 'stopped_cleanly': False, 'seconds': None, 'error': None}
-    logical, amcheck = None, None
+            'checkpointed': False, 'stopped_cleanly': False, 'restarted_for_amcheck': False,
+            'seconds': None, 'error': None}
+    logical, amcheck, counted = None, None, None
     started = time.monotonic()
     cluster = job.new_server('copy', copy)
     try:
@@ -595,7 +604,7 @@ def bring_up_standby(job, copy):
         if not caught_up:
             info['error'] = reason
             info['log_tail'] = checks.tail(log_text(cluster.logfile))
-            return info, None, None
+            return info, None, None, None
         try:
             actual = compute_logical_state(cluster.query)
             differences = compare_logical_states(job.expected, actual)
@@ -607,18 +616,27 @@ def bring_up_standby(job, copy):
         cluster.promote()
         cluster.wait_for('SELECT NOT pg_is_in_recovery()', timeout=120)
         info['promoted'] = True
-        amcheck = run_amcheck(cluster)
         cluster.psql('CHECKPOINT;')
         info['checkpointed'] = True
         cluster.stop('fast')
         info['stopped_cleanly'] = True
+        if at_consistency is not None:
+            try:
+                counted = at_consistency(copy)
+            except (OSError, ValueError) as exc:
+                info['after_recovery_error'] = f'{type(exc).__name__}: {exc}'
+        # amcheck has to be installed, which a standby can't do: hence after promotion.
+        cluster.start()
+        info['restarted_for_amcheck'] = True
+        amcheck = run_amcheck(cluster)
+        cluster.stop('fast')
     except (CommandError, TimeoutError, OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
         info['error'] = f'{type(exc).__name__}: {exc}'
         info['log_tail'] = checks.tail(log_text(cluster.logfile))
     finally:
         cluster.ensure_stopped()
         info['seconds'] = round(time.monotonic() - started, 2)
-    return info, logical, amcheck
+    return info, logical, amcheck, counted
 
 
 def log_text(path):
@@ -636,10 +654,18 @@ def count_after_recovery(job, copy, when):
     return {**counted, 'counted_after': when, 'compared_by': 'tuple data (checks.tuple_data)'}
 
 
+STANDBY_COUNTED_AFTER = ('replay up to the source, promotion, CHECKPOINT and a clean stop, '
+                         'before pg_amcheck')
+RESTORE_COUNTED_AFTER = ('end of recovery, CHECKPOINT and a clean stop of the restored O, '
+                         'before the logical comparison and pg_amcheck')
+
+
 def bring_up_restore(job, output):
     """pgdelta's O, checked as EXP-03 does (byte comparison with S, pg_verifybackup, a
-    restore to the end of recovery and the logical comparison), plus pg_amcheck, then a
-    CHECKPOINT, a clean stop and the count of B's post-fork pages after recovery.
+    restore to the end of recovery and the logical comparison), plus pg_amcheck. Once
+    recovery has ended, and before anything reads the restored server's tables, it is
+    checkpointed, stopped cleanly and B's post-fork pages are counted; restore_and_compare
+    then starts it again for the logical comparison and pg_amcheck.
     Returns (bring_up, logical, amcheck, pgdelta_checks, diverged_after_recovery)."""
     extra = {'byte_comparison': evaluation.compare_trees(job.source_backup, output)}
     extra['byte_identical'] = extra['byte_comparison']['identical']
@@ -647,8 +673,8 @@ def bring_up_restore(job, output):
     extra['verifybackup'], extra['verifybackup_detail'] = verify['ok'], verify
     started = time.monotonic()
 
-    def after_recovery(cluster):
-        found = {'amcheck': run_amcheck(cluster)}
+    def at_consistency(cluster):
+        found = {}
         try:
             cluster.psql('CHECKPOINT;')
             found['checkpointed'] = True
@@ -656,20 +682,24 @@ def bring_up_restore(job, output):
             found['stopped_cleanly'] = True
             if job.listed_pages is not None:
                 found['diverged_after_recovery'] = count_after_recovery(
-                    job, cluster.datadir, 'end of recovery, pg_amcheck, CHECKPOINT and a clean '
-                                          'stop of the restored O')
-        except (CommandError, TimeoutError, OSError, RuntimeError,
+                    job, cluster.datadir, RESTORE_COUNTED_AFTER)
+        except (CommandError, TimeoutError, OSError, ValueError, RuntimeError,
                 subprocess.TimeoutExpired) as exc:
             found['after_recovery_error'] = f'{type(exc).__name__}: {exc}'
         return found
 
+    def while_running(cluster):
+        return {'amcheck': run_amcheck(cluster)}
+
     restore = evaluation.restore_and_compare(output, job.expected, job.pgbin, job.work,
-                                             while_running=after_recovery)
+                                             while_running=while_running,
+                                             at_consistency=at_consistency)
     info = {'mode': 'restore of O (EXP-03)', 'recovery_conf': None,
             'started': restore['restore_ok'], 'caught_up': restore['restore_ok'],
             'promoted': not restore.get('in_recovery', True),
             'checkpointed': restore.get('checkpointed', False),
             'stopped_cleanly': restore.get('stopped_cleanly', False),
+            'restarted_for_amcheck': restore.get('restarted', False),
             'seconds': round(time.monotonic() - started, 2), 'error': restore.get('error')}
     if restore.get('after_recovery_error'):
         info['after_recovery_error'] = restore['after_recovery_error']
@@ -753,25 +783,26 @@ def run_job(job):
 
 
 def check_accepted(job, result):
-    """Count stale pages in the refreshed copy, bring it up and check it, then count the
-    stale pages again once it has reached consistency and stopped cleanly."""
+    """Count stale pages in the refreshed copy, bring it up and check it; the stale pages
+    are counted again once it has reached consistency and stopped cleanly, before
+    pg_amcheck (bring_up_standby, bring_up_restore)."""
     listed = job.listed_pages is not None
     if listed:
         job.say(f'compare the {len(job.listed_pages)} post-fork pages of B with the copy')
         result['diverged_before_recovery'] = checks.compare_listed_pages(
             job.target, job.old_copy, job.source_backup, job.listed_pages)
     if job.tool == 'pgdelta':
-        job.say('check O like EXP-03, restore it, compare, pg_amcheck, CHECKPOINT, stop')
+        job.say('check O like EXP-03, restore it, CHECKPOINT, stop, count, restart, compare, '
+                'pg_amcheck')
         bring_up, logical, amcheck, extra, after = bring_up_restore(job, job.target)
         result['pgdelta_checks'] = extra
     else:
-        job.say('start the copy as a standby of the source, compare, promote, pg_amcheck, '
-                'CHECKPOINT, stop')
-        bring_up, logical, amcheck = bring_up_standby(job, job.target)
-        after = None
-        if listed and bring_up.get('stopped_cleanly'):
-            after = count_after_recovery(job, job.target, 'replay up to the source, '
-                                         'promotion, pg_amcheck, CHECKPOINT and a clean stop')
+        job.say('start the copy as a standby of the source, compare, promote, CHECKPOINT, '
+                'stop, count, restart, pg_amcheck')
+
+        def count(copy):
+            return count_after_recovery(job, copy, STANDBY_COUNTED_AFTER) if listed else None
+        bring_up, logical, amcheck, after = bring_up_standby(job, job.target, count)
     if listed and after is None and not bring_up.get('after_recovery_error'):
         bring_up['after_recovery_error'] = ('the copy never stopped cleanly after reaching '
                                             "consistency, so B's post-fork pages were not "

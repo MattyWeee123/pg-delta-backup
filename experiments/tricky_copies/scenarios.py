@@ -609,12 +609,20 @@ def record_post_fork_pages(ctx, old_info, source_info):
 
 
 def check_after_fork(ctx, old_info, fork_value, post_fork):
-    """S2b's and S2c's checks: B's REDO and checkpoint locations lie before the fork, and
-    every page the diverging writes updated is on B's disk with an LSN after it."""
+    """S2b's and S2c's checks: B's REDO and checkpoint locations lie before the fork, the
+    flush ran no checkpoint or restartpoint (the flushing cluster's pg_control_checkpoint()
+    location is the same before and after it), and every page the diverging writes updated
+    is on B's disk with an LSN after the fork."""
     redo, checkpoint = old_info['redo_location'], old_info['checkpoint_location']
     ctx.check('no_checkpoint_after_fork', lsnscan.parse_lsn(redo) < fork_value
               and lsnscan.parse_lsn(checkpoint) < fork_value,
               fork_lsn=lsnscan.format_lsn(fork_value), redo_lsn=redo, checkpoint_lsn=checkpoint)
+    flush = ctx.facts.get('flush') or {}
+    before_flush = flush.get('checkpoint_lsn_before_flush')
+    after_flush = flush.get('checkpoint_lsn_after_flush')
+    ctx.check('no_checkpoint_during_flush', before_flush is not None
+              and before_flush == after_flush, flushed_on=flush.get('flushed_on'),
+              checkpoint_lsn_before_flush=before_flush, checkpoint_lsn_after_flush=after_flush)
     listed = {(page['file'], page['block']) for page in post_fork}
     written = diverged_locations(ctx)
     found = sum(segment_location(relpath, block) in listed for _table, relpath, block in written)

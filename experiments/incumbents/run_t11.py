@@ -75,10 +75,22 @@ def read_json(path):
 def resolve_arm(arm, old_copy_wal_keep_size):
     """(arm, B's wal_keep_size or None) from --arm and --old-copy-wal-keep-size.
 
-    Without --arm the arm follows the size: 'retained' when one is given, else 'default'.
-    --arm retained gives B RETAINED_WAL_KEEP unless a size is given; --arm default with a
-    size is a contradiction."""
+    A size of 0, in any unit, is PostgreSQL's default: B keeps no WAL, so it is the
+    default arm and B gets no setting. Without --arm the arm follows the size: 'retained'
+    when a nonzero one is given, else 'default'. --arm retained gives B RETAINED_WAL_KEEP
+    unless a size is given, and can't take 0; --arm default with a nonzero size is a
+    contradiction. A size PostgreSQL wouldn't read is an error."""
     size = None if old_copy_wal_keep_size in (None, '', 'none') else old_copy_wal_keep_size
+    if size is not None:
+        value = checks.size_in_bytes(size)
+        if value is None:
+            raise SystemExit(f'--old-copy-wal-keep-size {size!r} is not a size PostgreSQL reads '
+                             "(a number, then optionally B, kB, MB, GB or TB), nor 'none'")
+        if value == 0:
+            if arm == 'retained':
+                raise SystemExit(f'--arm retained keeps B\'s WAL, but --old-copy-wal-keep-size '
+                                 f'{size} keeps none; give a nonzero size or use --arm default')
+            size = None
     if arm is None:
         return ('retained' if size else 'default'), size
     if arm == 'default':
@@ -172,16 +184,19 @@ def scenario_facts(directory, meta):
 
 def print_table(results):
     """One line per run: 'before' and 'after' count B's diverged pages the copy still holds
-    right after the tool and after recovery; 'class' is the refusal class."""
+    right after the tool and after recovery; 'other' the listed pages that after recovery
+    hold neither B's nor S's tuple data; 'class' is the refusal class."""
     print(f"{'scenario':8} {'tool':12} {'arm':8} {'outcome':9} {'class':19} {'verdict':12} "
-          f"{'logical':7} {'amcheck':7} {'before':>6} {'after':>5} {'seconds':>8}")
+          f"{'logical':7} {'amcheck':7} {'before':>6} {'after':>5} {'other':>5} "
+          f"{'seconds':>8}")
     for result in results:
         row = checks.summary_row(result)
         print(f"{row['scenario']:8} {row['tool']:12} {row['arm'] or '':8} "
               f"{row['outcome'] or '':9} {row['refusal_class'] or '':19} "
               f"{result.get('verdict') or '':12} {str(row['logical_match']):7} "
               f"{str(row['amcheck_ok']):7} {str(row['diverged_before_recovery']):>6} "
-              f"{str(row['diverged_pages_left']):>5} {str(row['seconds']):>8}")
+              f"{str(row['diverged_pages_left']):>5} {str(row['other_after_recovery']):>5} "
+              f"{str(row['seconds']):>8}")
 
 
 def main(argv=None):
@@ -203,7 +218,7 @@ def main(argv=None):
     parser.add_argument('--arm', choices=checks.ARMS, default=None,
                         help="EXP-08's arm of B's WAL retention: 'default' (EXP-03's settings) "
                              f"or 'retained' (B gets wal_keep_size {RETAINED_WAL_KEEP}, or "
-                             '--old-copy-wal-keep-size). Default: retained if '
+                             '--old-copy-wal-keep-size). Default: retained if a nonzero '
                              '--old-copy-wal-keep-size is given, else default')
     parser.add_argument('--out', default=None,
                         help='results directory (default results/t11/ARM in this checkout)')
@@ -218,7 +233,7 @@ def main(argv=None):
                         help="wal_keep_size for the cluster whose data directory becomes B, so B "
                              "keeps its own WAL since the last common checkpoint, as pg_rewind "
                              "needs (default: none, EXP-03's settings, or with --arm retained "
-                             f"{RETAINED_WAL_KEEP})")
+                             f"{RETAINED_WAL_KEEP}; 0 is PostgreSQL's default, the default arm)")
     parser.add_argument('--reuse-scenarios', action='store_true',
                         help='reuse scenarios already built under OUT/scenarios at --rows')
     parser.add_argument('--keep-copies', action='store_true',

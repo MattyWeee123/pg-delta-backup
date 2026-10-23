@@ -48,7 +48,8 @@ The check `exposed_pages` fails the build when none is. In S2, B's REDO location
 S2b's and S2c's checks add:
 - `old_copy_crashed` (S2b) or `old_copy_is_stopped_standby` (S2c: the state is "shut down in recovery");
 - `no_checkpoint_after_fork`: B's REDO and checkpoint locations are both before the fork;
-- `diverged_pages_on_disk_after_fork`: every `accounts` and `tags` page the diverging writes updated is on that list. Its `flush` field holds the eviction's counts by table, the cluster it ran on, and its `pg_control_checkpoint()` location before and after the eviction, which must be equal.
+- `no_checkpoint_during_flush`: the flushing cluster's `pg_control_checkpoint()` location is the same before and after the eviction, so the flush ran no checkpoint (S2b, on P) and no restartpoint (S2c, on Q);
+- `diverged_pages_on_disk_after_fork`: every `accounts` and `tags` page the diverging writes updated is on that list. Its `flush` field holds the eviction's counts by table, the cluster it ran on, and its `pg_control_checkpoint()` location before and after the eviction.
 
 The workload is deterministic SQL (`generate_series`, `md5`) over four tables:
 - `accounts` has a primary key and a secondary index.

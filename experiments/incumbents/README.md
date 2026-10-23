@@ -48,11 +48,11 @@ python3 experiments/incumbents/run_t11.py --arm retained --tools walg --reuse-sc
 | `--wal-g PATH` | `auto`: `wal-g` on `PATH` | `none` skips both WAL-G tools |
 | `--scenarios` | `S1,S2,S2b,S2c` | Any EXP-03 ids, comma-separated, in any case |
 | `--tools` | `pg_rewind,pg_probackup,walg,walg_send,pgdelta,lsn_skip` | Comma-separated |
-| `--arm` | `default`, or `retained` when `--old-copy-wal-keep-size` is given | EXP-08's arm: `default` gives B EXP-03's settings; `retained` gives B `wal_keep_size` 4GB, or `--old-copy-wal-keep-size` |
+| `--arm` | `default`, or `retained` when a nonzero `--old-copy-wal-keep-size` is given | EXP-08's arm: `default` gives B EXP-03's settings; `retained` gives B `wal_keep_size` 4GB, or `--old-copy-wal-keep-size` |
 | `--out DIR` | `results/t11/ARM` (gitignored) | Results directory |
 | `--rows N` | 200,000 | Passed to EXP-03's scenario builder |
 | `--wal-keep-size` | `4GB` | `wal_keep_size` for the cluster that becomes the source; `none` gives EXP-03's settings (see below) |
-| `--old-copy-wal-keep-size` | none; 4GB with `--arm retained` | `wal_keep_size` for the cluster whose data directory becomes B (see below). `--arm default` with a size is an error |
+| `--old-copy-wal-keep-size` | none; 4GB with `--arm retained` | `wal_keep_size` for the cluster whose data directory becomes B (see below). A size of 0, in any unit, is PostgreSQL's default and means the `default` arm, with no setting; `--arm retained` with 0, `--arm default` with a nonzero size, and a size PostgreSQL wouldn't read are errors |
 | `--reuse-scenarios` | off | Reuse builds under `OUT/scenarios/` made at the same `--rows` and settings |
 | `--keep-copies` | off | Keep each run's copies of B and of the source |
 | `--tool-timeout`, `--catchup-timeout` | 1800 s, 120 s | Per tool command; for a refreshed standby to reach the source |
@@ -111,15 +111,17 @@ S2c exists because a tool may refuse S2b only for its crash, which says nothing 
    - **The incumbents** are brought up as a standby of the source:
      1. pg_rewind writes its own `standby.signal` and `primary_conninfo` with `--write-recovery-conf`. For the catch-up tools, the harness writes both.
      2. The harness starts the copy and waits until `pg_last_wal_replay_lsn()` reaches the source's `pg_current_wal_lsn()`. It gives up early when the server log says the WAL is gone, the timeline doesn't fit, or recovery failed.
-     3. While the copy is a hot standby, it compares the logical state with `expected_state.json`: every database, and for every permanent user table its row count and md5. A copy that errors on that read counts as a mismatch.
-     4. It promotes the copy and runs `pg_amcheck --all --heapallindexed --install-missing`. The promotion is needed because amcheck has to be installed, which a standby can't do.
-     5. It runs `CHECKPOINT` and stops the copy with `-m fast`.
-   - **pgdelta's O** gets EXP-03's checks: byte comparison with S, `pg_verifybackup`, a restore to the end of recovery and the logical comparison. pg_amcheck then runs on the restored server, followed by `CHECKPOINT` and a stop with `-m fast`.
-   - **Diverged pages after recovery.** Once the copy has stopped cleanly after that bring-up (the incumbents' copy of B, or pgdelta's restored O), B's post-fork pages are compared with it again: `diverged_after_recovery`. Here pages are compared by their tuple data (`checks.tuple_data`): the page with `pd_lsn` and `pd_checksum` zeroed and, on heap pages, the four hint bits of every tuple's `t_infomask` cleared (xmin and xmax committed and invalid, which also covers a frozen xmin). A page counts as left when its tuple data still equals B's original diverged page and differs from S's. So a hint bit, checksum or page LSN written since doesn't hide a stale page, and a page that later activity legitimately rewrote (pruned, vacuumed, updated) isn't counted as B's: it lands in `other`. Such a page may still hold B's rows in another layout; the logical comparison is what catches those.
+     3. While the copy is a hot standby, it compares the logical state with `expected_state.json`: every database, and for every permanent user table its row count and md5. A copy that errors on that read counts as a mismatch. A hot standby doesn't prune pages, so this read leaves B's pages as they are.
+     4. It promotes the copy, runs `CHECKPOINT` and stops it with `-m fast`. B's post-fork pages are counted now (below).
+     5. It starts the copy again and runs `pg_amcheck --all --heapallindexed --install-missing`, then stops it. amcheck runs after the promotion because it has to be installed, which a standby can't do.
+   - **pgdelta's O** gets EXP-03's checks: byte comparison with S, `pg_verifybackup` and a restore to the end of recovery. The restored server is then checkpointed and stopped with `-m fast`, and B's post-fork pages are counted. It is started again for EXP-03's logical comparison, then pg_amcheck.
+   - **Diverged pages after recovery.** At that clean stop (the incumbents' copy of B, or pgdelta's restored O), B's post-fork pages are compared with the copy again: `diverged_after_recovery`. The count comes before anything reads the copy's tables as a primary. Such a read prunes pages (`heap_page_prune_opt`), and pg_amcheck's heap scans are one: run first, they removed B's dead tuples from its stale `accounts` pages, which then counted as `other` (see [On the Mac](#on-the-mac)).
+
+     Here pages are compared by their tuple data (`checks.tuple_data`): what is left once the page is masked the way the server's own `wal_consistency_checking` masks it, reusing EXP-03's `classify.mask_heap` and `mask_btree`. That zeroes `pd_lsn`, `pd_checksum`, `pd_prune_xid` and the free space, and clears `PD_PAGE_FULL` and `PD_HAS_FREE_LINES`; on heap pages it also clears the four hint bits of every tuple's `t_infomask` (xmin and xmax committed and invalid, which also covers a frozen xmin), and on btree leaves the line pointer flags (LP_DEAD), `BTP_HAS_GARBAGE`, `BTP_SPLIT_END` and the cycle id. `PD_ALL_VISIBLE` stays, since VACUUM WAL-logs it. FSM, VM and init-fork pages are compared without `pd_lsn` and `pd_checksum` only. A page counts as left when its tuple data still equals B's original diverged page and differs from S's. So hints, a checksum or a page LSN written since don't hide a stale page, and a page that later activity rewrote isn't counted as B's: it lands in `other`, which `summary.csv` reports as `other_after_recovery`. Such a page may still hold some of B's rows in another layout; the logical comparison is what catches those.
 5. **Verdict**, from EXP-08's three checks: the logical match, pg_amcheck and, where B has post-fork pages, `diverged_after_recovery`.
    - `wrong_data` when any of them found a problem (logical mismatch, amcheck errors, or pages left after recovery).
    - `correct` when the copy caught up, matched, passed amcheck and, if B has post-fork pages, none is left after recovery. This is EXP-08's "Correct (repaired)".
-   - `not_verified` otherwise, e.g. a copy that never came up or never stopped cleanly, so its pages weren't counted after recovery; and for a harness error.
+   - `not_verified` otherwise, e.g. a copy that never came up or never stopped cleanly, so its pages weren't counted after recovery (`bring_up` → `after_recovery_error` says so), or one that couldn't be started again for pg_amcheck; and for a harness error.
    - Other runs that weren't accepted keep their outcome as the verdict.
 
 ### The tools
@@ -142,10 +144,11 @@ WAL-G runs with `PGHOST`, `PGPORT`, `PGUSER` and `PGDATABASE` pointing at the so
 - **B's WAL: two arms (`--arm`).** pg_rewind also reads B's own WAL, from the last common checkpoint up to where B ends (its shutdown checkpoint, or for a standby its minimum recovery point), to find the pages B changed after the fork. EXP-08 runs every tool on both:
   - `default`: B's cluster runs with EXP-03's settings: R in S1 (it gets the default back after cloning P's configuration), P in S2 and S2b, Q in S2c. Whether B still has its WAL is then part of what T11 measures. The development run before EXP-08's registration found it gone at 200,000 rows on S2 and S2b: on S2, P's shutdown checkpoint removed it, and pg_rewind exits before touching the copy with "could not find previous WAL record" (`refused`, class `other`); on S2b, P's crash left it in place, but pg_rewind's own crash recovery ends with a checkpoint that removes it, and pg_rewind exits after that recovery changed the copy (`failed`).
   - `retained`: B's cluster gets `wal_keep_size` 4GB. This stands in for production's WAL archive with `pg_rewind --restore-target-wal`. EXP-08 judges I4 on this arm.
-  - `result.json`, `summary.csv` and `summary.json` record the arm of each run (`arm`), derived from the build's settings. Use one `--out` per arm, as `--arm` does by default; a run from another build in the same OUT is listed in `runs_from_other_builds`.
+  - `result.json`, `summary.csv` and `summary.json` record the arm of each run (`arm`), derived from the build's settings: `retained` when B's `wal_keep_size` is above zero, `default` when it is absent or zero (PostgreSQL's default, in any unit). Use one `--out` per arm, as `--arm` does by default; a run from another build in the same OUT is listed in `runs_from_other_builds`.
   - Neither setting changes S or the LSN-skip numbers. B's settings change only which of B's WAL segments are still in `pg_wal`.
 - **Diverged pages are counted twice.** Before recovery, byte for byte, to show what the tool itself left; after recovery, by tuple data, to show what the copy holds once it reached consistency the way its tool intends. Only the second counts for the verdict. A catch-up tool's copy can hold B's bytes right after the tool and lose them in replay (a full-page image of the source overwrites them), or keep them for good.
-- **amcheck runs after promotion**, on a copy that has already matched the source as a standby. `--heapallindexed` checks that every heap tuple is in its indexes. It doesn't check that every index entry points to a live heap tuple, so a copy can pass amcheck and still fail the logical read.
+- **The after-recovery count comes before pg_amcheck**, so the three checks are independent: amcheck's heap scans can't prune B's stale pages before they are counted. pgdelta's logical comparison also moved after the count, since O is read as a primary. The incumbents' logical comparison stays where it was, on the hot standby, which doesn't prune.
+- **amcheck runs after promotion**, on a copy that has already matched the source as a standby, started again after the count. `--heapallindexed` checks that every heap tuple is in its indexes. It doesn't check that every index entry points to a live heap tuple, so a copy can pass amcheck and still fail the logical read.
 - **The logical read goes through the heap.** EXP-03's logical state turns index scans off, so `logical_match` counts and hashes every visible heap tuple, including one that no index entry points to. Read through the primary key, as PostgreSQL 17 plans it by default, such a tuple would be invisible to the comparison.
 
 ## What a run directory holds
@@ -163,46 +166,48 @@ WAL-G runs with `PGHOST`, `PGPORT`, `PGUSER` and `PGDATABASE` pointing at the so
 - `commands`: for each command, the exact command line, exit status, seconds, and the last 20 lines of stdout and stderr;
 - `arm`, `returncode`, `seconds` (the tool's own commands only), `target_modified`, `outcome`, `refusal`, `refusal_class`, `refusal_class_evidence`, `outcome_reason` and, if any, `harness_error`;
 - `parsed`, what the tool's output says, from `checks.parse_*`. For pg_rewind: the divergence point, the last common checkpoint, whether crash recovery ran, and whether no rewind was needed. For pg_probackup: `syncLSN`, the start LSN, the transfer ratio and the errors. For WAL-G: the backup name and the LSN used;
-- `diverged_before_recovery` and `diverged_after_recovery` (counts by state, the pages left by kind and by cause, and examples), `bring_up` (recovery configuration, LSNs reached, whether the copy was checkpointed and stopped cleanly, errors, the server log's tail), `logical_match` and `logical_differences`, `amcheck` and `amcheck_ok`, `verdict`. pgdelta's runs also hold `pgdelta_checks` (byte comparison, `pg_verifybackup`).
+- `diverged_before_recovery` and `diverged_after_recovery` (counts by state, the pages left by kind and by cause, examples, and for the second when it was counted), `bring_up` (recovery configuration, LSNs reached, whether the copy was checkpointed, stopped cleanly and started again for pg_amcheck, errors, the server log's tail), `logical_match` and `logical_differences`, `amcheck` and `amcheck_ok`, `verdict`. pgdelta's runs also hold `pgdelta_checks` (byte comparison, `pg_verifybackup`).
 
 `OUT/summary.csv` has one row per run under OUT, whichever invocation made it:
 - `scenario, tool, outcome, logical_match, amcheck_ok, diverged_pages_left, seconds`. `diverged_pages_left` is the count after recovery, the one the verdict uses;
 - `verdict, refusal, outcome_reason`, so a refusal for a stated reason, a tool that stopped with an error and a harness error read differently;
 - `rows, source_conf, old_copy_conf`: the build that run used, from its own `result.json` (`source_conf` and `old_copy_conf` as `name=value`; empty for none, or for a result written before they were recorded);
 - `arm, refusal_class, diverged_before_recovery`;
-- `i3_judged_on`: for an S2b run refused with class `other`, the S2c run of the same tool and arm, with its verdict (e.g. `S2c (wrong_data)`, or `S2c (not run)`). EXP-08 judges that tool's I3 on S2c.
+- `i3_judged_on`: for an S2b run refused with class `other`, the S2c run of the same tool and arm, with its verdict (e.g. `S2c (wrong_data)`, or `S2c (not run)`). EXP-08 judges that tool's I3 on S2c;
+- `other_after_recovery`: the listed pages that after recovery hold neither B's nor S's tuple data (`diverged_after_recovery` → `other`).
 
 `OUT/summary.json` adds each run's settings, tool version, refusal evidence, bring-up and notes, and `i3_judged_on` in full. `invocation`, `tools` and `scenarios` describe the invocation that wrote it: its `--rows`, settings and arm, the tool versions, and the scenario facts (B's state and REDO, checkpoint and minimum recovery locations, the timelines, the settings, the fork LSN, the exposed pages, where the post-fork page list came from). `runs_from_other_builds` lists the runs under OUT built at other rows or settings, and `run_t11.py` prints a warning for each. Use a separate `--out` per configuration to keep summaries apart.
 
 ## On the Mac
 
-PostgreSQL 17.11 (Homebrew), 200,000 rows, `--wal-keep-size 4GB` for the source, `pg_rewind`, `pgdelta` and `lsn_skip` on S2, S2b and S2c, once per arm. These are development runs of the tooling, not EXP-08's registered run, which is on a Debian VM.
+PostgreSQL 17.11 (Homebrew), 200,000 rows, `--wal-keep-size 4GB` for the source, `pg_rewind`, `pgdelta` and `lsn_skip` on S2, S2b and S2c, once per arm. These are development runs of the tooling, not EXP-08's registered run, which is on a Debian VM. They were made after the after-recovery count moved before pg_amcheck.
 
-The builds are the same in both arms, apart from B's `wal_keep_size`:
+Each arm builds its own scenarios. The builds do the same things apart from B's `wal_keep_size`, but their LSNs differ by a few bytes between arms, as they do between runs. Where they differ, the table gives the default arm first, then the retained arm:
 
 | | S2 | S2b | S2c |
 |---|---|---|---|
 | B's state | shut down | in production | shut down in recovery |
-| Fork (S's history) | 0/8D100B8 | 0/8D12538 | 0/AD104C0 |
-| B's REDO, checkpoint | 0/9A1D8E0, 0/9A1D8E0 (after the fork) | 0/8D12468, 0/8D124C0 | 0/AD103F0, 0/AD10448 |
-| B's minimum recovery point | 0/0 | 0/0 | 0/BB7D0C0 (Q replayed all of P's diverged WAL) |
+| Fork (S's history) | 0/8D10120; 0/8D100A0 | 0/8D12558 | 0/AD104C8; 0/AD104B0 |
+| B's REDO | 0/9A1D948; 0/9A1D8C8 (after the fork) | 0/8D12488 | 0/AD103F8; 0/AD103E0 |
+| B's checkpoint | as its REDO | 0/8D124E0 | 0/AD10450; 0/AD10438 |
+| B's minimum recovery point | 0/0 | 0/0 | 0/BB7D0C8; 0/BB7D0B0 (Q replayed all of P's diverged WAL) |
 | B's post-fork pages | 1,698 | 1,871 | 1,871 |
-| Exposed | 1,685 | 1,447 (167 heap pages of `tags`) | 1,447 (167 heap pages of `tags`) |
+| Exposed | 1,685: 1,131 `accounts` heap pages, 547 `accounts_pkey`, 3 `accounts_bal`, 4 FSM and VM | 1,447: 928 `accounts` heap pages, 346 `accounts_pkey`, 2 `accounts_bal`, 167 `tags` heap pages, 4 FSM and VM | as S2b |
 
-In S2b and S2c every one of the 1,167 pages the diverging writes updated (1,000 of `accounts`, 167 of `tags`) was on B's disk with an LSN after the fork. On Q, the flush evicted 3,151 buffers in two passes, and Q's `pg_control_checkpoint()` stayed at its base backup's 0/9000080 throughout: Q made its only restartpoint at shutdown, at the last checkpoint it had replayed, from before the fork.
+In S2b and S2c, every one of the 1,167 pages the diverging writes updated (1,000 of `accounts`, 167 of `tags`) was on B's disk with an LSN after the fork. P's flush (S2b) evicted 1,871 buffers and Q's (S2c) 3,151, each in two passes, and the build check `no_checkpoint_during_flush` passed: P's `pg_control_checkpoint()` stayed at 0/8D124E0, and Q's at its base backup's 0/9000080. Q made its only restartpoint at shutdown, at the last checkpoint it had replayed, from before the fork.
 
 | Tool | Arm | S2 | S2b | S2c |
 |---|---|---|---|---|
-| pg_rewind | default | refused, class `other`: "could not find previous WAL record at 0/8D100B8", before touching the copy | failed: the same error, after its own crash recovery changed the copy | correct |
+| pg_rewind | default | refused, class `other`: "could not find previous WAL record at 0/8D10120", before touching the copy | failed: "could not find previous WAL record at 0/8D12558", after its own crash recovery changed the copy | correct |
 | pg_rewind | retained | correct | correct (after its crash recovery) | correct |
 | pgdelta | both | correct | correct | correct |
-| lsn_skip | both | wrong_data: 1,685 pages left before recovery, 685 after; reading `docs` fails on a missing TOAST chunk, and amcheck finds missing TOAST values | wrong_data: 1,447 left before recovery, 519 after; `accounts` has 199,072 rows of 200,000 and `tags` 19,833 of 20,000; amcheck finds a broken `accounts_bal` sibling link | as S2b |
+| lsn_skip | both | wrong_data: 1,685 pages left before recovery and 1,685 after; reading `docs` fails on a missing TOAST chunk, and amcheck finds missing TOAST values | wrong_data: 1,447 left before recovery and 1,447 after; `accounts` has 199,072 rows of 200,000 and `tags` 19,833 of 20,000; amcheck finds a broken `accounts_bal` sibling link | as S2b |
 
-- **pg_rewind on S2c works in the default arm.** Q's shutdown restartpoint keeps its WAL from its REDO location on, and that REDO is the last common checkpoint (0/AD10448 is pg_rewind's "last common checkpoint"). pg_rewind read Q's WAL up to Q's minimum recovery point, after the diverged writes, and rewound every page.
+- **pg_rewind on S2c works in the default arm.** Q's shutdown restartpoint keeps its WAL from its REDO location on, and that REDO belongs to the last common checkpoint (pg_rewind's "last common checkpoint" is B's checkpoint, 0/AD10450 in the default arm). pg_rewind read Q's WAL up to Q's minimum recovery point, after the diverged writes, and rewound every page.
 - **No i3 pointer appears:** neither pg_rewind nor pgdelta refused S2b with class `other`. pg_rewind's default-arm S2b is a failure after it modified the copy, not a refusal. EXP-08's S2b-to-S2c rule applies to the catch-up tools.
-- **The control shows what the after-recovery count can't see.** In S2b and S2c, 928 of the 1,447 pages the control left, all `accounts` heap pages, were pruned on access in the copy once it came up (pd_upper moved, `pd_prune_xid` cleared). They no longer equal B's page by tuple data, so they count as `other`, not as left, although they still hold B's diverged rows: `accounts` is short by exactly 928 rows. The 519 left after recovery are 346 `accounts_pkey` pages, the 167 `tags` pages (`tags` is short by 167 rows) and a few FSM, VM and `accounts_bal` pages. The after-recovery count is a lower bound on stale pages; the logical comparison and amcheck catch the rest.
+- **The control's stale pages are all counted after recovery.** Every page it left before recovery still holds B's tuple data at the clean stop after promotion, and none is `other`. An earlier run counted after pg_amcheck instead, and got 685 on S2 and 519 on S2b and S2c: pg_amcheck's `--heapallindexed` heap scan, on the promoted copy, had pruned 1,000 (S2) and 928 (S2b, S2c) exposed `accounts` heap pages. A pruned page has lost the row B updated on it, and holds no tuple data of B's own, so it counted as `other`. In S2b and S2c, `accounts` is short by exactly those 928 rows, and `tags` by its 167 exposed pages' rows.
 - **pgdelta's O** holds S's page at every listed block, before and after recovery. The 13 (S2) and 15 (S2b, S2c) listed pages it lacks are blocks past the end of S's files, which B's diverging writes had extended.
-- **pg_rewind's copies** hold S's tuple data at all but one listed page after recovery, an FSM page; none holds B's.
+- **pg_rewind's copies** hold S's tuple data at every listed page after recovery but one: block 2 of `accounts`' FSM, which counts as `other` (an FSM page isn't WAL-logged). None holds B's.
 - Each build took 3 to 4 s and each tool under 0.5 s; a whole arm took under a minute.
 
 ## Checked only on Linux so far
@@ -218,4 +223,4 @@ In S2b and S2c every one of the 1,167 pages the diverging writes updated (1,000 
 | `tools.py` | Tool probing, the adapters, the standby and restore bring-up, `run_job` |
 | `checks.py` | Outcome, refusal-class and verdict rules, output parsing, the diverged-page comparisons, summary files |
 
-Tests: `tests/test_incumbents.py`. The unit tests cover classification, refusal classes (a table of real messages), parsing, both page comparisons on synthetic pages, exposed pages, the LSN-skip control, S2b's and S2c's checks, the arms and the summary columns. Three cluster tests run `run_t11.py` at 2,000 rows with pg_rewind and the control: on S1 and S2, on S2b with B keeping its WAL, and on S2c, whose build they check (state, REDO before the fork, post-fork pages on disk, exposed pages, no restartpoint during the flush). They take about 15 s and are skipped without PostgreSQL 17 (`PGDELTA_TEST_PG_BIN`, default the Homebrew path).
+Tests: `tests/test_incumbents.py`. The unit tests cover classification, refusal classes (a table of real messages), parsing, both page comparisons on synthetic pages (hint bits and the page-level hints included), exposed pages, the LSN-skip control, S2b's and S2c's checks (a checkpoint during the flush included), the arms (a zero size included), the summary columns, the order of both bring-ups (the count before any read of a primary) and a copy that never stopped cleanly. Three cluster tests run `run_t11.py` at 2,000 rows: pg_rewind on S1 and S2; pg_rewind and the control on S2b with B keeping its WAL; pg_rewind, pgdelta and the control on S2c, whose build they check (state, REDO before the fork, post-fork pages on disk, exposed pages, no restartpoint during the flush). On S2b and S2c, the control's stale pages must all still be B's after recovery, none `other`; pgdelta's O must be checkpointed, stopped cleanly and hold none. They take about 20 s and are skipped without PostgreSQL 17 (`PGDELTA_TEST_PG_BIN`, default the Homebrew path).

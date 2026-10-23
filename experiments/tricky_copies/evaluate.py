@@ -202,26 +202,35 @@ def log_tail(path, lines=20):
 
 
 def restore_and_compare(backup_dir, expected_state, pgbin, work_parent, keep=False,
-                        while_running=None):
+                        while_running=None, at_consistency=None):
     """Copy a backup to a disposable directory, start it, wait for recovery to finish
-    and compare its logical state with the expected one. ``while_running(cluster)``, if
-    given, runs next on the started server and returns a dict merged into the result."""
+    and compare its logical state with the expected one. ``at_consistency(cluster)``, if
+    given, runs once recovery has finished and before anything reads the tables; it may
+    stop the server, which is then started again (``restarted``) for the comparison.
+    ``while_running(cluster)``, if given, runs after the comparison. Each returns a dict
+    merged into the result."""
     work = Path(tempfile.mkdtemp(prefix='pgdrestore-', dir=work_parent))
     sockdir = short_tempdir()
     datadir = work / 'data'
     result = {'restore_ok': False, 'logical_match': False}
     cluster = Cluster('restore', pgbin, datadir, sockdir, free_port(), work / 'restore.log')
+    recovered = ("SELECT CASE WHEN pg_is_in_recovery() "
+                 "THEN pg_get_wal_replay_pause_state() = 'paused' ELSE true END")
     try:
         shutil.copytree(backup_dir, datadir, symlinks=True)
         os.chmod(datadir, 0o700)
         started = time.monotonic()
         cluster.start(timeout=900)
-        cluster.wait_for("SELECT CASE WHEN pg_is_in_recovery() "
-                         "THEN pg_get_wal_replay_pause_state() = 'paused' ELSE true END",
-                         timeout=900)
+        cluster.wait_for(recovered, timeout=900)
         result['in_recovery'] = cluster.scalar('SELECT pg_is_in_recovery()') == 't'
         result['startup_seconds'] = round(time.monotonic() - started, 2)
         result['restore_ok'] = True
+        if at_consistency is not None:
+            result.update(at_consistency(cluster))
+            if not cluster.running:
+                cluster.start(timeout=900)
+                cluster.wait_for(recovered, timeout=900)
+                result['restarted'] = True
         actual = compute_logical_state(cluster.query)
         differences = compare_logical_states(expected_state, actual)
         result['logical_match'] = not differences

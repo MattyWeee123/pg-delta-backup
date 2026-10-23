@@ -266,10 +266,51 @@ class TupleDataTest(unittest.TestCase):
         # All four bits are masked, so a frozen tuple (xmin committed and invalid) is
         # still the same tuple data: it still holds B's row.
         self.assertTrue(checks.same_tuple_data(base, flip_hint_bits(base, checks.HINT_BITS)))
-        # Page header flags are not hint bits of a tuple.
+        # The page-level hints the server's heap_mask ignores are not tuple data either
+        # (test_page_level_hints); PD_ALL_VISIBLE, which VACUUM WAL-logs, is.
         flagged = bytearray(base)
         struct.pack_into('<H', flagged, 10, 0x0002)  # PD_PAGE_FULL
+        self.assertTrue(checks.same_tuple_data(base, bytes(flagged)))
+        struct.pack_into('<H', flagged, 10, 0x0004)  # PD_ALL_VISIBLE
         self.assertFalse(checks.same_tuple_data(base, bytes(flagged)))
+
+    def test_page_level_hints(self):
+        """Hints PostgreSQL changes without WAL, as its own heap_mask and btree_mask
+        ignore them: on a heap page pd_prune_xid, PD_PAGE_FULL and PD_HAS_FREE_LINES
+        (heap_page_prune_opt clears and resets them when it finds nothing to remove); on
+        a btree leaf the line pointer flags (LP_DEAD from kill_prior_tuple),
+        BTP_HAS_GARBAGE, BTP_SPLIT_END and the vacuum cycle id. Only main-fork pages are
+        masked this way."""
+        def with_header(page, flags=None, prune_xid=None):
+            buf = bytearray(page)
+            if flags is not None:
+                struct.pack_into('<H', buf, 10, flags)
+            if prune_xid is not None:
+                struct.pack_into('<I', buf, 20, prune_xid)
+            return bytes(buf)
+
+        stale = with_header(heap_page(0x900, infomask=0, data=b'diverged'), flags=0x0002,
+                            prune_xid=731)
+        # What a prune that found nothing to remove leaves: flags and pd_prune_xid reset.
+        for hinted in (with_header(stale, flags=0, prune_xid=0),
+                       with_header(stale, flags=0x0001, prune_xid=9999),
+                       with_header(flip_hint_bits(stale), flags=0x0003)):
+            self.assertTrue(checks.same_tuple_data(stale, hinted))
+            self.assertTrue(checks.same_tuple_data(hinted, stale, 'main'))
+        self.assertFalse(checks.same_tuple_data(stale, with_header(stale, flags=0x0006)))
+        # Not on another fork's page, whose header isn't masked.
+        self.assertFalse(checks.same_tuple_data(stale, with_header(stale, prune_xid=0), 'fsm'))
+        # A btree leaf: LP_DEAD, BTP_HAS_GARBAGE, BTP_SPLIT_END and the cycle id are hints.
+        leaf = btree_leaf(0x900)
+        hinted_leaf = bytearray(btree_leaf(0x7000, lp_flags=3, garbage=True))
+        opaque = BLOCK - 16
+        flags = struct.unpack_from('<H', hinted_leaf, opaque + 12)[0]
+        struct.pack_into('<HH', hinted_leaf, opaque + 12, flags | (1 << 5), 77)
+        self.assertTrue(checks.same_tuple_data(leaf, bytes(hinted_leaf)))
+        self.assertFalse(checks.same_tuple_data(leaf, bytes(hinted_leaf), 'init'))
+        other_key = bytearray(leaf)
+        other_key[opaque - 16:opaque] = b'K' * 16
+        self.assertFalse(checks.same_tuple_data(leaf, bytes(other_key)))
 
     def test_free_space_leftovers(self):
         """Bytes between pd_lower and pd_upper hold no tuple on a main-fork page; an FSM
@@ -298,7 +339,9 @@ class TupleDataTest(unittest.TestCase):
         moved = bytearray(btree_leaf(0x5000))
         struct.pack_into('<H', moved, 8, 1234)
         self.assertTrue(checks.same_tuple_data(leaf, bytes(moved)))
-        self.assertFalse(checks.same_tuple_data(leaf, btree_leaf(0x900, lp_flags=3)))
+        # A leaf's LP_DEAD is a hint on the main fork, not on another fork's page.
+        self.assertTrue(checks.same_tuple_data(leaf, btree_leaf(0x900, lp_flags=3)))
+        self.assertFalse(checks.same_tuple_data(leaf, btree_leaf(0x900, lp_flags=3), 'init'))
         fsm = page(0x10, b'f')
         self.assertTrue(checks.same_tuple_data(fsm, page(0x99, b'f')))
         self.assertFalse(checks.same_tuple_data(fsm, page(0x10, b'g')))
@@ -478,7 +521,7 @@ class S2bCheckTest(unittest.TestCase):
 
     def make(self, tmp, *, state='in production', redo='0/700', checkpoint='0/750',
              on_disk_lsn=0x900, source_lsns=(0x80, 0x90), checker=scenarios.check_s2b,
-             untouched_lsn=None):
+             untouched_lsn=None, flush_checkpoints=('0/750', '0/750')):
         """B's accounts blocks 1 and 2 diverged after the fork at 0/800; with
         ``untouched_lsn``, so did block 0 of another table (tags), which S left alone."""
         ctx = FakeContext(tmp)
@@ -490,7 +533,9 @@ class S2bCheckTest(unittest.TestCase):
         write(ctx.source_backup, 'pg_wal/00000002.history',
               b'1\t0/800\tno recovery target specified\n')
         ctx.facts = {'diverged': {'file': rel, 'blocks': [1, 2]}, 'split_lsn': '0/800',
-                     'old_primary_end_lsn': '0/960', 'flush': {'clean': True}}
+                     'old_primary_end_lsn': '0/960',
+                     'flush': {'clean': True, 'checkpoint_lsn_before_flush': flush_checkpoints[0],
+                               'checkpoint_lsn_after_flush': flush_checkpoints[1]}}
         if untouched_lsn is not None:
             write(ctx.old_copy, 'base/5/16408', heap_page(untouched_lsn, data=b'TAGS'))
             write(ctx.source_backup, 'base/5/16408', heap_page(0x60, data=b'tags'))
@@ -509,6 +554,7 @@ class S2bCheckTest(unittest.TestCase):
         self.assertEqual(set(ctx.checks), {'diverged_pages_differ', 'timeline_switched',
                                            'same_system_identifier', 'exposed_pages',
                                            'old_copy_crashed', 'no_checkpoint_after_fork',
+                                           'no_checkpoint_during_flush',
                                            'diverged_pages_on_disk_after_fork'})
         self.assertEqual(ctx.observations['fork_lsn'], '0/800')
         self.assertEqual(ctx.observations['old_copy_redo_lsn'], '0/700')
@@ -532,6 +578,25 @@ class S2bCheckTest(unittest.TestCase):
         self.assertFalse(unflushed.checks['diverged_pages_on_disk_after_fork']['ok'])
         self.assertEqual(unflushed.checks['diverged_pages_on_disk_after_fork'][
             'pages_with_lsn_after_fork'], 1)
+
+    def test_checkpoint_during_flush_fails_the_build(self):
+        """The flush must write the diverged pages without a checkpoint or restartpoint:
+        the cluster's pg_control_checkpoint() location must be the same before and after
+        it. A missing record of either fails too."""
+        for checker, state in ((scenarios.check_s2b, 'in production'),
+                               (scenarios.check_s2c, 'shut down in recovery')):
+            with tempfile.TemporaryDirectory() as tmp:
+                moved = self.make(Path(tmp, 'a'), state=state, checker=checker,
+                                  flush_checkpoints=('0/600', '0/750'))
+                unrecorded = self.make(Path(tmp, 'b'), state=state, checker=checker,
+                                       flush_checkpoints=(None, None))
+            check = moved.checks['no_checkpoint_during_flush']
+            self.assertFalse(check['ok'], checker.__name__)
+            self.assertEqual((check['checkpoint_lsn_before_flush'],
+                              check['checkpoint_lsn_after_flush']), ('0/600', '0/750'))
+            self.assertFalse(unrecorded.checks['no_checkpoint_during_flush']['ok'])
+            # The other checks don't see it: B's REDO and checkpoint are before the fork.
+            self.assertTrue(moved.checks['no_checkpoint_after_fork']['ok'])
 
     def test_no_exposed_page_fails_the_build(self):
         """When the source rewrote every block B diverged on after B's REDO location, an
@@ -576,6 +641,7 @@ class S2bCheckTest(unittest.TestCase):
                                            'same_system_identifier', 'exposed_pages',
                                            'old_copy_is_stopped_standby',
                                            'no_checkpoint_after_fork',
+                                           'no_checkpoint_during_flush',
                                            'diverged_pages_on_disk_after_fork'})
         self.assertEqual(ctx.observations['exposed_pages'], 3)
         self.assertFalse(crashed.checks['old_copy_is_stopped_standby']['ok'])
@@ -692,6 +758,189 @@ def executable(path, text):
     Path(path).write_text(text)
     os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR)
     return path
+
+
+class FakeServer:
+    """A server that records what is done to it, in ``events``."""
+
+    def __init__(self, events, datadir='/copy', running=False):
+        self.events, self.datadir, self.running = events, Path(datadir), running
+        self.logfile, self.sockdir, self.port, self.name = Path('/nonexistent.log'), '/s', 1, 'x'
+
+    def start(self, timeout=300):
+        self.events.append('start')
+        self.running = True
+
+    def stop(self, mode='fast', timeout=300):
+        self.events.append(f'stop {mode}')
+        self.running = False
+
+    def promote(self, timeout=300):
+        self.events.append('promote')
+
+    def wait_for(self, sql, db='postgres', timeout=120, interval=0.2):
+        self.events.append('wait')
+
+    def psql(self, sql, db='postgres', timeout=900):
+        self.events.append(sql.strip())
+        return ''
+
+    def scalar(self, sql, db='postgres'):
+        return 'f'
+
+    def query(self, sql, db='postgres', timeout=900):
+        return []
+
+    def server_options(self):
+        return ''
+
+    def ensure_stopped(self):
+        self.running = False
+
+
+class BringUpOrderTest(unittest.TestCase):
+    """EXP-08's third check counts B's post-fork pages once the copy reached consistency
+    and was checkpointed and stopped cleanly, before anything reads its tables on a
+    primary: pg_amcheck --heapallindexed's heap scans, and any read of a primary, prune
+    pages (heap_page_prune_opt), which would turn B's stale pages into 'other'."""
+
+    def patches(self, events):
+        def amcheck(cluster, timeout=3600):
+            events.append('amcheck')
+            return {'ok': True}
+
+        def logical(query):
+            events.append('logical read')
+            return {}
+        return (mock.patch.object(tools, 'run_amcheck', amcheck),
+                mock.patch.object(tools, 'compute_logical_state', logical),
+                mock.patch.object(tools, 'compare_logical_states', lambda e, a: []))
+
+    def test_standby_counts_before_amcheck(self):
+        events = []
+        server = FakeServer(events)
+        job = SimpleNamespace(new_server=lambda name, datadir: server,
+                              source=SimpleNamespace(scalar=lambda sql: '0/10'),
+                              pgbin=SimpleNamespace(tool=lambda name: name), expected={})
+
+        def count(copy):
+            events.append('count')
+            self.assertFalse(server.running)
+            return {'diverged_left': 0, 'other': 0}
+        amcheck, logical, compare = self.patches(events)
+        with amcheck, logical, compare, \
+                mock.patch.object(tools, 'ensure_standby_config', lambda c, s: 'harness'), \
+                mock.patch.object(tools, 'run', lambda cmd, **kw: events.append('pg_ctl start')), \
+                mock.patch.object(tools, 'wait_caught_up', lambda j, c, t: (True, None, '0/10')):
+            info, logical_result, amcheck_result, counted = tools.bring_up_standby(
+                job, Path('/copy'), count)
+        self.assertEqual(events, ['pg_ctl start', 'logical read', 'promote', 'wait',
+                                  'CHECKPOINT;', 'stop fast', 'count', 'start', 'amcheck',
+                                  'stop fast'])
+        self.assertEqual(counted, {'diverged_left': 0, 'other': 0})
+        self.assertTrue(info['promoted'] and info['checkpointed'] and info['stopped_cleanly']
+                        and info['restarted_for_amcheck'])
+        self.assertIsNone(info['error'])
+        self.assertEqual((logical_result['match'], amcheck_result), (True, {'ok': True}))
+
+    def test_standby_count_error(self):
+        """A count that fails is an after-recovery error; amcheck still runs."""
+        events = []
+        job = SimpleNamespace(new_server=lambda name, datadir: FakeServer(events),
+                              source=SimpleNamespace(scalar=lambda sql: '0/10'),
+                              pgbin=SimpleNamespace(tool=lambda name: name), expected={})
+
+        def count(copy):
+            raise OSError('unreadable')
+        amcheck, logical, compare = self.patches(events)
+        with amcheck, logical, compare, \
+                mock.patch.object(tools, 'ensure_standby_config', lambda c, s: 'harness'), \
+                mock.patch.object(tools, 'run', lambda cmd, **kw: None), \
+                mock.patch.object(tools, 'wait_caught_up', lambda j, c, t: (True, None, '0/10')):
+            info, _logical, amcheck_result, counted = tools.bring_up_standby(job, Path('/c'),
+                                                                             count)
+        self.assertIsNone(counted)
+        self.assertIn('OSError: unreadable', info['after_recovery_error'])
+        self.assertEqual(amcheck_result, {'ok': True})
+
+    def test_restore_counts_before_reading(self):
+        """pgdelta's O: recovery ends, then CHECKPOINT, a clean stop and the count; the
+        server is started again for the logical comparison and pg_amcheck."""
+        events = []
+        with tempfile.TemporaryDirectory() as tmp:
+            output = write(tmp, 'output/PG_VERSION', b'17\n').parent
+            job = SimpleNamespace(source_backup=Path(tmp, 's'), old_copy=Path(tmp, 'b'),
+                                  listed_pages=[], expected={}, pgbin=None, work=Path(tmp))
+
+            def counted(job_, copy, when):
+                events.append('count')
+                return {'diverged_left': 0, 'other': 0, 'counted_after': when}
+
+            def server(name, pgbin, datadir, sockdir, port, logfile):
+                return FakeServer(events, datadir)
+            amcheck, logical, compare = self.patches(events)
+            from experiments.tricky_copies import evaluate
+            with amcheck, \
+                    mock.patch.object(evaluate, 'compute_logical_state',
+                                      lambda q: events.append('logical read') or {'tables': {}}), \
+                    mock.patch.object(evaluate, 'compare_logical_states', lambda e, a: []), \
+                    mock.patch.object(evaluate, 'Cluster', server), \
+                    mock.patch.object(tools, 'count_after_recovery', counted), \
+                    mock.patch.object(tools.evaluation, 'compare_trees',
+                                      lambda a, b: {'identical': True}), \
+                    mock.patch.object(tools.evaluation, 'verify_backup',
+                                      lambda o, p: {'ok': True}):
+                info, logical_result, amcheck_result, _extra, after = tools.bring_up_restore(
+                    job, output)
+        self.assertEqual(events, ['start', 'wait', 'CHECKPOINT;', 'stop fast', 'count', 'start',
+                                  'wait', 'logical read', 'amcheck'])
+        self.assertTrue(info['checkpointed'] and info['stopped_cleanly']
+                        and info['restarted_for_amcheck'])
+        self.assertIsNone(info['error'])
+        self.assertTrue(logical_result['match'])
+        self.assertEqual(amcheck_result, {'ok': True})
+        self.assertEqual(after['diverged_left'], 0)
+        self.assertIn('before', after['counted_after'])
+
+    def accepted_job(self, tmp, tool):
+        return tools.Job(scenario_id='S2c', scenario_dir=tmp, meta={'rows': 5}, expected={},
+                         listed_pages=[], tool=tool, tool_info={'available': True},
+                         run_dir=Path(tmp, 'run'), pgbin=None, verbose=False)
+
+    def test_pgdelta_never_stopped_cleanly(self):
+        """A restored O that never stopped cleanly after recovery has no after-recovery
+        count, so its verdict can't be 'correct'."""
+        def adapter(job):
+            job.target = job.work / 'output'
+            return tools.ToolRun([], 0, False, '', 0.1, {'basis_unchanged': True})
+        bring_up = ({'caught_up': True, 'checkpointed': True, 'stopped_cleanly': False,
+                     'error': None}, {'match': True, 'differences': [], 'read_as': 'restored'},
+                    {'ok': True}, {}, None)
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.dict(tools.ADAPTERS, {'pgdelta': adapter}), \
+                mock.patch.object(tools, 'bring_up_restore', lambda job, output: bring_up):
+            result = tools.run_job(self.accepted_job(tmp, 'pgdelta'))
+        self.assertEqual((result['outcome'], result['logical_match'], result['amcheck_ok']),
+                         ('accepted', True, True))
+        self.assertIsNone(result['diverged_after_recovery'])
+        self.assertIn('never stopped cleanly', result['bring_up']['after_recovery_error'])
+        self.assertEqual(result['verdict'], 'not_verified')
+
+    def test_standby_never_stopped_cleanly(self):
+        bring_up = ({'caught_up': True, 'promoted': True, 'checkpointed': True,
+                     'stopped_cleanly': False, 'error': 'CommandError: stop failed'},
+                    {'match': True, 'differences': [], 'read_as': 'hot standby'}, None, None)
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(tools, 'bring_up_standby', lambda job, copy, count: bring_up):
+            job = self.accepted_job(tmp, 'pg_rewind')
+            job.target = Path(tmp, 'target')
+            result = {'outcome': 'accepted', 'logical_match': None, 'amcheck_ok': None,
+                      'diverged_before_recovery': None, 'diverged_after_recovery': None}
+            tools.check_accepted(job, result)
+        self.assertIsNone(result['diverged_after_recovery'])
+        self.assertIn('never stopped cleanly', result['bring_up']['after_recovery_error'])
+        self.assertEqual(checks.verdict('accepted', result['logical_match'],
+                                        result['amcheck_ok'], None, True, True), 'not_verified')
 
 
 class ProbeTest(unittest.TestCase):
@@ -876,7 +1125,7 @@ class SummaryTest(unittest.TestCase):
             documents = [
                 result_doc('S2b', 'walg', outcome='accepted', verdict='wrong_data',
                            logical_match=False, diverged_before_recovery={'diverged_left': 9},
-                           diverged_after_recovery={'diverged_left': 7}),
+                           diverged_after_recovery={'diverged_left': 7, 'other': 2}),
                 result_doc('S2', 'pg_probackup', outcome='refused', verdict='refused',
                            logical_match=None, amcheck_ok=None, seconds=0.2, refusal='message',
                            outcome_reason='exit status 1: ERROR: Destination is not in source '
@@ -911,6 +1160,10 @@ class SummaryTest(unittest.TestCase):
         by_name = dict(zip(rows[0], rows[4]))
         self.assertEqual((by_name['diverged_before_recovery'], by_name['refusal_class'],
                           by_name['arm'], by_name['i3_judged_on']), ('9', '', '', ''))
+        # The listed pages that hold neither B's nor S's tuple data after recovery.
+        self.assertEqual(by_name['other_after_recovery'], '2')
+        self.assertEqual(dict(zip(rows[0], rows[1]))['other_after_recovery'], '')
+        self.assertEqual(summary['runs'][3]['other_after_recovery'], 2)
         self.assertEqual(summary['rows'], 5)
         self.assertEqual(summary['runs'][3]['verdict'], 'wrong_data')
         self.assertTrue(summary['runs'][0]['caught_up'])
@@ -1038,6 +1291,30 @@ class DriverTest(unittest.TestCase):
             self.assertEqual(checks.arm_of(conf), arm)
         self.assertEqual(checks.ARMS, ('default', 'retained'))
 
+    def test_zero_retention_is_the_default_arm(self):
+        """wal_keep_size 0 is PostgreSQL's default: B keeps no WAL, so it is the default
+        arm, whatever unit it is written in, and --arm retained can't have it."""
+        for size in ('0', '0MB', '0 GB', '0.0kB', '0B'):
+            self.assertEqual(run_t11.resolve_arm(None, size), ('default', None), size)
+            self.assertEqual(run_t11.resolve_arm('default', size), ('default', None), size)
+            with self.assertRaises(SystemExit):
+                run_t11.resolve_arm('retained', size)
+            self.assertEqual(checks.arm_of(run_t11.server_settings('4GB', size)), 'default',
+                             size)
+        for size in ('1', '1kB', '0.5GB', '4GB', '1TB'):
+            self.assertEqual(run_t11.resolve_arm(None, size), ('retained', size), size)
+            self.assertEqual(checks.arm_of(run_t11.server_settings('4GB', size)), 'retained',
+                             size)
+        with self.assertRaises(SystemExit):
+            run_t11.resolve_arm(None, 'lots')
+        with self.assertRaises(SystemExit):
+            run_t11.resolve_arm('retained', '-1')
+        self.assertEqual(checks.size_in_bytes('4GB'), 4 << 30)
+        self.assertEqual(checks.size_in_bytes('512'), 512 << 20)  # wal_keep_size is in MB
+        self.assertEqual(checks.size_in_bytes(' 1 kB '), 1024)
+        self.assertIsNone(checks.size_in_bytes('4 gigs'))
+        self.assertIsNone(checks.size_in_bytes('4gb'))  # PostgreSQL's units are case-sensitive
+
     def test_scenario_facts(self):
         meta = {'built_ok': True, 'rows': 7,
                 'old_copy': {'cluster_state': 'shut down in recovery', 'redo_location': '0/700',
@@ -1143,6 +1420,19 @@ class PgRewindClusterTest(unittest.TestCase):
         self.assertEqual(observations['exposed_pages'],
                          sum(p['exposed'] for p in observations['post_fork_pages']))
 
+    def assert_counted_before_amcheck(self, control):
+        """The control's copy holds B's exposed pages, and nothing between the tool and
+        the after-recovery count may rewrite them: replay as a hot standby can't prune, and
+        the count comes before pg_amcheck's heap scans, which would. So every page left
+        before recovery is still B's after it, by tuple data, and none is 'other'."""
+        before, after = control['diverged_before_recovery'], control['diverged_after_recovery']
+        self.assertEqual(after['other'], 0, after)
+        self.assertGreater(after['diverged_left'], 0)
+        self.assertEqual(after['diverged_left'] + after['not_diverged'],
+                         before['diverged_left'] + before['not_diverged'], (before, after))
+        self.assertIn('before pg_amcheck', after['counted_after'])
+        self.assertTrue(control['bring_up']['restarted_for_amcheck'])
+
     def test_pg_rewind_repairs_s1_and_s2(self):
         tmp = Path(tempfile.mkdtemp(prefix='pgd'))
         try:
@@ -1211,6 +1501,7 @@ class PgRewindClusterTest(unittest.TestCase):
             self.assertEqual(control['verdict'], 'wrong_data')
             self.assertGreater(control['diverged_pages_left'], 0)
             self.assertFalse(control['logical_match'])
+            self.assert_counted_before_amcheck(self.result(tmp, 'S2b', 'lsn_skip'))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -1219,7 +1510,7 @@ class PgRewindClusterTest(unittest.TestCase):
         its diverged pages, stopped cleanly with REDO before the fork."""
         tmp = Path(tempfile.mkdtemp(prefix='pgd'))
         try:
-            runs = self.run_t11(tmp, 'S2c', 'pg_rewind,lsn_skip')
+            runs = self.run_t11(tmp, 'S2c', 'pg_rewind,pgdelta,lsn_skip')
             meta = self.meta(tmp, 'S2c')
             self.assertEqual(meta['postgresql']['old_copy']['major'], 17)
             self.assert_post_fork_facts(meta)
@@ -1252,6 +1543,20 @@ class PgRewindClusterTest(unittest.TestCase):
             self.assertGreater(control['diverged_pages_left'], 0)
             self.assertGreaterEqual(control['diverged_before_recovery'],
                                     control['diverged_pages_left'])
+            self.assertEqual(control['other_after_recovery'], 0)
+            self.assert_counted_before_amcheck(self.result(tmp, 'S2c', 'lsn_skip'))
+            # pgdelta's restore path: recovery ends, CHECKPOINT, a clean stop, the count.
+            pgdelta = self.result(tmp, 'S2c', 'pgdelta')
+            self.assertEqual((pgdelta['outcome'], pgdelta['verdict']), ('accepted', 'correct'),
+                             pgdelta)
+            self.assertTrue(pgdelta['bring_up']['checkpointed']
+                            and pgdelta['bring_up']['stopped_cleanly'])
+            self.assertNotIn('after_recovery_error', pgdelta['bring_up'])
+            after = pgdelta['diverged_after_recovery']
+            self.assertEqual((after['diverged_left'], after['other']), (0, 0))
+            self.assertEqual(after['listed'], meta['observations']['post_fork_page_count'])
+            self.assertIn('before', after['counted_after'])
+            self.assertTrue(pgdelta['logical_match'] and pgdelta['amcheck_ok'])
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 

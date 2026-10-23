@@ -15,7 +15,7 @@ from pathlib import Path
 from experiments.tricky_copies.classify import (HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID,
                                                 HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID,
                                                 LP_NORMAL, classify_pair, line_pointers,
-                                                page_kind)
+                                                mask_btree, mask_heap, page_kind)
 from experiments.tricky_copies.lsnscan import BLOCK, relation_kind
 
 # T11's columns (diverged_pages_left is counted after recovery, EXP-08's third check);
@@ -23,11 +23,12 @@ from experiments.tricky_copies.lsnscan import BLOCK, relation_kind
 # and from a harness error; then the build the run used, since a summary covers every
 # run under OUT, made by any number of invocations; then EXP-08's revisions: B's WAL
 # arm, the refusal class, the count before recovery, and for a tool that refused S2b
-# for another reason than identity or history, the S2c result I3 is judged on instead.
+# for another reason than identity or history, the S2c result I3 is judged on instead;
+# last, the listed pages that after recovery hold neither B's nor S's tuple data.
 CSV_COLUMNS = ('scenario', 'tool', 'outcome', 'logical_match', 'amcheck_ok',
                'diverged_pages_left', 'seconds', 'verdict', 'refusal', 'outcome_reason',
                'rows', 'source_conf', 'old_copy_conf', 'arm', 'refusal_class',
-               'diverged_before_recovery', 'i3_judged_on')
+               'diverged_before_recovery', 'i3_judged_on', 'other_after_recovery')
 
 # Messages a tool prints when it declines to touch a copy. A nonzero exit with one of
 # them is a refusal for the stated reason; exit status 0 is always "accepted".
@@ -276,27 +277,39 @@ TUPLE_HEADER = 23  # offsetof(HeapTupleHeaderData, t_bits); t_infomask is at off
 
 
 def tuple_data(page, kind='main'):
-    """A page as diverged_after_recovery compares it: pd_lsn and pd_checksum zeroed and, on
-    a heap page (a sequence page holds one heap tuple), the four hint bits of every normal
-    tuple's t_infomask (xmin and xmax committed and invalid) cleared. On a main-fork heap,
-    sequence or btree page, the free space between pd_lower and pd_upper is zeroed too:
-    it holds no tuple, only whatever bytes the page held there before (replaying a prune
-    leaves other leftovers than the original prune did). FSM and VM pages keep their data
-    in that area, so ``kind`` (the relation fork) must say 'main' for it to be zeroed.
-    What's left is the page's tuple data and layout, which a later hint bit, checksum or
-    page LSN on the same page doesn't change."""
-    buf = bytearray(page)
-    struct.pack_into('<IIH', buf, 0, 0, 0, 0)
+    """A page as diverged_after_recovery compares it, without what PostgreSQL may change on
+    it without WAL. pd_lsn and pd_checksum are zeroed on every page. A main-fork page is
+    masked further, by EXP-03's versions of the server's own wal_consistency_checking
+    masks (classify.mask_heap, mask_btree):
+    - heap and sequence pages (a sequence page holds one heap tuple): pd_prune_xid,
+      PD_PAGE_FULL and PD_HAS_FREE_LINES (a prune that finds nothing to remove clears and
+      resets them), the free space between pd_lower and pd_upper (it holds no tuple, only
+      what the page held there before; replaying a prune leaves other leftovers than the
+      prune did), and the four hint bits of every normal tuple's t_infomask (xmin and
+      xmax committed and invalid). All four are cleared, so a frozen xmin counts as the
+      same tuple data too: the tuple still holds the same row;
+    - btree pages: the same header fields and free space, and on a leaf the line pointer
+      flags (LP_DEAD, which kill_prior_tuple sets), BTP_HAS_GARBAGE, BTP_SPLIT_END and
+      the vacuum cycle id.
+    PD_ALL_VISIBLE stays: VACUUM WAL-logs it. FSM, VM and init-fork pages keep everything
+    but pd_lsn and pd_checksum, since FSM and VM pages hold their data where a heap page
+    has free space, so ``kind`` (the relation fork) must say 'main' for the rest to be
+    masked; so do main-fork pages of other access methods. What's left is the page's
+    tuple data and layout, which a later hint, checksum or page LSN on the same page
+    doesn't change."""
     layout = page_kind(page)
-    if kind == 'main' and layout in ('heap', 'sequence', 'btree'):
-        lower, upper = struct.unpack_from('<HH', page, 12)  # page_kind checked the bounds
-        buf[lower:upper] = bytes(upper - lower)
-    if layout in ('heap', 'sequence'):
+    if kind == 'main' and layout in ('heap', 'sequence'):
+        buf = bytearray(mask_heap(page))
         for _position, offset, flags, length in line_pointers(page):
             if flags != LP_NORMAL or length < TUPLE_HEADER or offset + TUPLE_HEADER > BLOCK:
                 continue
             infomask = struct.unpack_from('<H', buf, offset + 20)[0]
             struct.pack_into('<H', buf, offset + 20, infomask & ~HINT_BITS)
+        return bytes(buf)
+    if kind == 'main' and layout == 'btree':
+        return mask_btree(page)
+    buf = bytearray(page)
+    struct.pack_into('<IIH', buf, 0, 0, 0, 0)
     return bytes(buf)
 
 
@@ -373,12 +386,38 @@ def build_conf(document):
     return {'source': conf.get('source') or {}, 'old_copy': conf.get('old_copy') or {}}
 
 
+# PostgreSQL's memory units (case-sensitive) and wal_keep_size's own unit, MB.
+SIZE_UNITS = {'B': 1, 'kB': 1 << 10, 'MB': 1 << 20, 'GB': 1 << 30, 'TB': 1 << 40}
+SIZE = re.compile(r'\s*(\d+(?:\.\d*)?|\.\d+)\s*(B|kB|MB|GB|TB)?\s*')
+
+
+def size_in_bytes(text, default_unit='MB'):
+    """A wal_keep_size value (e.g. '4GB', '512', '0') in bytes, as PostgreSQL reads it:
+    a non-negative number, optionally fractional, then an optional unit; None if it isn't
+    one."""
+    match = SIZE.fullmatch(str(text))
+    if not match:
+        return None
+    return round(float(match.group(1)) * SIZE_UNITS[match.group(2) or default_unit])
+
+
+def retains_wal(size):
+    """Whether B's wal_keep_size ``size`` (a setting's text, or None) keeps any WAL. None,
+    '' and a zero size don't: 0 is PostgreSQL's default. Any other text counts as
+    retention; the server refuses a size it can't read, so no built scenario records one."""
+    if size in (None, '', 'none'):
+        return False
+    value = size_in_bytes(size)
+    return value is None or value > 0
+
+
 def arm_of(conf):
-    """'retained' when the settings by role give B a wal_keep_size, 'default' when they
-    don't, None when they aren't recorded."""
+    """'retained' when the settings by role give B a nonzero wal_keep_size, 'default' when
+    they give none or 0 (PostgreSQL's default), None when they aren't recorded."""
     if conf is None:
         return None
-    return 'retained' if (conf.get('old_copy') or {}).get('wal_keep_size') else 'default'
+    return 'retained' if retains_wal((conf.get('old_copy') or {}).get('wal_keep_size')) \
+        else 'default'
 
 
 def conf_text(settings):
@@ -435,7 +474,8 @@ def summary_row(result, pointer=None):
             'source_conf': None if conf is None else conf_text(conf['source']),
             'old_copy_conf': None if conf is None else conf_text(conf['old_copy']),
             'arm': arm_of(conf), 'refusal_class': result.get('refusal_class'),
-            'diverged_before_recovery': before, 'i3_judged_on': pointer_text(pointer)}
+            'diverged_before_recovery': before, 'i3_judged_on': pointer_text(pointer),
+            'other_after_recovery': (result.get('diverged_after_recovery') or {}).get('other')}
 
 
 def other_builds(results, rows, conf):
