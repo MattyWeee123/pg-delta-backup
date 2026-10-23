@@ -3,6 +3,29 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-23 (night): sponsor questions closed by decision; next, T11, T8a and T3
+
+**Why:** the decision ledger's first test, T1, was a list of questions for the sponsor. Matt went through them and settled each from the project brief and Google's public docs, so nothing waits on the sponsor any more.
+
+**What Omni does today** (public docs, rechecked by an independent agent; [notes](research/notes/alloydb-omni.md)):
+- After an unplanned failover, the operator deletes the old primary and seeds a new standby with `pg_basebackup`, which can take hours on a large database.
+- After a DR failover, Google's procedure tries a rewind of the former primary and falls back to a full copy.
+- No rebuild path keeps a usable copy when it fails: `pg_basebackup` deletes its partial output, a failed `pg_rewind` leaves its target unrecoverable, and Omni's documented remedies are delete-and-recopy.
+
+**Decisions** ([ledger, O1-O9](DECISIONS.md#decisions-of-october-23-2026-t1-closed)):
+- Target Omni's HA standby rebuild and DR re-seed; we define the sizes.
+- Run only when an old copy exists; otherwise `pg_basebackup`.
+- A program on the source is allowed. Its slowdown must be no worse than `pg_basebackup`'s.
+- The old copy may be patched in place; a failed refresh leaves it blocked from starting.
+- TLS on the wire. No GPL code; pgdelta is to be Apache-2.0 (no LICENSE file yet).
+- T3's two staged-only arms are dropped, since v1 has no capture.
+
+**T1's prediction:** "a source program is allowed" held; "B must survive a failed refresh" failed, so in-place patching becomes a candidate default for T3 to decide.
+
+**Also:** [BEN-QUESTIONS.md](BEN-QUESTIONS.md) now lists the decisions and a few non-blocking questions. The October 22 version, whose draft post was never sent, is archived.
+
+**Next, in order:** T11 (the incumbent tools: `pg_rewind`, the catch-up tools, pgBackRest), T8a (pgdelta reading a stopped source directly, no capture), T3 (the destination write path, including in-place patching). Each gets its predictions written down before it runs.
+
 ## 2026-10-23 (evening): decision ledger, every design choice graded by its evidence
 
 **Why:** Matt asked whether v0 is the right direction, whether v1 builds on or scraps it, and whether design choices are backed by evidence or added blindly.

@@ -15,7 +15,8 @@ A CMU student project with Google's AlloyDB team: a tool that brings an older ph
     - Where it can't, pgdelta is fastest only for scattered changes below about 2 Gbit/s, and rsync for local changes below about 3.9 Gbit/s.
     - A full copy wins on faster links.
   - **Why staged pgdelta can't win on fast links:** the local backup it starts from costs as much as a full copy ([EXP-07](docs/experiments/EXP-07-capture-speed.md)), and its own transfer is about as long again.
-- **Next:** overlap pgdelta's destination-side work with the capture, and read the source's files directly instead of taking a backup first. Each needs a new experiment.
+- **Target and decisions (October 23):** AlloyDB Omni's HA standby rebuild and DR re-seed. The old copy may be patched in place, TLS on the wire, no GPL code ([decisions](docs/DECISIONS.md#decisions-of-october-23-2026-t1-closed), [what Omni does today](docs/research/notes/alloydb-omni.md)). No sponsor questions are blocking.
+- **Next:** compare against the incumbent tools (T11), read the source's files directly instead of taking a backup first (T8a), and fix the destination write path (T3). Each has its predictions recorded before it runs.
 - **Measurement harness: built.** Backup and restore checks, resource sampling, the HammerDB slowdown driver, and a two-VM network benchmark ([experiments/network/](experiments/network/README.md)).
 - **Research: done.** [What already exists and where the gap is](docs/research/state-of-the-art.md).
 
@@ -45,7 +46,7 @@ Our niche is the copy whose history is lost: a standby whose WAL was recycled, a
 5. [Plan](docs/PLAN.md): workstreams, dependencies, schedule to the November 13 freeze.
 6. [Specification](docs/SPEC.md): architecture, design decisions, correctness gates.
 7. [Correctness contract](docs/CORRECTNESS.md): what "no data loss" means and how we test it.
-8. [Questions for Ben and Sumaithri](docs/BEN-QUESTIONS.md): our assumptions and the few open questions.
+8. [Questions for Ben and Sumaithri](docs/BEN-QUESTIONS.md): decisions taken, our assumptions, and non-blocking questions.
 9. [References](docs/REFERENCES.md): curated reading list.
 10. [Benchmark harness](benchmarks/README.md) and [native recovery suite](benchmarks/NATIVE.md).
 11. [Validation log](docs/VALIDATION.md): what has actually been run.

@@ -1,8 +1,8 @@
 # Questions for Ben and Sumaithri
 
-Updated October 22, 2026. The [September 30 version](archive/2026-09-30-ben-questions.md) is archived.
+Updated October 23, 2026. Earlier versions are archived: [September 30](archive/2026-09-30-ben-questions.md) and [October 22](archive/2026-10-22-ben-questions.md).
 
-Ben asked the team to define the plan and only ask when needed, so we state our assumptions and ask only questions whose answers would change what we build.
+**No questions are blocking.** On October 23, Matt settled the open questions himself, from the project brief and Google's public documentation. The decisions and the evidence behind each are in [DECISIONS.md](DECISIONS.md#decisions-of-october-23-2026-t1-closed). What Omni does today is in the [AlloyDB Omni research notes](research/notes/alloydb-omni.md).
 
 ## Already answered in the chats
 
@@ -13,47 +13,30 @@ Ben asked the team to define the plan and only ask when needed, so we state our 
 - A working proof of concept on PostgreSQL is enough; any language is fine (C only for an upstream contribution).
 - Most real-world backups aren't taken with `pg_basebackup` (Ben, October 2).
 
+## Decided on October 23
+
+| Question | Decision |
+|---|---|
+| Which situation do we target? | AlloyDB Omni's two full re-copies: rebuilding a same-region HA standby, and re-seeding a cross-region DR secondary. We define small, medium and large sizes ourselves. |
+| What if there's no old copy? | Out of scope: use `pg_basebackup`. Whether Omni keeps an old disk is the integrator's choice. |
+| May the tool run a program on the source? | Yes. Sending only changed chunks requires it. How Omni packages it is the integrator's choice. |
+| How much may it slow the live database? | No more than `pg_basebackup` does under the same load. Experiment T10a measures it. |
+| Must the old copy survive a failed refresh? | No. Omni's own rebuild paths don't keep it either. PostgreSQL must refuse to start on a half-refreshed copy, and the fallback is a rerun or a full copy. |
+| Encrypt the data stream? | Yes (TLS). |
+| May we use rsync or other GPL code? | No. pgdelta is to be Apache-2.0; rsync remains a baseline only. |
+| Where does the code go? | Not our concern: we build the tool, and Google integrates it if they want. |
+
 ## Our assumptions (tell us if any are wrong)
 
 1. A standalone tool, not a PostgreSQL patch.
-2. PostgreSQL 17 or 18 for the proof of concept; AlloyDB Omni if time allows.
-3. "No data loss" means the restored copy passes `pg_verifybackup`, starts, and its data matches the source at the backup's end point.
-4. Where PostgreSQL's own incremental backup applies, we hand off to it; our tool targets old copies it can't use.
-5. We build our own chunking and transfer engine and benchmark rsync, `pg_probackup catchup` and WAL-G catchup as baselines.
+2. A proof of concept on PostgreSQL 17 or 18 carries over to Omni, which stores ordinary PostgreSQL files.
+3. "No data loss" means the refreshed copy passes `pg_verifybackup`, recovers, and its data matches the source at the backup's end point.
+4. Where PostgreSQL's own incremental backup applies, we hand off to it. Our tool targets old copies it can't use.
+5. We build our own chunking and transfer engine and benchmark against `pg_basebackup`, native incremental, rsync, `pg_rewind`, `pg_probackup catchup`, WAL-G catchup and pgBackRest delta restore.
 
-## Ask Ben
+## Nice to know (not blocking)
 
-1. **Which real situation prompted this project?** Replicas that fell behind, old primaries after failover, copies from disk snapshots or other backup tools, or something else? Roughly how large are the databases, and how fast is the link between source and destination?
-2. **May the tool run a program on the source machine, and is temporary disk space there equal to the database size acceptable?** v0 takes a normal backup locally on the source, then sends only the differences. If scratch space isn't allowed, we go straight to reading the live data directory in backup mode.
-
-## Ask the AlloyDB team (from the research)
-
-1. Does Omni's data directory contain files or page formats beyond vanilla PostgreSQL?
-2. Could the Omni operator keep a failed primary's volume for our tool to refresh, instead of deleting it? That would be the most compelling demo.
-3. How does Omni's encryption treat page contents? Hashing raw bytes should still work, but we'd like to confirm.
-
-## Ask Sumaithri
-
-- Is there a formal mid-semester deliverable and date, or is the late-November / early-December demo the main milestone?
-
-## Draft post for the Chat space
-
-Not sent yet. Review with the team first.
-
-> Hi Ben and Sumaithri, here's where the delta backup project stands and our plan.
->
-> **Where we are:** the measurement setup is built and merged: backup and restore correctness checks, CPU and disk usage, and live-database slowdown under a HammerDB workload. First result: running a backup cut throughput by roughly 57–71% (a single laptop run; repeats on GCP next). We also surveyed existing tools: none refreshes an arbitrary older copy directly from a live server while verifying reused data by hash, which is the niche we're targeting. The tool itself starts this week.
->
-> **Plan to code freeze (around November 13):**
-> - Week of October 26: first working version on one machine. Rebuild a new backup from an old copy plus only the changed 8 KiB pages; report bytes saved at different change rates.
-> - Week of November 2: run between two GCP machines over a throttled link; compare bytes and time against full `pg_basebackup`, native incremental, rsync and the existing catchup tools.
-> - Week of November 9: tricky cases (wrong database, a copy that diverged after failover, shrunken tables), correctness under active load, final charts.
-> - Demo: refresh time vs. link speed, and bytes sent, at about 1, 10 and 50 GB.
->
-> **Our assumptions (tell us if any are wrong):** standalone tool; PostgreSQL 17/18 for the proof of concept, Omni if time allows; "no data loss" means the restored copy passes `pg_verifybackup`, starts, and matches the source at the backup's end point; when native incremental applies we hand off to it; we build our own chunking and transfer engine and benchmark rsync and the catchup tools as baselines.
->
-> **Two questions for Ben:**
-> 1. Which real situation prompted this: replicas that fell behind, old primaries after failover, copies from disk snapshots or other backup tools, or something else? Roughly how large are the databases, and how fast is the link between source and destination?
-> 2. May our tool run a program on the source machine, and is temporary disk space there equal to the database size acceptable?
->
-> **Sumaithri:** is there a formal mid-semester deliverable and date, or is the late-November / early-December demo the main milestone?
+- **AlloyDB team:** when the operator deletes an instance after a failover or an auto-heal, does it keep the instance's disk? That decides how often an old copy exists for the HA case.
+- **AlloyDB team:** under transparent data encryption, do standbys share the primary's data keys? An old copy is only reusable if they do.
+- **AlloyDB team:** do Omni clusters enable data checksums or `wal_log_hints` by default? `pg_rewind` needs one of them.
+- **Sumaithri:** is there a formal mid-semester deliverable and date, or is the late-November / early-December demo the main milestone?

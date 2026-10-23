@@ -1,5 +1,7 @@
 # Decision ledger
 
+*Update, night of October 23, 2026: the sponsor questions (T1) are closed by the owner's decisions, recorded in [Decisions of October 23](#decisions-of-october-23-2026-t1-closed). Rows they change are marked.*
+
 *A review of pgdelta v0 and the proposed v1, 23 October 2026. Nothing was re-run for this review. It reads the committed experiments and rechecks their numbers from the CSV files in `docs/experiments/data/`. It also reads pgdelta's own phase timers from the cloud runs, now committed as [exp04-pgdelta-timers.csv](experiments/data/exp04-pgdelta-timers.csv) (see "Where pgdelta's time goes").*
 
 This page lists every design decision in pgdelta v0 and the proposed v1. For each one it grades the evidence, says exactly what is still uncertain (the gray area), and names the test that would settle it. It answers three questions:
@@ -101,8 +103,8 @@ Real catch-up tools check identity and timeline. By the research's tool table th
 - the test suite and the harness.
 
 **Conditional:**
-- **A complete new copy, with B never touched.** This depends on whether the sponsor needs B to survive a failed refresh. That has never been asked, and the in-place alternative was never measured.
-- **The custom engine itself.** The plan's "rsync gate" fired: the bytes are equal. Single process against single process, the two are about even for scattered changes. rsync was never run in parallel or with the same write strategy. Whether v1 keeps pgdelta's engine, or wraps rsync with pgdelta's verification and publish logic, waits on T1 and T6.
+- **A complete new copy, with B never touched.** This depends on whether the sponsor needs B to survive a failed refresh. That has never been asked, and the in-place alternative was never measured. *Settled October 23 (O5): B may be patched in place; T3 (e) measures it.*
+- **The custom engine itself.** The plan's "rsync gate" fired: the bytes are equal. Single process against single process, the two are about even for scattered changes. rsync was never run in parallel or with the same write strategy. Whether v1 keeps pgdelta's engine, or wraps rsync with pgdelta's verification and publish logic, waits on T1 and T6. *Settled October 23 (O7): no GPL code, so v1 keeps its own engine.*
 
 **Replace:**
 - **The source path.** Read PGDATA directly in backup mode, stream only the WAL actually written, emit a `backup_manifest` (v1 loses the "byte-identical to S" check), and apply PostgreSQL's backup exclusion list.
@@ -153,6 +155,34 @@ Three settings look harmless only because every test ran at 0.1 ms round-trip ti
 1. **Optimising in the wrong frame.** EXP-05 and EXP-06 were steered by laptop runs that left out the capture. Their modelled crossovers came out 2.6-5.3 times too high. Copy-then-patch showed a gain on the laptop but none in the Linux timers. The costs that dominate on the VMs surfaced late: the capture, writing and flushing a whole new O, and source CPU.
 2. **Gates not followed through.** The plan's rsync gate fired, and the sponsor questions are still unsent. The harness used SHA-256 manifests with no recorded reason, so EXP-04's crossovers came out at only 48-80% of what EXP-04b later measured.
 3. **Requirements and baselines missing.** Source slowdown under an active workload is a stated sponsor requirement and is unmeasured for every method. Also never run: pgBackRest delta restore, the catch-up tools, pg_rewind, parallel rsync, added latency, and data larger than RAM.
+
+## Decisions of October 23, 2026 (T1 closed)
+
+Matt, the project owner, settled the open sponsor questions on October 23, working from the project brief and Google's public docs ([AlloyDB Omni notes](research/notes/alloydb-omni.md)). Nothing is left waiting on the sponsor. These are owner decisions, so they're listed here and not counted in the scorecard above. Each grade judges the evidence behind the decision, as elsewhere in this ledger.
+
+| ID | Decision | Grade | Evidence | Changes |
+|---|---|---|---|---|
+| O1 | **Target AlloyDB Omni, in both cases where it re-copies a whole database today:** rebuilding a same-region HA standby, and re-seeding a cross-region DR secondary. We define the small, medium and large sizes ourselves. | B | After an unplanned failover the operator deletes the old primary and seeds a new standby with `pg_basebackup`, which can take hours. After a DR failover, Google's procedure tries a rewind and falls back to a full copy. | D01's niche |
+| O2 | **pgdelta runs only when an old copy exists at the destination.** With none, use `pg_basebackup`. Whether Omni keeps an old disk is the integrator's choice. | B | The project brief targets a destination that already holds an older copy, and asks for documented fallback behaviour. | T1's first question |
+| O3 | **A program on the source is allowed.** How Omni packages it (a sidecar, an extension) is the integrator's choice. | B | The brief requires that only changed chunks cross the network, which needs fingerprints computed on the source side. Omni supports sidecars with their own CPU limits, and Google's samples run a backup agent that way. | D04 |
+| O4 | **Slowdown bar: no worse than `pg_basebackup` under the same load.** T10a measures two numbers, both fixed before it runs: the worst drop in throughput, and the total work lost over the refresh. | C | The brief's degradation metric compares against `pg_basebackup`, and Omni accepts `pg_basebackup`'s impact at every standby rebuild. The bar itself is a judgment. | D04, D81 |
+| O5 | **B may be patched in place.** A failed refresh may leave B unusable, provided PostgreSQL refuses to start on it until a refresh completes. The fallback is to rerun pgdelta or take a full copy. The new-copy mode stays as an option for copies that must survive, such as an ex-primary that may hold unreplicated writes, when there is room for it. | B | No Omni rebuild path guarantees a usable copy after a failed run. `pg_basebackup` deletes its partial output; `pg_rewind` leaves its target "likely not in a state that can be recovered"; Omni's documented remedies (DBSE2414, DBSE1082) are delete-and-recopy or re-create. The exception: managed AlloyDB backs up an ex-primary before re-creating it. | D38, D38p, D39; T3 (e) needs no undo journal |
+| O6 | **Encrypt the data stream (TLS).** | B | Omni recommends TLS for all connections and requires cert-manager. pgdelta's hash key and the changed pages cross the network. | D37 |
+| O7 | **No GPL code; pgdelta is to be licensed Apache-2.0.** No LICENSE file is in the repository yet, because its other contributors' code is covered too. rsync stays a baseline, not a candidate engine. | B | Google's policy lists the GPL as restricted for products delivered to customers; rsync is GPLv3; Omni's database images don't include rsync. | D06; T6 keeps only its baseline arms |
+| O8 | **Where the code lands is not our concern.** We build our own tool; Google integrates it if they want. | none needed | Owner decision. | none |
+| O9 | **Drop T3's staged-only arms (f) and (g).** Decided while pre-registering T3, under rule 8. | B | Both only matter while a capture exists. v1 removes the capture (D10p is graded X), and no use for staged mode was identified. | T3; D26, D27, D57 and D61 are moot unless staged mode returns |
+
+**How T1's prediction fared:**
+- "A source program is allowed": **held** (O3).
+- "B must survive a failed refresh": **failed** (O5). The rule written for this case fires: in-place patching becomes a candidate default, decided by T3 (e).
+- "Lineage-free copies with no repository, over links of 10 Gbit/s or less, are a real case": **partly held.** Omni's HA rebuild runs over a same-region link that can exceed 10 Gbit/s, although persistent-disk throughput may cap it lower. Clusters with a BackupPlan do have a pgBackRest repository, but HA and DR seeding bypass it.
+
+**Still open, none blocking:**
+- How often the same old copy is refreshed without having been started. This decides whether a cached hash tree (D13) is worth building.
+- Whether an old copy is reusable under Omni's transparent data encryption. Only if it shares the source's data keys.
+- Whether Omni keeps a deleted instance's disk (the integrator's choice, O2).
+
+**What changes in the queue:** T1 is done. T11, T8a and T3 run next, in that order. T3 (e) tests in-place patching with a startup block instead of an undo journal.
 
 ## Where pgdelta stands today
 
@@ -224,14 +254,14 @@ The tests T0 to T14 are described in the queue further down.
 
 | ID | Decision | Grade | Evidence | Gray area | Test |
 |---|---|---|---|---|---|
-| D01 | Niche: refresh a lineage-free old copy from the live server, with no repository, verifying every reused page | C | No tool found that does this. The sponsor said most real backups aren't taken with pg_basebackup. A timeline-blind LSN shortcut keeps wrong pages, but real catch-up tools would refuse the failover case, so pgdelta's measured edge there is reuse (48% sent), not correctness. Same bytes as rsync; faster only for scattered changes at about 0.3-2 Gbit/s. | How common such copies are; whether a pgBackRest repository already exists (Omni recommends pgBackRest); whether gated LSN tools are ever wrong (S2b). | T1, T11 |
+| D01 | Niche: refresh a lineage-free old copy from the live server, with no repository, verifying every reused page | C | No tool found that does this. The sponsor said most real backups aren't taken with pg_basebackup. A timeline-blind LSN shortcut keeps wrong pages, but real catch-up tools would refuse the failover case, so pgdelta's measured edge there is reuse (48% sent), not correctness. Same bytes as rsync; faster only for scattered changes at about 0.3-2 Gbit/s. | How common such copies are; whether a pgBackRest repository already exists (Omni recommends pgBackRest); whether gated LSN tools are ever wrong (S2b). *October 23: the target is Omni's HA rebuild and DR re-seed (O1, O2).* | T11 |
 | D02 | Hand off to native incremental or pg_rewind where they apply (not built yet) | A | Incremental was the fastest delta method in all 42 cells (for example hot at 2 Gbit/s: 4.05 s vs pgdelta 8.33 s), even reading B0 cold. | Selector rules untested; pg_rewind never benchmarked. | T11 |
 | D03 | Don't claim to beat a parallel full copy on fast LANs; report the crossover | B | No staged method beat a full copy unthrottled. Crossovers 1.97-2.47 Gbit/s; even a zero-overhead copy would lower them only about 20%. | v1's standing: its transfer alone crosses 5.0-9.9 Gbit/s against today's copy but 3.2-3.8 against a zero-overhead one. | T2 |
-| D04 | A program on each host; only digests and differing pages cross the link | B | Wire bytes 27.6-29.2 MB (local) and 610 MB (uniform), vs 2,102-2,112 MB. The transfer phase costs 4.9-6.4 source CPU-s, twice a whole full copy. | Sponsor permission; CPU budget; slowdown never measured. | T1, T10a |
+| D04 | A program on each host; only digests and differing pages cross the link | B | Wire bytes 27.6-29.2 MB (local) and 610 MB (uniform), vs 2,102-2,112 MB. The transfer phase costs 4.9-6.4 source CPU-s, twice a whole full copy. | ~~Sponsor permission~~ allowed (O3). Slowdown never measured; its bar is now pg_basebackup's (O4). | T10a |
 | D05 | Standalone tool, no PostgreSQL patch | C | Scope reasons; raw reads outside the server ran at 2.87 GB/s. | None for performance. | none |
-| D06 | Build our own engine instead of using rsync | C | Same bytes. Single process vs single process, about even for scattered changes (23.13 vs 23.29 s at 0.5 Gbit/s). rsync's local-change lead comes mostly from writing its copy during the capture. The plan's rsync gate fired and was never closed. | Speed at equal parallelism and equal write strategy. | T6, T1 |
+| D06 | Build our own engine instead of using rsync | C | Same bytes. Single process vs single process, about even for scattered changes (23.13 vs 23.29 s at 0.5 Gbit/s). rsync's local-change lead comes mostly from writing its copy during the capture. The plan's rsync gate fired and was never closed. *Closed October 23 by O7: rsync is GPL, so it can't be the engine.* | Speed at equal parallelism and equal write strategy (now a baseline question only). | T6 |
 | D08 | Scope: POSIX, PostgreSQL 17/18, plain format, no outside tablespaces; refuse everything else | C | Refusals tested; only 17.11 (and 17 to 18) exercised. | Whether this covers target deployments. | T1 |
-| D37 | Unauthenticated, unencrypted TCP for now; SSH later | D | No evidence; deviates from SPEC s3. The key crosses the network in clear. | Encryption's throughput cost. | T12 |
+| D37 | Unauthenticated, unencrypted TCP for now; SSH later | D | No evidence; deviates from SPEC s3. The key crosses the network in clear. | Encryption's throughput cost. *Superseded October 23 by O6: TLS required.* | T12 |
 | D46 | No resume, no stall timeout | D | A restart costs seconds at 2.1 GB; unknown at TB scale. | Restart cost per TB. | T9 |
 | D56 | v1 builds on v0 | B | The kept parts are validated; the replaced part is the measured bottleneck. | Keeping the new-copy design and the custom engine are conditional. v1 needs its own manifest. | T1, T6, T3, T8 |
 | D62 | Deferred: hand-off, LSN hints, outside tablespaces | D | No priority stated, yet hand-off is the strongest proven speed lever. | Order: the evidence says hand-off first. | none |
@@ -249,8 +279,8 @@ The tests T0 to T14 are described in the queue further down.
 | D26 | Key arrives only at session start | B | Secrecy sound. Saving from an earlier start: tenths of a second today, perhaps 0.5-1 s once the write path is fixed. | Size of saving; only with a capture. | T3 (f) |
 | D32 | Framed protocol, strict checks, byte counts | A | Within 0.4% of the network counters. | File list must fit one 64 MiB frame. | unit test |
 | D34 | Full-duplex without blocking | B | No hang in about 670-740 runs. | None. | none |
-| D38 | Safety half: B read-only, never modified | A | B0 unchanged after every trial and run. Most comparable tools work in place, and the rule traces to an unconfirmed placeholder. | Does the sponsor need B to survive a failed refresh? | T1 |
-| D39 | Staging, atomic rename, receipts | B | Tests; publish only after verification. In place would need an undo journal. | Crash behaviour at scale. | T13 |
+| D38 | Safety half: B read-only, never modified | A | B0 unchanged after every trial and run. Most comparable tools work in place, and the rule traces to an unconfirmed placeholder. | ~~Does the sponsor need B to survive a failed refresh?~~ No (O5): B may be patched in place, with a startup block; the new-copy mode stays as an option. | T3 (e), T13 |
+| D39 | Staging, atomic rename, receipts | B | Tests; publish only after verification. In place would need an undo journal. *O5 drops the undo journal: a failed in-place refresh leaves B blocked from starting.* | Crash behaviour at scale; the startup block under a killed run. | T3 (e), T13 |
 | D40 | Durability half: flush every file and directory | B | Required by SPEC; pg_basebackup flushes too. | Placement is D40p. | none |
 | D41 | Correctness half: re-hash every output byte before publishing | B | Sound; correct everywhere. The re-read goes through the page cache. | What it catches, fault by fault. | T13 |
 | D42 | No manifest emitted (relies on O = S) | B | Valid in v0 only. | v1 must emit one. | T8 |
@@ -265,7 +295,7 @@ The tests T0 to T14 are described in the queue further down.
 | ID | Decision | Grade | Evidence | Gray area | Test |
 |---|---|---|---|---|---|
 | D10p | (added) Keep the staged capture as the performance path | **X** | The capture (median 3.98-4.04 s) alone equals a full copy (3.96-4.13 s). It costs more source CPU than the whole full copy, and adds 16.8 MB of WAL padding. | Untested use: shipping an existing nightly backup. | T1 |
-| D38p | (added) Build a complete new O rather than patch in place, clone or copy ahead | D | Never varied. Costs 3.3-3.5 s of the 4.3-5.0 s transfer. | Savings of each alternative, and which the sponsor allows. | T3 (d)(e)(f) |
+| D38p | (added) Build a complete new O rather than patch in place, clone or copy ahead | D | Never varied. Costs 3.3-3.5 s of the 4.3-5.0 s transfer. | Savings of each alternative. In place is allowed (O5). | T3 (d)(e) |
 | D40p | (added) fsync each file serially in the main loop | D | Never varied. 1.66-1.72 s, the largest single phase; one 5.87 s outlier. | Early write-back or flushing on a worker; tail frequency. | T3 (b) |
 | D41p | (added) Separate re-read verification rather than fused or O_DIRECT | D | Never compared. 1.40-1.52 s of verifier time, mostly hidden; 4.0 s sequential. | Cost beyond RAM; what fused would miss. | T13, T9 |
 | D07 | Python, standard library only | C | Threads fail; 4 processes hash 3.88 times faster. Hashing is most of the source CPU. No compiled build compared. | Source CPU; v1's floor. | T5 |
@@ -341,7 +371,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 | Priority | Test | Decides | Cost |
 |---|---|---|---|
 | (do first) | T0 Commit the Linux phase timers | makes the phase table checkable | 1 hour, no cloud |
-| 1 | T1 Sponsor questions | niche, agent, B overwrite, repository, rsync engine | one message and a meeting |
+| done | T1 Sponsor questions | closed October 23 by the owner's decisions O1-O9 | none |
 | 2 | T10a Source slowdown, minimal, plus G4 correctness | the sponsor's degradation metric; urgency of T5 | 1 day, about 3 VM hours |
 | 3 | T11 Incumbents where pgdelta claims its edge | the correctness claim; the pgBackRest comparison | 1 day on the Mac plus 1-2 days, about 3 VM hours |
 | 4 | T8a Cold direct read without a capture | whether v1's reads widen the niche | half a day, about 2 VM hours |
@@ -362,7 +392,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 - **What:** copy the per-phase timers from the raw run files into the curated data. Done: [exp04-pgdelta-timers.csv](experiments/data/exp04-pgdelta-timers.csv), 252 runs.
 - **Check:** the curated values equal the raw ones for all 252 pgdelta runs. Nothing changes grade until T3 runs.
 
-### T1 Sponsor questions (only the open ones)
+### T1 Sponsor questions (closed October 23, 2026; see [Decisions of October 23](#decisions-of-october-23-2026-t1-closed))
 - **Questions:**
   - Which real situation prompted the project? How large are the databases, and how fast and how billed are the links?
   - May the tool run a program on the source, and with how much CPU and scratch space?
