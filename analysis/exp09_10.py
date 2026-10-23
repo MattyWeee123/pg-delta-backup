@@ -228,7 +228,7 @@ def fig_direct(table, tag):
                 ax.text(x, top + 0.15, f'{value:.1f}', ha='center', va='bottom', fontsize=7)
         if pattern in LOCAL:
             ax.axhspan(2.6, 3.8, color=COLORS['green'], alpha=0.08, zorder=0)
-            ax.text(2.45, 3.82, 'D2 predicted\n2.6–3.8 s', fontsize=7, color=COLORS['green'], ha='right', va='bottom')
+            ax.text(-0.45, 2.62, 'D2 predicted 2.6–3.8 s', fontsize=7, color=COLORS['green'], ha='left', va='bottom')
         ax.set_xticks(range(len(SPEEDS)), [SPEED_LABEL[s] for s in SPEEDS])
         ax.set_title(f'{pattern} 1%')
     axes[0].set_ylabel('End-to-end time, s (median; line to maximum)')
