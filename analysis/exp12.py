@@ -1094,7 +1094,10 @@ class Sampler:
         except (OSError, ValueError):
             sql = []
         sampler = cls(ticks, sql)
-        sampler.final = read_json(Path(directory) / 'sampler-final.json')
+        try:  # compressed with the logs at step 15, as everything but the registry is
+            sampler.final = (lines('sampler-final.json') or [None])[0]
+        except (OSError, ValueError):
+            sampler.final = None
         return sampler
 
     def increase(self, values, start, end, t=None):

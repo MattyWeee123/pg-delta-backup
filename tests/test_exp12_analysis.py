@@ -935,6 +935,24 @@ class DryRun(unittest.TestCase):
         self.assertIn('  - void: 00-hot-f0.01-s70 r2 busy 2g v1proxy: the load (busy) was found dead after it', text)
         self.assertIn('left out of every median: void 3', text)
 
+    @unittest.skipUnless(shutil.which('zstd'), 'needs zstd')
+    def test_compressed_logs_read_as_step_15_leaves_them(self):
+        # Every file of the load's directory but the registry zstd-compressed (agent.py compress --keep load.json).
+        with tempfile.TemporaryDirectory() as tmp:
+            sweep = exp12_smoke_data.write_session(Path(tmp) / 'results', smoke=True)
+            runs, trials, meta = exp12.load(sweep)
+            plain = exp12.Session(runs, trials, [meta], sweeps=[sweep], resamples=200)
+            files = [str(path) for path in (sweep / 'logs').rglob('*') if path.is_file() and path.name != 'load.json']
+            subprocess.run(['zstd', '-q', '--rm', *files], check=True)
+            runs, trials, meta = exp12.load(sweep)
+            packed = exp12.Session(runs, trials, [meta], sweeps=[sweep], resamples=200)
+        numbers = [[((r['stats'] or {}).get('W'), (r['sampler'] or {}).get('client_wait_s')) for r in S.runs]
+                   for S in (plain, packed)]
+        self.assertEqual(numbers[0], numbers[1])
+        self.assertTrue(any(w is not None for w, _ in numbers[1]))
+        self.assertEqual(packed.samplers[('exp12-smoke', exp12_smoke_data.TRIAL)].final['interval_s'],
+                         exp12_smoke_data.SAMPLER_TICK)
+
     def test_a_missing_log_leaves_no_numbers(self):
         with tempfile.TemporaryDirectory() as tmp:
             sweep = exp12_smoke_data.write_session(Path(tmp) / 'results', smoke=True)
