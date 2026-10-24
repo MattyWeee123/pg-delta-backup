@@ -119,24 +119,25 @@ An independent reviewer checked the first version before anything ran. Changes:
 - **Sweep `exp10-xfs`** (00:07–00:25 UTC): the destination's array reformatted as XFS with reflinks; full, `pgdelta`, `pgdelta_inplace`, `rsync_8k` and `incremental_cfr`; 75 runs.
 - **Sweep `exp10-ext4b`** (00:26–00:42 UTC): the array reformatted back to ext4 with `startup.sh`'s options (`infra/gcp/reformat_dest_ext4.sh`); full, `pgdelta`, the fixed `pgdelta_fsync_wb` and `pgdelta_fsync_worker`; 60 runs.
 - **Verification:** every run passed. On XFS, every `pgdelta` new copy shared 1.51 GB (uniform) or 2.09–2.10 GB (local) of blocks with another file, B0, as intended, and every in-place B shared none. rsync's new copy shared 1.00 GB (uniform) and 2.09–2.10 GB (local). The incremental output shared 2.12 GB, nearly all of it, but the measure (FIEMAP's shared flag) doesn't say with which file, so that includes the incremental backup's own files.
-- **Analysis:** `analysis/exp09_10.py`, function `exp10_later`, which prints every number below and writes the runs to [exp10-later-runs.csv](data/exp10-later-runs.csv).
+- **Analysis:** `analysis/exp09_10.py`, function `exp10_later`, which prints the tables and the derived figures below and writes the runs to [exp10-later-runs.csv](data/exp10-later-runs.csv).
 
 ![EXP-10: write paths on ext4 and XFS](../figures/exp10-xfs-and-rerun.svg)
 
-How to read it: each bar is one arm's median run, split by the receiver's own timers. The orange and red parts are the copy and the flush that dominated v0. In place, and the new copy on XFS, write almost nothing, so what is left is hashing B, the network, and waiting for the verifier (yellow). The bottom four bars also show why a new copy on XFS ends up close to in place but not equal: its verifier waits a little longer.
+How to read it: each bar is one arm's median run, split by the receiver's own timers. The three ext4 new-copy bars come from the last sweep, so they compare within one session; the ext4 in-place bar comes from the first. The orange and red parts are the copy and the flush that dominated v0; the fixed write-back's own flushing calls aren't timed separately and fall in the purple part. For local changes, in place and the new copy on XFS write almost nothing, so what is left is hashing B, the network, and waiting for the verifier (yellow). The bottom two bars show why a new copy on XFS ends up close to in place but not equal: for local changes its write phase is 0.11–0.13 s longer and its verifier wait 0.13–0.18 s longer; for uniform the gap is mostly the write phase (1.18 against 0.91 s, most of it fsync).
 
 **No session drift** (unthrottled medians, seconds unless stated). The source side and the full copy are the same in all three sweeps:
 
 | | ext4, first sweep | XFS | ext4, last sweep |
 |---|---:|---:|---:|
 | full copy, uniform / hot / append | 3.15 / 3.13 / 3.14 | 3.13 / 3.16 / 3.14 | 3.13 / 3.13 / 3.17 |
+| full copy maxima | 3.48 / 3.35 / 3.37 | 3.36 / 3.36 / 3.37 | 3.36 / 3.25 / 3.41 |
 | capture, staged pgdelta (range over workloads) | 3.30–3.33 | 3.28–3.31 | 3.29–3.30 |
 | source hashing | 1.04–1.05 | 1.05–1.06 | 1.05 |
 | measured link, Gbit/s | 15.04–15.08 | 14.98–15.01 | 14.97–15.05 |
 | full copy's source CPU, CPU-s | 1.63–1.70 | 1.67–1.72 | 1.64–1.67 |
 | pgdelta transfer, uniform / hot / append | 4.44 / 3.94 / 3.94 | **3.33 / 2.54 / 2.54** | 4.41 / 3.97 / 3.98 |
 
-**pgdelta on XFS against ext4** (median, maximum in brackets, seconds; ext4 is the first sweep, the last sweep is within 0.1 s on every timer):
+**pgdelta on XFS against ext4** (median, maximum in brackets, seconds; ext4 is the first sweep; the last sweep's medians are within 0.1 s of it on every timer, and its maxima within 0.16 s):
 
 | Workload | | transfer | write phase | copying B | fsync | hashing B | main loop waiting for verification |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -155,7 +156,20 @@ How to read it: each bar is one arm's median run, split by the receiver's own ti
 | hot | 2.35 (2.39) | 0.19 | 0.05 (0.06) | 1.16 (1.18) | 1.36 (1.39) |
 | append | 2.36 (2.39) | 0.18 | 0.05 (0.06) | 1.02 (1.03) | 1.22 (1.24) |
 
-**With clones, the write phase almost disappears, but about half of that saving comes back as waiting for verification.** Copying B's bytes takes 0.03 s instead of 1.2–1.4 s, and the fsync falls to 0.2 s (0.8 s for uniform). For local changes the write phase falls by about 2.8 s, but the transfer falls by only 1.40–1.44 s. The rest reappears where the revision expected it: a cloned O's pages aren't in the page cache, so the verifier reads them from disk, and the main loop waits 0.78–0.85 s for it instead of 0.12–0.19 s on ext4. Hashing B also took 0.24–0.25 s longer for local changes. Even so, building a complete new copy on XFS is within 0.19 s of patching in place for local changes, and 0.33 s for uniform, while leaving B intact.
+**With clones, the write phase almost disappears for local changes, but only about half of that saving reaches the transfer.** Copying B's bytes takes 0.03 s instead of 1.2–1.4 s, and the fsync falls to 0.2 s (0.8 s for uniform). For local changes the write phase falls by 2.76–2.84 s, but the transfer by only 1.40–1.44 s. The rest is waiting that the long write phase used to hide. Against either ext4 sweep, the main loop waits 0.64–0.72 s longer for the verifier, and 0.68–0.77 s longer on everything else, mostly hashing B, which itself took 0.23–0.25 s longer:
+
+| Workload | Arm | transfer | write phase | waiting for verification | other waits (hashing B, network) |
+|---|---|---:|---:|---:|---:|
+| hot | ext4, new copy | 3.94 | 3.07 | 0.14 | 0.73 |
+| | XFS, new copy | 2.54 | 0.27 | 0.78 | 1.49 |
+| | XFS, in place | 2.35 | 0.13 | 0.66 | 1.56 |
+| append | ext4, new copy | 3.94 | 3.01 | 0.17 | 0.76 |
+| | XFS, new copy | 2.54 | 0.25 | 0.85 | 1.44 |
+| | XFS, in place | 2.36 | 0.14 | 0.66 | 1.56 |
+
+(Medians, seconds; "other" is the transfer minus the write phase and the wait for verification.)
+
+In place shows almost the same waits with no clones at all: 0.65–0.66 s for the verifier, on ext4 and on XFS. So the risk the revision registered, that a cloned O's pages must be read from disk to verify them, accounts for only 0.13–0.18 s of the wait. The rest appears whenever the write phase is short. Even so, building a complete new copy on XFS is within 0.19 s of patching in place for local changes, and 0.33 s for uniform, while leaving B intact.
 
 | | Prediction | Result | Rule |
 |---|---|---|---|
@@ -173,7 +187,7 @@ How to read it: each bar is one arm's median run, split by the receiver's own ti
 
 - **Fixing write-back took its saving from 0.01 s to 0.94–0.98 s for local changes.** The first measurement was the bug, not the idea.
 - **Prediction (b), judged as the dated note registered it:** the fixed write-back replaces only the first write-back measurement, and the fsync thread keeps its first-sweep result. The better alternative then saves 0.68 s (uniform), 0.99 s (hot) and 0.996 s (append), so **(b) failed in all three workloads**, as the ext4 verdict above says.
-- **For local changes the thread's saving sits on the 1.0 s line.** In this sweep it saved 1.03–1.04 s, in the first sweep 0.99–1.00 s, and pooling both sweeps' 10 runs gives 1.005–1.010 s. The rerun's figure is a same-session comparison only. Most of its 0.04 s gain over the first sweep is the baseline's median rising by 0.03 s; the thread's fell by only 0.01–0.02 s. The rerun baseline's runs also spread over 0.11 s (hot) and 0.35 s (append).
+- **For local changes the thread's saving sits on the 1.0 s line.** In this sweep it saved 1.03–1.04 s, in the first sweep 0.99–1.00 s, and pooling both sweeps' 10 runs gives 1.005–1.010 s. The rerun's figure is a same-session comparison only. Most of its 0.04 s gain over the first sweep is the baseline's median rising by 0.03 s; the thread's fell by only 0.01–0.02 s. The rerun baseline for append also spread over 0.35 s (two low runs, 3.69 and 3.81 s), against 0.08 s in the first sweep; for hot it spread about as much in both sweeps (0.11 and 0.13 s).
 - **The rule moves the fsync,** and the background thread is the better alternative in all three workloads: by 0.05–0.25 s against the fixed write-back in the same sweep.
 
 ## Conclusions

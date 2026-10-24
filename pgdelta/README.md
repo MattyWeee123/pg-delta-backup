@@ -92,9 +92,9 @@ Each switch below can be turned on or off on its own, for [EXP-06](../docs/exper
   - Each worker also exits on its own as soon as its parent process is gone, even after SIGKILL.
 - **Calling pgdelta from Python** with `jobs` above 1 (`run_sender`, `run_receiver`) needs the usual multiprocessing guard in the main module, `if __name__ == '__main__':`. `spawn` and `forkserver` import the main module in every worker. `python -m pgdelta` and `python -m unittest` are already safe.
 
-### Switches for T3 and T8a (added, not yet measured)
+### Switches for T3 and T8a (measured October 23–24)
 
-Added for [T3](../docs/DECISIONS.md) arms (b) and (e) and for T8a, after the owner's decisions of October 23, 2026 (O5: B may be patched in place). None of them has been measured yet. The defaults keep v0's behaviour. `local` passes the receiver's switches on to its child receiver.
+Added for [T3](../docs/DECISIONS.md) arms (b) and (e) and for T8a, after the owner's decisions of October 23, 2026 (O5: B may be patched in place). They were measured in [EXP-09](../docs/experiments/EXP-09-direct-read.md) and [EXP-10](../docs/experiments/EXP-10-write-path.md): in place is v1's chosen default, and the new-copy mode's fsync moves to a thread (D85, D86). The code's defaults still keep v0's behaviour until v1 is built. `local` passes the receiver's switches on to its child receiver.
 
 | Switch | Commands | Values (default first) | What it does |
 |---|---|---|---|

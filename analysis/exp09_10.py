@@ -4,7 +4,8 @@
 
 Reads the harness's summary.csv and per-run records from `remote.py fetch`, writes the curated
 data docs/experiments/data/exp09-10-runs.csv and exp09-10-cells.csv, the figures
-docs/figures/exp09-direct.svg and exp10-write-path.svg, and
+docs/figures/exp09-direct.svg and exp10-write-path.svg, and, when EXP-10's later sweeps (XFS, and the
+last ext4 sweep) are present, exp10-later-runs.csv and exp10-xfs-and-rerun.svg, and
 prints every prediction and decision rule of docs/experiments/EXP-09-direct-read.md and
 EXP-10-write-path.md with its verdict. Every statistic is a per-workload median over the
 repeats, as the revised pre-registrations say; maxima are reported beside them.
@@ -348,6 +349,8 @@ def exp10_later(before, xfs, after):
                      f'{span("pgdelta", "capture_s")} | {span("pgdelta", "hash_source_s")} | '
                      f'{span("full", "measured_s2d_gbit")} | {span("pgdelta", "receiver_start_s")} | '
                      f'{span("full", "cpu_source_s")} |')
+    lines.append('- full copy maxima, uniform / hot / append: ' + '; '.join(
+        f'{name} ' + ' / '.join(f'{mx(d[p]["full"], "total_s"):.2f}' for p in PATTERNS) for name, d in sweeps))
     lines += ['\n## EXP-10 (d): pgdelta on XFS against ext4 (median (max), seconds)',
               '| Workload | sweep | transfer | write phase | copying B | fsync | hash B | wait for verification |',
               '|---|---|---|---|---|---|---|---|']
@@ -382,6 +385,27 @@ def exp10_later(before, xfs, after):
     lines.append(f'- rsync prep on XFS < 0.5 s: {"held" if all(v < 0.5 for v in prep) else "failed"} ({min(prep):.2f}–{max(prep):.2f} s)')
     lines.append(f'- combine with --copy-file-range on XFS < 2.5 s: {"held" if all(v < 2.5 for v in comb) else "failed"} '
                  f'({min(comb):.2f}–{max(comb):.2f} s)')
+    lines += ['\n## EXP-10 (d): where the write phase\'s saving went (medians, seconds; other = transfer − write phase − '
+              'wait for verification)',
+              '| Workload | arm | transfer | write phase | wait for verification | other | hashing B | verifier busy |',
+              '|---|---|---|---|---|---|---|---|']
+    arms = (('ext4, first sweep', b, 'pgdelta'), ('ext4, last sweep', a, 'pgdelta'), ('XFS', x, 'pgdelta'),
+            ('ext4, first sweep', b, 'pgdelta_inplace'), ('XFS', x, 'pgdelta_inplace'))
+    def parts(d, p, meth):
+        runs = d[p][meth]
+        t, w, v = m(runs, 'transfer_s'), m(runs, 'rebuild_s'), m(runs, 'verify_wait_s')
+        return t, w, v, t - w - v, m(runs, 'hash_basis_s'), m(runs, 'verify_s')
+    for p in PATTERNS:
+        for name, d, meth in arms:
+            lines.append(f'| {p} | {name}, {meth} | ' + ' | '.join(f'{v:.3f}' for v in parts(d, p, meth)) + ' |')
+    for p in PATTERNS:
+        for name, d in (('first', b), ('last', a)):
+            e, f = parts(d, p, 'pgdelta'), parts(x, p, 'pgdelta')
+            lines.append(f'- {p}, XFS against the {name} ext4 sweep: write phase {f[1] - e[1]:+.3f}, transfer {f[0] - e[0]:+.3f}, '
+                         f'wait for verification {f[2] - e[2]:+.3f}, other {f[3] - e[3]:+.3f}, hashing B {f[4] - e[4]:+.3f} s')
+        n, i = parts(x, p, 'pgdelta'), parts(x, p, 'pgdelta_inplace')
+        lines.append(f'- {p}, XFS new copy minus XFS in place: transfer {n[0] - i[0]:+.3f}, write phase {n[1] - i[1]:+.3f}, '
+                     f'wait for verification {n[2] - i[2]:+.3f}, other {n[3] - i[3]:+.3f} s')
     lines.append('- blocks the output shares with another file on XFS (FIEMAP), GB, min–max over runs: ' + '; '.join(
         f'{p} ' + ', '.join(
             f'{meth} {min(v) / 1e9:.2f}–{max(v) / 1e9:.2f}'
@@ -411,6 +435,15 @@ def exp10_later(before, xfs, after):
                      f'rule (≥ 0.5 s moves the fsync): {"moves" if all(v >= 0.5 for v in best.values()) else "stays"}')
         lines.append('- (b), same-session comparison only (rerun thread against the rerun baseline): '
                      + ', '.join(f'{p} {v:.3f}' for p, v in same_session.items()))
+        for p in PATTERNS:
+            def rng(d, meth):
+                v = [r['transfer_s'] for r in d[p][meth]]
+                return f'{min(v):.3f}–{max(v):.3f} (spread {max(v) - min(v):.3f})'
+            lines.append(f'- {p}: baseline runs, first sweep {rng(b, "pgdelta")}, last sweep {rng(a, "pgdelta")}; '
+                         f'thread runs, first {rng(b, "pgdelta_fsync_worker")}, last {rng(a, "pgdelta_fsync_worker")}; '
+                         f'median shifts first → last: baseline {m(a[p]["pgdelta"], "transfer_s") - m(b[p]["pgdelta"], "transfer_s"):+.3f}, '
+                         f'thread {m(a[p]["pgdelta_fsync_worker"], "transfer_s") - m(b[p]["pgdelta_fsync_worker"], "transfer_s"):+.3f}; '
+                         f'thread faster than the fixed write-back by {m(a[p]["pgdelta_fsync_wb"], "transfer_s") - m(a[p]["pgdelta_fsync_worker"], "transfer_s"):.3f} s')
     lines.append(f'\nCurated data: {write_later((("exp10-xfs", [r for d in x.values() for rs in d.values() for r in rs]), ("exp10-ext4b", [r for d in a.values() for rs in d.values() for r in rs]))).relative_to(ROOT)}')
     return lines
 
@@ -418,14 +451,15 @@ def exp10_later(before, xfs, after):
 def fig_exp10_later(before, xfs, after):
     """Transfer phase of each write path, ext4 against XFS, split from the median run's own timers."""
     b, x, a = unthrottled(before), unthrottled(xfs), unthrottled(after)
-    arms = [(b, 'pgdelta', 'ext4: new copy, fsync in the main loop (v0)'),
-            (a, 'pgdelta_fsync_wb', 'ext4: new copy, early write-back (fixed)'),
-            (a, 'pgdelta_fsync_worker', 'ext4: new copy, fsync on a thread'),
-            (b, 'pgdelta_inplace', 'ext4: in place'),
+    arms = [(a, 'pgdelta', 'ext4, last sweep: new copy, fsync in the main loop (v0)'),
+            (a, 'pgdelta_fsync_wb', 'ext4, last sweep: new copy, early write-back (fixed)'),
+            (a, 'pgdelta_fsync_worker', 'ext4, last sweep: new copy, fsync on a thread'),
+            (b, 'pgdelta_inplace', 'ext4, first sweep: in place'),
             (x, 'pgdelta', 'XFS: new copy with clones'),
             (x, 'pgdelta_inplace', 'XFS: in place')]
     parts = [('copy from B', COLORS['orange']), ('fsync (incl. waiting for the thread)', COLORS['red']),
-             ('other writing, publish or commit', COLORS['purple']), ('waiting for verification', COLORS['yellow']),
+             ('other writing (incl. write-back calls), publish or commit', COLORS['purple']),
+             ('waiting for verification', COLORS['yellow']),
              ('hashing, network and other waits', COLORS['sky'])]
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.2), sharex=True)
     seen = set()

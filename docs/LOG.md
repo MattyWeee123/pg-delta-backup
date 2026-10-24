@@ -3,18 +3,24 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
-## 2026-10-24 (later): a second recheck; EXP-10's verdict on (b) corrected
+## 2026-10-24 (later): two more rechecks; EXP-10's verdict on (b) corrected
 
 **Why:** the first rechecks ran before EXP-10's XFS arm and the write-back rerun existed, and before the ledger, README and index were updated. So a second independent recheck covered those, against the raw sweeps and the write-ups.
 
-**Found:** 21 problems, 4 major. All are corrected:
+**Found:** 21 problems, 4 major, corrected in commit bdd61c9:
 - **(b) was judged against its registration.** I had compared the rerun's fsync thread with the rerun's baseline and called (b) held for local changes. The dated note allowed the rerun to replace only the write-back measurement. Judged that way, (b) failed in all three workloads (the better alternative saves 0.68, 0.99 and 0.996 s). The rule's outcome is unchanged: the fsync moves to a thread. For local changes the saving sits on the 1.0 s line in every way of counting it (0.99–1.04 s).
 - **The summaries had dropped caveats** that the write-ups keep: pgdelta ran in staged mode in T11, so its edge over `pg_probackup` is not yet shown from a live server; v1's 2.7 s was on a stopped source, and T2's registered prediction would reverse it.
 - **Two grades:** D53 (copy-then-patch) goes from A to B, since it ties gap-fill and its XFS advantage is inferred; D87 duplicated D58 and is folded into it. The October 24 scorecard is now 6 A, 6 B, 5 C, 12 D, 3 X and 3 moot.
-- **EXP-10 now reports the verifier's wait,** as its revision required: with clones, about half of the write phase's saving comes back as waiting for cloned pages to be read from disk.
+- **EXP-10 now reports the verifier's wait,** as its revision required.
 - **One queue,** not two that disagreed, and a section for T11b.
 
-**Added:** the figure [exp10-xfs-and-rerun](figures/exp10-xfs-and-rerun.svg); the later sweeps' runs as [exp10-later-runs.csv](experiments/data/exp10-later-runs.csv); `exp10_later` now prints every number EXP-10's later sections cite, with maxima.
+**Then a third check, of those corrections themselves,** found that one of them was wrong (2 major, 15 minor, all now corrected):
+- **My explanation of the clone result was wrong.** I had written that about half of the write phase's saving on XFS comes back as the verifier reading cloned pages from disk. The timers say otherwise. For local changes the write phase falls 2.8 s and the transfer 1.4 s. Of the 1.4 s that doesn't reach the transfer, about half is the main loop waiting for the verifier and half is waiting on hashing B. In place shows almost the same waits with no clones, so reading cloned pages adds only 0.13–0.18 s. The waiting appears whenever the write phase is short.
+- **The README listed two risks to v1's HA result** where EXP-09 names four (T2, T8, beyond RAM, persistent disks).
+- **D01 goes back to C:** its positioning against the incumbents rests on single runs at small scale with pgdelta staged, and the live-server refresh that defines the niche is T8's. D02's A is scoped to the incumbent it was measured against (incremental).
+- Also: the figure now compares the ext4 new-copy arms within one sweep; the summaries give pgBackRest's registered time-rule outcome; stale passages in the ledger carry dated notes; T10a, T9 and T11b say what they can and can't measure.
+
+**Added:** the figure [exp10-xfs-and-rerun](figures/exp10-xfs-and-rerun.svg); the later sweeps' runs as [exp10-later-runs.csv](experiments/data/exp10-later-runs.csv); `exp10_later` now prints the tables and every derived figure EXP-10's later sections cite, with maxima and ranges.
 
 ## 2026-10-24: EXP-08, EXP-09 and EXP-10 done; VMs deleted
 
@@ -41,7 +47,7 @@ Plus two smoke runs. Every output was verified.
 - `pg_probackup` had to be built from source: Postgres Pro's repository didn't answer from Google Cloud, and PGDG ships PostgreSQL 18's libpq headers.
 - `reformat_dest_ext4.sh` returns the destination to ext4 without recreating the VM.
 
-**Cost** (Cloud Billing report for the project, last 30 days, read at 00:50 UTC on October 24): $18.20 of usage, $16.33 covered by credits, $1.87 left. The sweeps above may not have finished posting. About $1 of the usage is E2 cores from two GKE clusters created in the project on September 25–26 for Omni tests, not from these experiments. No VMs, disks or clusters remain in the project.
+**Cost** (Cloud Billing report for the project, last 30 days, read at 00:50 UTC on October 24): $18.20 of usage, $16.33 covered by credits, and a $1.87 subtotal not covered by credits. The sweeps above may not have finished posting. About $1 of the usage is E2 cores from two GKE clusters created in the project on September 25–26 for Omni tests, not from these experiments. No VMs, disks or clusters remain in the project.
 
 **Commit history:** at Matt's request, `main`'s history was rewritten on October 23 to drop an attribution line, and force-pushed (see the entry below).
 
