@@ -1176,6 +1176,27 @@ class WholeTrial(Stubbed):
         self.assertNotIn('script load-capacity', events)
         self.assertEqual(orchestrator.records, [])
 
+    def test_a_load_dead_at_a_planned_stop_voids_the_run_before_it(self):
+        class Ended(LoadStub):
+            def _source_script(self, script, *args, timeout=7200):
+                result = super()._source_script(script, *args, timeout=timeout)
+                if args[0] == 'load-stop':
+                    # The busy load had died during the last warm run: load-stop found it gone, sent no signal.
+                    result['how'] = 'ended' if result['run_id'] == 'busy' else 'SIGALRM'
+                return result
+
+        orchestrator, trial = self.trial(cls=Ended)
+        last = [record for record in orchestrator.records if record['load_run'] == 'busy'][-1]
+        self.assertEqual(last['block'], 'warm')
+        self.assertTrue(last['void'])
+        self.assertEqual(last['void_reason'], 'the load (busy) died before its stop')
+        self.assertEqual(trial['load']['died_before_stop'],
+                         [{'died': 'busy', 'voided': orchestrator.run_key(last), 'signalled_utc': None,
+                           'stopped_utc': None}])
+        self.assertEqual(sum(record['void'] for record in orchestrator.records), 1)  # the moderate stop was a signal
+        saved = json.loads(orchestrator.record_path(last).read_text())
+        self.assertTrue(saved['void'])
+
     def test_without_the_sampler(self):
         orchestrator, trial = self.trial(['--sampler-interval-s', '0'])
         self.assertEqual(trial['status'], 'pass')
@@ -1200,7 +1221,10 @@ class WholeTrial(Stubbed):
                     self.died = True
                     self.at('source', 'script load-status')
                     return {'running': False, 'last_progress': None}
-                return super()._source_script(script, *args, timeout=timeout)
+                result = super()._source_script(script, *args, timeout=timeout)
+                if args[0] == 'load-stop' and result['run_id'] == 'busy':
+                    result['how'] = 'ended'  # load-stop finds the dead pgbench gone; check_load voided already
+                return result
 
         orchestrator, trial = self.trial(cls=Dying)
         [restart] = trial['load']['restarts']

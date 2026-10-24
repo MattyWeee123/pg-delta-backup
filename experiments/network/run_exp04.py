@@ -3885,14 +3885,39 @@ class Orchestrator:
         self.load_current, self.load_rate = run, rate
         return run
 
-    def load_stop(self) -> dict:
-        """The current run stopped (SIGALRM, as its -T timer would), counted, its counters read again."""
+    def load_stop(self, *, death_known: bool = False) -> dict:
+        """The current run stopped (SIGALRM, as its -T timer would), counted, its counters read again. If pgbench had
+        already ended (load-stop's `how` 'ended') it died while the run before this stop ran, unnoticed, since
+        check_load looks only before a run: died_before_stop voids that run (unless the death is known already:
+        check_load's own stop)."""
         run = self.source.script(SOURCE_CLUSTER, 'load-stop', *self.load_args(), '--signal', self.args.load_signal)
         self.load_runs[:] = [run if item['run_id'] == run['run_id'] else item for item in self.load_runs]
         self.load_current, self.load_rate = None, None
         log(f'{self.trial_id}: the load stopped ({run["run_id"]}, {run.get("commits_total")} commits, '
             f'{"complete" if run.get("complete") else "INCOMPLETE"})')
+        if run.get('how') == 'ended' and not death_known:
+            self.died_before_stop(run)
         return run
+
+    def died_before_stop(self, run: dict) -> None:
+        """A planned stop (the switch to the moderate load, step 15, the clean-up) found the load's pgbench gone: the
+        latest run of this trial on that load run may hold the death in its window, so it is void (A8), as check_load
+        voids the run before a death it finds; recorded in trial['load']['died_before_stop'], beside the restarts."""
+        died = run['run_id']
+        previous = next((record for record in reversed(self.records) if record.get('trial_id') == self.trial_id
+                         and record.get('load_run') == died), None)
+        voided = None
+        if previous is not None:
+            previous['void'] = True
+            previous['void_reason'] = f'the load ({died}) died before its stop'
+            save_json(self.record_path(previous), previous)
+            measure.write_csv(self.out / 'summary.csv', self.records)
+            voided = self.run_key(previous)
+        log(f'{self.trial_id}: the load ({died}) had died before its stop; voided {voided}')
+        if self.current_trial is not None:
+            self.current_trial.setdefault('load', {}).setdefault('died_before_stop', []).append(
+                {'died': died, 'voided': voided, 'signalled_utc': run.get('signalled_utc'),
+                 'stopped_utc': run.get('stopped_utc')})
 
     def load_warmup(self, trial: dict) -> dict:
         """--load-warmup-s with the load running and nothing else; its last 60 s go into the block's null pool."""
@@ -3934,7 +3959,7 @@ class Orchestrator:
             save_json(self.record_path(previous), previous)
             voided = self.run_key(previous)
         log(f'{self.trial_id}: the load ({died}) died; restarting it at {rate}/s')
-        stopped = self.load_stop()
+        stopped = self.load_stop(death_known=True)
         restart = self.load_start(f'restart-{len(self.current_trial["load"]["restarts"]) + 1}', rate, 'restart')
         warmup = self.load_warmup(self.current_trial)
         entry = {'died': died, 'last_progress': status.get('last_progress'), 'voided': voided,

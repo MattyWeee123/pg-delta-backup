@@ -2011,6 +2011,8 @@ def load_lines(S):
         for restart in load.get('restarts') or []:
             lines.append(f'- restart: {restart.get("died")} died; {restart.get("restart")} started; '
                          f'voided {restart.get("voided")}')
+        for death in load.get('died_before_stop') or []:
+            lines.append(f'- {death.get("died")} had died before its planned stop; voided {death.get("voided")}')
         check = get(load, 'end', 'check') or {}
         lines.append(f'- load-check (step 15): {word(check.get("ok"))} (Σabalance {check.get("sum_abalance")}, Σn '
                      f'{check.get("sum_n")}, logged commits {check.get("expected_commits")}; incomplete '
