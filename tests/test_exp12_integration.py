@@ -158,6 +158,33 @@ class RunLines(unittest.TestCase):
         self.assertEqual(refused.exception.code, 2)
 
 
+class AnalysisReadings(unittest.TestCase):
+    """The write-up records, dated and before the sweep, each reading the analysis's docstring lists (rule 8)."""
+
+    def section(self):
+        text = SPEC.read_text()
+        start = text.index('### Analysis readings (October 24, 2026')
+        return text[start:text.index('\n## ', start)]
+
+    def test_every_reading_of_the_docstring_is_in_the_write_up(self):
+        section = self.section()
+        # Each of the analysis docstring's readings, by a phrase the write-up's entry carries.
+        for phrase in ('its own tool aborted is **wrong**', 'counts as **unverified**', 'less than half of its rate',
+                       'nearest-rank', '2 runs per block', '"undecided"', 'the larger of the warm and the cold',
+                       'unclipped', 'strictly in order', 'A2 fires on a `pause2` run', "A1's coverage control",
+                       "A run's own net values", 'up to 1 s past t1 + 15 s', 'both `v1proxy_s1`\'s and `burn4`\'s',
+                       "R2's bound ratios", 'same repeat\'s `full` run', '[t0, t1 + 10 s]', 'without `--busy-cpu`',
+                       'by the fallback\'s rule alone', "the latest run on that load run is void",
+                       'Smoke item 11 compares', 'Smoke item 12 judges', 'Smoke item 15 adds'):
+            self.assertIn(phrase, section)
+
+    def test_each_entry_is_marked_a_reading_or_a_rule_8_change(self):
+        entries = [line for line in self.section().splitlines() if line.startswith('- ')]
+        self.assertGreaterEqual(len(entries), 20)
+        self.assertEqual([line for line in entries if not line.startswith(('- *Reading', '- *Rule 8.*'))], [])
+        self.assertEqual(sum(line.startswith('- *Rule 8.*') for line in entries), 2)
+
+
 def readme_section(title: str) -> str:
     text = README.read_text()
     start = text.index(f'## {title}\n')

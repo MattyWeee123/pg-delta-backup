@@ -28,7 +28,9 @@ the median (or, in the maxima view, the maximum) of one window per run, `--null-
 `--null-seed`. Net values, "measurable", the bound and the tolerances follow the pre-registration's definitions;
 every robustness view uses the null of its own statistic.
 
-How this script reads what the text leaves open (recorded in the write-up before the sweep):
+How this script reads what the text leaves open (recorded in the write-up before the sweep, under "Analysis
+readings", each marked a reading or a rule 8 change):
+- A copy its own tool aborted is wrong (it doesn't start); a failure of the harness around an output is unverified.
 - A window's last bucket ends at t0 + T, so it can run up to 1 s past t1 + 10 s; the 15-s view's at t0 + T15, up to
   1 s past t1 + 15 s, and the harness's quiet tail waits that out (its view_end_utc). The robustness views' D at 0.5-s
   and 2-s buckets and the null of them use blocks of 10 s too (20 and 5 buckets); a 2-s bucket at a window's odd end
@@ -36,17 +38,21 @@ How this script reads what the text leaves open (recorded in the write-up before
 - Latency percentiles are nearest-rank over every logged transaction; a transaction's lateness is its latency from
   its schedule. The settle gate's log part compares the settle's p99 with its load run's warm-up's last minute.
 - The controls' cells (`pause2`, `burn4`) are judged with the 2 runs per block they are registered with; every other
-  cell needs 3.
+  cell needs 3 (rule 8). A6 judges a speed only with both v1proxy_s1's and burn4's values.
 - A4 that can't be decided (a counter or a calibration missing) is "undecided": the proxy's judged misses still
   count, its meets don't, so it can't hide a miss or make a meet.
 - Row 7b's δ for the warm cell against the cold one uses the larger of the warm and the cold `full`'s W_net in its
-  0.15 x W_net(full) term. The paired view's net value is the median paired difference minus its null's median,
-  unclipped, against δ from that null.
+  0.15 x W_net(full) term. The paired view pairs an arm only with the same repeat's full run in its block and speed
+  (any other comparison is the main view's); its net value is the median paired difference minus its null's median,
+  unclipped, against δ from that null. Near the line reads R2's bounds too, each against the line it decides at.
 - A run's own net (`work_lost_net_s`, `worst_drop_net`) is its W or D minus the median of one null window at its
   own T, clipped at 0; a cell's is the pre-registration's.
 - Decision 1's rows are checked strictly in order, so row 5 (nothing measurable) comes before row 7 even where a
   difference exceeds δ. A window whose log holds less than half of its rate's schedule has no numbers (it would read
-  as a window without loss). A2 fires on a pause2 run that fails a check it could make; a block without one says so.
+  as a window without loss), and a settle so covered is not settled and enters no null. A2 fires on a pause2 run that
+  fails a check it could make; a block without one says so.
+- Source CPU under load is the window's [t0, t1 + 10 s], from the sampler's ticks. On the main sweep only --busy-cpu
+  (smoke item 2's value) selects E4's, E7's, E9's, E14's and E16's ranges.
 - A1's coverage control pairs outputs taken under the load only: without it a copy lacks no commit, its cut is open
   after its last held one, and any later window would cover it.
 """
