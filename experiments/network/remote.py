@@ -11,6 +11,7 @@ pgd-dest under nohup, so the Mac can disconnect while it runs.
                                           from an older one lacks, and pg_probackup on both)
     remote.py deploy                      tarball of the tracked files -> ~/pgd on both
     remote.py setup-ssh                   key on pgd-dest, authorized on pgd-source
+                                          (--control-port 2222: and reachable there, EXP-13)
     remote.py start NAME -- ARGS...       run_exp04.py ARGS on pgd-dest, results in
                                           /data/exp04-results/NAME
     remote.py status NAME                 running or not, log tail, runs so far
@@ -262,7 +263,23 @@ def cmd_setup_ssh(config, args) -> int:
                               f'-o StrictHostKeyChecking=accept-new '
                               f'{config["SSH_USER"]}@{vms["source"]["internal"]} hostname')
     print(f'pgd-dest -> {vms["source"]["internal"]}: {probe.stdout.decode().strip()}')
+    if getattr(args, 'control_port', 0):
+        # EXP-13: the harness's control path, which infra/gcp/wan.sh leaves outside the emulated WAN
+        # (startup.sh has sshd listen there too; run_exp04 --control-port uses it).
+        probe = ssh(config, dest, control_probe_command(config['SSH_USER'], vms['source']['internal'],
+                                                        args.control_port), check=False)
+        if probe.returncode != 0:
+            raise SystemExit(f'pgd-dest cannot reach the source on the control port {args.control_port} '
+                             f'({probe.stderr.decode(errors="replace").strip()[-500:]}); remote.py provision runs '
+                             'infra/gcp/startup.sh, which has sshd listen there')
+        print(f'pgd-dest -> {vms["source"]["internal"]}:{args.control_port}: {probe.stdout.decode().strip()}')
     return 0
+
+
+def control_probe_command(user: str, address: str, port: int) -> str:
+    """What setup-ssh runs on dest to reach the source over the control port (EXP-13)."""
+    return (f'ssh -i {DEST_KEY} -p {int(port)} -o BatchMode=yes -o StrictHostKeyChecking=accept-new '
+            f'{user}@{address} hostname')
 
 
 def results_dir(name: str) -> str:
@@ -350,7 +367,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.set_defaults(func=cmd_wait_ready)
     commands.add_parser('provision').set_defaults(func=cmd_provision)
     commands.add_parser('deploy').set_defaults(func=cmd_deploy)
-    commands.add_parser('setup-ssh').set_defaults(func=cmd_setup_ssh)
+    sub = commands.add_parser('setup-ssh')
+    sub.add_argument('--control-port', type=int, default=0,
+                     help="EXP-13: also check that dest reaches the source's sshd on this port (2222)")
+    sub.set_defaults(func=cmd_setup_ssh)
     sub = commands.add_parser('start')
     sub.add_argument('name')
     sub.add_argument('args', nargs=argparse.REMAINDER)
