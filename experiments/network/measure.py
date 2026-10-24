@@ -1965,6 +1965,47 @@ def count_commits(paths) -> dict[int, int]:
     return counts
 
 
+def log_tails(paths) -> dict[int, dict]:
+    """client -> {'lines', 'contiguous', 'last_end_us'} over a run's log files: whether its transaction numbers (every
+    line, failed ones too) run 1, 2, 3, ... without a gap, and its last completion. EXP-12's SIGINT fallback judges a
+    run's log by them (load_log_complete)."""
+    tails: dict[int, dict] = {}
+    for path in paths:
+        for line in log_lines(path):
+            parsed = parse_pgbench_line(line)
+            if not parsed:
+                continue
+            client, number, end = parsed[0], parsed[1], parsed[4]
+            tail = tails.setdefault(client, {'lines': 0, 'contiguous': True, 'last_end_us': None})
+            tail['lines'] += 1
+            tail['contiguous'] = tail['contiguous'] and number == tail['lines']
+            tail['last_end_us'] = end if tail['last_end_us'] is None else max(tail['last_end_us'], end)
+    return tails
+
+
+# EXP-12's SIGINT fallback (The load): every line up to this long before the signal must be in the log.
+SIGINT_LOG_MARGIN_S = 1.0
+
+
+def load_log_complete(tails: dict, clients, signalled_utc: float) -> dict:
+    """The registered completeness rule for a run stopped with SIGINT, which pgbench 17 doesn't catch (only -T's
+    SIGALRM ends it as -T would), so each thread's buffered last lines are lost and the counters can't match the
+    log: every line up to 1 s before the signal present. Per client, its transaction numbers contiguous from 1 and
+    its last completion at or after the signal less 1 s. {'complete', 'short': {client: why}}."""
+    limit_us = int(round((signalled_utc - SIGINT_LOG_MARGIN_S) * 1_000_000))
+    short = {}
+    for client in clients:
+        tail = tails.get(int(client))
+        if tail is None:
+            short[str(client)] = 'no line'
+        elif not tail['contiguous']:
+            short[str(client)] = 'a gap in its transaction numbers'
+        elif tail['last_end_us'] < limit_us:
+            short[str(client)] = (f'its last line {(limit_us - tail["last_end_us"]) / 1e6:.3f} s before the signal '
+                                  f'less {SIGINT_LOG_MARGIN_S:g} s')
+    return {'complete': not short, 'short': short}
+
+
 def pick_commits(paths, wanted: dict) -> dict:
     """{(client, position): (scheduled, started, ended)} for the wanted commits of one run's logs.
 

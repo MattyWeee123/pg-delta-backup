@@ -126,6 +126,48 @@ class PgbenchLines(unittest.TestCase):
                 self.assertEqual(found.name, 'busy.10.zst')
                 self.assertEqual(measure.count_commits([found]), {0: 2, 1: 1})
 
+    def finish(self, tmp, how, signalled, lost_s=0.2, gap=False, stalled=None):
+        """finish_load_run on a run of 2 clients on 2 threads, each committing every 10 ms from 100 s to the signal at
+        105 s, whose logs lost their last `lost_s` (pgbench's buffered lines, under SIGINT), with every commit in the
+        counters; `gap` drops a line in the middle, `stalled` ends client 1's log at that time."""
+        load_dir = Path(tmp)
+        run = {'run_id': 'busy', 'pid': 100, 'threads': 2, 'start': {'n': {'0': 0, '1': 0}}, 'stop': None}
+        measure.write_load_state(load_dir, {'runs': [run], 'current': 'busy'})
+        commits = 500
+        for client, name in ((0, 'busy.100'), (1, 'busy.100.1')):
+            ends = [100.0 + (index + 1) * 0.01 for index in range(commits)]
+            last = (stalled if client == 1 and stalled is not None else 105.0) - lost_s
+            (load_dir / name).write_text(''.join(log_line(client, index + 1, end, 400)
+                                                 for index, end in enumerate(ends)
+                                                 if end <= last and not (gap and client == 0 and index == 100)))
+        stop = {'utc': 106.0, 'n': {'0': commits, '1': commits}, 'sum_n': 2 * commits, 'sum_abalance': 2 * commits}
+        args = Namespace(root=tmp, bin_dir=tmp, load_dir=tmp)
+        with mock.patch.object(source_cluster, 'load_counters', return_value=stop):
+            return source_cluster.finish_load_run(args, 'busy', how, signalled), args, stop
+
+    def test_sigints_fallback_is_judged_by_its_own_rule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # SIGALRM: the counters against the log, which lost its last lines: incomplete.
+            run, _, _ = self.finish(tmp, 'SIGALRM', 105.0)
+            self.assertEqual((run['complete'], run['completeness']['criterion']), (False, 'counters'))
+        with tempfile.TemporaryDirectory() as tmp:
+            # SIGINT: every line up to 1 s before the signal is there, so it is complete, and its commits are the
+            # counters' (step 15's load-check sums them).
+            run, args, stop = self.finish(tmp, 'SIGINT', 105.0)
+            self.assertEqual((run['complete'], run['completeness']['criterion']), (True, 'sigint'))
+            self.assertEqual(run['committed'], 1000)
+            self.assertLess(run['commits_total'], 1000)
+            with mock.patch.object(source_cluster, 'load_counters', return_value=stop):
+                check = source_cluster.cmd_load_check(args)
+            self.assertEqual((check['ok'], check['expected_commits'], check['incomplete']), (True, 1000, []))
+        for changes, why in (({'lost_s': 1.5}, 'before the signal less 1 s'),
+                             ({'gap': True}, 'a gap in its transaction numbers'),
+                             ({'stalled': 103.0}, 'before the signal less 1 s')):
+            with self.subTest(**changes), tempfile.TemporaryDirectory() as tmp:
+                run, _, _ = self.finish(tmp, 'SIGINT', 105.0, **changes)
+                self.assertFalse(run['complete'])
+                self.assertTrue(any(why in text for text in run['completeness']['short'].values()), run)
+
     def test_the_load_command_line(self):
         argv = measure.pgbench_load_argv('/b/pgbench', rate=6000, clients=32, threads=4, duration_s=14400, seed=122,
                                          prefix='/dev/shm/exp12/busy', scripts='/r/load', host='/w/src/s', port=5432,
@@ -1931,6 +1973,22 @@ class TheLoadOnARealCluster(unittest.TestCase):
         with self.assertRaises(SystemExit):
             source.load('load-start', *source.pgbench(), '--run-id', 'again2', '--rate', '100')
         source.load('load-stop')
+
+    def test_2b_sigints_fallback_on_a_real_pgbench(self):
+        # pgbench 17 doesn't catch SIGINT: its threads' buffered last lines can be lost, so the run is judged by the
+        # fallback's own rule (every line up to 1 s before the signal), and load-check sums its counters.
+        source = self.source
+        source.load('load-start', *source.pgbench(), '--run-id', 'interrupted', '--rate', '2000', '--duration-s', '600')
+        time.sleep(3.0)
+        stopped = source.load('load-stop', '--signal', 'INT')
+        self.assertEqual(stopped['how'], 'SIGINT')
+        self.assertEqual(stopped['completeness']['criterion'], 'sigint')
+        self.assertTrue(stopped['complete'], stopped['completeness'])
+        self.assertEqual(stopped['committed'], sum(int(n) for n in stopped['stop']['n'].values())
+                         - sum(int(n) for n in stopped['start']['n'].values()))
+        self.assertGreaterEqual(stopped['committed'], stopped['commits_total'])
+        check = source.load('load-check')
+        self.assertTrue(check['ok'], check)
 
     def test_3_backup_hold_closes_on_stdin(self):
         script = Path(source_cluster.__file__)

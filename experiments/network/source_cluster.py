@@ -506,17 +506,32 @@ def finish_load_run(args, run_id: str, how: str, signalled_utc=None) -> dict:
     """A run that has ended: its log counted per client, the counters again, and whether they agree.
 
     complete: for every client, n at the stop minus n at the start equals its log's committed transactions
-    (EXP-12's smoke item 1). pgbench's summary and the end of its progress output are kept.
+    (EXP-12's smoke item 1; `criterion` 'counters'). A run stopped with SIGINT, the registered fallback, is judged by
+    the fallback's own rule instead (`criterion` 'sigint'; measure.load_log_complete): pgbench 17 doesn't catch
+    SIGINT, so its threads' buffered last lines are lost and the counters can't match. Every line up to 1 s before
+    the signal must be there; its committed transactions are then the counters' (`committed`). pgbench's summary
+    and the end of its progress output are kept.
     """
     root, bin_dir, load_dir = Path(args.root), Path(args.bin_dir), Path(args.load_dir)
     state = measure.read_load_state(load_dir)
     run = measure.load_run(state, run_id)
     names = measure.pgbench_log_names(run)
-    counts = measure.count_commits([load_dir / name for name in names if (load_dir / name).exists()])
+    paths = [load_dir / name for name in names if (load_dir / name).exists()]
+    counts = measure.count_commits(paths)
     stop = load_counters(root, bin_dir)
     deltas = {key: stop['n'].get(key, 0) - n for key, n in run['start']['n'].items()}
     mismatched = {key: {'n_delta': delta, 'logged': counts.get(int(key), 0)} for key, delta in deltas.items()
                   if delta != counts.get(int(key), 0)}
+    if how.startswith('SIGINT') and signalled_utc is not None:
+        judged = measure.load_log_complete(measure.log_tails(paths), deltas, signalled_utc)
+        completeness = {'criterion': 'sigint', 'rule': 'every line up to 1 s before the signal: each client\'s '
+                        'transaction numbers contiguous from 1 and its last completion at or after the signal less '
+                        '1 s', 'short': judged['short']}
+        complete, committed = judged['complete'], sum(deltas.values())
+    else:
+        completeness = {'criterion': 'counters', 'rule': "each client's n at the stop less n at the start equals its "
+                        "log's committed transactions"}
+        complete, committed = not mismatched, sum(counts.values())
     try:
         summary = measure.summary_path(load_dir, run_id).read_text(errors='replace')
         progress = measure.progress_path(load_dir, run_id).read_text(errors='replace')
@@ -527,7 +542,8 @@ def finish_load_run(args, run_id: str, how: str, signalled_utc=None) -> dict:
     run.update(stop=stop, stopped_utc=time.time(), signalled_utc=signalled_utc, how=how,
                log_files=[name for name in names if (load_dir / name).exists()],
                commits={str(client): count for client, count in sorted(counts.items())},
-               commits_total=sum(counts.values()), complete=not mismatched, mismatched=mismatched,
+               commits_total=sum(counts.values()), committed=committed, complete=complete,
+               completeness=completeness, mismatched=mismatched,
                tps=float(tps.group(1)) if tps else None, processed=int(processed.group(1)) if processed else None,
                failed=int(failed_count.group(1)) if failed_count else None,
                aborted='aborted' in (summary + progress).lower(),
@@ -605,7 +621,8 @@ def cmd_load_check(args) -> dict:
     state = measure.read_load_state(args.load_dir)
     runs = state.get('runs', [])
     counters = load_counters(args.root, args.bin_dir)
-    expected = sum(run.get('commits_total') or 0 for run in runs)
+    # Each run's committed transactions: its log's, or (a run judged by the SIGINT rule) its counters'.
+    expected = sum(run.get('committed', run.get('commits_total')) or 0 for run in runs)
     unfinished = [run['run_id'] for run in runs if run.get('stop') is None]
     incomplete = [run['run_id'] for run in runs if run.get('stop') is not None and not run.get('complete')]
     gaps = [f'{before["run_id"]} -> {after["run_id"]}' for before, after in zip(runs, runs[1:])
@@ -614,7 +631,7 @@ def cmd_load_check(args) -> dict:
     return {'ok': sums and not unfinished and not incomplete and not gaps, 'sums_ok': sums,
             'sum_abalance': counters['sum_abalance'], 'sum_n': counters['sum_n'], 'expected_commits': expected,
             'unfinished': unfinished, 'incomplete': incomplete, 'gaps': gaps, 'counters': counters,
-            'runs': [{key: run.get(key) for key in ('run_id', 'kind', 'complete', 'commits_total', 'how')}
+            'runs': [{key: run.get(key) for key in ('run_id', 'kind', 'complete', 'commits_total', 'committed', 'how')}
                      for run in runs]}
 
 

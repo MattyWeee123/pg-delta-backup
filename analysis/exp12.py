@@ -1997,7 +1997,9 @@ def load_lines(S):
                 hours = (tally['last_end_us'] - tally['first_end_us']) / SECOND_US / 3600
             per_hour = None if not hours else tally['bytes'] / 1e6 / hours
             lines.append(f'| {run["run_id"]} | {run.get("kind")} | {run.get("rate") or "closed"} | '
-                         f'{run.get("commits_total")} | {yes(run.get("complete"))} | {run.get("failed")} | '
+                         f'{run.get("commits_total")} | {yes(run.get("complete"))}'
+                         + (' (SIGINT\'s rule: every line up to 1 s before the signal)'
+                            if get(run, 'completeness', 'criterion') == 'sigint' else '') + f' | {run.get("failed")} | '
                          f'{tally.get("lines", "–")} | {tally.get("commits", "–")} | {tally.get("aborts", "–")} | '
                          f'{tally.get("failed", "–")} | {tally.get("lag_over_latency", "–")} | '
                          f'{tally.get("not_rising", "–")} | {fmt(per_hour, 1)} |'
