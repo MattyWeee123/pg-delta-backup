@@ -560,6 +560,27 @@ How the harness and `analysis/exp12.py` read what the text above leaves open, re
 - *Reading.* Smoke item 12 judges `pause2` by E3's W and D ranges and by A2's two gap checks. E3's late count isn't part of item 12.
 - *Reading.* Smoke item 15 adds the budget's fixed parts to the projected runs: 20 minutes to provision, the smoke's 60, the trial's set-up 8 and end 4.5, and 15 to fetch and tear down. It also adds 28 speed visits of 8 s, then applies the cuts in their order until the pair's time is within 3.5 hours.
 
+**The smoke run (October 24, 16:57–18:18 UTC, before the sweep)**
+
+Five invocations on two new VMs (`us-central1-a`, PostgreSQL 17.11 on both, created 16:51): `exp12-smoke-cap` (scale 70; C from three capacity runs at a provisional 1,000/s; the oracle's seven controls), `exp12-smoke` (scale 70 at R_busy; one busy pass of every arm at every speed, the controls, one calibration pass, `full_nosync`, the idle-noise windows; 26 runs), `exp12-smoke-null` (five `none` runs at R_busy), `exp12-smoke-audit` (scale 5, the syscall audit of `full`, `pgdelta` and `v1proxy` under the load, the sampler at 0.5 s) and `exp12-smoke-nosampler` (scale 5, one `none` run with the sampler off). Every run passed. The items, as `analysis/exp12.py` printed them from the records:
+
+1. **pgbench's log** held: no failures; latency never under its schedule lag; completion times never falling within a client; every run complete (each client's change in `n` equal to its log's commits). At step 15, Σabalance = Σn = the logged commits in every trial (7,496,307; 22,119,039; and so on).
+2. **Capacity and rates.** C = 30,316 transactions per second (the median of three 60-s closed-loop runs at 32 clients). So **R_busy = 18,100** and **R_mod = 9,000** (0.6 and 0.3 × C, rounded down to 100). The source's busy CPU at R_busy was 0.628 of its 8 CPUs (0.641 in `exp12-smoke-null`), above 50%, which selects E4's and E7's upper ranges. **Seen, not acted on:** each later trial's own one-run C was lower, 27,148 and 27,508, so R_busy was 0.66–0.67 of those trials' C. The rule fixes R_busy from this item; item 3's check of the null, below, is what guards against too high a rate.
+3. **L and the null.** The busy warm-up's p99 was 10.54 ms (10.39 ms in `exp12-smoke-null`), so **L = 110 ms** (the larger). One window's W null at T = 15 s had its 95th percentile at 0.009 s (0.017 s from `exp12-smoke-null`'s five `none` runs and its settles), well under 0.1 s, so R_busy stays.
+4. **Clocks (changed before the sweep).** Debian's GCE image keeps time with `systemd-timesyncd`, not chrony, so the item's chrony readings and its `chronyc makestep` remedy weren't available. chrony was installed on both VMs against Google's metadata time server (and added to `startup.sh`, commit 127e9ed). Both then read under 2 µs from NTP time, and the harness's own probe put the two clocks 0.002–0.018 ms apart in every trial: within 5 ms.
+5. **The oracle** held. Under the load, after the capacity runs, the good copy passed every check, and each of the seven controls failed through the check it targets (`no_wal` the start; `n_raised` and `heap_page` the invariant; `index_page` amcheck only, with the invariant passing; `cut_extended` and `cut_back` the cut; `schema` the schema). One PostgreSQL minor version on both VMs; two schema dumps with `--restrict-key` hashed equal. No good output failed any check.
+6. **The proxy** held in 7 of 7 runs: backup mode held across the transfer, every byte hashed, the output verified against the snapshot's digest and started; the source never stopped for a proxy.
+7. **The one-core sender** reported `--jobs 1` against a 4-job receiver.
+8. **Eviction** held: the benchmark database's files and the snapshot at most 0.00% resident after it, loaddb at least 98.4% resident; the second eviction after `sync -f` ran once.
+9. **The capture's `--verbose` lines** parsed, with the WAL end point, in 6 of 6.
+10. **The settle gate** passed within 30 s in 19 of 19 runs at R_busy (and 5 of 5 in `exp12-smoke-null`). At the provisional 1,000/s it failed once: the per-second rate's own scatter there (921 to 1,062 against a ±5% gate) is about ±3%, against about ±0.7% at 18,100/s.
+11. **The sampler's cost (changed before the sweep, as registered).** At 0.1-s reads it used 2.6% of a core (0.0263 and 0.0256 in two sweeps), over the 1% limit, so its reads went to 0.5 s and the item repeated: 0.9% of a core, and the busy warm-up's p99 over its last minute 9.67 ms with it against 9.32 ms without it (`exp12-smoke-nosampler`), within 10%. **The sweep runs with `--sampler-interval-s 0.5`.**
+12. **`pause2`** held in both runs: W 1.896 and 1.915 s, D 1.000, the gap in the log matching the agent's signals, inside dest's mapped phase.
+13. **Dest's checks.** The idle noise was 0.48 MiB (499,712 bytes), so **NOISE = 0.48** and check (a)'s limit stays at 4 MiB. `full_nosync` left 2.29 GB dirty (at least 1.5 GB). The syscall audit passed for `full`, `pgdelta` and `v1proxy` under the load: 1,311–1,320 files and 1,323–1,350 directory changes, none uncovered (read from the records; `analysis/exp12.py`'s item-13 line doesn't read the audit, a reporting gap only).
+14. **Stability (the registered action not taken; rule 8).** The checkpoint and autovacuum checks held, and the benchmark database's logical digest was the same at the end as at the start. **loaddb's growth failed:** 278%, 67% and 50% in the three scale-70 and scale-5 trials, against at most 5%. All of it was in `load_progress`, the 32-row table of the clients' counters (32 pages at the start, up to 11,759 at the end); `pgbench_accounts` stayed at 3,637 pages. On a local PostgreSQL 17 the same scripts at 56,000/s for 20 s added 62 pages: nearly every update there was HOT. On the VMs about 0.05–0.13% of the counters' updates were not, with no copy needed for it (`exp12-smoke-null` grew 32 to 2,863 pages with `none` runs alone); the cause wasn't found. **The registered action, loaddb's fillfactor at 70, isn't applied:** it acts on `pgbench_accounts`, which didn't grow, and it would change the load whose C and rates items 2 and 3 measured. **What the item guards was checked directly instead:** over `exp12-smoke`'s 19-minute busy load, the completed rate held at about 1.075 million per minute (R_busy), the median latency at 0.69–0.75 ms, and the p99 in minutes without a copy at 1.5–3.6 ms by the end, against about 10 ms in the warm-up; nothing drifted upward. The sweep's write-up will report the same per-minute view over its whole load, and loaddb's growth.
+15. **The time projection:** 96 minutes for the 117 runs at this session's median run times, and with the budget's fixed parts, 3.45 hours against the 3.5-hour cut line, so **no cut** (as the dated readings above define the projection, with the budget's 60 minutes for the smoke run). The smoke run itself took about 81 minutes, with the chrony and sampler repeats, so the session will run about 20 minutes over that projection.
+16. **`analysis/exp12.py`** ran end to end on every smoke sweep, writing only to a scratch directory.
+
 ## How the two drafts were merged
 
 The first version's choices. Where the review changed one, the row says so.
@@ -627,11 +648,11 @@ If the projection is still over after all three, the session runs anyway and the
 **Run lines** (the shape; the values come from the smoke run):
 
 ```sh
-R_BUSY=0; R_MOD=0  # smoke item 2: 0.6 and 0.3 x C, rounded down to 100 per second
-NOISE=4            # check (a)'s idle noise, MiB (smoke item 13); the limit is max(4 MiB, NOISE)
-L_MS=10            # the late limit for the late-count view (smoke item 3); the analysis's only
-C=0; BUSY_CPU=0    # smoke item 2: C, and the busy CPU at R_BUSY as a share of the source's CPUs (selects E4's, E7's ranges)
-NOISE_BYTES=0      # smoke item 13: check (a)'s idle noise in bytes (run.json's dirty_idle_noise.max_increase_bytes)
+R_BUSY=18100; R_MOD=9000  # smoke item 2: 0.6 and 0.3 x C, rounded down to 100 per second
+NOISE=0.48         # check (a)'s idle noise, MiB (smoke item 13); the limit is max(4 MiB, NOISE)
+L_MS=110           # the late limit for the late-count view (smoke item 3); the analysis's only
+C=30316; BUSY_CPU=0.628  # smoke item 2: C, and the busy CPU at R_BUSY as a share of the source's CPUs (selects E4's, E7's ranges)
+NOISE_BYTES=499712 # smoke item 13: check (a)'s idle noise in bytes (run.json's dirty_idle_noise.max_increase_bytes)
 python3 experiments/network/remote.py start exp12-hot -- --patterns hot \
     --speeds 0.5,2,unthrottled --repeats 5 --order-seed 121 --manifest-checksums CRC32C \
     --dirty-noise-mib $NOISE \
@@ -644,7 +665,8 @@ python3 experiments/network/remote.py start exp12-hot -- --patterns hot \
     --moderate-rate $R_MOD --moderate-repeats 3 --moderate-speeds 2,unthrottled \
     --moderate-methods none,full,v1proxy,v1proxy_s1 --moderate-method-speeds none+v1proxy_s1=2 \
     --calibration-repeats 2 --calibration-speed 2 \
-    --calibration-methods full,capture,pgdelta,v1proxy,v1proxy_s1,pgdelta_direct_inplace,burn4
+    --calibration-methods full,capture,pgdelta,v1proxy,v1proxy_s1,pgdelta_direct_inplace,burn4 \
+    --sampler-interval-s 0.5  # smoke item 11
 .venv/bin/python analysis/exp12.py --sweeps results/exp04/exp12-hot --late-limit-ms $L_MS \
     --null-resamples 10000 --null-seed 121 --client-wait-share 0.25 \
     --capacity-tps $C --busy-cpu $BUSY_CPU --idle-noise-bytes $NOISE_BYTES

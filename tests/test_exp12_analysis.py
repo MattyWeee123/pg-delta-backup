@@ -1188,7 +1188,7 @@ class DryRun(unittest.TestCase):
                 found = exp12.build_parser().parse_args(words[2:])
         self.assertIsNotNone(found)
         self.assertEqual((found.sweeps, found.late_limit_ms, found.null_resamples, found.null_seed,
-                          found.client_wait_share), (['results/exp04/exp12-hot'], 10.0, 10_000, 121, 0.25))
+                          found.client_wait_share), (['results/exp04/exp12-hot'], 110.0, 10_000, 121, 0.25))
 
     def test_the_csv_columns_are_the_harness_columns(self):
         added = {'sweep', 'counts', 'left_out', 'late_count_2l_s', 'worst_drop_05s', 'worst_drop_2s',

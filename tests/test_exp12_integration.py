@@ -74,12 +74,13 @@ def harness_args(tmp='/nonexistent/exp12'):
 
 
 class RunLines(unittest.TestCase):
-    """EXP-12's "Run plan and budget": its run lines, exactly as written there (the placeholders' values included)."""
+    """EXP-12's "Run plan and budget": its run lines, exactly as written there, with the values the smoke run
+    (October 24) gave its placeholders."""
 
     def test_the_block_has_one_harness_line_and_the_analysiss(self):
         variables, harness, scripts = spec_run_lines()
-        self.assertEqual(variables, {'R_BUSY': '0', 'R_MOD': '0', 'NOISE': '4', 'L_MS': '10', 'C': '0', 'BUSY_CPU': '0',
-                                     'NOISE_BYTES': '0'})
+        self.assertEqual(variables, {'R_BUSY': '18100', 'R_MOD': '9000', 'NOISE': '0.48', 'L_MS': '110', 'C': '30316',
+                                     'BUSY_CPU': '0.628', 'NOISE_BYTES': '499712'})
         self.assertEqual(sorted(harness), ['exp12-hot'])
         self.assertEqual(sorted(scripts), ['analysis/exp12.py'])
 
@@ -90,12 +91,12 @@ class RunLines(unittest.TestCase):
         self.assertEqual([m for m in methods if m not in measure.ALL_METHODS], [])
         self.assertEqual((args.patterns, args.speeds, args.repeats, args.order_seed), ('hot', '0.5,2,unthrottled',
                                                                                        5, 121))
-        self.assertEqual((args.load, args.load_rate, args.moderate_rate), ('bank', 0, 0))
+        self.assertEqual((args.load, args.load_rate, args.moderate_rate), ('bank', 18100, 9000))
         self.assertEqual((args.load_clients, args.load_threads, args.load_warmup_s), (32, 4, 120))
         self.assertEqual((args.settle_s, args.settle_max_s, args.tail_s, args.none_window_s), (15, 60, 15, 60))
         self.assertEqual((args.source_cache, args.snapshot, args.static_digest), ('evict', True, 'first_repeat'))
         self.assertEqual(run_exp04.method_list(args.controls), ['pause2', 'burn4'])
-        self.assertEqual((args.manifest_checksums, args.dirty_noise_mib), ('CRC32C', 4.0))
+        self.assertEqual((args.manifest_checksums, args.dirty_noise_mib, args.sampler_interval_s), ('CRC32C', 0.48, 0.5))
         self.assertEqual((args.warm_source_repeats, args.warm_source_speeds, args.warm_source_methods),
                          (5, '2', 'full,v1proxy'))
         self.assertEqual((args.moderate_repeats, args.moderate_speeds, args.moderate_methods,
@@ -132,9 +133,12 @@ class RunLines(unittest.TestCase):
         self.assertEqual(counts, {'busy': 70, 'warm': 10, 'moderate': 18, 'calibration': 14, 'controls': 5})
         self.assertEqual(sum(counts.values()), 117)
 
-    def test_as_written_execute_refuses_the_zero_rates_before_it_touches_anything(self):
+    def test_with_zero_rates_execute_refuses_before_it_touches_anything(self):
+        # The line's shape before the smoke run gave R_BUSY and R_MOD their values.
         with tempfile.TemporaryDirectory() as tmp:
-            orchestrator = run_exp04.Orchestrator(harness_args(tmp))
+            args = harness_args(tmp)
+            args.load_rate = args.moderate_rate = 0
+            orchestrator = run_exp04.Orchestrator(args)
             self.addCleanup(orchestrator.pool.shutdown)
             with mock.patch.object(run_exp04.subprocess, 'run') as run, \
                     mock.patch.object(run_exp04.subprocess, 'Popen') as popen, \
@@ -149,12 +153,14 @@ class RunLines(unittest.TestCase):
         _, _, scripts = spec_run_lines()
         found = exp12.build_parser().parse_args(scripts['analysis/exp12.py'])
         self.assertEqual((found.sweeps, found.late_limit_ms, found.null_resamples, found.null_seed,
-                          found.client_wait_share), (['results/exp04/exp12-hot'], 10.0, 10_000, 121, 0.25))
-        # It carries smoke items 2 and 13 (A12, the busy CPU's ranges, check (a)); as written, with the placeholders,
-        # the analysis refuses to run.
-        self.assertEqual((found.capacity_tps, found.busy_cpu, found.idle_noise_bytes), (0.0, 0.0, 0))
+                          found.client_wait_share), (['results/exp04/exp12-hot'], 110.0, 10_000, 121, 0.25))
+        # It carries smoke items 2 and 13 (A12, the busy CPU's ranges, check (a)).
+        self.assertEqual((found.capacity_tps, found.busy_cpu, found.idle_noise_bytes), (30316.0, 0.628, 499712))
+        # With the placeholders' zeros, the analysis refuses to run.
+        zeros = [('0' if previous in ('--capacity-tps', '--busy-cpu', '--idle-noise-bytes') else word)
+                 for previous, word in zip([''] + scripts['analysis/exp12.py'], scripts['analysis/exp12.py'])]
         with mock.patch('sys.stderr', io.StringIO()), self.assertRaises(SystemExit) as refused:
-            exp12.main(scripts['analysis/exp12.py'])
+            exp12.main(zeros)
         self.assertEqual(refused.exception.code, 2)
 
 
