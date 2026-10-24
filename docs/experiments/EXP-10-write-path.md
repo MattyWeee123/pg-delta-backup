@@ -123,7 +123,7 @@ An independent reviewer checked the first version before anything ran. Changes:
 
 ![EXP-10: write paths on ext4 and XFS](../figures/exp10-xfs-and-rerun.svg)
 
-How to read it: each bar is one arm's median run, split by the receiver's own timers. The three ext4 new-copy bars come from the last sweep, so they compare within one session; the ext4 in-place bar comes from the first. The orange and red parts are the copy and the flush that dominated v0; the fixed write-back's own flushing calls aren't timed separately and fall in the purple part. For local changes, in place and the new copy on XFS write almost nothing, so what is left is hashing B, the network, and waiting for the verifier (yellow). The bottom two bars show why a new copy on XFS ends up close to in place but not equal: for local changes its write phase is 0.11–0.13 s longer and its verifier wait 0.13–0.18 s longer; for uniform the gap is mostly the write phase (1.18 against 0.91 s, most of it fsync).
+How to read it: each bar is one arm's median run, split by the receiver's own timers. The three ext4 new-copy bars come from the last sweep, so they compare within one session; the ext4 in-place bar comes from the first. The orange and red parts are the copy and the flush that dominated v0. The fixed write-back's flushing calls (medians 0.21–0.35 s, pgdelta's `writeback_seconds`) aren't in the run records the figure reads, so they fall in the purple part. The blue part is untimed: the main loop waiting for the sender's messages, plus about 0.17 s of start-up outside pgdelta's own timers. For local changes, in place and the new copy on XFS write almost nothing, so most of their time is the blue part and the final wait for the verifier (yellow). The bottom two bars compare a new copy on XFS with in place. By the medians of each timer (the bars are single runs and differ a little), for local changes the new copy's write phase is 0.11–0.13 s longer and its final wait for the verifier 0.13–0.18 s longer, partly offset by 0.07–0.12 s less untimed waiting; for uniform the gap is mostly the write phase (1.18 against 0.91 s, most of it fsync).
 
 **No session drift** (unthrottled medians, seconds unless stated). The source side and the full copy are the same in all three sweeps:
 
@@ -156,20 +156,24 @@ How to read it: each bar is one arm's median run, split by the receiver's own ti
 | hot | 2.35 (2.39) | 0.19 | 0.05 (0.06) | 1.16 (1.18) | 1.36 (1.39) |
 | append | 2.36 (2.39) | 0.18 | 0.05 (0.06) | 1.02 (1.03) | 1.22 (1.24) |
 
-**With clones, the write phase almost disappears for local changes, but only about half of that saving reaches the transfer.** Copying B's bytes takes 0.03 s instead of 1.2–1.4 s, and the fsync falls to 0.2 s (0.8 s for uniform). For local changes the write phase falls by 2.76–2.84 s, but the transfer by only 1.40–1.44 s. The rest is waiting that the long write phase used to hide. Against either ext4 sweep, the main loop waits 0.64–0.72 s longer for the verifier, and 0.68–0.77 s longer on everything else, mostly hashing B, which itself took 0.23–0.25 s longer:
+**With clones, the write phase almost disappears for local changes, but only about half of that saving reaches the transfer.** Copying B's bytes takes 0.03 s instead of 1.2–1.4 s, and the fsync falls to 0.2 s (0.8 s for uniform). For local changes the write phase falls by 2.76–2.84 s, but the transfer by only 1.40–1.44 s. Against either ext4 sweep, the main loop spends 0.64–0.72 s longer in its final wait for the verifier, and 0.68–0.77 s longer in untimed waiting. The untimed part is the main loop waiting for the sender's messages; by the protocol, the sender sends a file's changed pages only after it has B's digests for that file. The background work also took longer: hashing B by 0.23–0.25 s, and the verifier's busy time by 0.58–0.60 s.
 
-| Workload | Arm | transfer | write phase | waiting for verification | other waits (hashing B, network) |
-|---|---|---:|---:|---:|---:|
-| hot | ext4, new copy | 3.94 | 3.07 | 0.14 | 0.73 |
-| | XFS, new copy | 2.54 | 0.27 | 0.78 | 1.49 |
-| | XFS, in place | 2.35 | 0.13 | 0.66 | 1.56 |
-| append | ext4, new copy | 3.94 | 3.01 | 0.17 | 0.76 |
-| | XFS, new copy | 2.54 | 0.25 | 0.85 | 1.44 |
-| | XFS, in place | 2.36 | 0.14 | 0.66 | 1.56 |
+| Workload | Arm | transfer | write phase | final wait for the verifier | other (untimed) | hashing B | verifier busy |
+|---|---|---:|---:|---:|---:|---:|---:|
+| hot | ext4 (first sweep), new copy | 3.94 | 3.07 | 0.14 | 0.73 | 1.17 | 1.29 |
+|  | ext4 (first sweep), in place | 2.38 | 0.14 | 0.65 | 1.58 | 1.43 | 1.68 |
+|  | XFS, new copy | 2.54 | 0.27 | 0.78 | 1.49 | 1.42 | 1.89 |
+|  | XFS, in place | 2.35 | 0.13 | 0.66 | 1.56 | 1.41 | 1.69 |
+| append | ext4 (first sweep), new copy | 3.94 | 3.01 | 0.17 | 0.76 | 1.16 | 1.34 |
+|  | ext4 (first sweep), in place | 2.36 | 0.14 | 0.65 | 1.57 | 1.43 | 1.69 |
+|  | XFS, new copy | 2.54 | 0.25 | 0.85 | 1.44 | 1.40 | 1.92 |
+|  | XFS, in place | 2.36 | 0.14 | 0.66 | 1.56 | 1.44 | 1.70 |
 
-(Medians, seconds; "other" is the transfer minus the write phase and the wait for verification.)
+(Medians, seconds. "Other" is the transfer minus the write phase and the final wait; it includes about 0.17 s of start-up outside pgdelta's own timers. Hashing B and the verifier run on background threads.)
 
-In place shows almost the same waits with no clones at all: 0.65–0.66 s for the verifier, on ext4 and on XFS. So the risk the revision registered, that a cloned O's pages must be read from disk to verify them, accounts for only 0.13–0.18 s of the wait. The rest appears whenever the write phase is short. Even so, building a complete new copy on XFS is within 0.19 s of patching in place for local changes, and 0.33 s for uniform, while leaving B intact.
+**What the timers can and can't say.** In place on ext4, with no clones, shows most of the same growth: a 0.65 s final wait, 1.43 s hashing B and 1.68–1.69 s of verifier time. The two background threads draw on the same four pool workers, so one reading is that once the write phase is gone they compete for them; the timers can't separate that from CPU or disk time. Against in place on XFS, the new copy waits 0.13–0.18 s longer for the verifier, whose busy time is 0.20–0.22 s longer (0.10 s and 0.27 s for uniform). No timer counts disk reads, and the two arms also differ in the new copy's per-file fsync, so this doesn't isolate the cost of verifying cloned pages that aren't in the page cache, the risk the revision registered. It does bound it at a few tenths of a second, well short of the 0.64–0.72 s rise against ext4. Across all the pipelined arms, every one whose write phase is 1.2 s or less waits 0.57–0.85 s for the verifier at the end, and every one with about 2 s or more waits 0.01–0.24 s.
+
+Even so, building a complete new copy on XFS is within 0.19 s of patching in place for local changes, and 0.33 s for uniform, while leaving B intact.
 
 | | Prediction | Result | Rule |
 |---|---|---|---|

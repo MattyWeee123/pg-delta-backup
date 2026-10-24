@@ -127,7 +127,7 @@ B becomes the refreshed copy. A failed run may leave B unusable, but PostgreSQL 
 
 **A rerun completes a blocked B.** `pg_controldata` cannot read B while its pg_control is renamed, so B's identity is taken from the marker. A marker found next to a `global/pg_control` that was never renamed (a run killed between the two steps) is accepted too, with B's identity read as usual. A marker next to both control files, a renamed control file without a marker, or an unreadable marker is refused (exit 2). A new copy (`--output`) can also be built from a blocked B, since every reused page is verified anyway; B's identity then comes from its marker as well.
 
-**What it costs and saves, unmeasured:** no copy of B and no staging directory, but every file of S is still fsynced and re-read for verification, including files no page of which changed. Statistics: `in_place`, `in_place_tree` (see [Statistics JSON](#statistics-json)) and `switches.receiver.rebuild = "in-place"`.
+**What it costs and saves** (measured in [EXP-10](../docs/experiments/EXP-10-write-path.md) (e), on ext4): no copy of B and no staging directory, but every file of S is still fsynced and re-read for verification, including files no page of which changed. For local changes the write phase took 0.14 s, of which 0.08 s was fsync, and the transfer 2.36–2.38 s, against 3.94 s for a new copy (uniform: 0.79 s, 2.85 s against 4.44 s). Statistics: `in_place`, `in_place_tree` (see [Statistics JSON](#statistics-json)) and `switches.receiver.rebuild = "in-place"`.
 
 #### Where files are fsynced (`--fsync`)
 
@@ -403,8 +403,8 @@ Byte counts include the 5-byte frame headers, but not TCP/IP overhead. The categ
   - No cross-file matching.
   - No timeouts on a peer that stalls without closing.
 - The HELLO inventory must fit in one 64 MiB frame, which is roughly 700,000 files.
-- By default the fsync of each output file stays in the receiver's main loop, before the file goes to verification. On Linux, flushing a large file can cost more than writing it; `timings_seconds.fsync` shows how much. `--fsync writeback` and `--fsync worker` move it, and are not measured yet.
-- In place, every file of S is fsynced and verified, including files no page of which changed. On ext4 an fsync of a clean file can still flush the device's cache, so this may cost time per file; skipping unchanged files on a first attempt is an option T3 (e) could measure.
+- By default the fsync of each output file stays in the receiver's main loop, before the file goes to verification. On Linux, flushing a large file can cost more than writing it; `timings_seconds.fsync` shows how much. `--fsync writeback` and `--fsync worker` move it. In EXP-10 the worker saved 0.68–1.00 s and the fixed write-back 0.43–0.98 s; the default stays `main` until v1 is built.
+- In place, every file of S is fsynced and verified, including files no page of which changed. On ext4 an fsync of a clean file can still flush the device's cache; in EXP-10 (e) the whole write phase, fsyncs included, took 0.14 s for local changes, so skipping unchanged files would save little there.
 - `--source-kind datadir` reads only stopped clusters (T8a). Backup mode on a running server, WAL streaming and a `backup_manifest` are v1's (T8).
 - `--source-kind datadir` sends one WAL segment, the one where the shutdown checkpoint record starts. A record that starts in the last hundred or so bytes of a segment continues in the next one, which isn't sent, and that copy would not start (a chance of about 1 in 100,000 per shutdown; never seen in the tests, each of which starts its copy).
 - Verification re-reads O through the page cache, as it always has, so it checks what the kernel will write, not the medium itself.

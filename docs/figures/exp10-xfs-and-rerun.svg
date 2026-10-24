@@ -1455,59 +1455,59 @@ L 1066.799205 260.212
   </g>
   <g id="legend_1">
    <g id="patch_101">
-    <path d="M 86.001705 317.481891 
-L 104.001705 317.481891 
-L 104.001705 311.181891 
-L 86.001705 311.181891 
+    <path d="M 69.381939 317.481891 
+L 87.381939 317.481891 
+L 87.381939 311.181891 
+L 69.381939 311.181891 
 z
 " style="fill: #e69f00; stroke: #ffffff; stroke-linejoin: miter"/>
    </g>
    <g id="text_47">
-    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="111.201705" y="317.481891" transform="rotate(-0 111.201705 317.481891)">copy from B</text>
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="94.581939" y="317.481891" transform="rotate(-0 94.581939 317.481891)">copy from B</text>
    </g>
    <g id="patch_102">
-    <path d="M 183.536392 317.481891 
-L 201.536392 317.481891 
-L 201.536392 311.181891 
-L 183.536392 311.181891 
+    <path d="M 166.916626 317.481891 
+L 184.916626 317.481891 
+L 184.916626 311.181891 
+L 166.916626 311.181891 
 z
 " style="fill: #d55e00; stroke: #ffffff; stroke-linejoin: miter"/>
    </g>
    <g id="text_48">
-    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="208.736392" y="317.481891" transform="rotate(-0 208.736392 317.481891)">fsync (incl. waiting for the thread)</text>
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="192.116626" y="317.481891" transform="rotate(-0 192.116626 317.481891)">fsync (incl. waiting for the thread)</text>
    </g>
    <g id="patch_103">
-    <path d="M 379.877017 317.481891 
-L 397.877017 317.481891 
-L 397.877017 311.181891 
-L 379.877017 311.181891 
+    <path d="M 363.257251 317.481891 
+L 381.257251 317.481891 
+L 381.257251 311.181891 
+L 363.257251 311.181891 
 z
 " style="fill: #cc79a7; stroke: #ffffff; stroke-linejoin: miter"/>
    </g>
    <g id="text_49">
-    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="405.077017" y="317.481891" transform="rotate(-0 405.077017 317.481891)">other writing (incl. write-back calls), publish or commit</text>
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="388.457251" y="317.481891" transform="rotate(-0 388.457251 317.481891)">other writing (incl. write-back calls), publish or commit</text>
    </g>
    <g id="patch_104">
-    <path d="M 669.641861 317.481891 
-L 687.641861 317.481891 
-L 687.641861 311.181891 
-L 669.641861 311.181891 
+    <path d="M 653.022095 317.481891 
+L 671.022095 317.481891 
+L 671.022095 311.181891 
+L 653.022095 311.181891 
 z
 " style="fill: #f0e442; stroke: #ffffff; stroke-linejoin: miter"/>
    </g>
    <g id="text_50">
-    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="694.841861" y="317.481891" transform="rotate(-0 694.841861 317.481891)">waiting for verification</text>
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="678.222095" y="317.481891" transform="rotate(-0 678.222095 317.481891)">waiting for verification</text>
    </g>
    <g id="patch_105">
-    <path d="M 814.195923 317.481891 
-L 832.195923 317.481891 
-L 832.195923 311.181891 
-L 814.195923 311.181891 
+    <path d="M 797.576158 317.481891 
+L 815.576158 317.481891 
+L 815.576158 311.181891 
+L 797.576158 311.181891 
 z
 " style="fill: #56b4e9; stroke: #ffffff; stroke-linejoin: miter"/>
    </g>
    <g id="text_51">
-    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="839.395923" y="317.481891" transform="rotate(-0 839.395923 317.481891)">hashing, network and other waits</text>
+    <text style="font-size: 9px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="822.776158" y="317.481891" transform="rotate(-0 822.776158 317.481891)">untimed: waiting for the sender, start-up</text>
    </g>
   </g>
  </g>

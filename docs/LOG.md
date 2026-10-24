@@ -15,10 +15,14 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 - **One queue,** not two that disagreed, and a section for T11b.
 
 **Then a third check, of those corrections themselves,** found that one of them was wrong (2 major, 15 minor, all now corrected):
-- **My explanation of the clone result was wrong.** I had written that about half of the write phase's saving on XFS comes back as the verifier reading cloned pages from disk. The timers say otherwise. For local changes the write phase falls 2.8 s and the transfer 1.4 s. Of the 1.4 s that doesn't reach the transfer, about half is the main loop waiting for the verifier and half is waiting on hashing B. In place shows almost the same waits with no clones, so reading cloned pages adds only 0.13–0.18 s. The waiting appears whenever the write phase is short.
+- **My explanation of the clone result was wrong.** I had written that about half of the write phase's saving on XFS comes back as the verifier reading cloned pages from disk. For local changes the write phase falls 2.8 s and the transfer only 1.4 s. Of the 1.4 s that doesn't reach the transfer, about half is the main loop's final wait for the verifier and half is untimed waiting for the sender.
 - **The README listed two risks to v1's HA result** where EXP-09 names four (T2, T8, beyond RAM, persistent disks).
-- **D01 goes back to C:** its positioning against the incumbents rests on single runs at small scale with pgdelta staged, and the live-server refresh that defines the niche is T8's. D02's A is scoped to the incumbent it was measured against (incremental).
+- **D01 goes back to C:** its positioning against the incumbents was never measured from a live server, which is T8's. D02's pg_rewind half is split off as D02b (C).
 - Also: the figure now compares the ext4 new-copy arms within one sweep; the summaries give pgBackRest's registered time-rule outcome; stale passages in the ledger carry dated notes; T10a, T9 and T11b say what they can and can't measure.
+
+**And a fourth check, of the third round's fixes,** found my replacement explanation still claimed more than the timers show (2 major in EXP-10, 4 in the ledger, 11 minor; all now corrected):
+- **The timers can't say why the main loop waits.** No timer counts disk reads, and the untimed part has no breakdown. EXP-10 now reports what they do show: the final wait for the verifier and the untimed wait both grow, the background hashing and verifying take longer, and in place on ext4, with no clones, shows most of the same growth. Against in place on XFS, a new copy's final wait is 0.13–0.18 s longer, which bounds what verifying uncached cloned pages could cost.
+- **Ledger:** D02's pg_rewind half becomes its own row, D02b (C); the T9 persistent-disk note predicted the wrong direction (both methods move 2.1 GB through the disk, so the ratio should rise toward 1.0); T11b's arms now bracket the crossing it reports; T10a judges slowdown per source CPU-second; three dates corrected (arm (e) ran October 23).
 
 **Added:** the figure [exp10-xfs-and-rerun](figures/exp10-xfs-and-rerun.svg); the later sweeps' runs as [exp10-later-runs.csv](experiments/data/exp10-later-runs.csv); `exp10_later` now prints the tables and every derived figure EXP-10's later sections cite, with maxima and ranges.
 
