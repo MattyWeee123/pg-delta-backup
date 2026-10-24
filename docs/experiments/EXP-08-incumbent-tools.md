@@ -129,6 +129,8 @@ An independent reviewer checked the first version against the ledger and EXP-04b
 
 ## Results, part A: correctness on tricky old copies
 
+*Corrected October 24 after an independent recheck (18 findings, 11 major). The first version, in git as 130be14, explained a flagged page wrongly and didn't say how pgdelta and WAL-G's push/fetch mode actually ran.*
+
 **Run:** October 24, 2026, 00:00–00:05 UTC, on `pgd-dest` (Debian 12, PostgreSQL 17.11 from PGDG), both WAL arms, one run per (scenario, tool), 200,000 rows.
 
 **Tools:**
@@ -137,7 +139,11 @@ An independent reviewer checked the first version against the ledger and EXP-04b
 - WAL-G 3.0.9, the official release, SHA-256 checked;
 - pgdelta 0.1.0.
 
-**Data:** [exp08-t11.csv](data/exp08-t11.csv). The raw `result.json` and `scenario.json` files are under `results/t11/` (git-ignored).
+**Data:** [exp08-t11.csv](data/exp08-t11.csv). The raw `result.json`, `scenario.json` and tool logs are under `results/t11/` (git-ignored).
+
+**Two deviations from the design, found by the recheck:**
+- **pgdelta ran in EXP-03's staged mode.** It rebuilt a new copy O from the scenario's quiesced backup S and the untouched B, and O was checked against that same S. It didn't refresh B from the live source. So its "correct" here means what EXP-03 showed: a verified rebuild from a stopped backup. It does not test a live-server refresh, and its third check is trivially met.
+- **WAL-G's push/fetch mode (`catchup-push --from-lsn`) ignores the LSN in v3.0.9 and sends every file whole.** Its sentinel holds only the start LSN, and no file is marked incremental (`bundle.go`). So that arm is in effect a full copy, and its results say nothing about trusting a user-supplied LSN.
 
 **Every scenario built as designed.** For S2b and S2c, B's REDO point lies before the fork, and B's diverged pages are on disk:
 
@@ -147,53 +153,57 @@ An independent reviewer checked the first version against the ledger and EXP-04b
 | S2b | 1,871 | 1,447 |
 | S2c | 1,872 | 1,448 |
 
-**Outcomes** ("correct" means all three checks passed; the stale-page count is after recovery):
+**Outcomes.** "Correct" means checks 1 and 2 passed (rows and md5s; amcheck), plus check 3 (no stale pages after recovery) for S2b and S2c, where it was registered.
 
 | Tool | Arm | S1 | S2 | S2b | S2c |
 |---|---|---|---|---|---|
 | `pg_probackup catchup` (DELTA) | both | correct | **refused:** "Destination is not in source timeline history" (identity/history) | **accepted, wrong data:** 1,443 stale pages; `accounts` 199,072 of 200,000 rows, `tags` 19,833 of 20,000; amcheck fails | **accepted, wrong data:** 1,444 stale pages, same row losses, amcheck fails |
-| WAL-G `catchup-send` | both | correct | **refused:** "Destination is on timeline 1, but we are on 2" (identity/history) | refused, same | refused, same |
-| `pg_rewind` | default | correct ("no rewind required", then replay) | refused before touching the copy: "could not find previous WAL record" (other) | **failed after modifying the copy**, same error, so the copy is left unusable | correct by rows and amcheck; 1 page flagged (see below) |
-| `pg_rewind` | retained | correct | correct by rows and amcheck; 1 page flagged | correct | correct by rows and amcheck; 1 page flagged |
-| pgdelta | both | correct | correct | correct | correct |
-| WAL-G `catchup-push`/`fetch` with a user-supplied LSN (not counted) | both | correct | 1 page flagged | correct | 1 page flagged |
+| WAL-G `catchup-send` | both | correct | **refused:** "Destination is on timeline 1, but we are on 2" | refused, same | refused, same |
+| `pg_rewind` | default | correct ("no rewind required", then replay) | failed before modifying the copy: "could not find previous WAL record" (B's WAL was recycled)¹ | failed: its own crash recovery removed the WAL it then needed; the copy is left crash-recovered, cleanly stopped and still diverged | correct on checks 1 and 2; 1 page flagged by check 3² |
+| `pg_rewind` | retained | correct | correct | correct | correct on checks 1 and 2; 1 page flagged by check 3² |
+| pgdelta (staged, see above) | both | correct | correct | correct | correct |
+| WAL-G push/fetch (in effect a full copy; not counted) | both | correct | correct | correct | correct on checks 1 and 2; 1 page flagged² |
 | LSN-skip control | both | correct | wrong data, 1,686 stale pages | wrong data, 1,447 | wrong data, 1,448 |
 
-**The "1 page flagged" cases are an artifact of the third check, not stale data.** All seven are the same page: block 2 of `base/5/2840`, which is `pg_toast_2619`, the TOAST table of `pg_statistic` (checked on a fresh PostgreSQL 17 cluster). In every one of them:
-- the tool's output had **zero** stale pages before recovery;
-- rows matched and amcheck passed.
+¹ The harness records any error before the copy is modified as a refusal; under the registered classes this is a failure that left the copy untouched.
 
-The page matched B's old version only after the copy was promoted and started, when PostgreSQL's background statistics work wrote the same statistics B had computed after the fork. By the registered rule these runs are "wrong data". On the evidence, the tools' output was correct.
+² **The flagged page is the live source's current version, not stale data.** In all seven flagged runs it is the same page: block 2 of `base/5/2840`, which is `pg_toast_2619`, the TOAST table of `pg_statistic` (checked on a fresh PostgreSQL 17 cluster). The evidence:
+- Before recovery the tool's copy of that page equalled S's. After the copy replayed the source's WAL as a standby and was promoted, the page's tuple data equalled B's diverged version.
+- Nothing else ran in between: autovacuum is off in every scenario cluster, and the bring-up only checks recovery status, checkpoints and stops.
+- So replaying the source's own WAL produced it. Most likely the source made, after S was taken, the same change B had made after the fork (for example pruning dead TOAST tuples), and check 3's reference, S, predates it.
+
+The data directories weren't kept, so this can't be confirmed byte by byte. Three of the seven flagged runs are S2, where check 3 isn't registered; the harness's `verdict` column applied it there anyway, so those are correct by the registered rule. The other four are S2c: "wrong data" by the registered rule, with rows and amcheck correct.
 
 ### Verdict on each prediction
 
 | ID | Prediction | Result |
 |---|---|---|
-| I1 | The catch-up tools accept S1 and the copy is correct | **Held** for `pg_probackup` and WAL-G (both modes) |
+| I1 | The catch-up tools accept S1 and the copy is correct | **Held** for `pg_probackup` and WAL-G `catchup-send` |
 | I2 | The catch-up tools refuse S2, for identity or history | **Held** for `pg_probackup` and WAL-G `catchup-send` |
-| I3 | The catch-up tools accept S2b (or S2c) and keep stale pages | **Held for `pg_probackup`:** it accepts both S2b and S2c and returns copies missing 928 `accounts` rows and 167 `tags` rows. **Failed for WAL-G `catchup-send`:** it refuses both, from the timeline. |
-| I4 | `pg_rewind` repairs S2 and S2b (retained arm) | **S2b: held. S2: held on rows, amcheck and zero stale pages before recovery; strictly failed** by the post-promotion statistics page described above. Without retained WAL, `pg_rewind` refuses S2 and fails on S2b after modifying the copy |
-| I5 | `pg_rewind` on S1 reports no rewind is needed, then catches up by replay | **Held:** "source and target cluster are on the same timeline … no rewind required"; correct after replay |
-| I6 | pgdelta is correct on S2b and S2c | **Held**, in both arms, with zero stale pages before and after recovery |
+| I3 | The catch-up tools accept S2b (or S2c) and keep stale pages | **Held for `pg_probackup`:** it accepts S2b and S2c and returns copies missing 928 `accounts` rows and 167 `tags` rows. **Failed for WAL-G `catchup-send`:** it refuses both. Its check is plain timeline equality, not fork detection, so it would also refuse a copy that never diverged but sits on an older timeline after a promotion (not tested here) |
+| I4 | `pg_rewind` repairs S2 and S2b (retained arm) | **Held:** both correct by the registered checks |
+| I5 | `pg_rewind` on S1 reports no rewind needed, then catches up by replay | **Held:** "source and target cluster are on the same timeline … no rewind required"; correct after replay |
+| I6 | pgdelta is correct on S2b and S2c | **Held, in staged mode:** correct from a quiesced backup of the source, in both arms. A live-server refresh wasn't tested here (that's T8) |
 
 ### What the registered rules say
 
-- **On correctness against the catch-up tools, the edge is real for one of them and absent for the other:**
-  - **`pg_probackup`:** pgdelta has a measured correctness edge. `pg_probackup` silently returns a copy with lost rows whenever B's REDO point is older than its diverged pages (S2b: a crashed ex-primary; S2c: a cleanly stopped standby of one).
-  - **WAL-G's checked mode:** no correctness edge. It refuses every diverged copy. Against it, pgdelta's edge is reuse: WAL-G sends everything again, while pgdelta sends only the changed pages.
-- **`pg_rewind` repairs every diverged copy when B still has its WAL back to the fork.** So for Omni's DR path, which tries a rewind first, pgdelta's role is the fallback when rewind can't run: missing WAL (here S2, refused) or a crash (here S2b, where `pg_rewind` failed and left the copy unusable). pgdelta needs no WAL from B and repaired every case.
+- **Against `pg_probackup`, pgdelta has a measured correctness edge.** `pg_probackup` silently returns a copy with lost rows whenever B's REDO point is older than its diverged pages: a crashed ex-primary (S2b) or a cleanly stopped standby of one (S2c).
+- **Against WAL-G's checked mode, there's no correctness edge; the edge is reuse.** WAL-G refuses every copy on another timeline, so after a failover it sends everything again. pgdelta sends only the changed pages.
+- **`pg_rewind` repairs every diverged copy when B still has its WAL back to the fork.** Without that WAL it can't run: in S2 the WAL had been recycled, and in S2b its own crash recovery removed it. So for Omni's DR path, which tries a rewind first, pgdelta's role is the fallback when rewind lacks that WAL. pgdelta needs no WAL from B: in staged mode it rebuilt every case correctly. The live-server version of that claim is T8's to test.
 
 ## Results, part B: pgBackRest delta restore
 
-**Run:** October 23–24, 2026, 22:23–23:58 UTC, sweep `exp08-pgbackrest`, on the VMs of [EXP-09](EXP-09-direct-read.md).
+*Corrected October 24 after the same recheck. The first version reported restore time only, as if it were end to end, and drew conclusions from it that need the recovery time too.*
+
+**Run:** October 23, 2026, 22:22–23:58 UTC, sweep `exp08-pgbackrest`, on the VMs of [EXP-09](EXP-09-direct-read.md).
 - **Runs:** 162, every one verified. Every pgBackRest restore was started, recovered through `archive-get`, and matched the source's per-table row counts and md5s.
-- **Versions:** pgBackRest 2.59.3 (PGDG); the configuration is recorded in the sweep's `run.json`.
+- **Versions:** pgBackRest 2.59.3 (PGDG); the configuration is in the sweep's `run.json`.
 - **Data:** [exp08-runs.csv](data/exp08-runs.csv), [exp08-cells.csv](data/exp08-cells.csv).
-- **Analysis:** [analysis/exp08.py](../../analysis/exp08.py), written and dry-run before these results existed.
+- **Analysis:** [analysis/exp08.py](../../analysis/exp08.py), written and dry-run before these results existed (the usable-time column was added after the recheck).
 
 ![EXP-08: time](../figures/exp08-time.svg)
 
-**End-to-end time** (median of 3, seconds). For pgBackRest this is the restore alone: the backup it restores was taken just before, untimed.
+**Restore time** (median of 3, seconds). This is what the harness timed. For pgBackRest it excludes the backup (taken just before, untimed) and the recovery the copy needs before it can be used.
 
 | Workload | Link | Full copy | pgdelta v0 | pgdelta v1 path | pgBackRest zstd | pgBackRest none | pgBackRest block |
 |---|---|---:|---:|---:|---:|---:|---:|
@@ -207,9 +217,26 @@ The page matched B's old version only after the copy was promoted and started, w
 | | 2 Gbit/s | 10.29 | 7.21 | 2.69 | 4.06 | 5.69 | **2.62** |
 | | unthrottled | 3.11 | 7.27 | 2.70 | 4.10 | 4.44 | **2.64** |
 
+**Time until the copy is usable:** the restore plus starting the copy until it is out of recovery. This was measured untimed during verification. The full copy's and v0's outputs weren't started.
+
+| Workload | Link | pgdelta v1 path | pgBackRest zstd | pgBackRest none | pgBackRest block |
+|---|---|---:|---:|---:|---:|
+| uniform | 0.5 Gbit/s | **12.49** | 17.36 | 40.94 | 16.02 |
+| | 2 Gbit/s | **5.08** | 14.84 | 18.80 | 13.84 |
+| | unthrottled | **3.32** | 13.30 | 16.74 | 13.72 |
+| hot | 0.5 / 2 / unthrottled | **2.87–2.89** | 13.54–16.10 | 14.57–38.46 | 11.99–15.04 |
+| append | 0.5 / 2 / unthrottled | **2.85–2.87** | 17.21–19.21 | 17.12–33.88 | 11.46–15.56 |
+
+**How much of pgBackRest's recovery is real and how much comes from the harness:**
+- Its recovery time fits about **2.1 s plus 0.38 s per WAL file fetched** (zstd 2.09 + 0.385; block 2.19 + 0.381; none 2.33 + 0.500).
+- Each restore fetched **2–45 WAL files**. That count grew within a trial, because every earlier method's backup added WAL, so most of the backlog comes from the harness.
+- The fixed ~2.1 s doesn't come from the harness: it's the cost of starting, fetching and promoting.
+- A real restore from a day-old BackupPlan backup would fetch far more WAL.
+- pgdelta v1's 0.16 s comes from reading a stopped source. A live-source v1 (T8) will also need some recovery.
+
 ![EXP-08: bytes](../figures/exp08-bytes.svg)
 
-**Bytes from source to destination** (median, unthrottled, MB). For pgBackRest this includes the WAL its recovery fetched afterwards; that part is in brackets.
+**Bytes from source to destination** (median, MB; the same at every speed within 2%). For pgBackRest this includes the WAL its recovery fetched; that part is in brackets.
 
 | Workload | Full copy | pgdelta v1 path | pgBackRest zstd | pgBackRest none | pgBackRest block |
 |---|---:|---:|---:|---:|---:|
@@ -217,48 +244,42 @@ The page matched B's old version only after the copy was promoted and started, w
 | hot | 2,104 | 29 | 51 (0.4) | 1,406 (303) | **1.9** (0.4) |
 | append | 2,113 | 28 | 379 (0.5) | 1,412 (421) | **5.3** (0.4) |
 
-pgdelta's 28–29 MB for local changes is mostly the one 16 MiB WAL segment it always sends. The pages themselves are 12–13 MB.
+pgdelta's 28–29 MB for local changes includes one 16 MiB WAL segment, which is more than 99.99% unused space but sent uncompressed. The pages themselves are 10.6 MB (append) and 12.3 MB (hot).
 
 ### Verdict on each prediction
 
 | ID | Prediction | Result |
 |---|---|---|
-| I7 | `pgbackrest_zst` beats staged pgdelta on time for local changes | **Held in 5 of 6 cells; failed for append at 0.5 Gbit/s** (7.90 against 7.43 s): file-level restore sends 379 MB for append |
-| I8 | pgBackRest sends more bytes than pgdelta for uniform, judged on `pgbackrest_zst` | **Failed: 55 against 611 MB. The registered rule fires: on bytes, the pitch to Omni users must be "no repository needed".** Part of this is pgbench's padded rows compressing unusually well, which T4 will check on realistic data |
-| I8a | Without compression, pgBackRest sends more than pgdelta for uniform (about 1.05 GB) | **Held:** 1,109 MB restored plus 387 MB of WAL, against 611 MB |
-| I8b | With zstd, fewer bytes than pgdelta for uniform | **Held** (55 against 611 MB) |
-| I9 | Block incremental sends at most half of zstd's bytes for local changes | **Held:** 1.9 against 51 MB (hot), 5.3 against 379 MB (append) |
-| I10 | Uniform: `pgbackrest_zst` faster than pgdelta's v1 path at 0.5 Gbit/s | **Held:** 3.52 against 12.33 s |
+| I7 | `pgbackrest_zst` beats staged pgdelta on time for local changes | **Failed: held in 5 of 6 cells, failed for append at 0.5 Gbit/s** (7.90 against 7.43 s, ranges not overlapping), where file-level restore sends 379 MB |
+| I8 | pgBackRest sends more bytes than pgdelta for uniform, judged on `pgbackrest_zst` | **Failed at every speed: 55 against 610 MB. The registered rule fires: on bytes, the pitch to Omni users must be "no repository needed".** Part of this is pgbench's padded rows compressing unusually well, which T4 checks on realistic data |
+| I8a | Without compression, pgBackRest sends more than pgdelta for uniform | **Held:** 1,109 MB restored plus 387 MB of WAL, against 611 MB (unthrottled; similar at every speed) |
+| I8b | With zstd, fewer bytes than pgdelta for uniform | **Held** at every speed |
+| I9 | Block incremental sends at most half of zstd's bytes for local changes | **Held** at every speed: 1.9–2.0 against 51 MB (hot), 5.2–5.4 against 379 MB (append) |
+| I10 | Uniform: `pgbackrest_zst` faster than pgdelta's v1 path at 0.5 Gbit/s | **Held on restore time:** 3.52 against 12.33 s. Including recovery, the v1 path is faster (12.49 against 17.36 s), but most of that recovery is the harness's WAL backlog |
 | I10b | Local changes: v1 path faster than `pgbackrest_zst` at 0.5 and 2 Gbit/s | **Held:** 2.69–2.73 against 3.50–7.90 s |
 | I11 | `pgbackrest_zst` beats the full copy at every speed for local changes | **Failed unthrottled** (3.47 against 3.14 s; 4.10 against 3.11 s); held at 0.5 and 2 Gbit/s |
 
-**The registered rules, on `pgbackrest_zst` against pgdelta's v1 path: mixed.** The ratios (v1 ÷ zstd) are:
-- 0.34–0.78 for local changes at every speed;
-- 3.51 (0.5 Gbit/s), 1.41 (2 Gbit/s) and 0.90 (unthrottled) for uniform.
+**The registered time rules, on `pgbackrest_zst` against pgdelta's v1 path, on restore time: mixed.**
+- The ratios (v1 ÷ zstd) are 0.34–0.78 for local changes at every speed, and 3.51 (0.5 Gbit/s), 1.41 (2 Gbit/s) and 0.90 (unthrottled) for uniform.
+- The rule asks for the crossover. For **local changes**, the v1 path is faster at every speed tested. For **scattered changes**, pgBackRest with zstd is faster below a crossing somewhere between 2 and 15 Gbit/s: about 6–9 Gbit/s depending on how the two measured points are interpolated, and nothing in between was tested.
+- **On time to usable,** the v1 path is faster in every cell. But that comparison is dominated by the harness's WAL backlog, so it isn't the basis for the verdict.
 
-As registered for a mixed outcome, the crossing speeds are:
-- **Local changes (hot, append):** pgdelta's v1 path is faster at every link speed tested.
-- **Scattered changes (uniform):** pgBackRest with zstd is faster below about 9 Gbit/s; v1 is faster above it.
-
-**Not in the registered rules, but it matters most: block incremental.** `pgbackrest_block`, the newest repository format, ties pgdelta's v1 path for local changes at every speed:
-- hot: 2.82 against 2.71 s;
-- append: 2.62–2.68 against 2.69–2.70 s.
-
-It is faster for scattered changes on slower links, and it sends the fewest bytes of anything measured (1.9–5.3 MB for local changes). Its restore barely loads the source (0.3–0.5 CPU-s, against 5.4–6.0 for pgdelta), because the repository serves files it has already compressed.
+**Block incremental, not in the registered rules:**
+- **Restore time:** it ties pgdelta's v1 path for append (2.62–2.68 against 2.69–2.70 s). It is about 4% slower for hot in every run (2.82–2.83 against 2.71–2.73 s). It is faster for scattered changes on slower links.
+- **Bytes:** it sends the fewest of anything measured, 1.9–5.3 MB for local changes.
+- **Source CPU during the restore:** 0.3–0.5 CPU-s, against 5.3–6.0 for pgdelta's v1 path. That excludes the source CPU of the backup it restores and of its recovery's SSH fetches, neither of which was measured.
 
 ### What this means
 
-**Where a current pgBackRest backup already exists, pgBackRest's delta restore is as good as pgdelta's v1 path for local changes, and better for scattered changes on slower links.** That is especially true with block incremental. pgdelta's case therefore rests on what this experiment deliberately gave pgBackRest for free: **a backup taken just before the restore.**
+- **By the registered byte rule (I8), the pitch to Omni users is "no repository needed".** With a current backup in the repository, pgBackRest sends fewer bytes for scattered changes.
+- **For clusters that have a repository, the registered time rule gives this recommendation, on restore time:**
+  - local changes: pgdelta's v1 path, faster than Omni's zstd configuration by 1.3–2.9× at every speed;
+  - scattered changes: pgBackRest zstd, below a crossing of roughly 6–9 Gbit/s.
+- **Block incremental narrows pgdelta's lead to nothing for local changes on restore time.**
+- **Every pgBackRest number here assumes a backup taken just before the restore.** A real one is hours old, which adds WAL replay at about 0.4 s per 16 MiB file, plus a fixed ~2 s. pgdelta's v1 path needs no backup and refreshes from the live server (once T8 shows backup mode works).
+- **The comparison worth running next:** pgBackRest restoring a realistically old backup, with its WAL replay, against pgdelta refreshing from the live server.
 
-In Omni:
-- The newest BackupPlan backup is up to a day old (a daily full by default). A delta restore from it must then replay up to a day of WAL, which wasn't measured here.
-- HA and DR seeding don't use the repository at all.
-- pgdelta needs no repository and no recent backup. It refreshes straight from the live server.
-
-So the pitch to Omni users, by I8's registered rule and by these times, is **"no repository needed"**. The comparison worth running next is pgBackRest with a realistically old backup plus WAL replay, against pgdelta from the live server.
-
-**Caveats from the pre-registration, unchanged:**
+**Caveats from the pre-registration:**
 - pgdelta's v1 path read a stopped source.
 - pgBackRest's traffic was encrypted by SSH; pgdelta's wasn't.
 - pgbench compresses unrealistically well, which helps every zstd variant.
-- Each pgBackRest restore's recovery fetched 18–29 WAL files: the later in a trial a restore ran, the more WAL earlier methods had added. That is counted in its bytes, not its time.

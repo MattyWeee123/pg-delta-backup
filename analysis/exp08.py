@@ -35,6 +35,7 @@ METHODS = [('full', 'Full copy (pg_basebackup)', COLORS['grey'], None),
            ('pgbackrest_block', 'pgBackRest, zstd + block incremental', COLORS['purple'], '..')]
 NUMERIC = ('total_s', 'restore_s', 'transfer_s', 'capture_s', 'cpu_source_s', 'cpu_dest_s', 'wire_s2d_bytes',
            'wire_d2s_bytes', 'recovery_wire_s2d_bytes', 'recovery_wal_files', 'output_bytes', 'measured_s2d_gbit')
+DERIVED = ('ready_s', 'usable_s')
 
 
 def number(value):
@@ -52,6 +53,15 @@ def load(sweep: Path):
             run.update({k: number(row.get(k)) for k in NUMERIC})
             run['verified'] = row.get('verified') == 'True'
             run['logical_match'] = row.get('logical_match')
+            # Time from starting the output until it accepts writes (out of recovery): for pgBackRest,
+            # archive-get recovery; it is untimed in total_s but decides when the copy is usable.
+            record = sweep / 'runs' / row['trial_id'] / f"r{row['repeat']}-{row['speed']}-{row['method']}.json"
+            ready = None
+            if record.exists():
+                verification = json.loads(record.read_text()).get('verification') or {}
+                ready = number((verification.get('output_start') or {}).get('ready_seconds'))
+            run['ready_s'] = ready
+            run['usable_s'] = run['total_s'] + ready if ready is not None and run['total_s'] is not None else None
             rows.append(run)
     return rows
 
@@ -71,7 +81,7 @@ def cells(rows):
     table = {}
     for key, runs in grouped.items():
         cell = {'n': len(runs)}
-        for col in NUMERIC:
+        for col in (*NUMERIC, *DERIVED):
             values = [r[col] for r in runs if r[col] is not None]
             if values:
                 cell[col] = (statistics.median(values), max(values))
@@ -101,13 +111,14 @@ def crossing(table, pattern, a, b):
 
 def write_data(rows, table, tag):
     DATA.mkdir(parents=True, exist_ok=True)
-    keys = ['trial_id', 'pattern', 'speed', 'method', 'repeat', 'status', 'verified', 'logical_match', *NUMERIC]
+    keys = ['trial_id', 'pattern', 'speed', 'method', 'repeat', 'status', 'verified', 'logical_match', *NUMERIC, *DERIVED]
     with (DATA / f'exp08{tag}-runs.csv').open('w', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=keys)
         writer.writeheader()
         for run in sorted(rows, key=lambda r: (r['pattern'], r['speed'], r['method'], r['repeat'])):
             writer.writerow({k: run.get(k) for k in keys})
-    cols = ['total_s', 'wire_s2d_bytes', 'recovery_wire_s2d_bytes', 'cpu_source_s', 'cpu_dest_s']
+    cols = ['total_s', 'ready_s', 'usable_s', 'wire_s2d_bytes', 'recovery_wire_s2d_bytes', 'recovery_wal_files',
+            'cpu_source_s', 'cpu_dest_s']
     with (DATA / f'exp08{tag}-cells.csv').open('w', newline='') as f:
         writer = csv.writer(f)
         writer.writerow(['pattern', 'speed', 'method', 'n', *(f'{c}_{s}' for c in cols for s in ('median', 'max'))])
@@ -132,6 +143,12 @@ def part_b(table):
     for p in PATTERNS:
         for s in SPEEDS:
             say(f'| {p} | {SPEED_LABEL[s]} | ' + ' | '.join(fmt(med(table, p, s, m)) for m, *_ in METHODS) + ' |')
+    say('\n## Part B: time until the copy is usable, s (median of total + start until out of recovery)')
+    say('| Workload | Link | ' + ' | '.join(label for _, label, *_ in METHODS) + ' |')
+    say('|---|---|' + '---:|' * len(METHODS))
+    for p in PATTERNS:
+        for s in SPEEDS:
+            say(f'| {p} | {SPEED_LABEL[s]} | ' + ' | '.join(fmt(med(table, p, s, m, 'usable_s')) for m, *_ in METHODS) + ' |')
     say('\n## Part B: bytes source→dest, MB (median, recovery WAL included for pgBackRest)')
     say('| Workload | ' + ' | '.join(label for _, label, *_ in METHODS) + ' |')
     say('|---|' + '---:|' * len(METHODS))
@@ -143,25 +160,26 @@ def part_b(table):
     say(f'- **I7** (pgbackrest_zst beats staged pgdelta on time for local changes): '
         f'{"held" if all(a is not None and b is not None and a < b for *_, a, b in i7) else "failed"} '
         f'({", ".join(f"{p}/{SPEED_LABEL[s]} {fmt(a)} vs {fmt(b)}" for p, s, a, b in i7)})')
-    bz, bd = med(table, 'uniform', 'unthrottled', zst, 'wire_s2d_bytes'), med(table, 'uniform', 'unthrottled', v0, 'wire_s2d_bytes')
-    bn = med(table, 'uniform', 'unthrottled', 'pgbackrest_none', 'wire_s2d_bytes')
-    if bz and bd:
-        say(f'- **I8** (registered, judged on pgbackrest_zst: pgBackRest sends more bytes than pgdelta for uniform): '
-            f'{"held" if bz > bd else "failed — the rule fires: on bytes the pitch must be \"no repository needed\""} '
-            f'({mb(bz)} vs {mb(bd)} MB)')
-    if bn and bd:
-        say(f'- **I8a** (pgbackrest_none sends more than pgdelta for uniform, about 1.05 GB): '
-            f'{"held" if bn > bd else "failed"} ({mb(bn)} MB, recovery WAL included)')
-    if bz and bd:
-        say(f'- **I8b** (pgbackrest_zst sends fewer bytes than pgdelta for uniform): {"held" if bz < bd else "failed"}')
-    i9 = [(p, med(table, p, 'unthrottled', 'pgbackrest_block', 'wire_s2d_bytes'), med(table, p, 'unthrottled', zst, 'wire_s2d_bytes'))
-          for p in LOCAL]
+    def b(p, s, m):
+        return med(table, p, s, m, 'wire_s2d_bytes')
+    i8 = [(s, b('uniform', s, zst), b('uniform', s, v0), b('uniform', s, v1)) for s in SPEEDS]
+    more = all(z > d and z > e for _, z, d, e in i8 if z and d and e)
+    say(f'- **I8** (registered, judged on pgbackrest_zst: pgBackRest sends more bytes than pgdelta for uniform, at each speed): '
+        f'{"held" if more else "failed — the rule fires: on bytes the pitch must be \"no repository needed\""} '
+        f'({", ".join(f"{SPEED_LABEL[s]} {mb(z)} vs v0 {mb(d)} / v1 {mb(e)} MB" for s, z, d, e in i8)})')
+    i8a = [(s, b('uniform', s, 'pgbackrest_none'), b('uniform', s, v1)) for s in SPEEDS]
+    say(f'- **I8a** (pgbackrest_none sends more than pgdelta for uniform): '
+        f'{"held" if all(n and e and n > e for _, n, e in i8a) else "failed"} '
+        f'({", ".join(f"{SPEED_LABEL[s]} {mb(n)} MB" for s, n, _ in i8a)}, recovery WAL included)')
+    say(f'- **I8b** (pgbackrest_zst sends fewer bytes than pgdelta for uniform): '
+        f'{"held" if all(z and e and z < e for _, z, _d, e in i8) else "failed"}')
+    i9 = [(f'{p}/{SPEED_LABEL[s]}', b(p, s, 'pgbackrest_block'), b(p, s, zst)) for p in LOCAL for s in SPEEDS]
     say(f'- **I9** (pgbackrest_block ≤ half of pgbackrest_zst\'s bytes for local changes): '
         f'{"held" if all(b and z and b <= z / 2 for _, b, z in i9) else "failed"} '
         f'({", ".join(f"{p} {mb(b)} vs {mb(z)} MB" for p, b, z in i9)})')
-    a, b = med(table, 'uniform', '0.5g', zst), med(table, 'uniform', '0.5g', v1)
+    a, c = med(table, 'uniform', '0.5g', zst), med(table, 'uniform', '0.5g', v1)
     say(f'- **I10** (uniform: pgbackrest_zst faster than the v1 path at 0.5 Gbit/s): '
-        f'{"held" if a and b and a < b else "failed"} ({fmt(a)} vs {fmt(b)})')
+        f'{"held" if a and c and a < c else "failed"} ({fmt(a)} vs {fmt(c)})')
     i10b = [(p, s, med(table, p, s, v1), med(table, p, s, zst)) for p in LOCAL for s in ('0.5g', '2g')]
     say(f'- **I10b** (local: v1 path faster than pgbackrest_zst at 0.5 and 2 Gbit/s): '
         f'{"held" if all(x and y and x < y for *_, x, y in i10b) else "failed"} '
