@@ -1,6 +1,6 @@
 # EXP-11: How fast can a durable full copy go, and does v1's path still beat it?
 
-Status: **done** (results below; run October 24, 2026, 06:32–09:32 UTC, on two VMs created at 06:27 and deleted at 09:34). Pre-registered October 24, 2026, and revised after two independent reviews and a check of the revision, all before running; the harness was built and reviewed, and the smoke run's findings and its two fixes were recorded before the main sweep (see the end of the revisions). This is test T2 of the [decision ledger](../DECISIONS.md#t2-fastest-durable-full-copy-as-v1s-baseline-done-october-24-2026). It merges three independent drafts. The ledger's registered predictions and rules are kept word for word and judged as registered, except the zstd part, which moves to T4 (change 3). Everything marked "added here" is new. Where the arms depart from the ledger's, the reason is under [Changes from the ledger](#changes-from-the-ledger-rule-8), as rule 8 asks. A feasibility review and a fairness review checked the first version before anything ran. Every change they led to, and the changes from the check of the revision, are listed under [Revisions before running](#revisions-before-running-october-24-2026).
+Status: **done** (results below; run October 24, 2026, 06:32–09:32 UTC, on two VMs created at 06:27 and deleted at 09:34; the results were corrected after an independent recheck the same day, listed under [Corrections after the recheck](#corrections-after-the-recheck-october-24-2026)). Pre-registered October 24, 2026, and revised after two independent reviews and a check of the revision, all before running; the harness was built and reviewed, and the smoke run's findings and its two fixes were recorded before the main sweep (see the end of the revisions). This is test T2 of the [decision ledger](../DECISIONS.md#t2-fastest-durable-full-copy-as-v1s-baseline-done-october-24-2026). It merges three independent drafts. The ledger's registered predictions and rules are kept word for word and judged as registered, except the zstd part, which moves to T4 (change 3). Everything marked "added here" is new. Where the arms depart from the ledger's, the reason is under [Changes from the ledger](#changes-from-the-ledger-rule-8), as rule 8 asks. A feasibility review and a fairness review checked the first version before anything ran. Every change they led to, and the changes from the check of the revision, are listed under [Revisions before running](#revisions-before-running-october-24-2026).
 
 ## Question
 
@@ -552,7 +552,20 @@ The smoke run took 31 minutes, its two fixes included; the two invocations took 
 - **Data:** [exp11-runs.csv](data/exp11-runs.csv) (one row per run, with each arm's own phase timers and the durability checks) and [exp11-cells.csv](data/exp11-cells.csv) (medians and maxima per workload, speed and arm, in the main-block, HA and warm-source views).
 - **Analysis:** [analysis/exp11.py](../../analysis/exp11.py), written and dry-run on the smoke run's CSV before the sweep (smoke item 11), run as `.venv/bin/python analysis/exp11.py --sweeps results/exp04/exp11-local results/exp04/exp11-uniform --audit results/exp04/exp11-audit2 --idle-noise-bytes 458752`.
 - **Where the numbers come from:** the analysis's output, unless the text says a number was recomputed, either from exp11-runs.csv or from the raw run and trial records (git-ignored, under `results/exp04/`).
-- **The session is shifted against EXP-09 (A7).** v1 took 14–18% longer for local changes, and one `pg_basebackup` stream 22–30% longer unthrottled. So, as registered, every comparison below is within this session ([drift gates](#drift-gates-against-exp-09)).
+- **The session is shifted against EXP-09 (A7).** v1 took 14–18% longer for local changes (8–17% for uniform), and one `pg_basebackup` copy 22–30% longer unthrottled, while its single TCP stream measured 4–11% slower in the link tests. So, as registered, every comparison below is within this session ([drift gates](#drift-gates-against-exp-09)).
+
+### Corrections after the recheck (October 24, 2026)
+
+An independent recheck read this write-up and the ledger against the raw data from three sides (numbers, verdicts, summaries) and made 33 findings, 12 of them major. Every one was checked against the data; all held, some in part, and together they make 25 distinct corrections. No registered verdict changes. The pre-registered sections are unchanged. The major ones:
+- **The audit counts.** The analysis printed 33 uncovered for `full_nosync` and 3 for `pg_probackup`'s own flush. Those were example paths, not counts: the audit keeps the first 20 of each kind, and the analysis merged and deduplicated them. The audit counted 992 of 992 files and 1,021 of 1,021 directory changes for `full_nosync`, and 3 files and 2 directory changes for `pg_probackup`'s flush. Fixed in the analysis with a test (commit d5a2fe6); rerun as registered, only its audit table changed, and the curated CSVs and figures are byte-identical.
+- **Why `pg_probackup` is slower than one stream.** The conclusion gave a cause, splitting by file and flushing after the copy, that the timers don't support: one stream also carries the largest file and also flushes after its copy. The timers place most of the gap in its copy phase, for reasons they don't show.
+- **T5 and T13.** The registered cut (v1 at 4 jobs) is stated with what it rests on: it clears the 1.2 s edge by about 0.2 s in a session where v1 ran about 0.4 s slower than in EXP-09. With v1 at 8 jobs the cut falls in the band where T13 and T5 rank equal. The ledger's "neither changes the HA verdict" goes beyond the rule and is restated.
+- **The released-copier claims hold at Debian's default write-back on dest.** One `pg_basebackup` stream with dest's write-back at 64 MiB (`full_wb`) beat v1 at 10 Gbit/s and unthrottled.
+- **The session's slowdown isn't shown to be CPU-bound.** Dest's cold disk reads and the single-stream link test slowed too.
+- **A warm source sped up append's single stream** by about 0.75 s against the main block, which puts v1 over `full` at 0.92 there, above the qualifier's 0.90 (3 runs), though not hot's. So the probe's cold reader doesn't show that the source's cold read leaves one stream's pace alone.
+- **In the ledger:** D03 stays at B rather than A, and the crossovers name their 0.1 ms round-trip time wherever they are cited.
+
+The smaller corrections: `pg_probackup`'s flush also left 2 directory changes; the bound sits 0.44 s (not 0.45 s) above the floor at its closest; the gap from `full_wb` to the bound is 0.75–1.02 s; the closest deciding ratio to 0.90 is `R_adj` against B_rel; the warm-source numbers use one stated view; the reference-digest differences seen by v1 and `parcopy` runs are now reported; A1's, E10's and E11's notes; the lowest unthrottled single-stream link test was 10.5 Gbit/s, not 10.6; and the summaries in the ledger, the README, the experiments index and the log.
 
 ### Runs and verification
 
@@ -568,6 +581,7 @@ The smoke run took 31 minutes, its two fixes included; the two invocations took 
 - **The start and end reference digests differed in every trial** (recomputed from the trial records). The files that changed were system catalogs: `pg_statistic` with its TOAST table and index, `pg_class`, and their free-space and visibility maps, in `template1` in all three trials and also in `postgres`, the benchmark's database, in append. The commit log's `pg_xact/0000` changed too. `template1`'s `pg_statistic` grew from 155,648 to 212,992 bytes. That looks like autovacuum analysing the catalogs during the trial, but it wasn't confirmed. No benchmark table differed.
   - By the registered definitions, the source changed during every trial. So a `probackup*` run whose logical digest differed would have been void, not failed: A4's logical leg couldn't fire in this session. None differed, so no run was void, and no result depends on it.
   - **Smoke item 12 above is wrong.** It says the reference digests matched in both smoke trials. The trial records say the same files differed in every smoke trial too (`exp11-smoke`'s two, `exp11-smoke70` and `exp11-audit2`). So the exclusion the item asked for was never added. The analysis doesn't report the mismatch; it counts void runs only.
+  - **v1 and `parcopy` runs read a changed source too (reported only, as registered).** 187 of the 191 v1 and `parcopy` runs read a stopped source whose digest differed from the trial's reference digest (73 in hot, 71 in append, 43 in uniform; recomputed from the trial records). As registered, each run's own verification, against the source at the time, stands, and every one passed.
 - **Smoke records:** the smoke section says the first audit ran 10 runs; its records hold 5, each stopped by the audit script's `KeyError` before the fix and the rerun. So the smoke run made 89 runs, not 94.
 
 ### Durability and the syscall audit
@@ -591,15 +605,16 @@ Check (a)'s limit was 4 MiB in both sweeps and in the analysis: the smoke run's 
 - **The negative control worked.** `full_nosync` failed check (a) in all 30 runs, leaving at least 2.11 GB dirty, and failed check (b): none of its copy reached the disk inside the window. So check (a) stays in force (A6 doesn't fire).
 - **The syscall audit** (`exp11-audit2`: scale 5, one untimed run per arm under `strace`):
 
-| Arm | Passed | Uncovered | Left by the tool's own flush, before its `sync -f` |
-|---|---|---:|---|
-| `full`, `full_syncfs`, `full_wb` | yes | 0 | – |
-| `parcopy8`, `parcopy4` | yes | 0 | – |
-| v1 at 4 and 8 jobs | yes | 0 | – |
-| `probackup8` | yes | 0 | 3: two streamed WAL segments and `backup_label` |
-| `probackup4` | yes | 0 | 3: two streamed WAL segments and `backup_label` |
-| `full_nosync` | no, as a negative control must | 33 (`backup_label`, `pg_ident.conf`, `postgresql.auto.conf`, a WAL segment, `pg_xact/0000`, …) | – |
+| Arm | Passed | Uncovered: files, directory changes | Left by the tool's own flush, before its `sync -f` |
+|---|---|---|---|
+| `full`, `full_syncfs`, `full_wb` | yes | 0 of 992, 0 of 1,021 | – |
+| `parcopy8`, `parcopy4` | yes | 0 of 991, 0 of 1,018 | – |
+| v1 at 4 and 8 jobs | yes | 0 of 992, 0 of 1,003 | – |
+| `probackup8` | yes | 0 of 992, 0 of 1,018 | 3 files (two streamed WAL segments and `backup_label`) and 2 directory changes (the entries of one segment and of `backup_label`) |
+| `probackup4` | yes | 0 of 992, 0 of 1,018 | the same: 3 files and 2 directory changes |
+| `full_nosync` | no, as a negative control must | all of them: 992 of 992 files and 1,021 of 1,021 directory changes | – |
 
+- **The counts are the audit's own** (from the analysis after the recheck's fix, commit d5a2fe6). The analysis first printed 33 for `full_nosync` and 3 for `pg_probackup`'s flush: the audit keeps its first 20 examples of each kind, and the analysis had merged the file paths with the directory entries and counted the paths left after removing duplicates.
 - **`pg_probackup`'s own flush is incomplete, as its source code showed.** Its timed `sync -f` covered what it left, in 0.02 s (`probackup_sync_s`; the largest median in the sweep was 0.024 s).
 - **`full_syncfs`'s slow sync didn't recur.** One smoke run spent 3.6 s in it; over the sweep's 40 runs its sync phase took at most 1.30 s (recomputed from exp11-runs.csv).
 
@@ -637,7 +652,7 @@ Each envelope's arm is chosen on the main block's runs, pooled over the three wo
 
 ![EXP-11: durable full copies and v1's path by link speed](../figures/exp11-baselines.svg)
 
-How to read it: one panel per workload; time against this session's measured single-stream link speed, both on log scales. Each point is a main-block median of 5 runs, with a bar to the maximum. The blue band follows B_fast's chosen arm and the beige band B_rel's. The dotted black line is a full copy's bytes at the link rate, a model. v1 at 4 jobs is the thick green line: flat for local changes, so it crosses the bound (dark blue) between 5 and 10 Gbit/s, and it stays below one stream (grey) and `pg_probackup` (orange) everywhere.
+How to read it: one panel per workload; time against this session's measured single-stream link speed, both on log scales. Each point is a main-block median of 5 runs, with a bar to the maximum. The blue band follows B_fast's chosen arm and the beige band B_rel's. The dotted black line is a full copy's bytes at the link rate, a model. v1 at 4 jobs is the thick green line: flat for local changes, so it crosses the bound (dark blue) between 5 and 10 Gbit/s, and it stays below one stream at dest's default write-back (grey, and black for syncfs) and `pg_probackup` (orange) everywhere. The pink line, one stream with dest's write-back at 64 MiB (`full_wb`, a host setting), runs below v1 at 10 Gbit/s and unthrottled in every panel.
 
 ### Medians
 
@@ -703,7 +718,7 @@ Main block, median of 5 runs (maximum in brackets), seconds:
 | v1, 8 jobs | 2.76 (2.80) | 2.77 (2.82) | – |
 
 What the medians show:
-- **The bound sits 0.45–0.58 s above the hardware floor at every speed** (floor(s): 8.83, 3.53, 1.79 and 1.30 s).
+- **The bound sits 0.44–0.58 s above the hardware floor at every speed** (floor(s): 8.83, 3.53, 1.79 and 1.30 s).
 - **One stream is link-bound at 2 and 5 Gbit/s, plus about 1.5 s.** From 10 Gbit/s up it barely gets faster: 3.93–4.04 s at 10, 3.83–4.09 s unthrottled.
 - **`pg_probackup` is slower than one stream at every speed:** by about 2.5 s at 2 and 5 Gbit/s, and by about 2 s at 10 Gbit/s and up. 4 threads were as fast as 8.
 - **v1's path takes the same time at every speed for local changes** (3.08–3.19 s). For uniform it falls from 5.31 s at 2 Gbit/s to 3.69 s unthrottled.
@@ -729,7 +744,7 @@ What the medians show:
 
 **Question 2: where one stream's time above link time goes.**
 - **At 2 Gbit/s it is the final flush, as the working hypothesis said.** The sync phase takes 1.33–1.34 s of the 1.50–1.51 s above link time, and `full_nosync` runs only 0.16–0.18 s above link time. At 5 Gbit/s, `full`'s time above link time is about the same (1.54–1.56 s).
-- **Unthrottled, the flush is only half of it.** `full` runs 2.58–2.84 s above link time. Its stream phase alone (2.41–2.69 s) takes about twice the link time of its bytes (1.22 s, recomputed: the median over `full`'s unthrottled runs, from the single-stream link test). One cold reader reads `pgbench_accounts` at 2.07–2.17 GB/s, so neither the link nor a cold read of the largest file sets the stream's pace. With the source's cache warm, append's streams still took 1.92–1.94 s (recomputed, 3 runs). The timers don't say what sets it.
+- **Unthrottled, the flush is only half of it.** `full` runs 2.58–2.84 s above link time. Its stream phase alone (2.41–2.69 s) takes about twice the link time of its bytes (1.22 s, recomputed: the median over `full`'s unthrottled runs, from the single-stream link test), so the link doesn't set its pace. The probe's one cold reader reads `pgbench_accounts` at 2.07–2.17 GB/s, but that reader isn't the walsender, which reads differently, so the probe doesn't rule out the source's cold read. A warm source cut append's stream phase by about 0.75 s, to 1.92–1.94 s (against the main block's 2.69 s cold), but not hot's: 1.97, 2.51 and 2.71 s warm (median 2.51) against 2.41 s cold (recomputed, 3 warm runs each). So the source's cold read may set part of the pace; 3 runs can't say, and the timers don't.
 - **The flush variants** (recomputed from exp11-runs.csv, medians over each arm's main-block and extension runs): `full_syncfs` spent 1.29–1.30 s in its sync, about as long as `full`'s fsync method (1.33–1.34 s), so the two tie (E4). `full_wb`, with write-back at 64 MiB on dest, spent 0.06 s: the kernel wrote the copy back during the stream. So `full_wb` took about `full_nosync`'s time (2.62–2.90 s against 2.64–2.80 s unthrottled). Every variant's stream phase took 2.47–2.63 s unthrottled (median over its runs).
 
 **`pg_probackup`** (recomputed from exp11-runs.csv; unthrottled, range of the workloads' medians):
@@ -740,6 +755,13 @@ What the medians show:
 - 0.02 s in the registered `sync -f`.
 
 Its copy phase took as long at 10 Gbit/s (3.91–3.99 s) as unthrottled, and 4 threads were as fast as 8. That fits the largest file (about 0.94 GB) on one thread, as smoke item 1 read it; the timers don't give per-file times. Like `pg_basebackup`, it flushes after the copy, not during it. Its runs carry the WAL ticker (smoke item 1): without it, the catchups idled 2–8 s on the idle source.
+
+**Why it is slower than one stream isn't shown.** Splitting by file and flushing after the copy can't explain it: one `pg_basebackup` stream also carries every file, the largest included, and also flushes after its copy. Unthrottled, the gap of about 2 s splits into:
+- 0.46 s to start;
+- a copy phase 1.1–1.5 s longer than one stream's whole stream phase in the same workload (3.77–3.96 s with 4 or 8 threads, against 2.41–2.69 s);
+- its own fsyncs, only about 0.2–0.3 s longer than `pg_basebackup`'s sync (1.55–1.60 s against 1.33–1.34 s).
+
+At 2 and 5 Gbit/s, where splitting by file can't matter, its copy phase still ran 1.8–1.9 s above its link time (10.64–10.69 s against 8.89–8.93 s at 2 Gbit/s, 5.47–5.48 s against 3.56–3.57 s at 5), while one stream's ran about 0.1 s above. If the largest file is its critical path unthrottled, that thread moved about 0.24 GB/s, against about 0.8 GB/s for one `pg_basebackup` stream; E7 assumed 0.5–1 GB/s through SSH. What limits a thread isn't timed: SSH, the tool's own protocol, or its per-page work (its source used 7.7–10.6 CPU-s per run, the WAL ticker's backend included, against 2.4–2.6 for `full`). It reads over SSH, while `pg_basebackup` sends in clear. (Recomputed from exp11-runs.csv, main-block medians.)
 
 **`parcopy8`** (recomputed, unthrottled): its first byte arrived at 0.20 s and its last at 1.63–1.65 s. So it moved 2.12 GB in about 1.44 s, about 1.47 GB/s, near the disk's durable write rate (the floor wrote B0's bytes in 1.30 s, about 1.6 GB/s). Its write-back every 8 MiB left only 0.09 s of `fsync`s at the end. The sender's SSH launch took about 0.08 s (`total_s` − `total_no_ssh_s`).
 
@@ -794,8 +816,12 @@ Unthrottled, v1's median over the baseline's, on the HA verdict's runs (10 per a
 - *Near the line:* no. The deciding ratios are 0.64–0.65 above 1.00 and 0.11–0.13 below 0.90.
 - *With void runs:* no void runs.
 
-**What it asks of T5 and T13.** The cut needed is v1 − 0.9 × B_fast: **1.40 s for hot** (a target of 1.71 s) and **1.42 s for append** (1.70 s). Against B_rel, v1 is already below the line (by 0.54 and 0.49 s). The cut is more than 1.2 s, so the registered consequence applies: **v1's design can't reach the line on these VMs even with both T13 and T5,** since reading B cold once takes about 0.95 s plus about 0.3 s of start-up. The ledger says so. The targets themselves (1.70–1.71 s) are above the 1.25 s that the same row names; the row applies by the size of the cut, more than the 1.2 s the bands allow T13 and T5 together.
-- *Beside it, not registered* (computed here from the HA view in exp11-cells.csv): with v1 at 8 jobs the cut would be 1.05 s (hot) and 1.07 s (append), in the 0.6–1.2 s band. The registered reading is the 4-job one.
+**What it asks of T5 and T13.** The cut needed is v1 − 0.9 × B_fast: **1.40 s for hot** (a target of 1.71 s) and **1.42 s for append** (1.70 s), with v1 at 4 jobs, the registered arm. Against B_rel, v1 is already below the line (by 0.54 and 0.49 s). The cut is more than 1.2 s, so the registered consequence applies: by the registered rule, **v1 at 4 jobs can't reach the line on these VMs even with both T13 and T5.** The rule's reason, that reading B cold once takes about 0.95 s plus about 0.3 s of start-up, doesn't decide it here: the targets (1.70–1.71 s) are above that 1.25 s floor, and the row applies by the size of the cut, more than the 1.2 s the bands allow T13 and T5 together.
+
+What this reading rests on:
+- **The 8-job reading differs, so both are stated, as registered.** With v1 at 8 jobs the cut is 1.05 s (hot) and 1.07 s (append), in the 0.6–1.2 s band, where the rule ranks T13 and T5 equal (computed here from the HA view in exp11-cells.csv). Leaving the Out row (`R_fast` below 1.00) would need a cut of 1.21–1.23 s at 4 jobs and 0.86–0.88 s at 8.
+- **The 4-job cut clears the 1.2 s edge by about 0.2 s, in a shifted session.** v1 itself ran about 0.4 s slower here than in EXP-09 (3.11–3.12 s on the HA runs against 2.70–2.71 s), with its hashing 13–19% slower (see Drift gates). The bound, near dest's durable write rate, which matched EXP-09's, probably didn't move. So the band, judged within the session as registered, stands, but the reading "can't reach even with both" rests on this session's v1.
+- **The band's T13 premise is EXP-09's 0.62 s re-read wait.** Here the main loop waited 0.67–0.68 s at 4 jobs (`verify_wait_s`, recomputed).
 
 ### Beside the verdict: v1 at 8 jobs, B_tuned, matched parallelism and a warm source
 
@@ -812,18 +838,18 @@ Unthrottled, v1's median over the baseline's, on the HA verdict's runs (10 per a
 
 **The same row: Out on fast links, with the qualifier** ("R_rel = 0.68" for hot, "0.69" for append). Not fragile, not near the line. So the two v1 arms agree.
 
-**Against B_tuned (A2's reading): the same row,** Out with the qualifier, since B_tuned's arm is `parcopy8`. `full_wb` alone gives v1 ratios of 1.18 (hot) and 1.15 (append).
+**Against B_tuned (A2's reading): the same row,** Out with the qualifier, since B_tuned's arm is `parcopy8`. `full_wb` alone gives v1 ratios of 1.18 (hot) and 1.15 (append), and 1.05 and 1.02 with v1 at 8 jobs (recomputed). So one `pg_basebackup` stream with one dest kernel setting beats v1 unthrottled; it did at 10 Gbit/s too (2.66–2.72 s against v1's 3.09–3.15 s for local changes). A2 doesn't fire, since `full_wb` is 0.75–0.84 s from B_fast, so the registered qualifier stands as worded; but it holds at Debian's default write-back on dest, and whether Omni's nodes set `vm.dirty_*` is unknown.
 
 **At matched parallelism** (v1 at 4 jobs against arms of at most 4 streams): `R_fast` against `parcopy4` is 1.57 (hot), 1.53 (append) and 1.87 (uniform), with `R_max` 1.53, 1.37 and 1.86. The released readings are unchanged, since one `pg_basebackup` stream is still B_rel.
 
-**With a warm source** (not the verdict; 3 warm runs per arm against 10 cold):
+**With a warm source** (not the verdict; 3 warm runs per arm). The cold ratios are given in both views: the main block's 5 runs, which E15 is judged on, and the 10 runs the analysis's own table uses:
 
-| Workload | v1 over `full`, warm / cold | v1 over `probackup8`, warm / cold |
+| Workload | v1 over `full`: warm / cold, main block / cold, 10 runs | v1 over `probackup8`: the same |
 |---|---|---|
-| hot | 0.82 / 0.81 | 0.53 / 0.51 |
-| append | 0.92 / 0.79 | 0.52 / 0.52 |
+| hot | 0.82 / 0.80 / 0.81 | 0.53 / 0.51 / 0.51 |
+| append | 0.92 / 0.77 / 0.79 | 0.52 / 0.52 / 0.52 |
 
-In append, `full` was 0.75 s faster warm than its main-block median, and its stream phase took 1.92–1.94 s against 2.54 s cold (recomputed). In hot, all three arms were slightly slower warm (by 0.07–0.14 s). Three runs per cell say little.
+All on the main block (recomputed from exp11-runs.csv): in append, `full` was 0.75 s faster warm (3.34 s against 4.09 s), and its stream phase took 1.92–1.94 s against 2.69 s; `probackup8` and v1 were 0.11 and 0.06 s faster. In hot, all three arms were slightly slower warm (by 0.07–0.14 s), and `full`'s warm streams took 1.97, 2.51 and 2.71 s against 2.41 s. **Warm, v1 over `full` in append was 0.92, above the qualifier's 0.90.** Three runs per cell say little.
 
 ### Crossovers
 
@@ -864,14 +890,14 @@ Wire bytes held in every cell, for `full` and for v1 (within 0.0%). **So the ses
 | CPU, kernel, PostgreSQL | Intel Xeon at 2.80 GHz (Cascade Lake), 6.1.0-53, 17.11 | the same |
 | Disk writes, 1 GiB, both VMs | 1,632–1,634 MB/s | 1,632–1,634 MB/s |
 | Disk reads, 1 GiB: source / dest | 2,165 / 2,234 MB/s | 2,123–2,140 / 1,954–1,991 MB/s |
-| One stream, unthrottled link tests | 14.9–15.2 Gbit/s | 10.6–15.1 Gbit/s (31 tests) |
+| One stream, unthrottled link tests | 14.9–15.2 Gbit/s | 10.5–15.1 Gbit/s (31 tests) |
 | v1: the source hashing its data directory (main block, pooled over speeds) | 1.40–1.41 s | 1.59–1.61 s |
 | v1: dest hashing B, local changes | 1.60 s | 1.85–1.91 s |
 | v1: the verifier's busy time, local changes | 1.74–1.79 s | 1.97–2.06 s |
 | v1: CPU-s per run, source / dest | 5.3–6.0 / 10.0–11.1 | 6.1–7.1 / 11.2–12.8 |
 | `full`: source CPU-s per run | 1.6–1.9 | 2.4–2.6 |
 
-The same code on the same CPU model took 13–19% longer to hash, and both arms measured in both sessions used more CPU per run. Link-bound copies at 2 and 5 Gbit/s matched EXP-09 within 1.2%; the work bound by CPU, or by one stream's own pace, slowed. The cause isn't measured: the VMs were new, on other physical hosts. EXP-09 recorded a 22% shift the other way between EXP-04b's session and its own.
+The same code on the same CPU model took 13–19% longer to hash, and both arms measured in both sessions used more CPU per run (a VM-wide counter, which also grows with a longer run). Link-bound copies at 2 and 5 Gbit/s matched EXP-09 within 1.2%; the work not set by a throttled link slowed, and so did dest's cold disk reads (11–13%) and the unthrottled single-stream link test. The cause isn't measured: the VMs were new, on other physical hosts. EXP-09 recorded a 22% shift the other way between EXP-04b's session and its own.
 
 ### Order effects
 
@@ -879,19 +905,21 @@ Differences over 0.1 s in a median, as registered (from the analysis's output):
 - **After a source restart** (a v1 or `parcopy` run just before): 14 differences of 0.10–0.36 s, 7 slower and 7 faster, each comparing groups of 1 to 4 runs. The largest: `probackup4` in hot took 6.14 s after a restart (1 run) against 5.78 s (4 runs); `full_wb` was 0.32–0.33 s faster after a restart in two cells.
 - **The extension against the main block:** `full_syncfs` 0.11 s slower in hot and in append, `parcopy4` 0.14 s slower in append, and `full` 0.13 s faster in append.
 
-None moves a verdict. The closest deciding ratio is `R_rel`, 0.77–0.78 against the 0.90 line; crossing it would need `full_syncfs` about 0.55 s faster. `R_fast` would need v1 1.2 s faster to reach 1.00.
+None moves a verdict. The closest deciding ratio to its line is `R_adj` against B_rel, 0.78 (hot) and 0.79 (append) against 0.90; the qualifier would be lost if `full_syncfs` were about 0.49 s faster in append (0.54 s in hot; recomputed). `R_fast` would need v1 1.2 s faster to reach 1.00.
 
 ### What the results depend on
 
 The pre-registration's limitations all apply. The ones a result here depends on:
 - **Stopped sources for v1 and `parcopy`.** Both read a cleanly stopped source. The released arms read a running, idle one and paid backup mode, 0.045–0.046 s here. A live v1 would also stream WAL, write `backup_label` and recover at the start (T8). The HA verdict compares v1 with `parcopy` like for like.
-- **An idle source, read cold.** No slowdown was measured (T10a). The warm-source block is three arms, 3 runs each.
+- **An idle source, read cold.** No slowdown was measured (T10a). The warm-source block is three arms, 3 runs each. Warm, v1 over `full` was 0.92 in append, above the qualifier's 0.90, and 0.82 in hot (3 runs), since a warm source sped up append's single stream by about 0.75 s. A live primary would hold much of 2.1 GB in its cache.
+- **Debian's default write-back on dest.** "Faster than the released copiers tested" holds at it. With `vm.dirty_background_bytes` at 64 MiB on dest, one `pg_basebackup` stream (`full_wb`) beat v1 at 10 Gbit/s and unthrottled (v1 took 1.15–1.18 times as long; 1.02–1.05 at 8 jobs). Whether Omni's nodes set `vm.dirty_*` is unknown (A2's integrator question).
 - **2.1 GB fits in RAM.** Every full copy's flush lands at the end, and v1's verification re-read comes from the page cache, which favours v1. No ratio is projected to TB scale (rule 10; T9).
 - **One VM pair, local NVMe, ext4 in ordered mode.** Unthrottled, dest's durable write rate sets the floor (1.30 s). A persistent disk may cap every method (T9), and larger machines would speed a parallel copy more than v1, whose bottleneck is dest CPU. The directory rule relies on ext4's ordered journal.
-- **The session is shifted against EXP-09.** Only within-session ratios are used.
+- **The session is shifted against EXP-09.** Only within-session ratios are used. The registered T5 and T13 band depends on it: the 4-job cut clears the band's 1.2 s edge by about 0.2 s, while v1 ran about 0.4 s slower than in EXP-09.
 - **The WAL ticker** stands in for a live primary's WAL, in `probackup*` runs only. Without it, `pg_probackup` would have idled 2–8 s per run.
 - **Single runs and 10 runs.** The HA verdict, its ratios and A3 rest on 10 runs per arm in hot and append; every other prediction on 5; the warm-source readings on 3; the syscall audit on one run per arm at scale 5; `pg_probackup`'s byte diagnostic on each trial's first repeat.
-- **`pg_probackup` runs over SSH;** `pg_basebackup`, `parcopy` and pgdelta send in clear. pgdelta will need TLS (O6, T12).
+- **`pg_probackup` runs over SSH;** `pg_basebackup`, `parcopy` and pgdelta send in clear. pgdelta will need TLS (O6, T12). What limits `pg_probackup`'s copy isn't timed, so its 5.8–6.1 s may depend on SSH.
+- **0.1 ms round-trip time.** One TCP stream isn't window-limited here, which hides what parallel streams gain on DR's links. Every crossover is at this latency (T12).
 - **The data shape caps per-file parallelism:** two heap files hold most of the bytes. That favours v1 against `pg_probackup`, not against `parcopy`.
 - **The bound is home-built and idealised:** no TLS, manifest or backup mode, and ranges real tools don't split. No operator can run it as it stands.
 - **Fast checkpoints, and no deletion of an old copy on the clock,** favour the full copies.
@@ -939,12 +967,12 @@ Each verdict is the registered analysis's. Where its reading of a prediction loo
 | E7 | `probackup8` 2.6–3.8 s unthrottled and 9.6–10.6 at 2; `probackup4` within 0.2 s; `probackup_sync_s` under 0.2 s | **Failed, failed, held** | 5.98–6.10 s and 12.74–12.79 s. `probackup4` − `probackup8`: −0.15, −0.11 and −0.23 s (uniform outside). `sync -f` at most 0.024 s. Its copy phase alone took 3.8–4.0 s, and its own flush 1.6 s after it (recomputed) |
 | E8 | Probes and the adder | **Held, except the adder** | Write floor 1.29–1.30 s; cold read 0.73 s; one reader 2.07–2.17 GB/s; 8 streams 15.18–15.27 Gbit/s; bracket median 0.035–0.037 s, its first pair slower. The adder failed low: 0.026–0.049 s over every cell (0.045–0.046 s unthrottled), against 0.05–0.30 |
 | E9 | Ratios for hot and append at 4 jobs; the expected verdict | **Held, except `R_rel`** | `R_fast` 1.64 and 1.65 (1.15–1.65, at the top); `R_rel` 0.77 and 0.78 (failed: below 0.85); `R_F0` 0.81 and 0.79; `R_tuned` equal to `R_fast`; `full_wb` alone 1.18 and 1.15; at 8 jobs every ratio × 0.89; the verdict Out on fast links, as expected. `R_rel` came out lower because the released arms were slower than expected |
-| E10 | v1's crossovers | **Held** | Against B_fast 6.46–6.52 Gbit/s for local changes (6–9.5) and 5.04 for uniform (4.5–7.5); against B_rel none; against F0 none for local, and uniform ties unthrottled (0.95). The link-only model crosses at 5.38–5.45 Gbit/s for local changes (registered as about 6.3) |
-| E11 | VM-wide CPU-s per run | **Failed** | Every group used more than predicted. `full` arms 2.3–2.7 on the source and 2.2–3.3 on dest; `parcopy` 1.3–1.7 (inside) and 4.9–6.6; `pg_probackup` 7.7–10.6 and 10.1–11.8; v1 at 4 jobs 6.1–7.2 and 11.2–12.8; at 8 jobs 8.8–8.9 and 15.9–16.1. Partly the session's shift (see Drift gates) |
+| E10 | v1's crossovers | **Held** | Against B_fast 6.46–6.52 Gbit/s for local changes (6–9.5) and 5.04 for uniform (4.5–7.5); against B_rel none; against F0 none for local, and uniform ties unthrottled (0.95, inside 0.95–1.05 by 0.001: 0.951). The link-only part, reported only, missed: the model crosses at 5.38–5.45 Gbit/s for local changes against about 6.3 registered, since v1 was slower in this session (17.7 / 3.1 against 17.7 / 2.7) |
+| E11 | VM-wide CPU-s per run | **Failed** | Every group but `parcopy`'s source side used more than predicted. `full` arms 2.3–2.7 on the source and 2.2–3.3 on dest; `parcopy` 1.3–1.7 (inside) and 4.9–6.6; `pg_probackup` 7.7–10.6 and 10.1–11.8 (its counters include the WAL ticker's backend); v1 at 4 jobs 6.1–7.2 and 11.2–12.8; at 8 jobs 8.8–8.9 and 15.9–16.1. The session was shifted; the cause isn't measured, and a VM-wide counter also grows with a longer run |
 | E12 | removed (T4) | – | – |
-| E13 | Every durable arm passes (a), (b) and the syscall audit; `full_nosync` leaves at least 1.5 GB; the audit finds `pg_probackup`'s own flush incomplete and its `sync -f` covering it | **Held, held; "the audit: every arm passes" failed; the `pg_probackup` clause held** | **The audit clause's verdict looks wrong.** The analysis checks that every arm passed the audit, which counts `full_nosync`, the negative control, which must fail. E13 says every *durable* arm. All nine durable arms passed with nothing uncovered, and `full_nosync` failed with 33 files uncovered, as it should. Read as registered, E13 held in full. (a) and (b): 0 of 438 durable runs failed; `full_nosync`'s smallest increase was 2.11 GB |
+| E13 | Every durable arm passes (a), (b) and the syscall audit; `full_nosync` leaves at least 1.5 GB; the audit finds `pg_probackup`'s own flush incomplete and its `sync -f` covering it | **Held, held; "the audit: every arm passes" failed; the `pg_probackup` clause held** | **The audit clause's verdict looks wrong.** The analysis checks that every arm passed the audit, which counts `full_nosync`, the negative control, which must fail. E13 says every *durable* arm. All nine durable arms passed with nothing uncovered, and `full_nosync` failed with all 992 files and all 1,021 directory changes uncovered, as it should (the analysis first printed 33, a count of example paths; see the audit table). `pg_probackup`'s own flush left 3 files and 2 directory changes, as registered ("and its directories"). Read as registered, E13 held in full. (a) and (b): 0 of 438 durable runs failed; `full_nosync`'s smallest increase was 2.11 GB |
 | E14 | v1 at 8 jobs: 2.3–2.8 s, from 0.4 s faster to 0.1 s slower than at 4 | **Held** | 2.74 and 2.75 s; 0.34 and 0.38 s faster |
-| E15 | Warm source: `full` and `probackup8` 0–0.5 s faster, v1 0–0.15 s; warm ratios at most 0.17 and 0.25 above cold | **Failed; held** | In hot all three were slower warm (by 0.07, 0.09 and 0.14 s); in append `full` was 0.75 s faster (above 0.5), `probackup8` 0.11 s and v1 0.06 s. Ratios +0.000 to +0.156. 3 runs per cell |
+| E15 | Warm source: `full` and `probackup8` 0–0.5 s faster, v1 0–0.15 s; warm ratios at most 0.17 and 0.25 above cold | **Failed; held** | Against the main block's medians, as registered: in hot all three were slower warm (by 0.07, 0.09 and 0.14 s); in append `full` was 0.75 s faster (above 0.5), `probackup8` 0.11 s and v1 0.06 s. Ratios +0.000 to +0.156 (+0.00 to +0.13 against the 10-run cold medians). 3 runs per cell |
 
 ### Added rules
 
@@ -965,19 +993,19 @@ Each verdict is the registered analysis's. Where its reading of a prediction loo
 1. **EXP-09's HA verdict: Out on fast links,** against the fastest copy measured: "Out against the fastest copy measured; R_rel = 0.77" (hot) and "R_rel = 0.78" (append). With the qualifier: "v1 is faster than the released copiers tested here (`pg_basebackup` with fsync or syncfs, `pg_probackup catchup -j 4` and `-j 8`) at 2.1 GB on these VMs". No flag. The same at 8 jobs and against B_tuned.
 2. **So v1 targets DR's slower links first** (EXP-09's rule). **D03 stands:** no claim to beat a parallel full copy on a fast LAN, now with a measured crossover (6.5 Gbit/s for local changes, 5.0 for uniform). It also records that a parallel copier built with the effort v1 takes matches or beats v1 on fast LANs; O3 allows such a program on the source.
 3. **D03 also says, from rule (i):** "the single stream represents the released parallel tools at this data shape, not a range-parallel copier".
-4. **T5 and T13:** the cut is 1.40 s (hot) and 1.42 s (append), more than 1.2 s. **v1's design can't reach the HA line on these VMs even with both.** The ledger says so.
+4. **T5 and T13:** with v1 at 4 jobs, the registered arm, the cut is 1.40 s (hot) and 1.42 s (append), more than the 1.2 s the bands allow T13 and T5 together. **So by the registered rule, v1 at 4 jobs can't reach the HA line on these VMs even with both.** The ledger says so. With v1 at 8 jobs the cut is 1.05–1.07 s, in the band where T13 and T5 rank equal; the two readings differ, so both are stated. The 4-job cut clears the 1.2 s edge by about 0.2 s, in a session where v1 ran about 0.4 s slower than in EXP-09.
 5. **One stream's overhead is its final flush at 2 Gbit/s** (L1 held; the `--no-sync` rule doesn't fire). Unthrottled, the stream itself is the other half.
-6. **A1 doesn't fire:** `--sync-method=syncfs` isn't the faster shipped copy, so nothing is restated against it.
-7. **A2 doesn't fire:** the HA claim needn't name the destination's write-back setting, and D03 gets no gray area from it.
+6. **A1 doesn't fire:** syncfs wasn't 0.3 s faster than fsync in every workload (the two tie, E4), so nothing is restated against it. `full_syncfs` is still B_rel's chosen arm at 10 Gbit/s and unthrottled, and every `R_rel` uses it.
+7. **A2 doesn't fire:** the HA claim needn't name the destination's write-back setting, and D03 gets no gray area from it. The released-copier claim holds at Debian's default write-back on dest: with one kernel setting changed there, one `pg_basebackup` stream (`full_wb`, tiered host-tuned) beat v1 (see What the results depend on).
 8. **A3 passes:** the bound counts, and crossovers against it are not upper bounds.
 9. **A4, A5 and A6 exclude nothing,** and check (a) stays in force.
 10. **A7 marks the session shifted:** L3 and L4 are not judged; the in-session verdicts stand.
 
 ## Conclusions
 
-1. **A durable full copy can take half the time of one `pg_basebackup` stream on these VMs, but only with a copier nobody ships.** `parcopy8` splits files into 64 MiB ranges over 8 streams and writes back every 8 MiB. It took 1.88 s unthrottled, 0.58 s above the disk's durable write floor, against 3.8–4.1 s for one stream. The only released parallel tool found, `pg_probackup catchup`, took 5.8–6.1 s with its `sync -f`, slower than one stream: it splits by file, so the largest file sits on one thread, and it flushes after the copy. So L2 failed both ways, and rule (i) fired.
-2. **One stream's overhead above link time is the final flush at 2 and 5 Gbit/s** (1.33 of about 1.5 s). Unthrottled the flush is half of it; the stream itself runs at about half the link rate, and the timers don't say why. `--sync-method=syncfs` doesn't help. Letting dest's kernel write back during the stream (`full_wb`, a host setting) brings one stream to 2.6–2.9 s, still 0.75–0.84 s behind the bound.
-3. **EXP-09's HA verdict reverses: Out on fast links.** Unthrottled, for local changes, v1's path at 4 jobs takes 1.64–1.65 times as long as the bound, and 1.45–1.47 times at 8 jobs, with no flag. It is faster than the released copiers tested: 0.77–0.78 of `pg_basebackup` with syncfs, 0.79–0.81 of the single stream Omni runs today, and about half of `pg_probackup`. By the registered cut (1.40–1.42 s), T13 and T5 together can't bring it to EXP-09's line against the bound on these VMs. This holds on one VM pair with local NVMe, for 2.1 GB that fits in RAM, on an idle source, with v1 and the bound both reading a stopped source.
-4. **On slower links v1's path beats every copy measured.** It crosses the bound at 6.5 Gbit/s for local changes and 5.0 for uniform, at 0.1 ms round-trip time. It beats one stream and `pg_probackup` at every speed measured, up to 13.5–14.5 Gbit/s. So v1 targets DR's slower links first, as EXP-09's rule says; their latency and transport are T12's.
-5. **The session ran slower than EXP-09's, in the CPU-bound work.** v1 took 14–18% longer for local changes and one stream 22–30% longer unthrottled, while link-bound copies at 2 and 5 Gbit/s matched within 1.2%. Every ratio above is within this session. Against today's single stream, v1's ratio here is 0.79–0.81, against EXP-09's 0.86.
-6. **Every run was verified, and every durable arm passed the durability checks and the syscall audit.** `pg_probackup`'s own flush leaves its streamed WAL and `backup_label` unflushed; with the registered `sync -f`, nothing is left. Two things this run couldn't show: what `--no-sync` costs at a standby's start, since the harness flushed each output before starting it; and a `pg_probackup` logical failure, since the source's catalogs changed in every trial and a difference would have counted as void. None occurred.
+1. **A durable full copy can take half the time of one `pg_basebackup` stream on these VMs, but only with a copier nobody ships.** `parcopy8` splits files into 64 MiB ranges over 8 streams and writes back every 8 MiB. It took 1.88 s unthrottled, 0.58 s above the disk's durable write floor, against 3.8–4.1 s for one stream. The only released parallel tool found, `pg_probackup catchup` over SSH, took 5.8–6.1 s with its `sync -f`, slower than one stream. Its copy phase alone (3.8–4.0 s, about as long at 10 Gbit/s and with a warm source) outlasts one stream's whole stream phase (2.4–2.7 s), and it then flushes for 1.6 s. Splitting by file explains why 8 threads gained nothing over 4; what limits each thread (SSH, its own protocol) isn't timed. So L2 failed both ways, and rule (i) fired.
+2. **One stream's overhead above link time is the final flush at 2 and 5 Gbit/s** (1.33 of about 1.5 s). Unthrottled the flush is half of it; the stream itself runs at about half the link rate, and the timers don't say why (a warm source sped it up in append but not in hot). `--sync-method=syncfs` doesn't help. Letting dest's kernel write back during the stream (`full_wb`, a host setting) brings one stream to 2.6–2.9 s, still 0.75–1.02 s behind the bound.
+3. **EXP-09's HA verdict reverses: Out on fast links.** Unthrottled, for local changes, v1's path at 4 jobs takes 1.64–1.65 times as long as the bound, and 1.45–1.47 times at 8 jobs, with no flag. With dest at Debian's default write-back, it is faster than the released copiers tested: 0.77–0.78 of `pg_basebackup` with syncfs, 0.79–0.81 of the single stream Omni runs today (EXP-09's ratio was 0.86), and about half of `pg_probackup`. With `vm.dirty_background_bytes` at 64 MiB on dest, one `pg_basebackup` stream (`full_wb`) beat v1 at 10 Gbit/s and unthrottled (v1 took 1.15–1.18 times as long; 1.02–1.05 at 8 jobs). By the registered cut with v1 at 4 jobs (1.40–1.42 s), T13 and T5 together can't bring it to EXP-09's line against the bound on these VMs. That reading rests on this session: the cut clears the rule's 1.2 s edge by about 0.2 s, while v1 ran about 0.4 s slower than in EXP-09, and with v1 at 8 jobs the cut (1.05–1.07 s) falls in the band where T13 and T5 rank equal. All of this holds on one VM pair with local NVMe, for 2.1 GB that fits in RAM, on an idle source read cold, with v1 and the bound both reading a stopped source.
+4. **On slower links, at 0.1 ms round-trip time, v1's path beats every copy measured.** It crosses the bound at 6.5 Gbit/s for local changes and 5.0 for uniform. With dest at Debian's default write-back, it beats one stream and `pg_probackup` at every speed measured, up to 13.5–14.5 Gbit/s. So v1 targets DR's slower links first, as EXP-09's rule says; their latency and transport are T12's.
+5. **The session ran slower than EXP-09's in the work not set by a throttled link.** v1 took 14–18% longer for local changes (8–17% for uniform) and one unthrottled `pg_basebackup` copy 22–30% longer, while link-bound copies at 2 and 5 Gbit/s matched within 1.2%. The cause isn't measured: hashing, dest's cold disk reads (11–13% slower) and the single-stream link test all slowed. Every ratio above is within this session. Against today's single stream, v1's ratio here is 0.79–0.81, against EXP-09's 0.86.
+6. **Every run was verified, and every durable arm passed the durability checks and the syscall audit.** `pg_probackup`'s own flush leaves its streamed WAL and `backup_label`, and their directory entries, unflushed (3 files and 2 directory changes); with the registered `sync -f`, nothing is left. Two things this run couldn't show: what `--no-sync` costs at a standby's start, since the harness flushed each output before starting it; and a `pg_probackup` logical failure, since the source's catalogs changed in every trial and a difference would have counted as void. None occurred.
