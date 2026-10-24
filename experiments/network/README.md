@@ -160,6 +160,50 @@ These were added on October 23, 2026, after the owner's decisions that closed T1
 - **What clones on XFS, and what doesn't.** rsync's timed prep keeps `cp -a`'s default, so on XFS it clones B0, as T3 (d) means it to; pgdelta's copy-then-patch clones through `copy_file_range`; `incremental_cfr` combines with `pg_combinebackup --copy-file-range`, which clones too (`incremental` keeps `--copy`). The untimed copies of B0 for the in-place methods and pgBackRest never clone (above).
 - **Which kind of copy each output is** is measured, not assumed: every verification records the output's `shared_extents` from FIEMAP after the run (CSV `output_shared_bytes`, the bytes in extents shared with another file, which can only be B0). It is 0 on ext4, and empty where FIEMAP isn't available.
 
+## Methods for T2
+
+[EXP-11](../../docs/experiments/EXP-11-full-copy-baseline.md) asks how fast a durable full copy can go on these VMs and whether v1's path still beats it. Its arms are pinned in `measure`. None is in the default `--methods` except `full`.
+
+| Method | Tier (`measure.TIERS`) | What runs | Source | Timed phase |
+|---|---|---|---|---|
+| `full` | `omni_today` | `pg_basebackup -Fp -X stream -c fast --manifest-checksums CRC32C --verbose` | running | **transfer** |
+| `full_nosync` | `diagnostic` | `full` with `--no-sync`: not durable, the durability checks' negative control | running | as `full` |
+| `full_syncfs` | `released` | `full` with `--sync-method=syncfs` | running | as `full` |
+| `full_wb` | `host_tuned` | `full` with dest's `vm.dirty_background_bytes` at 64 MiB for the run | running | as `full` |
+| `probackup8`, `probackup4` | `released` | `pg_probackup catchup -b FULL --stream --temp-slot -j 8` (or 4) on dest, over SSH, then `sync -f` of the output | running | **catchup_sync**: steps **catchup**, then **sync** |
+| `parcopy8`, `parcopy4` | `bound` | `experiments/network/parcopy.py`: 8 or 4 TCP streams of 64 MiB ranges, write-back every 8 MiB | stopped cleanly | **receiver_transfer**, as `pgdelta_direct*` |
+| `pgdelta_direct_inplace` | `v1` | T8a's arm, unchanged | stopped cleanly | as T8a |
+| `pgdelta_direct_inplace_j8` | `v1_8_jobs` | the same with `--jobs 8` on both ends | stopped cleanly | as T8a |
+
+- **One timed phase per arm,** one counter window, so no write-back can happen off the clock between two phases.
+- **`--manifest-checksums CRC32C` is required.** It still defaults to SHA256, EXP-04's setting, and a run that selects any T2 arm (`measure.T2_METHODS`) refuses to start without CRC32C, in `parse_args` and in `execute`.
+- **Every pg_basebackup arm runs with `--verbose`, `full` included,** and never `--progress`. Its output comes through a pipe that a thread of the orchestrator reads, stamping each line with the seconds since the launch as it arrives (`Child(stamp_lines=True)`; no extra process), with `LC_MESSAGES=C`. `measure.basebackup_phases` splits the run into checkpoint, stream, WAL end, sync and manifest rename. The backup-mode adder (`backup_mode_adder_s`, EXP-11's `R_adj`) is the checkpoint wait plus the time from the WAL end point to the start of the sync.
+- **Every pg_basebackup arm's output is started** after `pg_verifybackup`, its bytes counted first: on port 5433, recovering from its `backup_label` to consistency, then queried and stopped. `usable_s` is `total_s` plus the start's time to consistency. Since `full` is started too, an output that could not be stopped now blocks `full` as well.
+- **`full_wb`'s kernel setting** is written on dest before the cache drop and reset in `run_method`'s `finally`, by writing `vm.dirty_background_ratio` back to the default recorded at the start (Linux refuses 0 for the bytes setting). Before every run of a T2 invocation a guard requires the ratio at its default and the bytes setting at 0; a run started otherwise fails before its cache drop. Both values are in each record's `sysctl` and the CSV.
+- **`probackup*` and `parcopy*`** are dispatched to `run_probackup` and `run_parcopy`. Their command lines (`probackup_argv`, `probackup_sync_argv`, `parcopy_receive_argv`, `parcopy_send_argv`) are in `run.json`'s `method_flags`. `parcopy*` stops and restarts the source as `pgdelta_direct*` does and is verified by `verify_direct`; `probackup*` is verified by `verify_probackup`.
+- **Durability, checked in every run** (`measure.durability_check`, the record's `durability`):
+  - (a) dest's `Dirty` + `Writeback` (`/proc/meminfo`), read just before the clock starts and first after it stops, may grow by at most 4 MiB or the idle noise, whichever is larger. `--idle-noise-windows N` measures the noise at the start, as the largest increase over N idle windows of `--idle-seconds` (`run.json` `dirty_idle_noise`); `--dirty-noise-mib` passes the smoke run's.
+  - (b) for a full copy, dest's md array (`/proc/diskstats`) must write at least 0.98 × the output's bytes in the window.
+  - A run's status stays its verification's; `durability_ok` is a column of its own, so `full_nosync` keeps its times.
+
+**A T2 trial** (EXP-11's order within a trial):
+1. the cluster and dataset, B0, the workload and its `CHECKPOINT`, as before; then `pgbench_accounts`'s file, from the catalog;
+2. the start reference digest: a clean stop, `agent.py datadir-digest`, a restart. Comparisons leave out `global/pg_control`, `pg_wal/` and `pg_stat/`, which every clean stop rewrites (`measure.reference_view`);
+3. the probes, untimed, each one's error recorded without stopping the trial: the durable write floor on dest (`agent.py durable-write-test`: 4 writers, as many bytes as B0 holds, write-back every 8 MiB, then an fsync of each); the cold read floor (`read-test` of the data directory without `pg_wal`, 4 readers split as EXP-07's C4) and one reader of `pgbench_accounts`'s file, on the source; the backup-mode bracket (`source_cluster.py backup-mode-probe --repeats 10`, the cache dropped before each pair);
+4. the main block;
+5. the extension (`--extension-repeats`, `--extension-methods`), then the warm-source block (`--warm-source-repeats`, `--warm-source-methods`), both unthrottled, each repeat in its own random order, their repeats numbered on from the main block's. In the warm-source block only dest's cache is dropped; the source runs `sync` and reads its data directory without `pg_wal` once instead (a stopped source after its stop);
+6. the durable write floor again;
+7. the end reference digest (`trial['reference_match']`, and `reference_differences` when the source changed);
+8. the source's logical digest (the pending checks); 9. EXP-01's row-level ground truth; 10. B0's full digest.
+
+At each speed's first visit in a trial, `set_speed` also runs an 8-stream link test from source to dest (`agent.py blast-send/blast-recv --streams 8`); every record at that speed carries its rate (`measured_s2d_gbit_8streams`), which `link_time_s` and `above_link_s` use for the multi-stream arms.
+
+**Preflight.** A T2 run also refuses to start without `strace` on dest (for the syscall audit), without `pg_basebackup --sync-method` where `full_syncfs` runs, with dest's `vm.dirty_background_bytes` not 0, or when the `pg_probackup` or `parcopy` arms' own checks (`check_probackup`, `check_parcopy`) fail. `remote.py provision` runs `install_incumbents.sh` after `startup.sh` on both VMs, so `pg_probackup` is on the source too, as its remote mode needs; `startup.sh` installs `strace`.
+
+**New CSV columns:** `tier`, `block`, `source_cache`, `durable`, `durability_ok`, `dirty_increase_mb`, `disk_write_dest_bytes`, `disk_read_dest_bytes`; `pbb_checkpoint_s`, `pbb_stream_s`, `pbb_wal_end_s`, `pbb_sync_s`, `pbb_manifest_s`, `backup_mode_adder_s`; `probackup_sync_s`, `probackup_copy_s`, `probackup_stop_s`, `probackup_files_sync_s`; `parcopy_streams`, `parcopy_max_stream_bytes`, `parcopy_balance`, `parcopy_first_byte_s`, `parcopy_last_byte_s`, `parcopy_write_s`, `parcopy_fsync_s`, `parcopy_fsync_calls`, `parcopy_fsync_expected`; `usable_s`, `void`, `bytes_identical`, `measured_s2d_gbit_8streams`, `link_time_s`, `above_link_s`, `sysctl_dirty_background_bytes`, `sysctl_dirty_background_ratio`.
+
+The run lines are in EXP-11's [Run plan](../../docs/experiments/EXP-11-full-copy-baseline.md#run-plan-and-budget).
+
 ## Measurements
 
 For every timed phase, both VMs' counters are read just before and just after it:
@@ -573,5 +617,7 @@ The 0.5 Gbit/s and uniform unthrottled ratios are within 0.01 of the previous ru
   - `reformat_dest_xfs.sh` refusing without `--yes`, without root, on pgd-source or another host, and without the array, with every destructive command replaced by one that fails; `startup.sh`'s packages; `remote.py provision`;
   - the new CSV and report columns, ratios and the phase table;
   - on a real PostgreSQL, when its binaries are present (`PGDELTA_TEST_PG_BIN`): an output whose configuration listens on an address the host lacks and archives starts with the harness's settings, and its per-table digest is stable and follows a changed row.
+
+`python -m unittest discover -s tests -p test_exp11_core.py` covers T2's core without a VM: the method tables and command lines; `run.json`'s `method_flags` with each new arm's whole command line, the blocks and the preflight (an `execute()` with its VM steps stubbed); the CRC32C guard and the block options; `Child`'s stamped lines, and the phase parsers and the adder on PostgreSQL 17's `pg_basebackup --verbose` lines (with and without a sync, and cut short) and on `pg_probackup catchup`'s; `/proc/meminfo` and `/proc/diskstats`, and checks (a) and (b) with the 4 MiB limit and the idle noise; one counter window per arm, the flush inside it (a stand-in `run_probackup` with its `sync -f`); `full_wb`'s set and reset, after an exception too, with both values checked; the warm-source block; the trial's order, its blocks and a changed source; the 8-stream link test; and the agent's and the source's probes (a 3-stream blast over loopback, the durable write and read tests on temporary files, `sysctl`, `env`, the backup-mode bracket).
 
 pgdelta's prefetch itself is tested in `tests/test_pgdelta_prefetch.py`.
