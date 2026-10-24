@@ -108,6 +108,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import itertools
 import json
 import os
@@ -131,7 +132,7 @@ if str(REPO_ROOT) not in sys.path:
 from benchmarks.backup import atomic_json, basebackup_command, combine_command  # noqa: E402
 from benchmarks.methods import RSYNC_OPTIONS, parse_pgdelta_stats, rsync_transfer_stats  # noqa: E402
 from experiments.change_patterns import workloads  # noqa: E402
-from experiments.network import durability_audit, measure  # noqa: E402
+from experiments.network import durability_audit, measure, source_cluster  # noqa: E402
 from experiments.network.agent import RESULT_PREFIX  # noqa: E402
 
 SCHEMA_RUN = 'exp04-method-run/1'
@@ -197,6 +198,29 @@ PROBE_RELATION_SQL = f"SELECT pg_relation_filepath('{PROBE_RELATION}');"
 # T2: the blocks of a trial, in order. The source's cache is dropped before each run in the first
 # two and read, warm, in the third.
 BLOCKS = ('main', 'extension', 'warm_source')
+# EXP-12 (T10a): its blocks, in order, under the load (busy at --load-rate, warm at the same rate, moderate at
+# --moderate-rate) and then without it (calibration). The source's static files are evicted before each run,
+# or, in the warm block, read once.
+LOAD_BLOCKS = ('busy', 'warm', 'moderate', 'calibration')
+WARM_BLOCKS = ('warm_source', 'warm')
+# EXP-12's control slots: pause2 and burn4 at the busy block's start and end, pause2 at the moderate block's start.
+CONTROL_SLOTS = (('busy_start', 'busy'), ('busy_end', 'busy'), ('moderate_start', 'moderate'))
+CLOCK_PORT = 7300  # EXP-12: the clock probe's TCP exchange
+BACKUP_LABEL = 't10a'  # EXP-12: the label of bracket's and the proxies' backups
+LOAD_SCRIPT_DIR = 'experiments/network/load'  # under the repository, on the source
+# EXP-12: pgbench's --random-seed by run, from --load-seed (default --order-seed): each run its own.
+LOAD_SEED_OFFSETS = {'capacity': 0, 'busy': 1, 'moderate': 2, 'restart': 10}
+TIMELINE_POLICY = (
+    "EXP-12's run under the load: (1) the source, untimed: the previous runs' source work (S verified with "
+    "pg_verifybackup and, for staged pgdelta, hashed against O; pgdelta's statistics read; S removed), the load "
+    'checked alive, the eviction (POSIX_FADV_DONTNEED of the benchmark database and the snapshot; the warm block reads '
+    'them once instead) and fincore; (2) the settle: dest\'s set-up and cache drop (uncapped, dest_wait_s), then the '
+    "source's gate (agent.py settle-gate: at least --settle-s, at most --settle-max-s, else unsettled), with nothing "
+    'on the source but the load, the sampler and the counter reads; (3) the timed phase or phases, dest\'s counters '
+    'for checks (a) and (b) read just before the clock starts and first after it stops; t0 and t1 in UTC on dest\'s '
+    "clock, mapped to the source's with the clock probe's offset; (4) the quiet tail (--tail-s from the clock's "
+    "stop): dest's verification, which reaches nothing on the source, then the rest waited out. The calibration "
+    'block has no load, no gate and no tail; the source is stopped only for v1 itself, there')
 DURABILITY_POLICY = (
     "EXP-11's checks, in every run's record (durability) and the CSV: (a) dest's Dirty + Writeback "
     '(/proc/meminfo), read just before the clock starts and first after it stops, grows by at most '
@@ -330,15 +354,18 @@ def messages_env() -> dict:
     return {**env, 'LC_MESSAGES': 'C'}
 
 
-def checksum_problem(methods, checksums: str) -> str | None:
+def checksum_problem(methods, checksums: str, load=None) -> str | None:
     """Why the selected methods can't run with these manifest checksums, or None.
 
     EXP-11's rule 7: CRC32C for every pg_basebackup, B0 included. --manifest-checksums still defaults
-    to SHA256, EXP-04's setting, so T2's methods refuse to run without CRC32C.
+    to SHA256, EXP-04's setting, so T2's methods refuse to run without CRC32C. So do EXP-12's arms and any
+    run under its load (--load): B0, full and the staged capture (its rule 7).
     """
-    t2 = [method for method in methods if method in measure.T2_METHODS]
+    t2 = [method for method in methods if method in measure.T2_METHODS or method in measure.T10A_METHODS]
+    if load and not t2:
+        t2 = [f'--load {load}']
     if t2 and checksums != T2_MANIFEST_CHECKSUMS:
-        return (f'{", ".join(t2)} need --manifest-checksums {T2_MANIFEST_CHECKSUMS} (EXP-11, rule 7), '
+        return (f'{", ".join(t2)} need --manifest-checksums {T2_MANIFEST_CHECKSUMS} (EXP-11 and EXP-12, rule 7), '
                 f'not {checksums}')
     return None
 
@@ -610,6 +637,35 @@ class Orchestrator:
         # This trial's probackup* outputs' byte views, by (repeat, speed label, method), for the byte
         # diagnostic against the end reference digest if the source changed (finish_logical_checks).
         self.byte_views: dict = {}
+        # EXP-12 (T10a), under the load (--load); each is set again per trial (run_load_trial).
+        self.snapshot_digest: dict | None = None  # the snapshot's selection, hashed at step 5 (datadir-digest's)
+        self.database_oids: dict = {}  # the source's databases: name -> OID (their files are base/<OID>)
+        self.references: dict = {}  # step 4's, without load: the logical digest, the invariant, the schema hashes
+        self.clock_offset_s: float | None = None  # the source's clock minus dest's, from the latest clock probe
+        self.idle_rate: float | None = None  # the source's idle busy CPU-s per second, steal left out (step 6)
+        self.load_runs: list = []  # every pgbench run of the trial, as load-start and load-stop reported it
+        self.load_current: dict | None = None
+        self.load_rate = None  # the current run's -R
+        # Source work left by a run for the next run's untimed step (before its settle): S verified and removed,
+        # pgdelta's statistics read. Each is {'record', 'paths'} with what it needs.
+        self.pending_source: list = []
+        self.output_digests: dict = {}  # staged pgdelta's O digests (dest), waiting for S's (source)
+        self.static_digests: set = set()  # (method, speed) cells whose first repeat took (vi)'s digest
+        self.repeat_counter = 0  # the trial's repeats and control slots, numbered on across its blocks
+        # The controls' order within a slot, from a stream of its own so the arms' orders don't shift.
+        self.control_rng = random.Random(f'exp12-controls-{args.order_seed}')
+        self.current_trial: dict | None = None
+        # EXP-12's blocks after the busy one, and its controls (parse_args has checked them).
+        self.controls = method_list(getattr(args, 'controls', ''))
+        self.warm_speeds = measure.parse_speeds(getattr(args, 'warm_source_speeds', '') or measure.UNTHROTTLED)
+        self.moderate_methods = method_list(getattr(args, 'moderate_methods', ''))
+        self.moderate_speeds = (measure.parse_speeds(args.moderate_speeds)
+                                if getattr(args, 'moderate_speeds', '') else [])
+        self.moderate_method_speeds = (measure.parse_method_speeds(args.moderate_method_speeds, self.moderate_methods,
+                                                                   self.moderate_speeds)
+                                       if getattr(args, 'moderate_method_speeds', None) else {})
+        self.calibration_methods = method_list(getattr(args, 'calibration_methods', ''))
+        self.calibration_speed = measure.parse_speed(getattr(args, 'calibration_speed', '2') or '2')
 
     # --- paths -------------------------------------------------------------
 
@@ -647,6 +703,32 @@ class Orchestrator:
     def t2(self) -> bool:
         """Whether this run selects any of EXP-11's arms (measure.T2_METHODS)."""
         return any(method in measure.T2_METHODS for method in self.methods)
+
+    @property
+    def t10a(self) -> bool:
+        """Whether this run is EXP-12's: under the fixed-rate load (--load)."""
+        return getattr(self.args, 'load', None) is not None
+
+    @property
+    def pinned_methods(self) -> list[str]:
+        """Every method this run may run, for run.json's pins and pgdelta's checks: --methods, and under EXP-12 its
+        calibration block's (v1 itself among them) and its controls."""
+        extra = [*self.calibration_methods, *self.controls] if self.t10a else []
+        return list(dict.fromkeys([*self.methods, *extra]))
+
+    @property
+    def snapshot_data(self) -> str:
+        """EXP-12's snapshot: a cleanly stopped copy of the source's data directory on its /data (the proxies read it)."""
+        return f'{self.work}/snap'
+
+    @property
+    def load_dir(self) -> str:
+        """The load's logs, progress lines and registry on the source (tmpfs), with the sampler's."""
+        return self.args.load_log_dir
+
+    @property
+    def sampler_dir(self) -> str:
+        return f'{self.load_dir}/sampler'
 
     def dest_log(self, name: str) -> Path:
         return self.out / 'logs' / self.trial_id / 'dest' / (self.log_prefix + name)
@@ -927,14 +1009,21 @@ class Orchestrator:
                                   user=PG_USER, basis=basis, checksum=self.args.manifest_checksums,
                                   extra=extra)
 
+    def capture_argv(self) -> list[str]:
+        """The staged capture: a local pg_basebackup of S on the source. Under EXP-12's load with --verbose, its
+        lines stamped as they arrive over SSH (G4's capture end: its write-ahead log end point)."""
+        return self.basebackup(self.source_capture, host=f'{self.source_root}/s',
+                               extra=measure.BASEBACKUP_VERBOSE if self.t10a else ())
+
     def capture_commands(self, method: str) -> list[dict]:
         """Local pg_basebackup S on the source (the staged methods' capture).
 
         The log is named after the method, so the staged methods at one
         (repeat, speed) keep their own capture logs and GNU time reports.
         """
-        argv = self.basebackup(self.source_capture, host=f'{self.source_root}/s')
-        return [self.remote_command(argv, f'{method}-capture.log')]
+        if self.t10a:
+            return [self.remote_stamped_command(self.capture_argv(), f'{method}-capture.log')]
+        return [self.remote_command(self.capture_argv(), f'{method}-capture.log')]
 
     def method_paths(self, method: str) -> dict:
         # For the in-place methods and pgBackRest, 'output' is B: the copy of B0 they patch.
@@ -944,7 +1033,10 @@ class Orchestrator:
         if method in measure.STAGED_METHODS:
             paths['capture'] = self.source_capture
         if method in measure.PGDELTA_DIRECT_METHODS:
-            paths['source_data'] = self.source_data  # read in place; never removed
+            # Read in place; never removed. EXP-12's proxies read the snapshot, the live source running.
+            paths['source_data'] = self.snapshot_data if method in measure.V1PROXY_METHODS else self.source_data
+        if method == 'capture':
+            paths['capture'] = self.source_capture  # EXP-12's capture alone: S, verified and removed later
         if method in measure.PGDELTA_METHODS:
             # In place, the receipt is beside B, which is this same path.
             paths['receipt'] = self.outputs / f'{method}.pgdelta-receipt.json'
@@ -1285,9 +1377,10 @@ class Orchestrator:
                 '--pg-controldata', self.bin / 'pg_controldata', *measure.PGDELTA_ARGS[method]['receive']]
 
     def pgdelta_send_argv(self, method, paths) -> list:
-        # pgdelta_direct* reads the stopped source's data directory (--source-kind datadir,
-        # among the engine's flags); the staged methods read the capture S.
-        source = self.source_data if method in measure.PGDELTA_DIRECT_METHODS else self.source_capture
+        # pgdelta_direct* reads a stopped data directory (--source-kind datadir, among the engine's
+        # flags): the source's, or EXP-12's snapshot for the proxies (method_paths' source_data); the
+        # staged methods read the capture S.
+        source = paths['source_data'] if method in measure.PGDELTA_DIRECT_METHODS else self.source_capture
         return [self.source.python, '-m', 'pgdelta', 'send', '--source', source,
                 '--connect', f'{self.dest_ip}:{PGDELTA_PORT}',
                 '--pg-controldata', self.bin / 'pg_controldata', '--stats-json', paths['stats'],
@@ -1651,6 +1744,17 @@ class Orchestrator:
         return {**result, 'values': values}
 
     def run_phases(self, method, paths, daemon_holder: dict) -> dict:
+        # EXP-12's arms first: the proxies are in PGDELTA_DIRECT_METHODS, so they must be taken before it.
+        if method in measure.V1PROXY_METHODS:
+            return self.run_v1proxy(method, paths)
+        if method == 'none':
+            return self.run_none(method, paths)
+        if method == 'capture':
+            return self.run_capture(method, paths)
+        if method == 'bracket':
+            return self.run_bracket(method, paths)
+        if method in measure.CONTROL_METHODS:
+            return self.run_control(method, paths)
         if method in measure.FULL_VARIANTS:
             return self.run_full(method, paths)
         if method in measure.INCREMENTAL_METHODS:
@@ -1670,6 +1774,12 @@ class Orchestrator:
         raise CommandError(f'unknown method {method}')
 
     def verify(self, method, paths, phases) -> dict:
+        if method in measure.G4_METHODS and self.t10a:
+            # EXP-12: the bytes, then the started copy against the load's oracle (G4).
+            return self.verify_live(method, paths, phases)
+        if method in (*measure.T10A_ARMS, *measure.CONTROL_METHODS) and method not in measure.V1PROXY_METHODS:
+            # none, bracket and the controls write nothing; the capture's S is verified on the source later.
+            return self.verify_nothing(method, paths)
         if method in measure.PGDELTA_DIRECT_METHODS or method in measure.PARCOPY_METHODS:
             # parcopy* copies v1's selection of the stopped source: checked as pgdelta_direct* is.
             return self.verify_direct(method, paths)
@@ -1733,12 +1843,20 @@ class Orchestrator:
         byte for byte (SHA-256); it shares no inode with B0; in place, no marker or renamed
         control file is left. Then the output is started on dest on a spare port and must
         answer a query (it is stopped again), and B0 must be unchanged.
+
+        EXP-12's proxies are checked against the snapshot's selection as its digest was stored at the
+        trial's step 5 (snapshot_digest), so their verification never reads the source.
         """
         output = Path(paths['output'])
-        source, digest = self.both(
-            lambda: measure.tree_digest(output),
-            lambda: self.source.agent('datadir-digest', self.source_data, '--pg-controldata',
-                                      str(self.bin / 'pg_controldata'), timeout=3600))
+        if method in measure.V1PROXY_METHODS:
+            if self.snapshot_digest is None:
+                raise CommandError(f"{method}: the snapshot's digest was not taken (--snapshot)")
+            source, digest = self.snapshot_digest, measure.tree_digest(output)
+        else:
+            source, digest = self.both(
+                lambda: measure.tree_digest(output),
+                lambda: self.source.agent('datadir-digest', self.source_data, '--pg-controldata',
+                                          str(self.bin / 'pg_controldata'), timeout=3600))
         expected = source['digest']
         identical, differences = measure.compare_digests(expected, measure.files_of(digest))
         differences = [f'selected but not a regular file on the source: {path}'
@@ -1758,7 +1876,10 @@ class Orchestrator:
         if method in measure.PARCOPY_METHODS:
             # A5: the fsyncs parcopy owes for what O holds, counted apart from its own report.
             result['fsync_expected_from_output'] = measure.fsyncs_expected(digest)
-        if self.reference_digests.get('start'):
+        if method in measure.V1PROXY_METHODS:
+            result['reference'] = {'against': "the snapshot's selection, as stored at the trial's step 5",
+                                   'summary': measure.digest_summary(expected)}
+        elif self.reference_digests.get('start'):
             # T2: this run's own stopped-source digest against the trial's reference, reported only.
             result['reference'] = self.source_against_reference(expected)
         result['shared_extents'] = measure.shared_extents(output)
@@ -1834,13 +1955,14 @@ class Orchestrator:
     def output_stop_argv(self, data: Path, mode: str = 'fast') -> list:
         return [self.bin / 'pg_ctl', '-D', data, '-m', mode, '-w', '-t', '300', 'stop']
 
-    def psql_argv(self, host, port: int, sql: str) -> list:
+    def psql_argv(self, host, port: int, sql: str, database: str = PG_DATABASE) -> list:
         return [self.bin / 'psql', '-X', '-A', '-t', '-q', '-v', 'ON_ERROR_STOP=1', '-h', host,
-                '-p', str(port), '-U', PG_USER, '-d', PG_DATABASE, '-c', sql]
+                '-p', str(port), '-U', PG_USER, '-d', database, '-c', sql]
 
-    def query(self, sql: str, *, host, port: int, log_name: str, timeout: float = 7200) -> str:
+    def query(self, sql: str, *, host, port: int, log_name: str, timeout: float = 7200,
+              database: str = PG_DATABASE) -> str:
         """One psql query from dest; its output, or CommandError. The session is pinned to UTC."""
-        argv = [str(part) for part in self.psql_argv(host, port, sql)]
+        argv = [str(part) for part in self.psql_argv(host, port, sql, database)]
         result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
                                 stdin=subprocess.DEVNULL,
                                 env=server_env(PGOPTIONS=measure.LOGICAL_SESSION_OPTIONS))
@@ -1868,11 +1990,13 @@ class Orchestrator:
                 raise CommandError(f'the output was still in recovery after {timeout} s')
             time.sleep(0.5)
 
-    def check_output(self, method, data: Path, *, recovery: bool, query: str = OUTPUT_QUERY) -> dict:
+    def check_output(self, method, data: Path, *, recovery: bool, query: str = OUTPUT_QUERY, checks=None) -> dict:
         """Start an output on dest, query it, and stop it again (untimed).
 
         With recovery, wait until it has replayed what it needs and left recovery first.
         The server is stopped whatever happens, before cleanup can remove its directory.
+        EXP-12: `checks`, if given, runs once the query has answered, while the output is still up, and its
+        result is the result's `checks` (the load's oracle, which classifies its own errors).
         """
         self.output_socket.mkdir(parents=True, exist_ok=True)
         result = {'ok': False, 'answer': None, 'error': None}
@@ -1893,8 +2017,11 @@ class Orchestrator:
             result['answer'] = self.query(query, host=self.output_socket, port=OUTPUT_PG_PORT,
                                           log_name=f'{method}-output-query.log')
             result['ok'] = True
+            if checks is not None:
+                result['checks'] = checks()
         except (CommandError, subprocess.TimeoutExpired) as exc:
             result['error'] = f'{type(exc).__name__}: {exc}'
+            result['error_kind'] = 'timeout' if isinstance(exc, subprocess.TimeoutExpired) else 'copy'
         finally:
             result['stop'] = self.stop_output(method, data)
         return result
@@ -2058,6 +2185,9 @@ class Orchestrator:
 
     def run_method(self, trial: dict, repeat: int, speed: dict, link: dict, method: str,
                    order_index: int, order: list[str]) -> dict:
+        if self.t10a:
+            # EXP-12: eviction, the settle, the window and the quiet tail (run_load_method).
+            return self.run_load_method(trial, repeat, speed, link, method, order_index, order)
         paths = self.method_paths(method)
         record = {'schema': SCHEMA_RUN, 'run_name': self.out.name, 'trial_id': self.trial_id,
                   'pattern': trial['pattern'], 'fraction': trial['fraction'],
@@ -2487,8 +2617,29 @@ class Orchestrator:
 
     def method_flags(self, method: str) -> dict:
         """The flags a method pins, for run.json and its records."""
+        # EXP-12's arms (the proxies with pgdelta's, below): each one's whole command line.
+        if method == 'none':
+            return {'none': {'window_s': self.args.none_window_s, 'commands': []}}
+        if method == 'capture':
+            return {'pg_basebackup': ['--manifest-checksums', self.args.manifest_checksums,
+                                      *measure.BASEBACKUP_VERBOSE],
+                    'argv': [str(part) for part in self.capture_argv()],
+                    'output': 'agent.py run --tee on the source; stamped here as each line arrives over SSH'}
+        if method == 'bracket':
+            return {'psql': self.bracket_argv()}
+        if method in measure.CONTROL_METHODS:
+            return {'agent': self.control_argv(method), 'control': dict(measure.CONTROLS[method])}
         if method in measure.PGDELTA_ARGS:
-            return {command: list(args) for command, args in measure.PGDELTA_ARGS[method].items()}
+            flags = {command: list(args) for command, args in measure.PGDELTA_ARGS[method].items()}
+            if method in measure.V1PROXY_METHODS:
+                paths = self.method_paths(method)
+                flags.update(send_argv=[str(part) for part in self.pgdelta_send_argv(method, paths)],
+                             receive_argv=[str(part) for part in self.pgdelta_receive_argv(method, paths)],
+                             backup_hold=self.backup_hold_argv(), backup_statements=list(
+                                 source_cluster.backup_hold_statements(BACKUP_LABEL)))
+            elif method in measure.PGDELTA_STAGED_METHODS and self.t10a:
+                flags['capture_argv'] = [str(part) for part in self.capture_argv()]
+            return flags
         if method in measure.PGBACKREST_METHODS:
             return {'restore': ['--delta', f'--process-max={measure.PGBACKREST_PROCESS_MAX}'],
                     'stanza': dict(measure.PGBACKREST_VARIANTS[method]),
@@ -2563,7 +2714,8 @@ class Orchestrator:
                        'digest': measure.digest_summary(self.b0_digest)}
 
     def run_trial(self, index: int, pattern: str, fraction: float) -> dict:
-        """One trial. In a T2 run, EXP-11's order within a trial:
+        """One trial. Under EXP-12's load (--load), its own order (run_load_trial). In a T2 run, EXP-11's order
+        within a trial:
 
         1. the cluster and dataset, B0, the workload and its CHECKPOINT;
         2. the start reference digest (a clean stop, the selected files hashed, a restart);
@@ -2577,6 +2729,8 @@ class Orchestrator:
         Outside T2 runs, steps 2, 3, 6 and 7 are left out. Between steps 2 and 7 no SQL reads a
         user table on the source.
         """
+        if self.t10a:
+            return self.run_load_trial(index, pattern, fraction)
         args = self.args
         # A source that could not be restarted stops its own trial; this one builds a new cluster.
         self.source_down = None
@@ -2685,7 +2839,7 @@ class Orchestrator:
         """One (block, repeat, speed): the link set and tested, then each method once, in a new random order."""
         args = self.args
         link = self.set_speed(speed)
-        link.update(repeat=repeat, block=block, source_cache='warm' if block == 'warm_source' else 'cold',
+        link.update(repeat=repeat, block=block, source_cache='warm' if block in WARM_BLOCKS else 'cold',
                     **extra)
         order = measure.method_orders(methods, self.rng, 1)[0]
         link['method_order'] = order
@@ -2834,6 +2988,1431 @@ class Orchestrator:
         subprocess.run(['tar', '-C', str(target), '-xf', '-'], input=pack.stdout, check=True)
         self.remove_source(remote)
 
+    # --- T10a (EXP-12): the arms --------------------------------------------------------------
+
+    def pause(self, seconds: float) -> None:
+        """Wait: none's window, the settle's minimum, the quiet tail, the load's warm-ups (tests replace it)."""
+        if seconds > 0:
+            time.sleep(seconds)
+
+    def remote_stamped_command(self, argv, log_name: str, *, cwd: str | None = None) -> dict:
+        """A command on the source whose output lines are stamped here as they arrive over SSH.
+
+        `agent.py run --tee` runs it on the source, logging there and copying each line to its stdout as it comes;
+        a Child here (stamp_lines) stamps each on arrival, on this clock, as a dest-side pg_basebackup's are, with
+        no extra process on the source. The record is the source command's (host 'source', its argv, its exit
+        code, which `run --tee` exits with); its rusage and inner wall arrive in the agent's result line, which
+        complete_stamped reads once the window has closed and the reader has settled.
+        """
+        argv = [str(part) for part in argv]
+        extra = ['--cwd', cwd] if cwd else []
+        if self.gnu_time:
+            extra += ['--gnu-time', self.gnu_time]
+        child = Child(self.source.agent_argv('run', '--tee', '--log', self.source_log(log_name), *extra, '--', *argv),
+                      self.dest_log(log_name), env=messages_env(), stamp_lines=True)
+        result = child.wait(self.args.command_timeout)
+        result.update(host='source', argv=argv, ssh_rusage=result.get('rusage'), rusage=None, peak_rss_kb=None,
+                      gnu_time=None, launcher=None, source_log=self.source_log(log_name), stamped_over_ssh=True)
+        return result
+
+    def complete_stamped(self, phases: dict) -> None:
+        """Each stamped source command completed from the agent's result line at the end of its stamped log."""
+        for phase in phases.values():
+            for command in phase.get('commands', ()):
+                if not command.get('stamped_over_ssh') or command.get('inner_wall_seconds') is not None:
+                    continue
+                try:
+                    lines = measure.parse_stamped_lines(Path(command['log']).read_text(errors='replace'))
+                    result = agent_result('\n'.join(text for _, text in lines))
+                except (OSError, ValueError, KeyError):
+                    command['agent_result'] = None
+                    continue
+                command.update(inner_wall_seconds=result.get('wall_seconds'), rusage=result.get('rusage'),
+                               peak_rss_kb=result.get('peak_rss_kb'), gnu_time=result.get('gnu_time'),
+                               launcher=result.get('launcher'), reported_exit_code=result.get('exit_code'))
+
+    def run_none(self, method, paths) -> dict:
+        """none: one empty timed phase of --none-window-s, with the counter reads every arm makes."""
+        seconds = self.args.none_window_s
+        return {measure.NONE_PHASE: self.timed_phase(measure.NONE_PHASE, lambda: self.pause(seconds) or [])}
+
+    def run_capture(self, method, paths) -> dict:
+        """capture: the staged capture alone, a local pg_basebackup of S on the source (CRC32C, -c fast, --verbose,
+        stamped over SSH), flushed by pg_basebackup itself. S is verified and removed before the next settle."""
+        return {measure.CAPTURE_PHASE: self.timed_phase(measure.CAPTURE_PHASE, lambda: self.capture_commands(method))}
+
+    def bracket_argv(self) -> list[str]:
+        """bracket: pg_backup_start('t10a', true), then pg_backup_stop(false), in one psql session on the source."""
+        return source_cluster.backup_mode_argv(self.source_root, self.bin, label=BACKUP_LABEL)
+
+    def run_bracket(self, method, paths) -> dict:
+        """bracket: backup mode alone, one timed phase; psql's \\timing splits it into its start and stop."""
+        return {measure.BRACKET_PHASE: self.timed_phase(
+            measure.BRACKET_PHASE, lambda: [self.remote_command(self.bracket_argv(), f'{method}.log')])}
+
+    def control_argv(self, method) -> list[str]:
+        """A control's agent command on the source (measure.CONTROLS)."""
+        control = measure.CONTROLS[method]
+        if control['agent'] == 'load-pause':
+            return ['load-pause', str(control['seconds']), '--load-dir', self.load_dir]
+        return ['burn', '--procs', str(control['procs']), '--seconds', str(control['seconds'])]
+
+    def run_control(self, method, paths) -> dict:
+        """pause2 or burn4: the agent's command on the source as the one timed phase. pause2's signal times, on the
+        source's clock, are the phase's `control` (A2 matches them with the log's gap)."""
+        argv = self.control_argv(method)
+        holder: dict = {}
+
+        def body():
+            started_utc, started = time.time(), time.perf_counter()
+            holder['result'] = self.source.agent(*argv, timeout=600)
+            return [{'host': 'source', 'argv': [AGENT, *argv], 'exit_code': 0,
+                     'wall_seconds': round(time.perf_counter() - started, 6), 'started_utc': started_utc,
+                     'rusage': None, 'role': f'the control, agent.py {argv[0]} (its result is the phase\'s control)'}]
+
+        phase = self.timed_phase(measure.CONTROL_PHASE, body)
+        phase['control'] = holder.get('result')
+        return {measure.CONTROL_PHASE: phase}
+
+    def backup_hold_argv(self) -> list[str]:
+        return [self.source.python, f'{self.remote_repo}/{SOURCE_CLUSTER}', 'backup-hold', '--root', self.source_root,
+                '--bin-dir', str(self.bin), '--label', BACKUP_LABEL]
+
+    def start_backup_hold(self) -> dict:
+        """The proxy's backup mode: backup-hold over SSH, until it prints its start LSN (pg_backup_start(t10a, true)
+        has returned in its one session, which stays open)."""
+        argv = self.backup_hold_argv()
+        hold = {'argv': argv, 'started_utc': time.time(), 'started': time.perf_counter()}
+        process = subprocess.Popen(self.source.argv(argv), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        hold['process'] = process
+        line = process.stdout.readline()
+        hold['received_utc'] = time.time()
+        if line.startswith(source_cluster.BACKUP_STARTED):
+            hold['start'] = json.loads(line[len(source_cluster.BACKUP_STARTED):])
+        else:
+            hold['error'] = f'backup mode did not start: {line.strip()[-500:]!r}'
+        return hold
+
+    def stop_backup_hold(self, hold: dict) -> dict:
+        """pg_backup_stop(false) in the held session (a line on backup-hold's stdin), until it reports the stop LSN.
+        The command record of the backup mode: host 'source', its stop and start in `backup`."""
+        process = hold['process']
+        requested = time.time()
+        try:
+            process.stdin.write('stop\n')
+            process.stdin.close()
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        try:
+            stdout, stderr = process.communicate(timeout=600)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            stdout, stderr = process.communicate()
+        try:
+            backup = agent_result(stdout or '')
+        except ValueError:
+            backup = None
+        return {'host': 'source', 'argv': hold['argv'], 'exit_code': process.returncode,
+                'wall_seconds': round(time.perf_counter() - hold['started'], 6), 'started_utc': hold['started_utc'],
+                'rusage': None, 'role': 'backup mode held in one session around the transfer (backup-hold)',
+                'start_line': hold.get('start'), 'start_received_utc': hold.get('received_utc'),
+                'stop_requested_utc': requested, 'backup': backup, 'stderr_tail': (stderr or '')[-2000:]}
+
+    def run_v1proxy(self, method, paths) -> dict:
+        """v1proxy*: one timed phase (measure.V1PROXY_PHASE), one counter window, in four steps.
+
+        backup_start: backup-hold over SSH until pg_backup_start(t10a, true) has returned; receiver_start: pgdelta's
+        receiver on dest, refreshing B in place, until it listens; transfer: pgdelta send on the source reading the
+        snapshot (method_paths' source_data; the live source is never stopped), until both ends exit;
+        backup_stop: pg_backup_stop(false) in the same session. The phase's `backup` holds A4 (ii): the start LSN
+        before the sender's launch, and the stop asked for after both ends have exited.
+        """
+        holder: dict = {}
+        steps: dict = {}
+        start_step, receiver_step, transfer_step, stop_step = measure.V1PROXY_STEPS
+
+        def step(name, host, origin, started):
+            steps[name] = {'host': host, 'offset_seconds': round(started - origin, 3),
+                           'wall_seconds': round(time.perf_counter() - started, 3)}
+
+        def body():
+            origin = time.perf_counter()
+            hold = holder['hold'] = self.start_backup_hold()
+            step(start_step, 'source', origin, origin)
+            commands = []
+            if 'error' not in hold:
+                started = time.perf_counter()
+                commands = self.start_receiver(method, paths, holder)
+                step(receiver_step, 'dest', origin, started)
+                if not commands:
+                    started = time.perf_counter()
+                    commands = self.pgdelta_transfer(method, paths, holder['receiver'], measure.V1PROXY_PHASE)
+                    step(transfer_step, 'source', origin, started)
+            started = time.perf_counter()
+            commands.append(self.stop_backup_hold(hold))
+            step(stop_step, 'source', origin, started)
+            return commands
+
+        try:
+            phase = self.timed_phase(measure.V1PROXY_PHASE, body)
+        except BaseException:
+            receiver, hold = holder.get('receiver'), holder.get('hold')
+            if receiver is not None and receiver.result is None:
+                receiver.stop()
+            if hold is not None and hold['process'].poll() is None:
+                self.stop_backup_hold(hold)
+            raise
+        phase['steps'] = steps
+        receiver = holder.get('receiver')
+        if receiver is not None:
+            phase['receiver'] = {'argv': receiver.argv, 'log': str(receiver.log_path)}
+        phase['backup'] = self.backup_held(phase['commands'])
+        return {measure.V1PROXY_PHASE: phase}
+
+    @staticmethod
+    def backup_held(commands) -> dict:
+        """A4 (ii) for a proxy run: backup mode held across the transfer, in one session.
+
+        The start LSN reached dest before the sender was launched, and the stop was asked for after both ends had
+        exited (dest's clock for both); both LSNs are the session's own (backup-hold's).
+        """
+        hold = next((command for command in commands if command.get('role', '').startswith('backup mode held')), None)
+        sender = next((command for command in commands if command.get('host') == 'source'
+                       and command is not hold), None)
+        receiver = next((command for command in commands if command.get('host') == 'dest'), None)
+        if hold is None:
+            return {'held': False, 'why': 'no backup-hold record'}
+        backup = hold.get('backup') or {}
+        start, stop = backup.get('start') or hold.get('start_line') or {}, backup.get('stop') or {}
+        ends = [command['started_utc'] + command['wall_seconds'] for command in (sender, receiver)
+                if command and command.get('started_utc') is not None]
+        before = (sender is not None and hold.get('start_received_utc') is not None
+                  and hold['start_received_utc'] <= sender['started_utc'])
+        after = bool(ends) and hold.get('stop_requested_utc') is not None and hold['stop_requested_utc'] >= max(ends)
+        return {'start_lsn': start.get('lsn'), 'start_utc': start.get('utc'), 'stop_lsn': stop.get('lsn'),
+                'stop_utc': stop.get('utc'), 'one_session': bool(backup.get('one_session')),
+                'started_before_sender': before, 'stopped_after_transfer': after,
+                'held': bool(start.get('lsn') and stop.get('lsn') and backup.get('one_session') and before and after
+                             and hold.get('exit_code') == 0)}
+
+    def proxy_hashed(self, reported: dict) -> dict:
+        """A4 (i) for a proxy run: its sender hashed every byte of the snapshot's selection, by pgdelta's own
+        counters (files and pages hashed) against the snapshot's digest (its files, and their pages of 8 kB)."""
+        entries = ((self.snapshot_digest or {}).get('digest') or {}).get('entries') or {}
+        block = 8192
+        pages = sum(-(-entry[1] // block) for entry in entries.values())
+        files_hashed = (reported.get('files') or {}).get('total')
+        pages_hashed = (reported.get('pages') or {}).get('total')
+        return {'files_selected': len(entries), 'files_hashed': files_hashed, 'pages_selected': pages,
+                'pages_hashed': pages_hashed,
+                'all_hashed': bool(entries) and files_hashed == len(entries) and pages_hashed == pages}
+
+    def verify_nothing(self, method, paths) -> dict:
+        """EXP-12's arms with nothing on dest (none, bracket, the controls, capture): B0 unchanged. The capture's S
+        is verified on the source with the next run's untimed source work (verified None until then)."""
+        changes = measure.stat_changes(self.b0_stat, measure.tree_stat(self.b0))
+        result = {'basis_changes': changes, 'verified': not changes}
+        if method == 'capture':
+            result.update(verified=False if changes else None,
+                          capture_check="pending: pg_verifybackup of S on the source, before the next settle")
+        return result
+
+    # --- T10a (EXP-12): the oracle (G4) ------------------------------------------------------
+
+    def copy_check(self, body) -> dict:
+        """One check of the load's oracle on a started copy, by its own verdict ('ok' or 'wrong'). An error the copy's
+        server or tools return is 'wrong'; only a harness-side failure, a timeout or a missing binary, 'unverified'."""
+        try:
+            return body()
+        except CommandError as exc:
+            return {'status': 'wrong', 'error': f'{type(exc).__name__}: {exc}'}
+        except subprocess.TimeoutExpired as exc:
+            return {'status': 'unverified', 'error': f'timed out: {exc}'}
+        except OSError as exc:
+            return {'status': 'unverified', 'error': f'{type(exc).__name__}: {exc}'}
+
+    def tool_text(self, argv, log_name: str, *, timeout: float = 3600):
+        """A PostgreSQL tool run here against a copy or the source: (exit code, stdout, stderr), logged."""
+        argv = [str(part) for part in argv]
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL,
+                                env=server_env())
+        log = self.dest_log(log_name)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        log.write_text(f'$ {shlex.join(argv)}\n{result.stdout}{result.stderr}')
+        return result.returncode, result.stdout, result.stderr
+
+    def schema_hashes(self, host, port: int, label: str) -> dict:
+        """(vii): SHA-256 of `pg_dump --schema-only --restrict-key=exp12` of loaddb and of postgres; CommandError if
+        pg_dump fails. Each dump is kept beside the logs."""
+        hashes = {}
+        for database in measure.SCHEMA_DATABASES:
+            argv = measure.schema_dump_argv(self.bin / 'pg_dump', host=host, port=port, user=PG_USER, database=database)
+            code, out, err = self.tool_text(argv, f'{label}-{database}.sql')
+            if code != 0:
+                raise CommandError(f'pg_dump of {database} failed ({code}): {err.strip()[-1000:]}')
+            hashes[database] = hashlib.sha256(out.encode()).hexdigest()
+        return hashes
+
+    def oracle_checks(self, method, *, static_digest: bool, mutate=None) -> dict:
+        """The load's oracle on a started copy (port OUTPUT_PG_PORT): (iii) the invariant, with each client's n for
+        the cut; (vi) the benchmark database's row counts, or its logical digest; pg_amcheck --heapallindexed of
+        loaddb; (vii) the schema dumps' hashes. Each check classified by copy_check; none raises.
+
+        `mutate`, for the oracle's negative controls, changes the started copy first.
+        """
+        host, port = self.output_socket, OUTPUT_PG_PORT
+        checks = {}
+        if mutate is not None:
+            checks['mutated'] = self.copy_check(lambda: {'status': 'ok', 'statements': mutate()})
+
+        def invariant():
+            answer = json.loads(self.query(measure.load_oracle_sql(), host=host, port=port, database=measure.LOAD_DATABASE,
+                                           log_name=f'{method}-oracle-invariant.log'))
+            verdict = measure.atomicity(answer)
+            return {'status': 'ok' if verdict['ok'] else 'wrong', **verdict, 'sum_abalance': answer.get('sum_abalance'),
+                    'sum_n': answer.get('sum_n'), 'clients': answer.get('clients'), 'progress': answer.get('n')}
+
+        def benchmark():
+            reference = self.references['logical']
+            if static_digest:
+                digest = json.loads(self.query(measure.logical_digest_sql(), host=host, port=port,
+                                               log_name=f'{method}-oracle-digest.log'))
+                same, differences = measure.compare_logical(reference, digest)
+                return {'status': 'ok' if same else 'wrong', 'digest': True, 'differences': differences}
+            counts = json.loads(self.query(measure.row_counts_sql(), host=host, port=port,
+                                           log_name=f'{method}-oracle-rows.log'))
+            same, differences = measure.compare_rows(reference, counts)
+            return {'status': 'ok' if same else 'wrong', 'digest': False, 'counts': counts, 'differences': differences}
+
+        def amcheck():
+            argv = measure.amcheck_argv(self.bin / 'pg_amcheck', host=host, port=port, user=PG_USER)
+            code, out, err = self.tool_text(argv, f'{method}-oracle-amcheck.log')
+            return measure.amcheck_result(code, out + err)
+
+        def schema():
+            hashes = self.schema_hashes(host, port, f'{method}-oracle-schema')
+            differs = sorted(db for db, digest in hashes.items() if digest != self.references['schema'].get(db))
+            return {'status': 'wrong' if differs else 'ok', 'hashes': hashes, 'differ': differs}
+
+        checks.update(invariant=self.copy_check(invariant), benchmark=self.copy_check(benchmark),
+                      amcheck=self.copy_check(amcheck), schema=self.copy_check(schema))
+        return checks
+
+    @staticmethod
+    def oracle_summary(start: dict) -> dict:
+        """A started copy's oracle as one status per check (measure.ORACLE_CHECKS), the cut and coverage pending.
+
+        A copy that doesn't start or answer is 'wrong' on start, unless its start timed out ('unverified'); the
+        checks it then couldn't run stay None.
+        """
+        checks = start.get('checks') or {}
+        if start.get('ok'):
+            started = 'ok'
+        else:
+            started = 'unverified' if start.get('error_kind') == 'timeout' or start.get('harness_error') else 'wrong'
+        status = {'start': started, 'cut': None, 'coverage': None}
+        for check, key in (('atomic', 'invariant'), ('rows', 'benchmark'), ('amcheck', 'amcheck'),
+                           ('schema', 'schema')):
+            status[check] = (checks.get(key) or {}).get('status') if started == 'ok' else None
+        invariant = checks.get('invariant') or {}
+        return {**status, 'progress': invariant.get('progress'), 'static_digest': (checks.get('benchmark') or {}).get(
+            'digest'), 'amcheck_relations': (checks.get('amcheck') or {}).get('relations_checked')}
+
+    def static_digest_due(self, method) -> bool:
+        """(vi)'s logical digest in each (arm, speed) cell's first repeat (--static-digest first_repeat), in every
+        run (every), or never (none); row counts are taken in every run."""
+        policy = self.args.static_digest
+        if policy == 'none':
+            return False
+        if policy == 'every':
+            return True
+        cell = (method, (self.current_run or (None, None))[1])
+        if cell in self.static_digests:
+            return False
+        self.static_digests.add(cell)
+        return True
+
+    def verify_live(self, method, paths, phases) -> dict:
+        """EXP-12's verification of a live output, full or staged pgdelta (G4), on dest only, after the clock.
+
+        (i) pg_verifybackup with its CRC32C manifest (O with S's, for pgdelta, whose O is byte-compared with S on the
+        source before the next settle: identical_to_capture is None until then); its bytes and WAL counted; then
+        (ii) started on port 5433 with no TCP, no archive and no restore_command, recovering from its backup_label
+        with only the WAL it holds; the oracle on it while it runs (oracle_checks); B0 unchanged. The cut (iv) and
+        coverage (v) wait for the logs, at the trial's end.
+        """
+        output = Path(paths['output'])
+        check = self.local_command([self.bin / 'pg_verifybackup', output], f'{method}-verify.log')
+        result = {'pg_verifybackup_exit_code': check['exit_code'], 'pg_verifybackup_seconds': check['wall_seconds']}
+        if method in measure.STAGED_METHODS:
+            digest = measure.tree_digest(output)
+            independent, problems = measure.independence(digest, self.b0_digest)
+            self.output_digests[(*self.current_run, method)] = digest
+            result.update(identical_to_capture=None, independent_of_basis=independent, independence_problems=problems,
+                          output_digest=measure.digest_summary(digest), output_bytes=digest['bytes'])
+            wal_files = measure.wal_files_from_digest(digest)
+        else:
+            result['output_bytes'] = tree_bytes(output)
+            wal_files = measure.wal_files(output)
+        try:
+            manifest = (output / 'backup_manifest').read_text()
+        except OSError:
+            manifest = None
+        try:
+            result['wal'] = measure.wal_summary(wal_files, manifest)
+        except (ValueError, KeyError, TypeError) as exc:
+            result['wal'] = {'wal_bytes': sum(wal_files.values()), 'error': str(exc)}
+        result['shared_extents'] = measure.shared_extents(output)
+        digest_due = self.static_digest_due(method)
+        try:
+            result['output_start'] = self.check_output(
+                method, output, recovery=True, checks=lambda: self.oracle_checks(method, static_digest=digest_due))
+        except OSError as exc:  # a binary missing on dest: the harness's side
+            result['output_start'] = {'ok': False, 'error': f'{type(exc).__name__}: {exc}', 'harness_error': True}
+        result['oracle'] = self.oracle_summary(result['output_start'])
+        result['basis_changes'] = measure.stat_changes(self.b0_stat, measure.tree_stat(self.b0))
+        bytes_ok = (check['exit_code'] == 0 and result.get('independent_of_basis', True))
+        result['oracle']['bytes'] = ('wrong' if not bytes_ok else None if method in measure.STAGED_METHODS else 'ok')
+        result['verified'] = bytes_ok and result['output_start'].get('ok') and not result['basis_changes']
+        return result
+
+    def g4_boundaries(self, method, record) -> dict:
+        """G4's boundaries of a live output: its capture's end (the write-ahead log end point's LSN, and when
+        pg_basebackup printed it, on dest's clock), publication (the clock's stop) and usable (plus the start's time to
+        consistency). Coverage and staleness follow from the cut, at the trial's end."""
+        phases = record.get('phases') or {}
+        command = None
+        for phase in phases.values():
+            command = next((item for item in phase.get('commands', ())
+                            if Path(str(item['argv'][0])).name == 'pg_basebackup'), None) or command
+        end = None
+        if command is not None:
+            try:
+                lines = measure.parse_stamped_lines(Path(command['log']).read_text(errors='replace'))
+                end = measure.wal_end_point(lines, command.get('started_utc'))
+            except (OSError, KeyError):
+                end = None
+        window = record.get('window') or {}
+        ready = measure._get(record, 'verification', 'output_start', 'ready_seconds')
+        return {'capture_end': end, 'publication_utc': window.get('t1_utc'),
+                'usable_utc': None if ready is None or window.get('t1_utc') is None else window['t1_utc'] + ready,
+                'coverage_window_utc': self.coverage_window(method, record)}
+
+    @staticmethod
+    def coverage_window(method, record) -> list | None:
+        """(v)'s window on dest's clock: full's from its backup's start (its phase's) to its clock stop; staged
+        pgdelta's its capture's start to its end."""
+        phases = record.get('phases') or {}
+        if method == 'pgdelta':
+            part = measure._get(phases, measure.RECEIVER_PHASE, 'parts', 'capture')
+            if not part or part.get('started_utc') is None:
+                return None
+            return [part['started_utc'], part['started_utc'] + part['wall_seconds']]
+        first = next(iter(phases.values()), None)
+        last = list(phases.values())[-1] if phases else None
+        if not first or first.get('started_utc') is None or last.get('ended_utc') is None:
+            return None
+        return [first['started_utc'], last['ended_utc']]
+
+    def set_load_status(self, record: dict) -> None:
+        """A run's status under EXP-12 from its verification: a live output's by its oracle (measure.oracle_status),
+        the capture's by its S check, any other's by verify (pass or fail)."""
+        verification = record.get('verification') or {}
+        if record.get('status') == 'error':
+            return
+        if 'oracle' in verification:
+            status = measure.oracle_status(verification['oracle'])
+            record['status'] = status
+            wrong = [check for check, value in verification['oracle'].items()
+                     if value == 'wrong' and check in (*measure.ORACLE_CHECKS, 'bytes')]
+            record['error'] = f'wrong: {", ".join(wrong)}' if wrong else None
+            return
+        verified = verification.get('verified')
+        record['status'] = 'pending' if verified is None else 'pass' if verified else 'fail'
+        record['error'] = None if verified is not False else (verification.get('error') or 'output verification failed')
+
+    # --- T10a (EXP-12): one run under the load ------------------------------------------------
+
+    @property
+    def benchmark_files(self) -> str:
+        """The benchmark database's files on the source (base/ of postgres, about 2.1 GB)."""
+        return f'{self.source_data}/base/{self.database_oids["postgres"]}'
+
+    @property
+    def loaddb_files(self) -> str:
+        return f'{self.source_data}/base/{self.database_oids[measure.LOAD_DATABASE]}'
+
+    def static_files(self) -> list[str]:
+        """What every cold window reads cold: the benchmark database's files and, with --snapshot, the snapshot."""
+        return [self.benchmark_files, *([self.snapshot_data] if self.args.snapshot else [])]
+
+    def cache_state(self) -> dict:
+        """fincore of the benchmark database's files, the snapshot and loaddb's files: what is resident now."""
+        names = {'benchmark': self.benchmark_files, 'loaddb': self.loaddb_files}
+        if self.args.snapshot:
+            names['snapshot'] = self.snapshot_data
+        result = self.source.agent('fincore', *names.values(), timeout=600)
+        return {name: result['paths'].get(path) for name, path in names.items()}
+
+    def source_cache_step(self, warm: bool) -> dict:
+        """The source's cache before a run's settle: the static files evicted (POSIX_FADV_DONTNEED; the load's
+        database, pg_xact and pg_wal left alone), or in the warm block read once instead; then fincore of each."""
+        if self.args.source_cache == 'keep':
+            return {'policy': 'keep: the source cache is left as it is (no eviction, no fincore)'}
+        started = time.perf_counter()
+        if warm:
+            action = {'read': [self.source.agent('read-test', path, '--readers', str(READ_FLOOR_READERS), timeout=3600)
+                               for path in self.static_files()]}
+        else:
+            action = {'evicted': self.source.agent('evict', *self.static_files(), timeout=600)}
+        fincore = self.cache_state()
+        return {'policy': 'warm' if warm else 'evict', **action, 'fincore': fincore,
+                'cache_flag': measure.cache_flag(fincore, warm), 'seconds': round(time.perf_counter() - started, 3)}
+
+    def before_settle(self, method, paths, record, daemon_holder) -> dict:
+        """A run's step 1, on the source, untimed, before its settle: the previous runs' source work (S verified and
+        removed, pgdelta's statistics read); the load checked alive (restarted if it died); this method's leftovers
+        removed and its stats directory made; the source stopped cleanly for v1 itself (calibration); the eviction
+        (or the warm read) and fincore."""
+        started = time.perf_counter()
+        result = {'pending': self.flush_pending_source()}
+        if self.load_current is not None:
+            result['load'] = self.check_load()
+        remote = [paths[key] for key in ('capture', 'stats') if key in paths]
+        if remote:
+            self.remove_source(*remote)
+        if method in measure.PGDELTA_METHODS or method in measure.PARCOPY_METHODS:
+            self.source.agent('run', '--log', self.source_log(f'{method}-mkdir-stats.log'), '--', 'mkdir', '-p',
+                              f'{self.work}/stats')
+        if method in measure.SOURCE_STOP_METHODS:
+            daemon_holder['source_stopped'] = True  # set first: a failed stop is still restarted
+            result['stop'] = self.source.script(SOURCE_CLUSTER, 'stop-clean', '--root', self.source_root,
+                                                '--bin-dir', str(self.bin))
+        result['cache'] = self.source_cache_step(record['source_cache'] == 'warm')
+        result['seconds'] = round(time.perf_counter() - started, 3)
+        return result
+
+    def dest_setup(self, method, paths, daemon_holder) -> dict:
+        """Dest's work in the settle: this run's set-up (B for the proxies and v1 itself: cp -a --reflink=never B0 B;
+        sync -f B), then dest's cache drop. Never inside a window."""
+        started = time.perf_counter()
+        steps = []
+        if method in measure.BASIS_COPY_METHODS:
+            steps.append(self.copy_basis(method, paths))
+        if method in measure.HOST_TUNED_METHODS:
+            daemon_holder['dirty_writeback'] = None
+            daemon_holder['dirty_writeback'] = self.set_dirty_writeback(method)
+            steps.append({'what': "set dest's write-back for the run (reset after it)",
+                          **daemon_holder['dirty_writeback']})
+        steps.append({'what': "dest's cache dropped", **self.drop_caches(source=False)})
+        return {'steps': steps, 'seconds': round(time.perf_counter() - started, 3)}
+
+    def settle(self, method, paths, record, daemon_holder) -> dict:
+        """A run's settle: at least --settle-s with nothing on the source but the load, the sampler and the counter
+        reads, until the source's gate passes (agent.py settle-gate, capped at --settle-max-s: then 'unsettled')
+        and dest's work is done (uncapped; its wait is dest_wait_s). Dest works first, so no window starts before it
+        ends; the gate then waits out what is left of the minimum. Without the load (calibration) there is no gate.
+        The source's CPU over the settle gives its rate (cpu_source_excess_s's)."""
+        started_utc, started = time.time(), time.perf_counter()
+        before = self.snapshot_source()
+        dest = self.dest_setup(method, paths, daemon_holder)
+        dest_wait = time.perf_counter() - started
+        gate = None
+        if self.load_current is not None:
+            elapsed = time.perf_counter() - started
+            gate = self.source.agent('settle-gate', '--rate', str(self.load_rate), '--load-dir', self.load_dir,
+                                     '--min-s', f'{max(0.0, self.args.settle_s - elapsed):.3f}',
+                                     '--max-s', f'{max(0.0, self.args.settle_max_s - elapsed):.3f}',
+                                     timeout=self.args.settle_max_s + self.args.settle_s + 120)
+        else:
+            self.pause(self.args.settle_s - (time.perf_counter() - started))
+        after = self.snapshot_source()
+        cpu = measure.snapshot_delta(before, after)
+        busy = measure.busy_seconds(cpu['cpu'])
+        interval = cpu['interval_seconds']
+        return {'started_utc': started_utc, 'ended_utc': time.time(),
+                'seconds': round(time.perf_counter() - started, 3), 'dest': dest, 'dest_wait_s': round(dest_wait, 3),
+                'gate': gate, 'unsettled': bool(gate and gate.get('unsettled')),
+                'cpu_source': cpu['cpu'], 'cpu_window_seconds': interval,
+                'busy_rate_no_steal': round(busy / interval, 6) if busy is not None and interval else None}
+
+    def window(self, phases: dict) -> dict:
+        """The run's window: the UTC start of its first timed phase (t0) and end of its last (t1), on dest's clock and
+        mapped to the source's with the latest offset; the slowdown window runs to t1 plus --window-tail-s."""
+        values = list(phases.values())
+        t0, t1 = values[0].get('started_utc'), values[-1].get('ended_utc')
+        offset = self.clock_offset_s
+        return {'t0_utc': t0, 't1_utc': t1, 'clock_offset_s': offset,
+                't0_source_utc': None if t0 is None or offset is None else round(t0 + offset, 6),
+                't1_source_utc': None if t1 is None or offset is None else round(t1 + offset, 6),
+                'tail_s': self.args.window_tail_s}
+
+    def quiet_tail(self, clock_stopped: float, clock_stopped_utc: float, seconds: float) -> dict:
+        """The quiet tail: `seconds` from the clock's stop with nothing on the source but the load. Dest's
+        verification ran inside it, from the clock's stop (and after (a) and (b)); what is left is waited out."""
+        used = time.perf_counter() - clock_stopped
+        self.pause(seconds - used)
+        return {'started_utc': clock_stopped_utc, 'ended_utc': time.time(), 'seconds': seconds,
+                'verification_s': round(used, 3), 'overran_s': round(max(0.0, used - seconds), 3)}
+
+    def load_tool_reported(self, method, paths, phases) -> dict:
+        """What a run reports that dest holds (pgdelta's statistics, on the source, are read before the next settle)."""
+        if method in measure.FULL_VARIANTS:
+            return self.basebackup_reported(method, phases)
+        if method == 'capture':
+            command, lines = self.stamped_command(phases, measure.CAPTURE_PHASE, 'pg_basebackup')
+            return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None, 'scope': 'a local capture: no link',
+                    'flags': self.method_flags(method),
+                    'basebackup_phases': measure.basebackup_phases(lines, (command or {}).get('wall_seconds')),
+                    'lines': [[seconds, text] for seconds, text in lines]}
+        if method == 'bracket':
+            command = next(iter(phases[measure.BRACKET_PHASE]['commands']), {})
+            timings = measure.psql_timings(command.get('log_tail', ''))
+            return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None, 'scope': 'no copy',
+                    'pg_backup_start_s': timings[0] if timings else None,
+                    'pg_backup_stop_s': timings[1] if len(timings) > 1 else None}
+        if method in measure.CONTROL_METHODS:
+            return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None, 'scope': 'a control',
+                    'control': phases[measure.CONTROL_PHASE].get('control')}
+        return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None, 'scope': 'nothing runs'}
+
+    def run_load_method(self, trial: dict, repeat: int, speed: dict, link: dict, method: str,
+                        order_index: int, order: list[str]) -> dict:
+        """One run under EXP-12's timeline (its "Each run"):
+
+        1. the source, untimed, before the settle (before_settle): the previous runs' source work, the load
+           checked, this method's source set-up, the eviction (or the warm read) and fincore;
+        2. the settle (settle): dest's set-up and cache drop, then the source's gate; nothing on the source but the
+           load, the sampler and the counter reads;
+        3. the timed phase or phases, dest's counters for checks (a) and (b) read just before the clock starts and
+           first after it stops (timed_phase); t0 and t1 in UTC (window);
+        4. the quiet tail (quiet_tail): dest's verification, which starts only now and touches nothing on the source,
+           then the rest of --tail-s waited out. The source's part of the verification waits for the next run's
+           step 1 (pending_source).
+
+        In the calibration block (no load) there is no gate and no tail. The source is stopped and restarted only for
+        v1 itself (SOURCE_STOP_METHODS), and only there.
+        """
+        paths = self.method_paths(method)
+        loaded = self.load_current is not None
+        record = {'schema': SCHEMA_RUN, 'run_name': self.out.name, 'trial_id': self.trial_id,
+                  'pattern': trial['pattern'], 'fraction': trial['fraction'], 'scale': trial['scale'],
+                  'rows_changed': trial.get('rows_changed'), 'repeat': repeat, 'speed': speed,
+                  'speed_index': link.get('speed_index'), 'speed_order': link.get('speed_order'), 'method': method,
+                  'order_index': order_index, 'method_order': order,
+                  'link': {key: link[key] for key in link if key.endswith('gbit')},
+                  'paths': {key: str(value) for key, value in paths.items()},
+                  'block': link.get('block'), 'block_repeat': link.get('block_repeat'),
+                  'control_slot': link.get('control_slot'), 'source_cache': link.get('source_cache', 'cold'),
+                  'load_rate': self.load_rate if loaded else None,
+                  'load_run': (self.load_current or {}).get('run_id'), 'clock_offset_s': self.clock_offset_s,
+                  'idle_rate_no_steal': self.idle_rate, 'started_utc': utc_now(), 'status': 'running', 'error': None,
+                  'failure_kind': None, 'void': False}
+        log(f'{self.trial_id} r{repeat} {speed["label"]} [{order_index + 1}/{len(order)}] {method} ({record["block"]}'
+            + (f', {record["control_slot"]}' if record['control_slot'] else '') + ')')
+        daemon_holder: dict = {}
+        self.log_prefix = f'r{repeat}-{speed["label"]}-'
+        self.current_run = (repeat, speed['label'])
+        tail_seconds = self.args.tail_s if loaded else 0.0
+        try:
+            stuck = self.output_stuck
+            if stuck and (str(paths['output']) == stuck['data'] or method in measure.OUTPUT_START_METHODS
+                          or method in measure.G4_METHODS):
+                raise CommandError(f'an output started on port {OUTPUT_PG_PORT} for an earlier verification '
+                                   f'could not be stopped ({stuck["data"]}); {method} cannot run')
+            self.remove_dest(*[paths[key] for key in ('output', 'increment', 'receipt', 'receive_stats')
+                               if key in paths])
+            phases: dict = {}
+            record['phases'] = phases
+            if self.writeback_defaults is not None:
+                sysctl = record['sysctl'] = {}
+                sysctl['before'] = self.check_dirty_writeback(sysctl)
+            record['source_untimed'] = self.before_settle(method, paths, record, daemon_holder)
+            record['caches_dropped'] = 'dest'
+            record['settle'] = self.settle(method, paths, record, daemon_holder)
+            if daemon_holder.get('dirty_writeback'):
+                record.setdefault('sysctl', {})['during'] = daemon_holder['dirty_writeback']['values']
+            phases.update(self.run_phases(method, paths, daemon_holder))
+            stopped, stopped_utc = time.perf_counter(), time.time()
+            self.complete_stamped(phases)
+            record['window'] = self.window(phases)
+            record['totals'] = measure.phase_totals(phases)
+            if method in measure.STAGED_METHODS:
+                record['totals_serial'] = measure.serial_totals(phases)
+            problems = [problem for phase in phases.values() for problem in phase['failures']]
+            if problems:
+                record['failure_kind'] = 'tool'
+                raise CommandError('; '.join(problems))
+            # 4. Dest's verification, inside the tail: after the clock and after (a) and (b)'s last read.
+            record['tool_reported'] = (None if method in measure.PGDELTA_METHODS
+                                       else self.load_tool_reported(method, paths, phases))
+            if self.args.syscall_audit:
+                record['audit'] = self.syscall_audit(method, paths, phases)
+            verification = self.verify(method, paths, phases)
+            record['verification'] = verification
+            record['output_bytes'] = verification.get('output_bytes')
+            record['capture_bytes'] = verification.get('capture_bytes')
+            record['wal'] = verification.get('wal')
+            padding = (record['wal'] or {}).get('wal_padding_bytes')
+            record['output_minus_wal_padding_bytes'] = (
+                None if record['output_bytes'] is None or padding is None else record['output_bytes'] - padding)
+            record['durability'] = measure.durability_check(record, record['output_bytes'], self.idle_noise_bytes)
+            if method in measure.G4_METHODS:
+                record['g4'] = self.g4_boundaries(method, record)
+            if method in measure.V1PROXY_METHODS:
+                record['proxy'] = {'backup': phases[measure.V1PROXY_PHASE].get('backup'), 'hashed': None}
+            if verification['basis_changes']:
+                raise CommandError('B0 changed: ' + '; '.join(verification['basis_changes']))
+            self.set_load_status(record)
+            record['tail'] = self.quiet_tail(stopped, stopped_utc, tail_seconds)
+        except Exception as exc:  # record, clean up, carry on with the next method
+            record['status'] = 'error'
+            record['failure_kind'] = record['failure_kind'] or 'harness'
+            record['error'] = f'{type(exc).__name__}: {exc}'
+            record['traceback'] = traceback.format_exc()
+            log(f'  ERROR {record["error"]}')
+        finally:
+            if 'dirty_writeback' in daemon_holder:
+                del daemon_holder['dirty_writeback']
+                try:
+                    record.setdefault('sysctl', {})['reset'] = self.reset_dirty_writeback()
+                except Exception as exc:
+                    record['sysctl']['reset'] = {'error': f'{type(exc).__name__}: {exc}'}
+                    record['status'], record['failure_kind'] = 'error', record['failure_kind'] or 'harness'
+            if daemon_holder.pop('source_stopped', False):
+                try:
+                    record['source_restart'] = self.restart_source()
+                except Exception as exc:
+                    self.source_down = f'{type(exc).__name__}: {exc}'
+                    record['source_restart'] = {'error': self.source_down}
+                    record['status'], record['failure_kind'] = 'error', record['failure_kind'] or 'harness'
+                    record['error'] = (record['error'] + '; ' if record['error'] else '') + \
+                        f'the source cluster could not be restarted: {self.source_down}'
+            if self.output_stuck and self.output_stuck['data'] == str(paths['output']):
+                record['output_stuck'] = self.output_stuck
+            if not self.args.keep_outputs:
+                try:
+                    stuck = (self.output_stuck or {}).get('data')
+                    self.remove_dest(*[paths[key] for key in ('output', 'increment', 'receipt', 'receive_stats')
+                                       if key in paths and str(paths[key]) != stuck])
+                except Exception as exc:
+                    record['cleanup_error'] = str(exc)
+            # The source's part: S verified and removed, pgdelta's statistics read, before the next settle.
+            if any(key in paths for key in ('capture', 'stats')):
+                self.pending_source.append({'record': record, 'paths': paths})
+        self.log_prefix = ''
+        self.current_run = None
+        record['finished_utc'] = utc_now()
+        totals = record.get('totals') or {}
+        log(f'  {record["status"]}: {totals.get("wall_seconds")} s'
+            + (', unsettled' if (record.get('settle') or {}).get('unsettled') else ''))
+        save_json(self.record_path(record), record)
+        self.records.append(record)
+        measure.write_csv(self.out / 'summary.csv', self.records)
+        return record
+
+    def flush_pending_source(self) -> list:
+        """The source's part of the runs before this one, each in order (source_half); their records rewritten."""
+        done = []
+        while self.pending_source:
+            item = self.pending_source.pop(0)
+            try:
+                done.append(self.source_half(item))
+            except Exception as exc:  # the harness's own failure, on that run: the next run goes ahead
+                record = item['record']
+                record.update(status='error', failure_kind=record.get('failure_kind') or 'harness',
+                              error=f'its source part failed: {type(exc).__name__}: {exc}',
+                              traceback=traceback.format_exc())
+                save_json(self.record_path(record), record)
+                self.update_trial_run(record)
+                done.append({'run': self.run_key(record), 'error': record['error']})
+        if done:
+            measure.write_csv(self.out / 'summary.csv', self.records)
+        return done
+
+    def source_half(self, item: dict) -> dict:
+        """One run's source work, untimed, with nothing measured: pgdelta's statistics (tool_reported, the untimed
+        prefetch, the proxy's A4 (i)); S checked with pg_verifybackup on the source and, for staged pgdelta, its
+        SHA-256 digest against O's, taken on dest; then S and the statistics removed. An SSH failure leaves the S
+        check unverified; S's own failure makes the run wrong."""
+        record, paths = item['record'], item['paths']
+        method = record['method']
+        verification = record.get('verification')
+        done: dict = {'run': self.run_key(record)}
+        prefix, self.log_prefix = self.log_prefix, f'r{record["repeat"]}-{record["speed"]["label"]}-'
+        try:
+            if 'stats' in paths and record.get('status') != 'error' and verification is not None:
+                try:
+                    reported = self.tool_reported(method, paths, record.get('phases') or {})
+                    record['tool_reported'] = reported
+                    if method in measure.STAGED_METHODS:
+                        record['prefetch_untimed'] = measure.prefetch_untimed(record['phases'], reported.get('prefetch'))
+                    if method in measure.V1PROXY_METHODS:
+                        record.setdefault('proxy', {})['hashed'] = self.proxy_hashed(reported)
+                    done['stats'] = True
+                except (CommandError, ValueError, KeyError) as exc:
+                    record['tool_reported'] = {'error': f'{type(exc).__name__}: {exc}'}
+                    done['stats'] = False
+            if 'capture' in paths and record.get('status') != 'error' and verification is not None:
+                done['capture'] = self.check_capture(method, paths, record, verification)
+        finally:
+            try:
+                self.remove_source(*[paths[key] for key in ('capture', 'stats') if key in paths])
+            except Exception as exc:
+                done['cleanup_error'] = str(exc)
+            self.log_prefix = prefix
+        self.set_load_status(record)
+        save_json(self.record_path(record), record)
+        self.update_trial_run(record)
+        return done
+
+    def check_capture(self, method, paths, record, verification) -> dict:
+        """S on the source: pg_verifybackup, and for staged pgdelta O's digest against S's (identical_to_capture)."""
+        try:
+            check = self.source.agent('run', '--log', self.source_log(f'{method}-capture-verify.log'), '--',
+                                      str(self.bin / 'pg_verifybackup'), paths['capture'], timeout=3600)
+            verification['capture_verifybackup_exit_code'] = check['exit_code']
+            s_ok = check['exit_code'] == 0
+            if method in measure.STAGED_METHODS:
+                capture = self.source.agent('digest', paths['capture'], timeout=3600)
+                output = self.output_digests.pop((record['repeat'], record['speed']['label'], method), None)
+                identical, differences = (measure.compare_digests(capture, output) if output is not None
+                                          else (None, ['no digest of O was taken']))
+                verification.update(identical_to_capture=identical, differences=differences,
+                                    capture_digest=measure.digest_summary(capture), capture_bytes=capture['bytes'])
+                record['capture_bytes'] = capture['bytes']
+                verification['oracle']['bytes'] = ('ok' if s_ok and identical and verification['oracle'].get('bytes')
+                                                   is None else 'wrong')
+            else:
+                verification['verified'] = s_ok and not verification['basis_changes']
+            return {'pg_verifybackup': check['exit_code'], 'identical': verification.get('identical_to_capture')}
+        except (CommandError, subprocess.TimeoutExpired) as exc:  # SSH or a timeout: the harness's side
+            verification['capture_check_error'] = f'{type(exc).__name__}: {exc}'
+            if 'oracle' in verification:
+                verification['oracle']['bytes'] = 'unverified'
+            else:
+                verification['verified'] = False
+                verification['error'] = f'S could not be checked: {exc}'
+            return {'error': verification['capture_check_error']}
+
+    def update_trial_run(self, record: dict) -> None:
+        """The trial's list of runs, with this run's status as it now stands."""
+        for run in (self.current_trial or {}).get('runs', ()):
+            if (run['repeat'], run['speed'], run['method']) == (record['repeat'], record['speed']['label'],
+                                                                 record['method']):
+                run['status'] = record['status']
+
+    # --- T10a (EXP-12): the load ---------------------------------------------------------------
+
+    def load_args(self) -> list[str]:
+        return ['--root', self.source_root, '--bin-dir', str(self.bin), '--load-dir', self.load_dir]
+
+    def load_pgbench_args(self, role: str) -> list[str]:
+        """pgbench's clients, threads, scripts, and a seed per role (LOAD_SEED_OFFSETS) from --load-seed."""
+        return ['--clients', str(self.args.load_clients), '--threads', str(self.args.load_threads), '--seed',
+                str(self.load_seed(role)), '--scripts', f'{self.remote_repo}/{LOAD_SCRIPT_DIR}']
+
+    def load_seed(self, role: str) -> int:
+        """pgbench's --random-seed for a run: --load-seed (default --order-seed) plus its role's offset; each restart
+        its own."""
+        base = self.args.load_seed if self.args.load_seed is not None else self.args.order_seed
+        if role == 'restart':
+            return base + LOAD_SEED_OFFSETS['restart'] + len(self.load_runs)
+        return base + LOAD_SEED_OFFSETS[role]
+
+    def load_start(self, run_id: str, rate: int, role: str) -> dict:
+        """A pgbench run at `rate` (load-start: the counters first, then pgbench under setsid on the source)."""
+        log(f'{self.trial_id}: the load at {rate}/s ({run_id})')
+        run = self.source.script(SOURCE_CLUSTER, 'load-start', *self.load_args(), *self.load_pgbench_args(role),
+                                 '--run-id', run_id, '--rate', str(rate), '--duration-s',
+                                 str(self.args.load_duration_s), '--kind', role)
+        self.load_runs.append(run)
+        self.load_current, self.load_rate = run, rate
+        return run
+
+    def load_stop(self) -> dict:
+        """The current run stopped (SIGALRM, as its -T timer would), counted, its counters read again."""
+        run = self.source.script(SOURCE_CLUSTER, 'load-stop', *self.load_args(), '--signal', self.args.load_signal)
+        self.load_runs[:] = [run if item['run_id'] == run['run_id'] else item for item in self.load_runs]
+        self.load_current, self.load_rate = None, None
+        log(f'{self.trial_id}: the load stopped ({run["run_id"]}, {run.get("commits_total")} commits, '
+            f'{"complete" if run.get("complete") else "INCOMPLETE"})')
+        return run
+
+    def load_warmup(self, trial: dict) -> dict:
+        """--load-warmup-s with the load running and nothing else; its last 60 s go into the block's null pool."""
+        started = time.time()
+        self.pause(self.args.load_warmup_s)
+        ended = time.time()
+        warmup = {'run_id': (self.load_current or {}).get('run_id'), 'started_utc': started, 'ended_utc': ended,
+                  'seconds': self.args.load_warmup_s, 'pool_utc': [max(started, ended - 60), ended]}
+        trial['load']['warmups'].append(warmup)
+        return warmup
+
+    def load_capacity(self, trial: dict) -> dict:
+        """Step 7: the trial's own C, closed loop, each run logged and offset; then --capacity-rest-s of rest."""
+        result = self.source.script(SOURCE_CLUSTER, 'load-capacity', *self.load_args(),
+                                    *self.load_pgbench_args('capacity'), '--run-id', 'capacity', '--warmup-s',
+                                    str(self.args.capacity_warmup_s), '--seconds', str(self.args.capacity_s),
+                                    '--runs', str(self.args.capacity_runs),
+                                    timeout=(self.args.capacity_warmup_s + self.args.capacity_s)
+                                    * (self.args.capacity_runs + 1) + 600)
+        self.load_runs.extend(result['runs'])
+        log(f'{self.trial_id}: C = {result.get("capacity_tps")} transactions per second')
+        self.pause(self.args.capacity_rest_s)
+        return {'capacity_tps': result.get('capacity_tps'), 'all_complete': result.get('all_complete'),
+                'runs': [run['run_id'] for run in result['runs']], 'rest_s': self.args.capacity_rest_s}
+
+    def check_load(self) -> dict:
+        """Before each run: is the load's pgbench still running? If it died, the run before is void (its window may
+        hold the death), and the load restarts at its rate, counters recorded, with its warm-up (A8)."""
+        status = self.source.script(SOURCE_CLUSTER, 'load-status', '--load-dir', self.load_dir)
+        if status.get('running'):
+            return {'running': True}
+        rate, died = self.load_rate, self.load_current['run_id']
+        voided = None
+        previous = next((record for record in reversed(self.records) if record.get('trial_id') == self.trial_id
+                         and record.get('load_run') == died), None)
+        if previous is not None:
+            previous['void'] = True
+            previous['void_reason'] = f'the load ({died}) was found dead after it'
+            save_json(self.record_path(previous), previous)
+            voided = self.run_key(previous)
+        log(f'{self.trial_id}: the load ({died}) died; restarting it at {rate}/s')
+        stopped = self.load_stop()
+        restart = self.load_start(f'restart-{len(self.current_trial["load"]["restarts"]) + 1}', rate, 'restart')
+        warmup = self.load_warmup(self.current_trial)
+        entry = {'died': died, 'last_progress': status.get('last_progress'), 'voided': voided,
+                 'stopped': stopped['run_id'], 'restart': restart['run_id'], 'warmup': warmup}
+        self.current_trial['load']['restarts'].append(entry)
+        return {'running': False, **entry}
+
+    def sampler_start(self) -> dict:
+        return self.source.agent('sampler', 'start', '--out', self.sampler_dir, '--load-dir', self.load_dir,
+                                 '--interval', str(self.args.sampler_interval_s), '--psql', str(self.bin / 'psql'),
+                                 '--host', f'{self.source_root}/s', '--port', str(PG_PORT), '--user', PG_USER,
+                                 '--database', PG_DATABASE)
+
+    def sampler_stop(self) -> dict:
+        return self.source.agent('sampler', 'stop', '--out', self.sampler_dir, timeout=120)
+
+    @property
+    def load_logs(self) -> Path:
+        """The load's logs and the sampler's data on dest, once fetched (step 15)."""
+        return self.out / 'logs' / self.trial_id / 'load'
+
+    def fetch_load_logs(self) -> dict:
+        """The load's directory (its logs zstd-compressed, the registry and the sampler's) from the source's tmpfs."""
+        target = self.load_logs
+        target.mkdir(parents=True, exist_ok=True)
+        pack = subprocess.run(self.source.argv(['tar', '-C', self.load_dir, '-cf', '-', '.']), capture_output=True,
+                              timeout=3600)
+        if pack.returncode != 0:
+            raise CommandError(pack.stderr.decode(errors='replace')[-1000:])
+        subprocess.run(['tar', '-C', str(target), '-xf', '-'], input=pack.stdout, check=True)
+        files = [path for path in target.rglob('*') if path.is_file()]
+        return {'dir': str(target), 'files': len(files), 'bytes': sum(path.stat().st_size for path in files)}
+
+    def end_load(self) -> dict:
+        """Step 15: the load stopped; --load-check-wait-s later, the source against every logged run (load-check);
+        the sampler stopped; the logs and the sampler's data compressed and fetched to dest."""
+        result = {'stop': self.load_stop()}
+        self.pause(self.args.load_check_wait_s)
+        result['check'] = self.source.script(SOURCE_CLUSTER, 'load-check', *self.load_args())
+        log(f'{self.trial_id}: load-check {"ok" if result["check"].get("ok") else "FAILED"}: '
+            f'sum(abalance) {result["check"].get("sum_abalance")}, sum(n) {result["check"].get("sum_n")}, '
+            f'{result["check"].get("expected_commits")} commits logged')
+        result['sampler'] = self.sampler_stop()
+        result['compress'] = self.source.agent('compress', self.load_dir, '--keep', measure.LOAD_STATE, timeout=3600)
+        result['fetched'] = self.fetch_load_logs()
+        return result
+
+    # --- T10a (EXP-12): the trial ----------------------------------------------------------------
+
+    def next_repeat(self) -> int:
+        repeat, self.repeat_counter = self.repeat_counter, self.repeat_counter + 1
+        return repeat
+
+    def run_load_block(self, trial: dict, block: str, repeats: int, speeds, methods, limited: dict) -> None:
+        """One of EXP-12's blocks: each repeat visits its speeds in a new seeded order, and at each runs every selected
+        arm once, in a seeded random order (run_cell). Repeats are numbered on across the trial's blocks."""
+        for block_repeat in range(repeats):
+            repeat = self.next_repeat()
+            order = measure.order_speeds(speeds, self.speed_rng, self.args.speed_order, block_repeat)
+            order = [speed for speed in order if measure.methods_at(methods, limited, speed['label'])]
+            labels = [speed['label'] for speed in order]
+            trial['speed_orders'].append({'block': block, 'repeat': repeat, 'block_repeat': block_repeat,
+                                          'speeds': labels})
+            log(f'{self.trial_id} r{repeat}: {block} repeat {block_repeat + 1} of {repeats}, {", ".join(labels)}')
+            for speed_index, speed in enumerate(order):
+                self.run_cell(trial, block, repeat, speed, measure.methods_at(methods, limited, speed['label']),
+                              {'speed_index': speed_index, 'speed_order': labels, 'block_repeat': block_repeat})
+
+    def run_controls(self, trial: dict, slot: str) -> None:
+        """pause2 and burn4 (--controls) in a seeded order: at the busy block's start and end; pause2 alone at the
+        moderate block's start. Each is a run with its own settle and tail, at whatever link is set."""
+        block = dict(CONTROL_SLOTS)[slot]
+        methods = [method for method in self.controls if slot != 'moderate_start' or method == 'pause2']
+        if not methods:
+            return
+        repeat = self.next_repeat()
+        speed = self.current_speed or measure.parse_speed(measure.UNTHROTTLED)
+        order = measure.method_orders(methods, self.control_rng, 1)[0]
+        link = {'repeat': repeat, 'block': block, 'source_cache': 'cold', 'control_slot': slot,
+                'speed_index': None, 'speed_order': None}
+        trial['controls'].append({'slot': slot, 'block': block, 'repeat': repeat, 'order': order})
+        for order_index, method in enumerate(order):
+            record = self.run_method(trial, repeat, speed, link, method, order_index, order)
+            trial['runs'].append({'repeat': repeat, 'speed': speed['label'], 'method': method,
+                                  'status': record['status'], 'block': block, 'control_slot': slot})
+            if self.source_down:
+                raise CommandError(f'the source cluster is down after {method}: {self.source_down}')
+        save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
+
+    def take_references(self, when: str) -> dict:
+        """Steps 4 and 17, without load: the benchmark database's logical digest (then, at the start, a CHECKPOINT),
+        loaddb's invariant (at the start, both sums 0), and the schema dumps' hashes. At the end each is compared
+        with the start's."""
+        started = time.perf_counter()
+        logical = json.loads(self.query(measure.logical_digest_sql(), host=self.source.ip, port=PG_PORT,
+                                        log_name=f'{when}-logical-digest.log'))
+        if when == 'start':
+            self.query('CHECKPOINT;', host=self.source.ip, port=PG_PORT, log_name='start-checkpoint.log')
+        invariant = json.loads(self.query(measure.load_oracle_sql(), host=self.source.ip, port=PG_PORT,
+                                          database=measure.LOAD_DATABASE, log_name=f'{when}-invariant.log'))
+        schema = self.schema_hashes(self.source.ip, PG_PORT, f'{when}-schema')
+        result = {'logical': logical, 'invariant': {**invariant, **measure.atomicity(invariant)}, 'schema': schema,
+                  'seconds': round(time.perf_counter() - started, 3)}
+        if when == 'start':
+            result['zero'] = int(invariant.get('sum_abalance') or 0) == 0 == int(invariant.get('sum_n') or 0)
+            self.references = result
+        else:
+            same, differences = measure.compare_logical(self.references['logical'], logical)
+            result.update(logical_match=same, logical_differences=differences,
+                          schema_match=schema == self.references['schema'])
+        return result
+
+    def take_snapshot(self) -> dict:
+        """Step 5: the snapshot (source_cluster.py snapshot), its selection's digest kept for the proxies'
+        verification and the trial's end; the trial's record holds its summary."""
+        result = self.source.script(SOURCE_CLUSTER, 'snapshot', '--root', self.source_root, '--bin-dir',
+                                    str(self.bin), '--log-dir', self.source_log('cluster'), '--snapshot',
+                                    self.snapshot_data, timeout=7200)
+        self.snapshot_digest = result.pop('digest')
+        result['digest'] = {'summary': measure.digest_summary(self.snapshot_digest['digest']),
+                            'selected': len(self.snapshot_digest['selected']),
+                            'read_from': self.snapshot_digest.get('read_from')}
+        return result
+
+    def idle_rate_probe(self) -> dict:
+        """Step 6: the source's idle busy CPU rate over --idle-rate-s, steal left out (the calibrated CPU-s' baseline)."""
+        before = self.snapshot_source()
+        self.pause(self.args.idle_rate_s)
+        after = self.snapshot_source()
+        delta = measure.snapshot_delta(before, after)
+        busy = measure.busy_seconds(delta['cpu'])
+        self.idle_rate = round(busy / delta['interval_seconds'], 6) if delta['interval_seconds'] else None
+        return {'cpu': delta['cpu'], 'interval_seconds': delta['interval_seconds'], 'busy_rate_no_steal': self.idle_rate}
+
+    def clock_probe(self) -> dict:
+        """The two clocks: a TCP timestamp exchange with the source's agent; the offset (the source's clock minus
+        dest's) of the shortest round trip, which every later record maps its times with."""
+        samples = str(self.args.clock_samples)
+        listener = subprocess.Popen(self.source.agent_argv('clock-probe', '--listen', f'{self.source.ip}:{CLOCK_PORT}',
+                                                           '--samples', samples),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                    stdin=subprocess.DEVNULL)
+        try:
+            if 'LISTENING' not in listener.stdout.readline():
+                raise CommandError(f'the clock probe did not start on the source: {listener.stderr.read()[-1000:]}')
+            result = self.local_agent('clock-probe', '--connect', f'{self.source.ip}:{CLOCK_PORT}', '--samples',
+                                      samples)
+            stdout, _ = listener.communicate(timeout=120)
+        finally:
+            if listener.poll() is None:
+                listener.kill()
+                listener.wait()
+        self.clock_offset_s = result['offset_s']
+        log(f'{self.trial_id}: the source\'s clock is {result["offset_s"] * 1000:+.3f} ms from dest\'s '
+            f'(round trip {result["rtt_s"] * 1000:.3f} ms)')
+        return {**result, 'source': agent_result(stdout)}
+
+    def wal_sync_probe(self) -> dict:
+        """Step 6: pg_test_fsync -s 2 on the source's /data."""
+        result = self.source.agent('run', '--log', self.source_log('pg_test_fsync.log'), '--',
+                                   str(self.bin / 'pg_test_fsync'), '-s', '2', '-f', f'{self.work}/pg_test_fsync.tmp',
+                                   timeout=900)
+        self.source.agent('remove', '--under', str(self.work), f'{self.work}/pg_test_fsync.tmp')
+        return {'exit_code': result['exit_code'], 'wall_seconds': result['wall_seconds'], 'output': result['log_tail']}
+
+    def load_probes(self) -> dict:
+        """Step 6, with no load: the idle rate, the clock offset, fincore of the data directory, the WAL sync probe.
+        Each one's error is recorded and the trial goes on."""
+        return {'idle': self.probe('the idle rate', self.idle_rate_probe),
+                'clock': self.probe('the clock probe', self.clock_probe),
+                'fincore': self.probe('fincore', lambda: self.source.agent('fincore', self.source_data, timeout=900)),
+                'wal_sync': self.probe('the WAL sync probe', self.wal_sync_probe)}
+
+    def run_load_trial(self, index: int, pattern: str, fraction: float) -> dict:
+        """One trial under EXP-12's load, in its order (its "Order within the trial"):
+
+        1. the cluster, the benchmark data and loaddb (loaddb-setup: amcheck, the settings, a restart, VACUUM ANALYZE,
+           CHECKPOINT); 2. B0 (CRC32C), verified, hashed; 3. the workload and its CHECKPOINT; 4. the start references;
+        5. the snapshot (--snapshot); 6. the probes; 7. the trial's own C, then rest; [the oracle's negative controls,
+        --oracle-controls, the smoke run's]; 8. the sampler and the load at --load-rate, its warm-up; 9. the controls;
+        10. the busy block; 11. the controls again; 12. the warm block; 13. the load restarted at --moderate-rate, its
+        warm-up, one pause2; 14. the moderate block; 15. the load stopped, load-check, the logs fetched; 16. idle, then
+        the calibration block; 17. the end references, EXP-01's ground truth, the snapshot's and B0's digests, then
+        the checks that wait for the logs: each live output's cut and coverage (finish_load_checks).
+        """
+        args = self.args
+        self.source_down = None
+        self.trial_id = f'{index:02d}-{pattern}-f{fraction:g}-s{args.scale}'
+        self.multi_stream_links, self.reference_digests, self.byte_views = {}, {}, {}
+        self.snapshot_digest, self.database_oids, self.references = None, {}, {}
+        self.load_runs, self.load_current, self.load_rate = [], None, None
+        self.pending_source, self.output_digests, self.static_digests = [], {}, set()
+        self.repeat_counter, self.current_speed = 0, None
+        trial = {'schema': SCHEMA_TRIAL, 'trial_id': self.trial_id, 'pattern': pattern, 'fraction': fraction,
+                 'scale': args.scale, 'seed': args.seed, 'started_utc': utc_now(), 'status': 'running', 'links': [],
+                 'runs': [], 'speed_orders': [], 'controls': [],
+                 'load': {'runs': self.load_runs, 'warmups': [], 'restarts': []}}
+        self.current_trial = trial
+        save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
+        try:
+            self.throttle('off')
+            log(f'{self.trial_id}: source cluster, dataset and loaddb (scale {args.scale})')
+            trial['setup'] = self.source.script(SOURCE_CLUSTER, 'setup', *self.cluster_args(trial),
+                                                '--listen-ip', self.source.ip, '--client-ip', self.dest_ip)
+            trial['rows_changed'] = workloads.target_rows(
+                pattern, fraction, accounts_rows=trial['setup']['spec']['accounts_rows'],
+                events_rows=trial['setup']['spec']['events_rows'])
+            trial['loaddb'] = self.source.script(SOURCE_CLUSTER, 'loaddb-setup', *self.load_args(), '--log-dir',
+                                                 self.source_log('cluster'), '--clients', str(args.load_clients))
+            self.database_oids = trial['loaddb']['databases']
+            self.take_b0(trial)
+            log(f'{self.trial_id}: workload {pattern} k={trial["rows_changed"]}')
+            trial['workload'] = self.source.script(SOURCE_CLUSTER, 'workload', *self.cluster_args(trial))
+            log(f'{self.trial_id}: the start references')
+            trial['references'] = {'start': self.take_references('start')}
+            if args.snapshot:
+                log(f'{self.trial_id}: the snapshot')
+                trial['snapshot'] = self.take_snapshot()
+            trial['probes'] = self.load_probes()
+            trial['clock'] = {'start': trial['probes']['clock']}
+            trial['load']['capacity'] = self.load_capacity(trial)
+            save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
+            trial['load']['sampler'] = self.sampler_start()
+            self.load_start('busy', args.load_rate, 'busy')
+            self.load_warmup(trial)
+            if args.oracle_controls:
+                trial['oracle_controls'] = self.run_oracle_controls()
+            self.run_controls(trial, 'busy_start')
+            self.run_load_block(trial, 'busy', args.repeats, self.speeds, self.methods, self.method_speeds)
+            self.run_controls(trial, 'busy_end')
+            self.run_load_block(trial, 'warm', args.warm_source_repeats, self.warm_speeds, self.warm_source_methods,
+                                {})
+            self.flush_pending_source()
+            if args.moderate_repeats:
+                self.load_stop()
+                self.load_start('moderate', args.moderate_rate, 'moderate')
+                self.load_warmup(trial)
+                self.run_controls(trial, 'moderate_start')
+                self.run_load_block(trial, 'moderate', args.moderate_repeats, self.moderate_speeds,
+                                    self.moderate_methods, self.moderate_method_speeds)
+                self.flush_pending_source()
+            trial['load']['end'] = self.end_load()
+            save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
+            if args.calibration_repeats:
+                self.pause(args.calibration_idle_s)
+                self.run_load_block(trial, 'calibration', args.calibration_repeats, [self.calibration_speed],
+                                    self.calibration_methods, {})
+                self.flush_pending_source()
+            self.throttle('off')
+            log(f'{self.trial_id}: the end references')
+            trial['references']['end'] = self.take_references('end')
+            trial['clock']['end'] = self.probe('the clock probe', self.clock_probe)
+            if args.snapshot:
+                digest = self.source.agent('datadir-digest', self.snapshot_data, '--pg-controldata',
+                                           str(self.bin / 'pg_controldata'), timeout=3600)
+                same, differences = measure.compare_digests(self.snapshot_digest['digest'], digest['digest'])
+                trial['snapshot']['end_match'], trial['snapshot']['end_differences'] = same, differences
+            trial['verify'] = self.source.script(SOURCE_CLUSTER, 'verify', *self.cluster_args(trial))
+            final = measure.tree_digest(self.b0)
+            same, differences = measure.compare_digests(self.b0_digest, final)
+            trial['b0_unchanged'], trial['b0_differences'] = same, differences
+            trial['load_checks'] = self.finish_load_checks(trial)
+            if not same:
+                raise CommandError('B0 changed during the trial: ' + '; '.join(differences))
+            bad = [run for run in trial['runs'] if run['status'] not in ('pass',)]
+            trial['status'] = 'pass' if not bad else 'fail'
+        except Exception as exc:
+            trial['status'] = 'error'
+            trial['error'] = f'{type(exc).__name__}: {exc}'
+            trial['traceback'] = traceback.format_exc()
+            log(f'{self.trial_id}: ERROR {trial["error"]}')
+        finally:
+            self.end_load_quietly(trial)
+            self.cleanup_trial(trial)
+        trial['finished_utc'] = utc_now()
+        save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
+        return trial
+
+    def end_load_quietly(self, trial: dict) -> None:
+        """After an error: the load and the sampler stopped, the source's leftovers removed, each failure recorded."""
+        steps = [('the pending source work', self.flush_pending_source)]
+        if self.load_current is not None:
+            steps.append(('stop the load', self.load_stop))
+        if 'end' not in trial.get('load', {}) and 'sampler' in trial.get('load', {}):
+            steps.append(('stop the sampler', self.sampler_stop))
+        for name, step in steps:
+            try:
+                step()
+            except Exception as exc:
+                trial.setdefault('cleanup_errors', []).append(f'{name}: {exc}')
+        for name, step in (('remove the snapshot', lambda: self.remove_source(self.snapshot_data)),
+                           ('remove the load directory', lambda: self.source.agent(
+                               'remove', '--under', str(Path(self.load_dir).parent), self.load_dir))):
+            try:
+                step()
+            except Exception as exc:
+                trial.setdefault('cleanup_errors', []).append(f'{name}: {exc}')
+
+    def finish_load_checks(self, trial: dict) -> dict:
+        """The checks that wait for the load's logs (fetched at step 15), for every live output of the trial and the
+        oracle's controls: (iv) the consistent cut and (v) coverage; G4's staleness; each run's final status.
+
+        Each copy's n (its oracle's progress) is mapped to the logged run whose span holds it, and the commits on
+        either side of its cut are read from that run's log in one pass per run (measure.pick_commits). Without the
+        logs, cut and coverage are unverified.
+        """
+        records = [record for record in self.records if record.get('trial_id') == self.trial_id
+                   and (record.get('verification') or {}).get('oracle', {}).get('progress') is not None]
+        copies = [(record['verification']['oracle'], record) for record in records]
+        copies += [(control['oracle'], None) for control in (trial.get('oracle_controls') or {}).get('controls', [])
+                   if (control.get('oracle') or {}).get('progress') is not None]
+        logs = self.load_logs
+        queries = [measure.cut_queries(oracle['progress'], self.load_runs) for oracle, _ in copies]
+        wanted = measure.wanted_commits(queries)
+        commits, unreadable = {}, []
+        for run in self.load_runs:
+            if run['run_id'] not in wanted:
+                continue
+            paths = [measure.existing_log(logs, name) for name in run.get('log_files') or []]
+            try:
+                for (client, position), times in measure.pick_commits(paths, wanted[run['run_id']]).items():
+                    commits[(run['run_id'], client, position)] = times
+            except (OSError, ValueError) as exc:
+                unreadable.append(f'{run["run_id"]}: {exc}')
+        for (oracle, record), query in zip(copies, queries):
+            if unreadable:
+                oracle['cut'] = oracle['coverage'] = 'unverified'
+                oracle['cut_detail'] = {'unreadable': unreadable}
+                continue
+            cut = measure.consistent_cut(query, commits)
+            oracle['cut'], oracle['cut_detail'] = ('ok' if cut['ok'] else 'wrong'), cut
+            window = (oracle.get('coverage_window_utc') if record is None
+                      else (record.get('g4') or {}).get('coverage_window_utc'))
+            offset = (record or {}).get('clock_offset_s', self.clock_offset_s)
+            if window is None:
+                oracle['coverage'] = 'unverified'
+            else:
+                covered = measure.coverage(cut, window[0], window[1], offset or 0.0)
+                oracle['coverage'], oracle['coverage_detail'] = ('ok' if covered['ok'] else 'wrong'), covered
+            if record is not None:
+                g4 = record.setdefault('g4', {})
+                t1 = (record.get('window') or {}).get('t1_source_utc')
+                moment = measure.cut_time(cut)
+                g4['cut_utc'] = [None if cut['lo_us'] is None else cut['lo_us'] / 1e6,
+                                 None if cut['hi_us'] is None else cut['hi_us'] / 1e6]
+                g4['staleness_s'] = None if t1 is None or moment is None else round(t1 - moment, 6)
+                self.set_load_status(record)
+                save_json(self.record_path(record), record)
+                self.update_trial_run(record)
+        for control in (trial.get('oracle_controls') or {}).get('controls', []):
+            if control['name'] in measure.ORACLE_CONTROLS:
+                control['verdict'] = measure.oracle_control_verdict(control['name'], control['oracle'])
+            else:  # the good copy passes every check
+                status = measure.oracle_status(control['oracle'])
+                control['verdict'] = {'control': control['name'], 'status': status, 'ok': status == 'pass'}
+        measure.write_csv(self.out / 'summary.csv', self.records)
+        return {'outputs': len(records), 'commits_read': len(commits), 'unreadable': unreadable,
+                'statuses': {status: sum(1 for record in records if record['status'] == status)
+                             for status in sorted({record['status'] for record in records})}}
+
+    # --- T10a (EXP-12): the oracle's negative controls (smoke item 5) --------------------------
+
+    def relation_path(self, relation: str) -> str:
+        """A relation's file in loaddb, relative to the data directory, from the source's catalog."""
+        return self.query(f"SELECT pg_relation_filepath('{relation}');", host=self.source.ip, port=PG_PORT,
+                          database=measure.LOAD_DATABASE, log_name=f'relation-{relation}.log')
+
+    def oracle_copy(self, name: str, extra=()) -> dict:
+        """A full copy of the live source, untimed (pg_basebackup, CRC32C), into outputs/oracle-<name>, with its window
+        on dest's clock (the coverage the copy must show)."""
+        output = self.outputs / f'oracle-{name}'
+        self.remove_dest(output)
+        started_utc = time.time()
+        command = self.local_command(self.basebackup(output, host=self.source.ip, extra=extra), f'oracle-{name}.log')
+        return {'output': output, 'command': command, 'window_utc': [started_utc, time.time()]}
+
+    def corrupt_page(self, data: Path, relative: str, block: int) -> dict:
+        """One 8-kB page of a relation's file overwritten with a non-zero pattern: its checksum then fails."""
+        path = Path(data) / relative
+        with open(path, 'r+b') as stream:
+            stream.seek(block * 8192)
+            stream.write(b'\xa5' * 8192)
+            stream.flush()
+            os.fsync(stream.fileno())
+        return {'file': relative, 'block': block}
+
+    def oracle_control(self, name: str, good: dict) -> dict:
+        """One of the oracle's negative controls (measure.ORACLE_CONTROLS) on a copy of the good output.
+
+        The copy is cp -a of it (or, for no_wal, its own pg_basebackup -X none). Started copies are changed with SQL
+        before the checks; the page controls start and recover it once, stop it cleanly, overwrite the page, and
+        start it again, so no WAL replay can restore the page. The cut and coverage wait for the logs.
+        """
+        log(f'{self.trial_id}: the oracle\'s negative control {name}')
+        data = self.outputs / f'oracle-{name}'
+        self.remove_dest(data)
+        prefix, self.log_prefix = self.log_prefix, f'oracle-{name}-'
+        try:
+            if name == 'no_wal':
+                copy = self.oracle_copy(name, extra=('--wal-method', 'none'))
+                window = copy['window_utc']
+            else:
+                subprocess.run(['cp', '-a', str(good['output']), str(data)], check=True)
+                window = good['window_utc']
+            shift = measure.ORACLE_CONTROL_SHIFT
+            statements = {'n_raised': ['UPDATE load_progress SET n = n + 1 WHERE client = 0;'],
+                          'cut_extended': [f'UPDATE load_progress SET n = n + {shift} WHERE client = 0;',
+                                           f'UPDATE pgbench_accounts SET abalance = abalance + {shift} WHERE aid = 1;'],
+                          'cut_back': [f'UPDATE load_progress SET n = n - {shift} WHERE client = 0;',
+                                       f'UPDATE pgbench_accounts SET abalance = abalance - {shift} WHERE aid = 1;'],
+                          'schema': ['ALTER TABLE load_progress ADD COLUMN extra integer;']}.get(name)
+            detail: dict = {}
+            if name in ('heap_page', 'index_page'):
+                first = self.check_output(f'oracle-{name}-first', data, recovery=True)
+                relation = 'pgbench_accounts' if name == 'heap_page' else 'pgbench_accounts_pkey'
+                relative = self.relation_path(relation)
+                block = 1 if name == 'index_page' else max(1, os.stat(data / relative).st_size // 8192 // 2)
+                detail = {'first_start_ok': first.get('ok'), 'relation': relation,
+                          **self.corrupt_page(data, relative, block)}
+
+            def mutate():
+                for statement in statements or ():
+                    self.query(statement, host=self.output_socket, port=OUTPUT_PG_PORT,
+                               database=measure.LOAD_DATABASE, log_name=f'oracle-{name}-mutate.log')
+                return statements
+
+            start = self.check_output(f'oracle-{name}', data, recovery=True, checks=lambda: self.oracle_checks(
+                f'oracle-{name}', static_digest=False, mutate=mutate if statements else None))
+            oracle = self.oracle_summary(start)
+            oracle['bytes'] = 'ok'
+            oracle['coverage_window_utc'] = window
+            return {'name': name, 'detail': detail, 'output_start': start, 'oracle': oracle}
+        finally:
+            self.log_prefix = prefix
+            if not self.args.keep_outputs:
+                self.remove_dest(data)
+
+    def run_oracle_controls(self) -> dict:
+        """EXP-12's smoke item 5 (--oracle-controls), under the load: a good full copy, which must pass every check,
+        and the seven negative controls, each of which must fail through its own check (measure.ORACLE_CONTROLS);
+        their cut and coverage are judged with the live outputs at the trial's end (finish_load_checks)."""
+        good = self.oracle_copy('good')
+        result = {'good': None, 'controls': [], 'copy': {'window_utc': good['window_utc'],
+                                                         'exit_code': good['command']['exit_code']}}
+        try:
+            # The good copy, then each control, each on a copy of the unstarted backup, each recovering on its own.
+            names = ['good', *measure.ORACLE_CONTROLS]
+            for name in names:
+                if name == 'good':
+                    data = self.outputs / 'oracle-checked'
+                    subprocess.run(['cp', '-a', str(good['output']), str(data)], check=True)
+                    try:
+                        checked = self.check_output('oracle-checked', data, recovery=True, checks=lambda: self.oracle_checks(
+                            'oracle-checked', static_digest=True))
+                    finally:
+                        if not self.args.keep_outputs:
+                            self.remove_dest(data)
+                    oracle = {**self.oracle_summary(checked), 'bytes': 'ok', 'coverage_window_utc': good['window_utc']}
+                    result['good'] = {'name': 'good', 'output_start': checked, 'oracle': oracle}
+                    result['controls'].append(result['good'])
+                else:
+                    result['controls'].append(self.oracle_control(name, good))
+        finally:
+            if not self.args.keep_outputs:
+                self.remove_dest(good['output'])
+        return result
+
+    def load_run_record(self) -> dict:
+        """What run.json says about EXP-12's load, blocks, timeline and oracle."""
+        args = self.args
+
+        def pgbench(run_id, rate):
+            return measure.pgbench_load_argv(self.bin / 'pgbench', rate=rate, clients=args.load_clients,
+                                             threads=args.load_threads, duration_s=args.load_duration_s,
+                                             seed=self.load_seed(run_id), prefix=f'{self.load_dir}/{run_id}',
+                                             scripts=f'{self.remote_repo}/{LOAD_SCRIPT_DIR}',
+                                             host=f'{self.source_root}/s', port=PG_PORT, user=PG_USER)
+
+        return {'load': args.load, 'scripts': [f'{name}@{weight}' for name, weight in measure.LOAD_SCRIPTS],
+                'database': measure.LOAD_DATABASE, 'clients': args.load_clients, 'threads': args.load_threads,
+                'rates': {'busy': args.load_rate, 'moderate': args.moderate_rate or None},
+                'pgbench_argv': {'busy': pgbench('busy', args.load_rate),
+                                 **({'moderate': pgbench('moderate', args.moderate_rate)} if args.moderate_repeats
+                                    else {}),
+                                 'capacity': pgbench('capacity', 0)},
+                'stop_signal': f'SIG{args.load_signal}', 'log_dir': self.load_dir, 'server_config':
+                measure.LOAD_SERVER_CONFIG, 'warmup_s': args.load_warmup_s,
+                'capacity': {'warmup_s': args.capacity_warmup_s, 'seconds': args.capacity_s,
+                             'runs': args.capacity_runs, 'rest_s': args.capacity_rest_s},
+                'settle': {'min_s': args.settle_s, 'max_s': args.settle_max_s, 'window_s': measure.SETTLE_WINDOW_S,
+                           'tolerance': measure.SETTLE_TOLERANCE, 'lag_ms': measure.SETTLE_LAG_MS},
+                'tail_s': args.tail_s, 'window_tail_s': args.window_tail_s, 'none_window_s': args.none_window_s,
+                'source_cache': args.source_cache, 'snapshot': self.snapshot_data if args.snapshot else None,
+                'static_digest': args.static_digest, 'controls': self.controls,
+                'control_slots': [slot for slot, _ in CONTROL_SLOTS], 'sampler_interval_s': args.sampler_interval_s,
+                'blocks': {'busy': {'repeats': args.repeats, 'speeds': [speed['label'] for speed in self.speeds],
+                                    'methods': self.methods, 'method_speeds': self.method_speeds},
+                           'warm': {'repeats': args.warm_source_repeats,
+                                    'speeds': [speed['label'] for speed in self.warm_speeds],
+                                    'methods': self.warm_source_methods, 'source_cache': 'warm'},
+                           'moderate': {'repeats': args.moderate_repeats, 'rate': args.moderate_rate or None,
+                                        'speeds': [speed['label'] for speed in self.moderate_speeds],
+                                        'methods': self.moderate_methods,
+                                        'method_speeds': self.moderate_method_speeds},
+                           'calibration': {'repeats': args.calibration_repeats,
+                                           'speed': self.calibration_speed['label'],
+                                           'methods': self.calibration_methods, 'load': None}},
+                'oracle': {'checks': list(measure.ORACLE_CHECKS), 'restrict_key': measure.SCHEMA_RESTRICT_KEY,
+                           'amcheck': measure.amcheck_argv(self.bin / 'pg_amcheck', host='<copy socket>',
+                                                           port=OUTPUT_PG_PORT, user=PG_USER),
+                           'controls': dict(measure.ORACLE_CONTROLS) if args.oracle_controls else None},
+                'timeline': TIMELINE_POLICY}
+
+    def preflight_t10a(self) -> dict:
+        """What an EXP-12 run checks before its first trial: the same PostgreSQL minor version on both VMs (check
+        (vii)'s dumps name it), and on the source zstd and util-linux's fincore."""
+        environment = self.run['environment']
+        versions = {host: {tool: (environment[host].get('postgresql') or {}).get(tool)
+                           for tool in ('postgres', 'pg_dump', 'pgbench', 'pg_amcheck')} for host in ('source', 'dest')}
+        if versions['source']['postgres'] != versions['dest']['postgres'] \
+                or versions['source']['pg_dump'] != versions['dest']['pg_dump']:
+            raise SystemExit(f'the VMs run different PostgreSQL versions ({versions}); EXP-12 needs one minor version '
+                             'on both (its schema dumps name it): upgrade the older one from PGDG first')
+        missing = [tool for tool in ('zstd', 'fincore') if not environment['source'].get(tool)]
+        missing += [tool for tool in ('pgbench', 'pg_amcheck') if not versions['source'][tool]]
+        missing += [f'{tool} on dest' for tool in ('pg_amcheck', 'pg_dump') if not versions['dest'][tool]]
+        if missing:
+            raise SystemExit(f'EXP-12 needs {", ".join(missing)} on the source (infra/gcp/startup.sh installs them)')
+        return {'versions': versions, 'zstd': environment['source'].get('zstd'),
+                'fincore': environment['source'].get('fincore'),
+                'chrony': {host: environment[host].get('chrony') for host in ('source', 'dest')}}
+
     # --- run ---------------------------------------------------------------
 
     def environment(self) -> dict:
@@ -2890,7 +4469,7 @@ class Orchestrator:
         sender's --source-kind and the pgdelta.datadir module that their verification runs.
         T2 runs need that module too: parcopy* and the reference digests use its selection.
         """
-        required = measure.pgdelta_required_options(self.methods)
+        required = measure.pgdelta_required_options(self.pinned_methods)
         found = {}
         for command, options in required.items():
             local = subprocess.run([sys.executable, '-m', 'pgdelta', command, '--help'],
@@ -2900,7 +4479,7 @@ class Orchestrator:
                 self.remote_repo, '--', self.source.python, '-m', 'pgdelta', command, '--help')
             found[command] = {'dest': pgdelta_supports(local.stdout, options),
                               'source': pgdelta_supports(remote.get('log_tail', ''), options)}
-        if self.t2 or any(method in measure.PGDELTA_DIRECT_METHODS for method in self.methods):
+        if self.t2 or self.t10a or any(method in measure.PGDELTA_DIRECT_METHODS for method in self.pinned_methods):
             module = measure.PGDELTA_DATADIR_MODULE
             local = subprocess.run([sys.executable, '-c', f'import {module}'], cwd=self.repo,
                                    capture_output=True, text=True, timeout=120)
@@ -3017,8 +4596,11 @@ class Orchestrator:
             self.method_speeds = measure.parse_method_speeds(args.method_speeds, self.methods, self.speeds)
         except ValueError as exc:
             raise SystemExit(str(exc))
-        problems = block_problems(args, self.methods) + [
-            problem for problem in [checksum_problem(self.methods, args.manifest_checksums)] if problem]
+        problems = block_problems(args, self.methods) + load_problems(args, self.methods) + [
+            problem for problem in [checksum_problem(self.methods, args.manifest_checksums, args.load)] if problem]
+        if self.t10a and (args.load_rate <= 0 or (args.moderate_repeats and args.moderate_rate <= 0)):
+            problems.append('EXP-12 needs --load-rate (and --moderate-rate for its moderate block) above 0: the smoke '
+                            "run's R_busy and R_mod (its item 2)")
         if problems:
             raise SystemExit('; '.join(problems))
         # A speed at which --method-speeds leaves no method is not visited at all.
@@ -3041,7 +4623,8 @@ class Orchestrator:
         self.out.mkdir(parents=True, exist_ok=True)
         self.outputs.mkdir(parents=True, exist_ok=True)
         stale = self.stale_output_server()
-        if stale and any(method in measure.OUTPUT_START_METHODS for method in self.methods):
+        if stale and any(method in measure.OUTPUT_START_METHODS or (self.t10a and method in measure.G4_METHODS)
+                         for method in self.pinned_methods):
             raise SystemExit(f'a server still runs on the output port {OUTPUT_PG_PORT} ({stale}), left by '
                              'an earlier run: stop it (pg_ctl -D <its data directory> stop) first')
 
@@ -3103,7 +4686,7 @@ class Orchestrator:
                 'methods_by_speed': {speed['label']: measure.methods_at(self.methods, self.method_speeds,
                                                                         speed['label'])
                                      for speed in self.speeds},
-                'method_flags': {method: self.method_flags(method) for method in self.methods},
+                'method_flags': {method: self.method_flags(method) for method in self.pinned_methods},
                 'pgbackrest': self.pgbackrest_run_record(),
                 # T2 (EXP-11): whether this run is one, and its blocks after the main one (unthrottled).
                 't2': self.t2,
@@ -3114,6 +4697,8 @@ class Orchestrator:
                                           'methods': self.warm_source_methods, 'speed': measure.UNTHROTTLED,
                                           'source_cache': 'warm'}},
                 'durability': DURABILITY_POLICY,
+                # EXP-12 (T10a): its load, blocks, timeline and oracle; None outside it.
+                't10a': self.load_run_record() if self.t10a else None,
                 'trials': {}, 'status': 'running'}
             self.throttle('off')
             self.run['environment'] = self.environment()
@@ -3134,14 +4719,17 @@ class Orchestrator:
                 if missing:
                     raise SystemExit(f'pgbackrest is not installed on {", ".join(missing)} '
                                      '(infra/gcp/startup.sh installs it)')
-            if self.t2:
+            if self.t2 or self.t10a:
+                # EXP-12 holds dest to EXP-11's durability standard in full: the same preflight.
                 self.run['t2_preflight'] = self.preflight_t2()
+            if self.t10a:
+                self.run['t10a_preflight'] = self.preflight_t10a()
             if args.syscall_audit:
                 self.run['syscall_audit'] = self.preflight_audit()
             if self.gnu_time:
                 self.run['rss_probe'] = self.rss_probe()
-            if self.t2 or any(method in measure.PGDELTA_METHODS for method in self.methods):
-                self.run['pgdelta_required_options'] = measure.pgdelta_required_options(self.methods)
+            if self.t2 or any(method in measure.PGDELTA_METHODS for method in self.pinned_methods):
+                self.run['pgdelta_required_options'] = measure.pgdelta_required_options(self.pinned_methods)
                 self.run['pgdelta_jobs_check'] = self.check_pgdelta_jobs()
             if args.disk_test_mib:
                 self.run['disk_test'] = dict(zip(('source', 'dest'), self.both(
@@ -3151,7 +4739,7 @@ class Orchestrator:
                                               str(args.disk_test_mib)))))
             if args.idle_seconds:
                 self.run['background'] = self.background()
-            if self.t2:
+            if self.t2 or self.t10a:
                 # Check (a)'s idle noise: given (the smoke run's), or measured now, or 0 (the 4 MiB floor).
                 if args.idle_noise_windows:
                     self.run['dirty_idle_noise'] = self.dirty_idle_noise(args.idle_noise_windows)
@@ -3284,6 +4872,64 @@ def parse_args(argv=None):
                         help='keep the source cluster and B0 after each trial')
     parser.add_argument('--stop-on-error', action='store_true')
     parser.add_argument('--allow-code-mismatch', action='store_true')
+    # EXP-12 (T10a): the source's slowdown under a fixed-rate load. Its blocks: busy (--repeats, --speeds,
+    # --methods, --method-speeds), warm (--warm-source-*), moderate (--moderate-*), calibration (--calibration-*).
+    load = parser.add_argument_group('EXP-12 (T10a)')
+    load.add_argument('--load', choices=('bank',),
+                      help="EXP-12: a fixed-rate pgbench load on the source's loaddb (bank: commit.sql@99 and "
+                           'abort.sql@1, experiments/network/load), with its trial order, its timeline and its arms')
+    load.add_argument('--load-rate', type=int, default=0, metavar='R',
+                      help="the busy and warm blocks' -R, transactions per second (smoke item 2's R_busy); 0 refuses "
+                           'to run')
+    load.add_argument('--load-clients', type=int, default=32)
+    load.add_argument('--load-threads', type=int, default=4)
+    load.add_argument('--load-warmup-s', type=float, default=120, help='after each load start, before anything else')
+    load.add_argument('--load-duration-s', type=int, default=14400, help="pgbench's -T (each run is stopped before)")
+    load.add_argument('--load-seed', type=int, help="pgbench's --random-seed base (default: --order-seed)")
+    load.add_argument('--load-log-dir', default=measure.LOAD_LOG_DIR,
+                      help="the load's per-transaction logs and the sampler's data on the source (tmpfs)")
+    load.add_argument('--load-signal', choices=('ALRM', 'INT'), default='ALRM',
+                      help="how a run is stopped: SIGALRM, the signal pgbench's own -T timer uses (smoke item 1's "
+                           'fallback is INT)')
+    load.add_argument('--capacity-warmup-s', type=int, default=30)
+    load.add_argument('--capacity-s', type=int, default=60)
+    load.add_argument('--capacity-runs', type=int, default=1, help='closed-loop runs for C (the smoke run takes 3)')
+    load.add_argument('--capacity-rest-s', type=float, default=30)
+    load.add_argument('--settle-s', type=float, default=15, help="each run's settle: at least this")
+    load.add_argument('--settle-max-s', type=float, default=60,
+                      help="the source's settle gate's cap (then the run is unsettled); dest's work has none")
+    load.add_argument('--tail-s', type=float, default=15, help="each run's quiet tail, from its clock's stop")
+    load.add_argument('--window-tail-s', type=float, default=10,
+                      help='the slowdown window runs this long past the clock (recorded for the analysis)')
+    load.add_argument('--none-window-s', type=float, default=60, help="none's empty timed phase")
+    load.add_argument('--source-cache', choices=('evict', 'keep'), default='evict',
+                      help='evict the static files before each cold run (keep: leave the cache alone, tests only)')
+    load.add_argument('--snapshot', action='store_true',
+                      help="take the proxies' snapshot of the data directory at the trial's step 5")
+    load.add_argument('--static-digest', choices=('every', 'first_repeat', 'none'), default='every',
+                      help="(vi)'s logical digest of the benchmark database: every live output, or each (arm, speed) "
+                           "cell's first repeat; row counts are taken in every run")
+    load.add_argument('--controls', default='', metavar='CONTROLS',
+                      help=f'comma list from {", ".join(measure.CONTROL_METHODS)}: at the busy block\'s start and end, '
+                           "and pause2 at the moderate block's start")
+    load.add_argument('--warm-source-speeds', default='',
+                      help="EXP-12: the warm block's speeds (default, as EXP-11's: unthrottled)")
+    load.add_argument('--moderate-rate', type=int, default=0, metavar='R', help="the moderate block's -R")
+    load.add_argument('--moderate-repeats', type=int, default=0)
+    load.add_argument('--moderate-speeds', default='')
+    load.add_argument('--moderate-methods', default='', metavar='METHODS')
+    load.add_argument('--moderate-method-speeds', action='append', default=[], metavar='METHODS=SPEEDS')
+    load.add_argument('--calibration-repeats', type=int, default=0)
+    load.add_argument('--calibration-speed', default='2')
+    load.add_argument('--calibration-methods', default='', metavar='METHODS',
+                      help="the calibration block's arms, without load: any methods and controls")
+    load.add_argument('--calibration-idle-s', type=float, default=30, help='idle before the calibration block')
+    load.add_argument('--load-check-wait-s', type=float, default=20, help='from the load stop to load-check')
+    load.add_argument('--idle-rate-s', type=float, default=20, help="step 6's idle background CPU window")
+    load.add_argument('--sampler-interval-s', type=float, default=0.1)
+    load.add_argument('--clock-samples', type=int, default=50)
+    load.add_argument('--oracle-controls', action='store_true',
+                      help="EXP-12's smoke item 5: the oracle's seven negative controls, under the load")
     args = parser.parse_args(argv)
     if args.scale < 1 or args.repeats < 1:
         parser.error('--scale and --repeats must be at least 1')
@@ -3295,11 +4941,68 @@ def parse_args(argv=None):
         measure.parse_method_speeds(args.method_speeds, methods, speeds)
     except ValueError as exc:
         parser.error(str(exc))
-    problems = block_problems(args, methods) + [
-        problem for problem in [checksum_problem(methods, args.manifest_checksums)] if problem]
+    problems = block_problems(args, methods) + load_problems(args, methods) + [
+        problem for problem in [checksum_problem(methods, args.manifest_checksums, args.load)] if problem]
     if problems:
         parser.error('; '.join(problems))
     return args
+
+
+def load_problems(args, methods) -> list[str]:
+    """What is wrong with EXP-12's options for these --methods (an empty list if nothing is).
+
+    Its arms and options need --load; the controls run only through --controls (and the calibration block); the
+    moderate block's methods come from --methods, the calibration's from any method or control; the proxies need
+    --snapshot. A rate of 0 parses (the run line's shape before the smoke run) and execute refuses it.
+    """
+    problems = []
+    loaded = getattr(args, 'load', None) is not None
+    t10a = [method for method in methods if method in measure.T10A_METHODS]
+    options = {'--controls': args.controls, '--moderate-repeats': args.moderate_repeats,
+               '--calibration-repeats': args.calibration_repeats, '--snapshot': args.snapshot,
+               '--oracle-controls': args.oracle_controls, '--warm-source-speeds': args.warm_source_speeds}
+    if not loaded:
+        given = [name for name, value in options.items() if value]
+        if t10a or given:
+            problems.append(f'{", ".join(t10a + given)} need --load (EXP-12)')
+        return problems
+    controls, moderate = method_list(args.controls), method_list(args.moderate_methods)
+    calibration = method_list(args.calibration_methods)
+    if [method for method in methods if method in measure.CONTROL_METHODS]:
+        problems.append('the controls run through --controls, not --methods')
+    unknown = [method for method in controls if method not in measure.CONTROL_METHODS]
+    if unknown or len(set(controls)) != len(controls):
+        problems.append(f'--controls must be distinct names from {", ".join(measure.CONTROL_METHODS)}')
+    if min(args.load_rate, args.moderate_rate) < 0 or args.load_clients < 1 or args.load_threads < 1:
+        problems.append('--load-rate and --moderate-rate must be 0 or more, and --load-clients and --load-threads '
+                        'at least 1')
+    for block, repeats, chosen in (('moderate', args.moderate_repeats, moderate),
+                                   ('calibration', args.calibration_repeats, calibration)):
+        if repeats < 0:
+            problems.append(f'--{block}-repeats must be 0 or more')
+        if bool(repeats) != bool(chosen):
+            problems.append(f'--{block}-repeats and --{block}-methods go together')
+    if [method for method in moderate if method not in methods] or len(set(moderate)) != len(moderate):
+        problems.append('--moderate-methods must be distinct names from --methods')
+    if args.moderate_repeats and not args.moderate_speeds:
+        problems.append('--moderate-repeats needs --moderate-speeds')
+    known = (*measure.ALL_METHODS, *measure.CONTROL_METHODS)
+    if [method for method in calibration if method not in known] or len(set(calibration)) != len(calibration):
+        problems.append('--calibration-methods must be distinct method or control names')
+    try:
+        moderate_speeds = measure.parse_speeds(args.moderate_speeds) if args.moderate_speeds else []
+        measure.parse_method_speeds(args.moderate_method_speeds, moderate, moderate_speeds)
+        if args.warm_source_speeds:
+            measure.parse_speeds(args.warm_source_speeds)
+        measure.parse_speed(args.calibration_speed)
+    except ValueError as exc:
+        problems.append(str(exc))
+    proxies = [method for method in (*methods, *calibration) if method in measure.V1PROXY_METHODS]
+    if proxies and not args.snapshot:
+        problems.append(f'{", ".join(sorted(set(proxies)))} read the snapshot: they need --snapshot')
+    if args.settle_s < 0 or args.settle_max_s < args.settle_s or args.tail_s < 0:
+        problems.append('--settle-s, --settle-max-s (at least --settle-s) and --tail-s must be 0 or more')
+    return problems
 
 
 def _terminate(signum, frame):
