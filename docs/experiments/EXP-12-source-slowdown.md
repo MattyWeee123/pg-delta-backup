@@ -1,6 +1,6 @@
 # EXP-12: How much does each refresh slow a busy source, and is every output correct under load?
 
-Status: **pre-registered October 24, 2026, revised after an independent review and a check of the revision; the harness is built and reviewed (see "Analysis readings"); not yet run.** This is test T10a of the [decision ledger](../DECISIONS.md#t10a-source-slowdown-minimal-version-plus-the-correctness-check-under-load), with gate G4 of the [spec](../SPEC.md#7-correctness-gates). It merges two independent drafts, one written for realism and decision value, one for measurement validity; where they differed, the choice and its reason are under [How the two drafts were merged](#how-the-two-drafts-were-merged). An independent review then checked the merged draft against the ledger, EXP-04b, EXP-09, EXP-11 and the harness code: 16 findings, 5 major. The project lead decided each one. Every change, and the parts not taken, are listed under [Revisions before running](#revisions-before-running-october-24-2026). A second, independent check then tested the revision: 9 findings, 2 major, and 5 items left unaddressed or unrecorded. All were applied; the changes are under [After a check of the revision](#after-a-check-of-the-revision). The ledger's registered question, prediction and rules, and owner decision O4, are kept word for word and judged as registered. Everything marked "added here" is new, and "revised" marks what the review or the check changed. Where the design departs from the ledger, the reason is under [Changes from the ledger](#changes-from-the-ledger-rule-8), as rule 8 asks. As for EXP-11, the harness build gets its own review, and the smoke run's findings are recorded here, dated, before the main sweep. How the harness and the analysis read what the text leaves open, after that review, is under [Analysis readings](#analysis-readings-october-24-2026-after-the-harness-builds-review).
+Status: **done** ([results below](#results); run October 24, 2026, on two VMs created at 16:51 UTC and deleted at 20:10 UTC: the smoke run 16:57–18:18, the registered sweep 18:23–20:08, nothing rerun). Pre-registered October 24, 2026, and revised after an independent review and a check of the revision, all before running; the harness was built and reviewed, and the smoke run's sixteen items and the drift check were recorded here, dated, before the sweep's data was read (see "Analysis readings"). This is test T10a of the [decision ledger](../DECISIONS.md#t10a-source-slowdown-minimal-version-plus-the-correctness-check-under-load-done-october-24-2026), with gate G4 of the [spec](../SPEC.md#7-correctness-gates). It merges two independent drafts, one written for realism and decision value, one for measurement validity; where they differed, the choice and its reason are under [How the two drafts were merged](#how-the-two-drafts-were-merged). An independent review then checked the merged draft against the ledger, EXP-04b, EXP-09, EXP-11 and the harness code: 16 findings, 5 major. The project lead decided each one. Every change, and the parts not taken, are listed under [Revisions before running](#revisions-before-running-october-24-2026). A second, independent check then tested the revision: 9 findings, 2 major, and 5 items left unaddressed or unrecorded. All were applied; the changes are under [After a check of the revision](#after-a-check-of-the-revision). The ledger's registered question, prediction and rules, and owner decision O4, are kept word for word and judged as registered. Everything marked "added here" is new, and "revised" marks what the review or the check changed. Where the design departs from the ledger, the reason is under [Changes from the ledger](#changes-from-the-ledger-rule-8), as rule 8 asks. As for EXP-11, the harness build gets its own review, and the smoke run's findings are recorded here, dated, before the main sweep. How the harness and the analysis read what the text leaves open, after that review, is under [Analysis readings](#analysis-readings-october-24-2026-after-the-harness-builds-review).
 
 ## Question
 
@@ -719,3 +719,428 @@ These stay open to question after the review. The harness build's review should 
 - Row 7b's test: a warm meet, plus a fall below the proxy's own cold reading by more than δ (revised).
 - A13's two scopes: `full` reclassified for the session, every other arm at that speed (revised).
 - The 3-run minimum for every cell, with a judged miss counting before a short cell (revised).
+
+## Results
+
+**Run:** October 24, 2026, on two new `n2-standard-8` VMs in `us-central1-a`, created at 16:51 UTC and deleted at 20:10 UTC. That is about 3.3 hours of the pair, about 3.3 USD at about 1 USD per hour for the two, against the budget of about 3.4 hours (3.05–3.85) and the 3.5-hour cut line. No cut applied (smoke item 15). Nothing was fixed or rerun once the sweep started (A11).
+
+| Step | UTC | Runs | Projected |
+|---|---|---:|---|
+| Create both VMs, provision, deploy | from 16:51 | – | 20 min |
+| The smoke run: `exp12-smoke-cap`, `exp12-smoke`, `exp12-smoke-null`, `exp12-smoke-audit`, `exp12-smoke-nosampler` | 16:57–18:18 | 38 | 60 min (50–76) |
+| The registered sweep, `exp12-hot` (one trial) | 18:23–20:08 | 117 | 108 min (98–120) |
+| Fetch the results, check them against the VMs', delete the VMs | 20:08–20:10 | – | 15 min |
+
+The smoke run took 81 minutes, with its chrony and sampler repeats (items 4 and 11); the sweep took 105. The results were fetched and checked equal to the VMs' copies (file counts and bytes, all six result sets) before the VMs were deleted.
+
+**The trial, in order** (from its records): the cluster, loaddb and B0 from 18:23; the capacity runs 18:25:50–18:27:23; the busy load from 18:27:53, its warm-up to 18:29:53; the busy block's windows 18:30–19:31; the warm block's 19:32–19:39; the switch at 19:40:31 to the moderate load, its warm-up to 19:42:31; the moderate block 19:42–19:58; the moderate load stopped at 19:58:05; the calibration block 19:59–20:06; the end references to 20:08.
+
+- **Runs:** 117, as planned: 74 in the busy block (its 4 controls included), 10 in the warm block, 19 in the moderate block (its `pause2` included) and 14 in the calibration block. Every run passed, and none left a median.
+- **Software:** PostgreSQL 17.11 on both VMs. pgdelta's code is EXP-11's: the diff of `pgdelta/` from EXP-11's tree, recorded at deploy time, is empty. The harness ran at commit b628c43 on both VMs.
+- **The run line** is the one under [Run lines](#run-plan-and-budget), as launched, with the smoke run's values: `R_BUSY=18100`, `R_MOD=9000`, `NOISE=0.48`, `--sampler-interval-s 0.5`.
+- **Data:** [exp12-runs.csv](data/exp12-runs.csv) (one row per run: times, O4's numbers and their views, latency, CPU, the flags, G4's checks, durability, bytes) and [exp12-cells.csv](data/exp12-cells.csv) (each block, speed and arm, in the main view and every robustness view).
+- **Analysis:** [analysis/exp12.py](../../analysis/exp12.py), written and dry-run on the smoke data before the sweep (smoke item 16), run exactly as registered: `.venv/bin/python analysis/exp12.py --sweeps results/exp04/exp12-hot --late-limit-ms 110 --null-resamples 10000 --null-seed 121 --client-wait-share 0.25 --capacity-tps 30316 --busy-cpu 0.628 --idle-noise-bytes 499712`.
+- **The drift check:** [analysis/exp12_drift.py](../../analysis/exp12_drift.py), committed with its tests before the sweep's logs were fetched (commits 8488bbc and 59a9f80), run as `.venv/bin/python analysis/exp12_drift.py --sweep results/exp04/exp12-hot --runs docs/experiments/data/exp12-runs.csv`. After the fetch, one commit (ea46b31) changed only its reported per-minute view: it now stops at the load's stop signal instead of pgbench's exit, prints per-block medians and marks the warm block's reads. The judged part is unchanged.
+- **Where the numbers come from:** the two scripts' outputs, unless the text says a number was recomputed, either from exp12-runs.csv or exp12-cells.csv, or from the raw records (git-ignored, under `results/exp04/exp12-hot/`: the run and trial records, pgbench's per-second progress lines and the harness's stamped command logs).
+- **The analysis's smoke-item lines are this sweep's, not the smoke run's.** Items 3, 11 and 13 re-read the sweep's records, so they print "no data" or "–" where an item's data exist only in the smoke run. Item 3 prints the L this sweep's warm-up would give: 100 ms, from a p99 of 9.988 ms. L = 110 ms was fixed by the smoke run, as registered, and is the only L used. The smoke run's items are judged in its own dated section above.
+- **Two things moved during the session.** This trial's own C was 10.9% below the smoke run's (A12), and loaddb grew from 4,224 to 48,968 pages, against smoke item 14's limit of 5% (see [loaddb's growth and the drift check](#loaddbs-growth-and-the-drift-check)). The registered drift check found no drift in either load. A10 marks the session shifted against EXP-11 on `full`'s idle time; that copy was 20% larger than EXP-11's (see [Drift against EXP-11](#drift-against-exp-11-a10-and-capacity-a12)).
+
+### Runs and verification: G4, R3, the oracle and durability
+
+G4's checks on every output taken from the live source, the started copies of `full` and staged `pgdelta` (G4's boundaries as medians):
+
+| Block | Arm | Outputs | Passed every check | WAL end point before publication, s | Usable after publication, s | Staleness, s (max) |
+|---|---|---:|---:|---:|---:|---|
+| busy | `full` | 15 | 15 | 1.43 | 1.17 | 1.43 (1.59) |
+| busy | `pgdelta` | 15 | 15 | 7.71 | 0.58 | 7.71 (13.51) |
+| warm | `full` | 5 | 5 | 1.65 | 1.17 | 1.66 (1.67) |
+| moderate | `full` | 6 | 6 | 1.59 | 0.51 | 1.60 (1.65) |
+| calibration | `full` | 2 | 2 | 1.42 | 0.26 | – (no load) |
+| calibration | `pgdelta` | 2 | 2 | 7.83 | 0.28 | – (no load) |
+
+- **Every live output passed every check:** 45 outputs. Each passed `pg_verifybackup` with its CRC32C manifest; recovered from its own `backup_label` with only the WAL it holds, and started; held the balance invariant (iii), a consistent cut (iv) and coverage (v) against the load's logs; matched the benchmark database's row counts (vi), and its per-table logical digest in each busy cell's first repeat (6 outputs); hashed equal to the schema references (vii); and passed `pg_amcheck --heapallindexed` over 283 relations. For staged `pgdelta`, S also passed `pg_verifybackup` and O was byte-identical to S.
+- **Staleness without load means nothing.** In the calibration block no load runs, so the cut is the last commit before the load stopped, and staleness (228 and 283 s, medians) is only the time since then.
+- **Every other output was verified too:** the proxies' 43 outputs (`v1proxy` 28, `v1proxy_s1` 15) were byte-identical to the snapshot's selection, by step 5's stored digest, and started; v1 itself (2 runs) matched the stopped source; S passed `pg_verifybackup` in all 7 `capture` runs. No run was unverified.
+- **R3 doesn't fire:** no output of `pgdelta`, `v1proxy`, `v1proxy_s1` or v1 itself was wrong. L5 holds over all 117 runs.
+- **A1 doesn't fire:** no `full` output was wrong. The analysis-only coverage control failed (v) in all 41 pairings it checked, as it must. The seven negative controls ran in the smoke run (item 5).
+- **The trial's references held** (trial record): the benchmark database's logical digest at the end equalled the start's; the schema dumps hashed equal; the snapshot's digest equalled step 5's; B0 was unchanged in every run and at the end.
+- **`full`'s cut lay 0.001–0.072 s before its "write-ahead log end point" stamp** in all 26 outputs taken under load (E10).
+
+**Durability on dest** (check (a)'s limit: 4 MiB, above the smoke run's idle noise of 0.48 MiB):
+
+| Block | Arm | Runs | (a) pass / fail | (b) pass / fail | Largest increase, MB | Smallest disk writes ÷ output |
+|---|---|---:|---|---|---:|---:|
+| busy | `full` | 15 | 15 / 0 | 15 / 0 | 1.4 | 1.000 |
+| busy | `pgdelta` | 15 | 15 / 0 | 15 / 0 | 1.7 | 1.019 |
+| busy | `v1proxy`, `v1proxy_s1` | 25 | 25 / 0 | – | 1.0 | 0.014 |
+| warm | `full` | 5 | 5 / 0 | 5 / 0 | 1.2 | 1.001 |
+| warm | `v1proxy` | 5 | 5 / 0 | – | 0.5 | 0.015 |
+| moderate | `full` | 6 | 6 / 0 | 6 / 0 | 1.4 | 1.000 |
+| moderate | `v1proxy`, `v1proxy_s1` | 9 | 9 / 0 | – | 0.6 | 0.014 |
+| calibration | every arm that writes on dest | 10 | 10 / 0 | 4 / 0 | 1.3 | 0.014 |
+
+- **A13 doesn't fire:** no run failed (a) or (b). The proxies patch B in place, so their disk writes are about 1.4% of the output and check (b) doesn't apply.
+- **The negative control and the syscall audit ran in the smoke run** (item 13): `full_nosync` left 2.29 GB dirty, so check (a) stays in force, and `full`, `pgdelta` and `v1proxy` passed the audit under the load.
+
+### The instrument and the load
+
+**The load** (smoke items 1 and 2, read from this trial's records):
+
+| pgbench run | Rate | When (UTC) | Commits | Rollbacks | Complete | Failed | Log, MB per hour |
+|---|---|---|---:|---:|---|---:|---:|
+| capacity warm-up | closed loop, 30 s | 18:25:50–18:26:21 | 792,754 | 8,034 | yes | 0 | 900.5 |
+| capacity | closed loop, 60 s | 18:26:21–18:27:23 | 1,604,780 | 16,227 | yes | 0 | 916.1 |
+| busy | 18,100 per second | 18:27:53–19:40:31 | 76,590,214 | 774,224 | yes | 0 | 719.5 |
+| moderate | 9,000 per second | 19:40:31–19:58:05 | 9,304,235 | 93,720 | yes | 0 | 352.9 |
+
+- **Every run was complete:** for each client, `n` at the stop minus `n` at the start equals its log's commits. No transaction failed. On no line was the latency below the schedule lag, and completion times never fell within a client. The rollbacks were 1.0% of the transactions, as the scripts' weights ask.
+- **Step 15 held:** Σabalance = Σn = the logged commits = **88,291,983**, with no incomplete run and no gap.
+- **C** (step 7) was 27,019 transactions per second, 10.9% below the smoke run's 30,316 (A12, below). So the busy rate, 18,100 per second, was 0.670 of this trial's C (0.60 of the smoke run's), and the moderate rate 0.333 (0.30). The busy CPU at R_busy, 0.628 of the source's 8 CPUs, is smoke item 2's, passed to the analysis as registered; at R_mod the settles' median was 0.369.
+- **The warm-ups:** the busy load's p99 was 9.99 ms over its 120 s (10.21 ms over its last minute, the null's part); the moderate load's 0.87 ms.
+
+**The positive control and the clocks** (A2, A3 and the clock gate):
+
+| `pause2` run | ρ | W, s (A2's bounds) | D | Gap in the log against SIGSTOP / SIGCONT, ms | Margin, ms | Inside dest's mapped phase | Late count at L, s |
+|---|---:|---|---:|---|---:|---|---:|
+| busy block's start, unthrottled visit | 0.670 | 1.908 ([1.47, 2.3]) | 1.000 | 0.00 / 0.06 | 16.98 | yes | 5.45 |
+| busy block's end, 0.5 Gbit/s visit | 0.670 | 1.919 ([1.47, 2.3]) | 1.000 | 0.02 / 0.07 | 6.16 | yes | 5.02 |
+| moderate block's start, 2 Gbit/s visit | 0.333 | 1.898 ([1.13, 2.3]) | 1.000 | 0.05 / 0.60 | 5.88 | yes | 2.79 |
+
+- **A2 doesn't fire** in either block: the logging, the arithmetic and the clock mapping return a 2.0-s pause as 1.90–1.92 s of lost work and a whole bucket at zero, with the log's gap within 0.6 ms of the agent's signals.
+- **A3 doesn't fire:** `none`'s median completed over scheduled was 1.0000 in both blocks, and its largest window-end backlog was 6 transactions (busy) and 2 (moderate), against R × 1 s.
+- **The clock gate holds:** the harness's probe put the source 0.000 ms from dest at the trial's start and 0.006 ms at its end; chrony read both VMs within 1 µs of NTP time.
+- **The harness's own checks** (smoke items 6–11, read from this trial's records): 107 evictions left at most 0.01% of the benchmark database's files and the snapshot resident, and at least 99.33% of loaddb; every settle gate passed within 30 s (103 of 103 loaded runs); the sampler used 0.9% of a core at 0.5-s reads, with none of its 10,866 ticks late; all 24 staged captures' `--verbose` lines parsed with their end point; and the proxy held backup mode across its transfer, hashed every byte and verified in 43 of 43 runs, the source never stopped for it.
+
+### The null
+
+| Block | Pool | One window: W median / 95th percentile, s (T = 15, 30, 50) | One window: D median / 95th percentile (T = 15) | Median of 5 windows at T = 15: W's 95th percentile, s |
+|---|---|---|---|---:|
+| busy (and warm) | 84 spans, 1,685 s (15 s more with the unsettled settle) | 0.0022 / 0.0117, 0.0045 / 0.0162, 0.0077 / 0.0209 | 0.0006 / 0.0100 | 0.0028 |
+| moderate | 20 spans, 573 s | 0.0024 / 0.0037, 0.0050 / 0.0067, 0.0083 / 0.0104 | 0.0008 / 0.0011 | 0.0031 |
+
+The busy pool's own latency over 30.9 million transactions: p50 0.653 ms, p95 0.958, p99 1.322, p99.9 11.07, maximum 37.6. The moderate pool's: p50 0.577 ms, p99 0.856. E2 held but for one clause: D's null median at T = 15 was 0.0006, below the 0.005–0.03 predicted. δ_W was its 0.05-s floor and δ_D its 0.03 floor in every comparison.
+
+### The cells: O4's two numbers, with time beside them
+
+The busy block, medians of 5 runs (maximum in brackets), net of the cell's null; "meas." says whether the median exceeds the null's 95th percentile. ΔW and ΔD are the arm's net value less `full`'s at the same speed, against δ_W = 0.05 s and δ_D = 0.03. Latency is over [t0, t1], from each transaction's scheduled start:
+
+| Speed | Arm | Time under load, s | W, s | W_net, s (meas.) | D | D_net (meas.) | ΔW | ΔD | Meets O4 | p95, ms | Worst 5-s p99, ms |
+|---|---|---:|---|---|---|---|---:|---:|---|---:|---:|
+| 0.5 Gbit/s | `full` (the bar) | 47.19 | 0.008 (0.010) | 0.000 (no) | 0.001 (0.001) | 0.000 (no) | – | – | – | 1.00 | 10.1 |
+| | `pgdelta` | 14.99 | 1.269 (1.341) | 1.265 (yes) | 0.969 (0.990) | 0.968 (yes) | +1.265 | +0.968 | **no** | 1,166.6 | 1,391.0 |
+| | `v1proxy` | 3.69 | 0.053 (0.079) | 0.051 (yes) | 0.051 (0.067) | 0.051 (yes) | +0.051 | +0.051 | **no** | 68.9 | 92.0 |
+| | `v1proxy_s1` | 7.55 | 0.003 (0.003) | 0.000 (no) | 0.001 (0.001) | 0.000 (no) | +0.000 | +0.000 | yes | 1.63 | 11.6 |
+| 2 Gbit/s | `full` (the bar) | 11.92 | 0.004 (0.004) | 0.000 (no) | 0.001 (0.001) | 0.000 (no) | – | – | – | 1.34 | 10.7 |
+| | `none` | 60.00 | 0.010 (0.012) | 0.000 (no) | 0.001 (0.001) | 0.000 (no) | −0.000 | −0.000 | yes | 0.94 | 2.6 |
+| | `capture` | 5.35 | 1.199 (1.348) | 1.197 (yes) | 0.956 (0.974) | 0.955 (yes) | +1.196 | +0.955 | **no** | 1,332.3 | 1,401.9 |
+| | `pgdelta` | 11.18 | 1.350 (1.374) | 1.346 (yes) | 0.962 (0.986) | 0.961 (yes) | +1.346 | +0.961 | **no** | 1,212.0 | 1,383.7 |
+| | `bracket` | 0.21 | 0.001 (0.002) | 0.000 (no) | 0.000 (0.001) | 0.000 (no) | −0.000 | −0.000 | yes | 11.8 | 8.0 |
+| | `v1proxy` | 3.62 | 0.071 (0.108) | 0.069 (yes) | 0.038 (0.072) | 0.038 (yes) | +0.068 | +0.038 | **no** | 96.8 | 124.6 |
+| | `v1proxy_s1` | 7.25 | 0.004 (0.010) | 0.001 (yes) | 0.001 (0.007) | 0.000 (yes) | +0.001 | +0.000 | yes | 1.83 | 14.1 |
+| unthrottled | `full` (the bar) | 4.29 | 0.002 (0.003) | 0.000 (no) | 0.001 (0.002) | 0.000 (no) | – | – | – | 6.41 | 17.1 |
+| | `pgdelta` | 10.26 | 1.257 (1.396) | 1.254 (yes) | 0.959 (0.970) | 0.958 (yes) | +1.254 | +0.958 | **no** | 1,211.3 | 1,360.9 |
+| | `v1proxy` | 3.61 | 0.072 (0.105) | 0.070 (yes) | 0.043 (0.061) | 0.042 (yes) | +0.070 | +0.042 | **no** | 131.8 | 161.3 |
+| controls (2 runs) | `pause2` | 2.11 | 1.914 (1.919) | 1.912 (yes) | 1.000 (1.000) | 0.999 (yes) | – | – | – | 1,967.1 | 1,986.0 |
+| | `burn4` | 2.12 | 0.235 (0.321) | 0.233 (yes) | 0.126 (0.167) | 0.125 (yes) | – | – | – | 273.9 | 291.9 |
+
+Every cell with a measurable W is flagged *client wait* (A8): `pgdelta`, `capture`, `v1proxy`, `v1proxy_s1` at 2 Gbit/s and both controls (see [Flags](#flags-and-robustness-views)).
+
+What the cells show:
+- **One `pg_basebackup` stream costs the busy load nothing measurable,** on either number, at 0.5 or 2 Gbit/s or unthrottled. So O4's bar here is "no measurable loss, within δ", as the notes before running said it might be.
+- **Staged pgdelta misses O4 by a wide margin at every speed:** 1.25–1.35 s of the load's work lost, and in its worst second 3–4% of the scheduled transactions completed (D 0.96–0.97). The load's p95 latency over its window was 1.17–1.21 s.
+- **The capture alone loses almost as much,** 1.20 s and D 0.96, with no link involved.
+- **v1's source side by proxy, at 4 workers, misses O4 at every speed, on both numbers, by a small margin:** 0.05–0.07 s of work and a worst second 4–5% short. Its effect on latency is larger: over its 3.6-s copy the load's median latency was 6.8–17 ms and its p95 69–132 ms, against 0.65 ms and 0.96 ms in the null.
+- **One source worker meets O4 at both speeds:** its net losses were at most 0.001 s and 0.000 (measurable at 2 Gbit/s, but far inside δ), and its p95 was 1.6–1.8 ms.
+- **Backup mode alone (`bracket`) and an empty window (`none`) cost nothing measurable.** `burn4`, 4 busy processes for 2 s, lost 0.23 s and 13% of its worst second.
+
+![EXP-12: the load around each refresh, the median run of each arm and speed](../figures/exp12-timeseries.svg)
+
+How to read it: one column per busy-block speed, and one for the controls. Each line is the median run of an arm's cell, against seconds from t0, the start of its first timed phase. The top row is completed over scheduled transactions per 1-s bucket: 1.0 means no loss, a dip below it is lost work, and the rise above it after a dip is pgbench catching up. The bottom row is the p99 latency per second, on a log scale. Staged pgdelta (orange) falls to near zero for one second about 4–5 s after t0 at every speed, and its p99 stays above 1 s for 3–5 s while the backlog drains; the capture alone (yellow-orange, 2 Gbit/s) does the same. `v1proxy` (green) dips by a few percent at t0 + 1 s, overshoots, and its p99 rises to 100–180 ms for 2–3 s. `full` (grey) and one source worker (light blue) stay at 1.0; their p99 spikes of 10–15 ms in alternate seconds also appear before t0, in load-only time. `pause2` (blue) stops the load for 2 s by design; `burn4` (yellow) dips to about 0.92.
+
+![EXP-12: each arm's net loss in the busy block](../figures/exp12-loss.svg)
+
+How to read it: W_net (left) and D_net (right) for each arm and speed in the busy block, medians of 5 runs. The black bar over each arm marks `full`'s net value plus δ at that speed: an arm whose bar rises above it misses O4 on that number. The null's grey band is too narrow to see at this scale, and no cell is short (none is hatched). Staged pgdelta and the capture lose 1.2–1.35 s and nearly a whole second; `v1proxy` sits just above the bar at every speed; one source worker, `bracket` and `none` sit at zero.
+
+**Time next to slowdown (A7)**, medians of `total_s` under load; W_net (s), D_net and p95 (ms) beside each:
+
+| Arm | busy 0.5 Gbit/s | busy 2 Gbit/s | busy unthrottled | warm 2 Gbit/s | moderate 2 Gbit/s | moderate unthrottled | idle, 2 Gbit/s (calibration) |
+|---|---|---|---|---|---|---|---:|
+| `full` | 47.19 s; 0.000, 0.000, 1.0 | 11.92 s; 0.000, 0.000, 1.3 | 4.29 s; 0.000, 0.000, 6.4 | 12.72 s; 0.000, 0.000, 1.2 | 12.65 s; 0.002, 0.002, 0.9 | 4.44 s; 0.001, 0.000, 1.0 | 12.07 |
+| `capture` | | 5.35 s; 1.197, 0.955, 1,332 | | | | | 3.89 |
+| `pgdelta` | 14.99 s; 1.265, 0.968, 1,167 | 11.18 s; 1.346, 0.961, 1,212 | 10.26 s; 1.254, 0.958, 1,211 | | | | 9.95 |
+| `bracket` | | 0.21 s; 0.000, 0.000, 11.8 | | | | | – |
+| `v1proxy` | 3.69 s; 0.051, 0.051, 68.9 | 3.62 s; 0.069, 0.038, 96.8 | 3.61 s; 0.070, 0.042, 131.8 | 3.12 s; 0.087, 0.067, 118.4 | 3.23 s; 0.001, 0.000, 2.6 | 3.19 s; 0.001, 0.000, 2.5 | 2.90 |
+| `v1proxy_s1` | 7.55 s; 0.000, 0.000, 1.6 | 7.25 s; 0.001, 0.000, 1.8 | | | 6.78 s; 0.000, 0.000, 0.9 | | 5.40 |
+| v1 itself | | | | | | | 4.38 |
+
+- **Staged pgdelta wins on time at both registered speeds** under load (14.99 s against 47.19 at 0.5 Gbit/s, 11.18 against 11.92 at 2), so R1 is judged at both. It was faster than `full` at 2 Gbit/s in each of the 5 repeats (recomputed from exp12-runs.csv). Unthrottled it took 10.26 s against 4.29.
+- **One source worker costs time:** `v1proxy_s1` took 7.25–7.55 s under load against `v1proxy`'s 3.61–3.69, still well under `full`'s 11.92 and 47.19 s at 2 and 0.5 Gbit/s. It didn't run unthrottled. Its time didn't depend on the link (7.55 and 7.25 s), so on the fastest link it would most likely take longer than one `pg_basebackup` stream (4.29 s); that is an inference, not a measurement.
+- **The load slowed the copies:** `v1proxy` took 25% longer than idle, `v1proxy_s1` 34%, the capture 38% and staged `pgdelta` 12% (E6). `full`'s times grew over the session with loaddb (see [loaddb's growth](#loaddbs-growth-and-the-drift-check)).
+
+### Where staged pgdelta's loss comes from (A5)
+
+**A5: "Most of staged pgdelta's slowdown is its capture, which v1 removes."** The capture alone lost 1.197 s of work, against staged pgdelta's 1.265, 1.346 and 1.254 s at 0.5, 2 Gbit/s and unthrottled: 89–95% of it.
+
+When it happens (recomputed from the raw records: each capture's stamped `--verbose` lines against pgbench's per-second progress lines): in all 20 busy-block `capture` and `pgdelta` runs, the load's slowest second overlaps the capture's `syncing data to disk` step. That step starts 3.6–4.0 s after t0 and lasts 1.49–1.68 s; in the slowest second the load completed 678–6,224 transactions against 18,100 scheduled. A second, smaller rise in p99 comes later, during the transfer (the time series, 0.5 Gbit/s panel).
+
+What isn't shown: why the load stalls during S's flush. E7's basis was that on ext4's ordered journal a WAL fsync can wait behind S's flush. The sampler's WAL sync time can't show it: it runs at 0.88–0.95 s per second of window in every arm, `none` included (recomputed from the sampler's table and the windows' lengths), so the WAL is being synced almost all the time at this rate. As registered, no cause is claimed beyond the timing.
+
+### v1's source side by proxy, at 4 workers and at 1
+
+The proxy passed its gate (A4) in every run, cold and warm: backup mode held around the transfer with its start and stop LSNs, every byte of the snapshot's selection hashed, and calibrated CPU-s within 20% of the reference: `v1proxy` 5.84 against v1 itself's 6.72 (−13%), `v1proxy_s1` 4.90 against 5.84 / 1.06 = 5.51 (−11%).
+
+| | `v1proxy` (4 source workers) | `v1proxy_s1` (1 source worker) |
+|---|---|---|
+| Meets O4, busy block | no, at 0.5 and 2 Gbit/s and unthrottled, on W and on D | yes, at 0.5 and 2 Gbit/s |
+| W_net, D_net | 0.051–0.070 s, 0.038–0.051 | 0.000–0.001 s, 0.000 |
+| Load's p50 / p95 / p99 over [t0, t1], ms | 6.8–17.2 / 68.9–131.8 / 96.4–164.5 | 0.73–0.74 / 1.63–1.83 / 10.6–12.4 |
+| Time under load, s | 3.61–3.69 | 7.25–7.55 |
+| Calibrated CPU-s; under load, CPU-s | 5.84; 5.51–6.12 | 4.90; 5.46–5.92 |
+| pgbench threads' added run-queue wait over the window, s (cell medians) | 0.88–0.91 | 0.63–0.66 |
+| The same, in the window's worst second, s | 0.32–0.34 | 0.00–0.08 |
+
+- **Four workers oversubscribe the source; one fits.** At R_busy the source's 8 CPUs were 63% busy, about 3 spare. During `v1proxy`'s window its processes added 6.9–7.0 CPU-s, while pgbench got about 1 CPU-s less than at the settle's rate and the load's backends 0.6–1.0 less (the sampler, a mechanism only).
+- **The client's own wait is large next to the loss.** In each `v1proxy` run, pgbench's threads waited 8.5–42 times its W in the run queue over the window, and 4.5–19 times the worst second's lost time in that second (recomputed from exp12-runs.csv). So how much of this small loss an application on another host would see isn't known. That is what the *client wait* flag marks (below).
+- **The time it costs:** one worker doubles the proxy's time under load (7.25–7.55 s against 3.61–3.69).
+- **What the proxy leaves out grew in this session.** It reads the snapshot taken before the load, so it sent 29.5 MB in every run. v1 itself, reading the stopped source after the load, sent 449 MB in the calibration block, most of it loaddb's grown `load_progress` (54,749 pages sent; recomputed from the run records). A live v1 here would have had loaddb's changes to send too, about 420 MB by the session's end rather than the 30 MB the design expected, plus the WAL the load writes during its copy.
+
+### The warm block and the moderate block
+
+**The warm block** (2 Gbit/s, 5 repeats; the benchmark database's files and the snapshot read into the cache before each settle):
+
+| Arm | Time, s | W_net, s | D_net | ΔW / ΔD against warm `full` | Meets O4 | p95, ms |
+|---|---:|---:|---:|---|---|---:|
+| `full` | 12.72 | 0.000 | 0.000 | – | – | 1.2 |
+| `v1proxy` | 3.12 | 0.087 | 0.067 | +0.087 / +0.067 | **no** | 118.4 |
+
+- **Warm, the proxy misses too, by more than cold** (0.087 s and 0.067 against 0.069 s and 0.038 at 2 Gbit/s cold). Without the cold read it finished sooner (3.12 s against 3.62) with less CPU under load (4.74 against 5.51 CPU-s), and its loss didn't fall. So row 7's cause is **7a, hashing**, as E15 expected.
+- **The first warm run is flagged *unsettled*.** Its read of the benchmark database and the snapshot came from evicted files and took 2.40 s, the whole untimed step 2.77 s. pgbench's progress lines show the load stalling while it ran (a mean latency of 904 ms in one second), and the backlog drained in the settle's first 2 s, which started as the read ended. That settle's p99 was 435 ms, more than twice the warm-up's, so its gate's log part failed, and it left the null. The run's window started 15 s later. Its W and D (0.089 s and 0.068) are the cell's medians; the other four runs' medians are 0.077 s and 0.056 (raw values, computed here from exp12-runs.csv), still above δ.
+- **`full`'s warm time isn't comparable with its cold time:** the warm block came later, when loaddb had grown, and its copies were 2,607–2,656 MB against 2,326–2,530 MB cold at 2 Gbit/s (recomputed from the run records).
+
+**The moderate block** (9,000 per second, 0.333 of this trial's C; 3 repeats):
+
+| Speed | Arm | Time, s | W_net, s (meas.) | D_net (meas.) | ΔW / ΔD | Meets O4 | p95, ms |
+|---|---|---:|---|---|---|---|---:|
+| 2 Gbit/s | `full` (the bar) | 12.65 | 0.002 (yes) | 0.002 (yes) | – | – | 0.87 |
+| | `none` | 60.00 | 0.000 (no) | 0.000 (no) | −0.002 / −0.002 | yes | 0.75 |
+| | `v1proxy` | 3.23 | 0.001 (yes) | 0.000 (no) | −0.001 / −0.002 | yes | 2.61 |
+| | `v1proxy_s1` | 6.78 | 0.000 (no) | 0.000 (no) | −0.002 / −0.002 | yes | 0.91 |
+| unthrottled | `full` (the bar) | 4.44 | 0.001 (yes) | 0.000 (no) | – | – | 1.04 |
+| | `v1proxy` | 3.19 | 0.001 (no) | 0.000 (no) | −0.000 / +0.000 | yes | 2.46 |
+
+At the moderate load the source's CPUs were 37% busy, about 5 spare, and **4 source workers meet O4**: the proxy's loss is no larger than `pg_basebackup`'s, both near zero, and the load's p95 rose only to 2.5–2.6 ms. The moderate `pause2` (1 run) returned W 1.898 s and D 1.000.
+
+### Source CPU
+
+| Arm | Calibrated CPU-s, idle (2 runs) | Idle time, s | Under load, 0.5 Gbit/s | Under load, 2 Gbit/s | Under load, unthrottled |
+|---|---:|---:|---:|---:|---:|
+| `full` | 2.26 | 12.07 | 7.19 | 4.00 | 3.03 |
+| `capture` | 4.42 | 3.89 | – | 1.97 | – |
+| `pgdelta` | 10.43 | 9.95 | 9.12 | 8.54 | 8.73 |
+| `v1proxy` | 5.84 | 2.90 | 6.12 | 5.51 | 6.10 |
+| `v1proxy_s1` | 4.90 | 5.40 | 5.92 | 5.46 | – |
+| v1 itself (`pgdelta_direct_inplace`) | 6.72 | 4.38 | – | – | – |
+| `burn4` | 8.21 | 2.08 | 6.23 (any link) | | |
+
+Under load is the window's VM-wide busy CPU, [t0, t1 + 10 s], over the settle's rate: approximate, as registered.
+- **Staged pgdelta uses 4.61 times `full`'s calibrated CPU-s** (10.43 over 2.26; L2 held). Under load the ratio is 1.27 at 0.5 Gbit/s and 2.13 at 2: there `full`'s window is longer, and its WAL sender streams the load's WAL through it (the sampler, below).
+- **v1 itself over `full` is 2.97** (6.72 over 2.26), against EXP-09's 5.3–6.0 over 1.6–1.9.
+- **The registered projection isn't made:** R2 doesn't track. Had it tracked, it would have multiplied `full`'s W_net, 0.000 s, by 2.8–3.75, and projected no measurable loss for v1, where the proxy measured 0.05–0.07 s.
+- **The sampler** (a mechanism; no verdict uses it), the cells' added CPU-s in the window over the settle's rate: `full`'s WAL sender 2.5–6.1 and the backends 0.6–2.8 more (it streams the load's WAL: 379–418 MB at 0.5 Gbit/s, recomputed from the run records); staged `pgdelta`'s `pg_basebackup` 2.8 and pgdelta 7.0–7.4, with pgbench 3.1–3.3 and the backends 2.5–2.8 less (the stall); `v1proxy`'s pgdelta 6.9–7.0, with pgbench about 1 less and the backends 0.6–1.0 less; `burn4`'s busy processes 6.3. No steal in any cell.
+
+### Flags and robustness views
+
+**The flags (A8, A9):**
+- ***Client wait* (A8)** fired on 58 runs on W and 28 on D, and flagged 14 cells: in the busy block `pgdelta` at every speed, `capture`, `v1proxy` at every speed, `v1proxy_s1` at 2 Gbit/s and both controls; warm `v1proxy`; in the moderate block `full` at both speeds and `v1proxy` at 2 Gbit/s. It flagged every cell of more than one run where W was measurable: the threads' added wait over a window, 0.1–2.2 s, is large next to the small W's measured here.
+- ***Fragile* (A9): yes.** Decisions 1 and 2 and R2 rest on cells flagged *client wait*: busy `pgdelta` and `v1proxy` at 0.5 and 2 Gbit/s, busy `v1proxy_s1` at 2 Gbit/s, and warm `v1proxy`. And one robustness view, flagged runs left out, empties those cells: it gives decision 1 "4. Proxy not judged", decision 2 "not judged" and R2 "not judged". The rows stand, as registered. The analysis's fragile line covers decisions 1 and 2 and R2. The HA caveat's cell (busy, unthrottled, `v1proxy`) and R1's `pgdelta` cells are flagged too, so by A9 those rows are fragile as well.
+- **For staged pgdelta the flag comes from elsewhere in the window, not from the stall.** Its threads' added wait over the window was 1.3–1.7 times its W, but in the worst second they waited less than in the settle (−0.10 to −0.14 times that second's lost time), as the capture alone did (recomputed from exp12-runs.csv). The stall's second isn't the client's.
+- ***Near the line* (A9): no**, as the analysis prints. The margins (recomputed from exp12-cells.csv): at 0.5 Gbit/s `v1proxy`'s ΔW is 0.0511 against δ_W 0.05, inside ±0.25 δ, but its ΔD, 0.0507 against 0.03, is well outside; at 2 Gbit/s its ΔW, 0.0684, clears the band's edge by 0.006 s, and its ΔD, 0.0377, by 0.0002; unthrottled 0.0701 and 0.0419. A miss at a speed needs one number only, so each speed's miss rests on one outside the band. R2's bound ratios are far from 1.5.
+- ***Latency caveat* (A9): none.** It applies to an arm that meets O4. `v1proxy_s1`'s worst 5-s p99 was 1.15 and 1.32 times `full`'s at 0.5 and 2 Gbit/s, under the factor of 2. `v1proxy` misses, so the caveat doesn't apply, but its worst 5-s p99 was 9–12 times `full`'s (92–161 ms against 10–17).
+- ***Unsettled***: 1 run, the first warm one (above). No *checkpoint*, *steal*, *cache*, *client* or *autovacuum* flag; the clock flag doesn't fire.
+
+**The robustness views** (each registered view, busy block; the analysis's tables, and the paired view from exp12-cells.csv):
+
+| View | Staged `pgdelta`, ΔW at 0.5 / 2 Gbit/s | `v1proxy`, ΔW / ΔD at 0.5; at 2; unthrottled | `v1proxy_s1` | The rows |
+|---|---|---|---|---|
+| medians (the main view) | +1.265 / +1.346 | +0.051 / +0.051; +0.068 / +0.038; +0.070 / +0.042 | meets | decision 1: 2. R1; decision 2: Cap meets |
+| maxima | +1.335 / +1.370 | +0.076 / +0.066; +0.105 / +0.071; +0.103 / +0.059 | meets | the same |
+| paired with the same repeat's `full` | +1.267 / +1.347 | +0.052 / +0.051; +0.069 / +0.038; +0.070 / +0.042 | meets | the same |
+| D in 0.5-s buckets | as main | D: +0.079; +0.060; +0.048 | meets | the same |
+| D in 2-s buckets | as main | D: +0.005; +0.019; +0.021, under δ_D, so the miss rests on W | meets | the same |
+| W as the late count at L | +4.435 / +5.911 | W: +0.007; +0.115; +0.249 | meets | the same |
+| W as the late count at 2L | +4.022 / +5.554 | W: 0.000 at every speed, so the miss rests on D | meets | the same |
+| a 15-s tail | +1.265 / +1.346 | +0.051 / +0.051; +0.068 / +0.038; +0.071 / +0.042 | meets | the same |
+| flagged runs left out | no runs left | no runs left | no runs left at 2 Gbit/s | decision 1: 4. Proxy not judged; decision 2: not judged; R2: not judged |
+| the null with the unsettled settle put back | as main | as main | meets | the same |
+
+No view but the one that leaves flagged runs out moves a row. The proxy misses at both registered speeds in every other view, though on different numbers: in 2-s buckets only W misses, at 0.5 Gbit/s by 0.001 s, and as the late count at 2L only D does.
+
+### Drift against EXP-11 (A10) and capacity (A12)
+
+**A10 marks the session shifted,** on one of its three gates:
+
+| Gate | This session | EXP-11's range, with its tolerance | Held |
+|---|---:|---|---|
+| `full`'s idle time at 2 Gbit/s | 12.07 s | 9.76–10.84 s (±5% of 10.27–10.32) | **no** |
+| v1's calibrated CPU-s | 6.72 | 5.19–8.28 (±15% of 6.1–7.2) | yes |
+| The single-stream link test at 2 Gbit/s | 1.917 Gbit/s | 1.879–1.955 (±2% of 1.917) | yes |
+
+**The shifted gate is the copy's size, not a slower session.** The calibration's `full` sent 2,534 MB against EXP-11's 2,102 MB (hot, 2 Gbit/s), because loaddb, 401 MB at the trial's end, was in the copy. Per MB sent it took about the same time: 4.76 against 4.89 ms (recomputed from exp12-runs.csv and exp11-runs.csv). As registered, every comparison here is within the session, and the registered projection would have used EXP-09's numbers.
+
+**A12 is flagged:** this trial's C, 27,019 per second, was 10.9% below the smoke run's 30,316. The smoke run's later one-run measurements had already read 27,148 and 27,508 (its item 2). The trial kept the rates set before the sweep, as registered, so the busy load ran at 0.670 of this trial's C. A3 shows it was sustainable: `none` completed 1.0000 of its schedule.
+
+### loaddb's growth and the drift check
+
+**loaddb grew to 11.6 times its size** (E13 and smoke item 14 failed: 1059%, against at most 5%), from 4,224 pages to 48,968 (35 MB to 401 MB). From the trial's start to its end, `load_progress` grew from 32 to 44,775 pages (0.26 to 367 MB), while `pgbench_accounts` went from 3,637 to 3,638 pages and the indexes didn't change. As in the smoke run, the cause wasn't found, and the registered action, fillfactor 70, wasn't applied (smoke item 14, rule 8).
+
+**The drift check, fixed before the sweep's data was read, finds no drift in either load:**
+
+| Load | Earlier settles: median p50 / p99, ms | Later settles: median p50 / p99, ms | Later over earlier | Drift (p50 above 1.1, or p99 above 2) |
+|---|---|---|---|---|
+| busy | first busy repeat, 14 settles: 0.667 / 1.327 | the warm block, 10 settles: 0.650 / 1.222 | ×0.975 / ×0.921 | no |
+| moderate | first repeat, 6 settles: 0.581 / 0.861 | third repeat, 6 settles: 0.573 / 0.845 | ×0.985 / ×0.982 | no |
+
+So, as registered, the session stands, and smoke item 14's deviation is reported as it is. The settles' medians fell slightly. The owner had decided before the fetch (October 24, in chat): "Don't rerun now. Apply the committed drift check after the fetch, and propose a rerun with a load_progress fix only if it shows drift." It shows none, so no rerun is proposed.
+
+![EXP-12: does the load drift over the session?](../figures/exp12-drift.svg)
+
+How to read it: the busy load on the left (18,100 per second, 71 minutes) and the moderate load on the right (9,000 per second, 17 minutes), against minutes from each load's start. The top row is completions per minute against the schedule (dashed). The middle and bottom rows are p50 and p99 per minute: black for load-only minutes, with every copy's and control's window (t0 to t1 + 15 s, the orange bands) taken out, and grey in the bottom row for all minutes. The dots are the settles the check judged: blue the earlier ones, orange the later. Grey marks the warm-up; the dotted pink lines are the warm block's reads of the database. Completions hold flat; the judged settles' p99 ends lower than it starts; the per-minute p99 is about 10 ms in the first five minutes and rises again in the warm block's minutes.
+
+What the per-minute view shows (reported, not judged):
+- **Completions per second held at 18,006–18,161** over the busy load's whole minutes (71, 68 after its warm-up), and at 8,976–9,023 over the moderate load's (17, 14 after its warm-up).
+- **The busy load's load-only p99 was about 10 ms in its first five minutes,** the warm-up and the first controls, and 1.37 ms (median) over the busy block's 61 minutes, its largest 12.5 ms. The smoke run showed the same early 10 ms.
+- **In the warm block's 7 minutes the load-only p99 rose** (median 8.7 ms, largest 939 ms). The run records show why. Before each warm run's settle, the harness read the benchmark database and the snapshot once on the source (`run_exp04.py`'s `source_cache_step` with `warm=True`; the record's `source_untimed.cache`, policy `warm`). Each read took 0.88–2.40 s, the first, from evicted files, 2.40 s; the whole untimed step took 1.25–2.77 s and ended as the settle started. Those reads are outside every window, so the per-minute view counts them as load-only time. pgbench's progress lines put a one-second rise in mean latency, to 4.1–7.9 ms, at each of the nine later reads, and the first read's stall at up to 904 ms (recomputed from the run records and the progress lines). Only the first read's backlog reached into a settle, which its gate flagged *unsettled* (above); in the other nine warm settles no second's mean latency passed 1.1 ms, and their p99 was 1.18–1.27 ms. The moderate load's p99 stayed at 0.85–1.08 ms.
+- **The copies grew with loaddb, and the loss didn't** (recomputed from the run records). `full`'s copy at 2 Gbit/s grew from 2,326 to 2,530 MB across the busy block's five repeats, and its time from 11.30 to 12.26 s; at 0.5 Gbit/s from 2,594 to 2,893 MB and 44.3 to 49.5 s. S grew from 2.24 to 2.51 GB, and staged pgdelta's bytes on the wire from 143 to 414 MB. The proxy's snapshot was fixed, so it sent 29.5 MB throughout. The capture's and staged pgdelta's W show no trend over the repeats (at 2 Gbit/s, by repeat: 1.20, 1.35, 1.24, 1.13, 1.18 s and 1.37, 1.37, 1.22, 1.35, 1.24 s), and `full`'s W stayed unmeasurable.
+
+### Order effects
+
+By the registered test, runs that follow a staged arm against the others: **no difference** over 0.05 s in W or 0.03 in D. The order of the blocks was fixed (busy, warm, moderate, calibration), so load level, loaddb's size and time in the session are confounded across blocks: the warm block ran with loaddb larger than in most of the busy block, the moderate block larger still, and the calibration block last. Within a block, each repeat visited the speeds in a shuffled order and ran the arms at each speed in a shuffled order.
+
+### What the results depend on
+
+The limitations listed before running all apply. The ones a result here depends on:
+- **No live v1.** The proxy reads a stopped snapshot on the live source's disks, in backup mode on the live server. It doesn't stream the WAL the load writes during its copy (about 8.5 MB per second at R_busy: `full` streamed 379–418 MB over its 44–49-s copies at 0.5 Gbit/s), doesn't read files while they are written, and didn't send loaddb's changes, which grew to about 420 MB here (v1 itself sent 449 MB in the calibration block, the proxy 29.5). Every v1 result here is by proxy; v1's own arm comes with T8.
+- **The client shares the source's CPU.** Every deciding cell is flagged *client wait*. pgbench's threads waited in the run queue 8.5–42 times the proxy's W over its windows. Leaving flagged runs out gives decision 1 "4. Proxy not judged" and decision 2 "not judged": the analysis's *fragile*. The rows stand, as registered, but how much of the proxy's loss an application on another host would see isn't known.
+- **One synthetic load,** three-row update transactions on a database that started at 35 MB, synchronous commits, no read I/O, at two levels set on this hardware. The proxy's verdict differs between them: it misses at 0.67 of this trial's C and meets at 0.33.
+- **2.1 GB in RAM, one VM pair, local NVMe in RAID 0, ext4 in ordered mode, 0.1 ms round-trip time.** The data, the WAL and staged pgdelta's S share one array. A separate WAL disk or a persistent disk would change staged pgdelta's stall and the proxy's I/O (T9); larger machines leave more spare CPU for 4 workers.
+- **The session shifted against EXP-11** on `full`'s idle time (A10), a larger copy, and **this trial's C was 10.9% below the smoke run's** (A12). Every comparison is within the session.
+- **loaddb grew to 11.6 times its size.** The registered drift check found no drift in the load's latency, but the full copies and S grew by up to 0.3 GB over the busy block, so `full`'s and staged pgdelta's times rose across repeats, and the warm and moderate blocks copied more than the busy block's early repeats.
+- **The order busy, warm, moderate, calibration is fixed,** so load level and time in the session are confounded.
+- **O4's definitions, tolerances and L are judgments** (change 3). With `full`'s loss unmeasurable, the bar is "no measurable loss, within δ", and δ sat at its fixed floors (0.05 s, 0.03).
+- **Short refreshes in 1-s buckets.** The proxy's 3.6-s copy is three or four buckets; in 2-s buckets its D_net falls under δ_D, and its miss then rests on W alone.
+- **Fast checkpoints, clear text and no CPU limit on the refresh,** for every arm.
+
+## Verdict on each prediction
+
+Each verdict is the registered analysis's, in the order of judgment. Where its reading looks wrong, the note says so beside it; the verdict isn't changed.
+
+### The ledger's prediction and rules (registered)
+
+| ID | Prediction | The analysis's verdict | Numbers and notes |
+|---|---|---|---|
+| L1 | "the slowdown tracks source CPU" | **Failed** (R2: doesn't track) | – |
+| L2 | "pgdelta uses about 4 times the full copy's source CPU" | **Held** | 4.61 (10.43 over 2.26 calibrated CPU-s), inside [3, 5]. Under load, beside: 1.27 at 0.5 Gbit/s, 2.13 at 2 |
+| L3 | "so its total throughput loss is 2-4 times the full copy's at 2 Gbit/s" | **Failed, high** | `full`'s W isn't measurable; staged pgdelta's 1.346 s over `full`'s bound puts the ratio at 1,625 or more |
+| L4 | "and still higher at 0.5 Gbit/s" | **Not judged** | `full`'s W is measurable at neither speed. The lower bounds: 161 at 0.5 Gbit/s, 1,625 at 2 |
+| L5 | "Every output is correct." | **Held** | 117 runs, none wrong; 45 live outputs passed every G4 check |
+
+| Rule | The analysis's verdict | Numbers and notes |
+|---|---|---|
+| R1 | **Fires:** "staged pgdelta: source CPU is a blocker" | Staged pgdelta wins on time at 0.5 and 2 Gbit/s under load (14.99 against 47.19 s; 11.18 against 11.92) and loses more there: ΔW +1.265 and +1.346 s against δ_W 0.05. Its T5 consequence applies (change 4). Fragile: its cells are flagged *client wait*, though the stall's second isn't the client's (Flags). **The wording is R1's, as registered; R2 and A5 show the loss doesn't follow CPU-seconds and is mostly the capture's flush** |
+| R2 | **Doesn't track** | Judged at both speeds with `full`'s bound: the rate ratio is at least 35 at 0.5 Gbit/s and 353 at 2, far outside [1/1.5, 1.5]. As registered: "the T5/T8 order waits for v1's own arm", unless R1 has moved T5, which it has |
+| R3 | **Doesn't fire** | No wrong output of `pgdelta`, `v1proxy`, `v1proxy_s1` or v1 itself; none unverified |
+
+### Decision 1: the T5/T8 order (busy block, 0.5 and 2 Gbit/s; rows in order)
+
+| Row | Applies | Notes |
+|---|---|---|
+| 1. Stop | no | R3 doesn't fire |
+| 2. R1 | **yes** | Slowdown is reported next to time, and T5 moves ahead of T8 (registered; change 4) |
+| 3. R2 | no | – |
+| 4. Proxy not judged | no | A2, A3, A4 and the clock gate don't fire; no `v1proxy` or `full` cell is short |
+| 5. No measurable slowdown | no | `v1proxy`'s W and D are measurable at both speeds |
+| 6. v1 meets | no | – |
+| 7. v1 misses | (beside row 2) | `v1proxy` misses at 0.5 and 2 Gbit/s, on W and D; warm reading **7a, hashing**: warm `v1proxy` also misses against warm `full` |
+
+**Decision 1: 2. R1. T5 moves ahead of T8.** The proxy's reading beside it, 7a, moves T5 ahead too, so the two agree. Fragile: with flagged runs left out, row 4 (T5 stays behind T8).
+
+### Decision 2: a cap on v1's source workers (rows in order)
+
+| Row | Applies | Notes |
+|---|---|---|
+| No cap | no | `v1proxy` misses at both speeds |
+| Cap fails | no | `v1proxy_s1` meets at both |
+| Cap meets | **yes** | `v1proxy` misses at 0.5 and 2 Gbit/s; `v1proxy_s1` meets at both |
+| Cap not judged | no | `v1proxy_s1` passed A4, with 5 runs per cell |
+
+**Decision 2: Cap meets.** "v1 at 4 source workers slows a busy primary more than `pg_basebackup`; one source core doesn't. v1 needs a source worker cap on busy primaries. T10b moves ahead of T8, as 'source workers by load', and D50 and D81 get a basis." Fragile: not judged with flagged runs left out.
+
+### Beside the decisions
+
+| Row | The analysis's verdict | Notes |
+|---|---|---|
+| O4 for staged pgdelta (D04, D10p) | **Misses O4 where it wins on time**; A5: "Most of staged pgdelta's slowdown is its capture, which v1 removes" | 1.197 of 1.265, 1.346 and 1.254 s |
+| HA caveat | **Fires** | Unthrottled, `v1proxy` W_net 0.070 s and D_net 0.042, against `full`'s 0.000 and 0.000 (ΔW +0.070 against δ 0.05; ΔD +0.042 against 0.03). Its cell is flagged *client wait*, so by A9 it is fragile, which the analysis doesn't print |
+| Load | **The moderate block differs** | Moderate, at 2 Gbit/s: "6. v1 meets", decision 2 "No cap"; busy: "7. v1 misses", "Cap meets". Both are stated; the busy block decides |
+| Warm source | **The same verdict** | Warm and cold `v1proxy` both miss at 2 Gbit/s |
+
+### Added predictions
+
+| ID | Prediction (short) | The analysis's verdict | Numbers and notes |
+|---|---|---|---|
+| E1 | C 10,000–40,000; busy CPU 40–75% at R_busy, 20–45% at R_mod | **Held** | C 27,019; 0.628 (the smoke run's, as registered) and 0.369. Above 50%, which selects the upper ranges of E4, E7, E9, E14 and E16 |
+| E2 | The null | **Failed, in one clause** | `none` completed 1.0000 of its schedule in all 8 windows; W's null median 0.002–0.008 s and 95th percentile 0.012–0.021 s at T = 15–50 (at most 0.02 and 0.05); 0.0028 s for a median of 5; δ_W the floor everywhere; the gate within 30 s in 100% of runs. D's null median at T = 15 was 0.0006, below 0.005–0.03 |
+| E3 | `pause2`: W 1.6–2.0 s at 0.6; D at least 0.95; late count 4–6 s; the gap matches | **Held** | W 1.908 and 1.919 s (1.898 at 0.33); D 1.000; late count 5.45 and 5.02 s (2.79 at 0.33) |
+| E4 | `burn4` above 50%: W_net at most 0.2 s, D_net at most 0.15, window p99 2–30 times the settle's | **Failed** | W_net 0.233 s; D_net 0.125 (inside); window p99 41 and 156 times the settle's |
+| E5 | Calibrated CPU-s per arm | **Failed, for one arm** | `v1proxy_s1` 4.90, below 5.0–7.0. Inside: `full` 2.26, `capture` 4.42, `pgdelta` 10.43, `v1proxy` 5.84, v1 itself 6.72 (within 20% of `v1proxy`), `burn4` 8.21; v1 over `full` 2.97, `pgdelta` over `full` 4.61 |
+| E6 | Times under load, and against idle | **Failed** | Outside: `full` 47.19 s at 0.5 Gbit/s (38–42) and 11.92 at 2 (10.3–11.3), larger copies (loaddb); staged `pgdelta` 14.99 at 0.5 (8.3–11.5); `v1proxy_s1` 7.55 and 7.25 (4.5–6.5); the capture 37.5% over idle (0–35%). Inside: `full` 4.29 unthrottled, the capture 5.35, `pgdelta` 11.18 and 10.26, `v1proxy` 3.61–3.69, `bracket` 0.21; `full` −1.3% against idle, the others +12% to +34% |
+| E7 | Net medians, above 50% | **Failed** | `full` unthrottled was not measurable (0.02–0.3 s and 0.02–0.15 predicted), and `v1proxy`'s window p99 was 73–124 times the null's (3–30). Inside: `full` at 0.5 and 2, `bracket`, the capture (1.197 s, 0.955), `pgdelta` (1.254–1.346 s, 0.958–0.968), `v1proxy` (0.051–0.070 s, 0.038–0.051), `v1proxy_s1` |
+| E8 | The registered verdicts | **Held** | L1 doesn't track, L2 holds, L3 fails high, L4 not judged, L5 holds, R1 fires, R2 doesn't track |
+| E9 | Decision 1 row 2; above 50%: "v1 misses" on D, 7a, "Cap meets"; the moderate block meets; the warm block the same | **Failed** | Every part held but one: the proxy missed on W as well as D. The analysis reads "on D" as "on D alone"; read as "at least on D", E9 would hold. The strict reading doesn't favour the prediction, and it is kept |
+| E10 | Every output passes; `full`'s cut within 0.3 s before its end point; staged pgdelta's staleness 4–8 s | **Held, held, failed** | Cut 0.001–0.072 s before the end point. Staleness 6.42–13.51 s in the busy block, 5 of 15 above 8 s (the 0.5 Gbit/s runs and later, larger S). The analysis's list also holds the two calibration outputs (234 and 332 s), whose staleness means nothing without load; the clause fails on the busy outputs alone |
+| E11 | At least half of pgdelta's W from its capture | **Held** | 1.197 of 1.254–1.346 s |
+| E12 | Wire bytes | **Failed** | `full` 2,744 MB at 0.5 Gbit/s (2.15–2.45 GB): loaddb's growth and the 379–418 MB of WAL it streamed; `v1proxy` 29.5 MB (27.6–29.2); staged `pgdelta` 262–307 MB (60–130), rising from 143 to 414 MB with `load_progress` over the busy block |
+| E13 | loaddb grows at most 5%; no failures; no unasked checkpoint; no autovacuum on loaddb | **Failed, in one clause** | Growth 1059%. No pgbench failure, no checkpoint in a window but an arm's own, no autovacuum on loaddb |
+| E14 | A6 above 50%: "cores", or "CPU-seconds" where `v1proxy`'s W_net is near E7's low end, by `v1proxy_s1`'s bound | **Failed** | A6 read "CPU-seconds is an adequate unit", but by `burn4`'s rate, not by the path E14 named: `v1proxy_s1`'s rate is far below half of `v1proxy`'s, and `v1proxy`'s W_net (0.051 and 0.069 s) is above the analysis's 0.02–0.05 reading of "near the low end" |
+| E15 | Warm `v1proxy`: W_net at most cold + 0.02 s, D_net within ±0.03; 7a | **Held** | Warm 0.087 s and 0.067 against cold 0.069 s and 0.038, inside by 0.0015 s and 0.0004 (recomputed from exp12-cells.csv); the cause 7a |
+| E16 | Above 50%, "client wait" flags at most `burn4`'s and `v1proxy`'s cells | **Failed** | It flagged 14 cells, `pgdelta`, the capture, `v1proxy_s1` at 2 Gbit/s, `pause2` and moderate `full` among them |
+
+### Added rules
+
+| ID | The analysis's verdict | Numbers and notes |
+|---|---|---|
+| A1 | **Doesn't fire** | No wrong `full` output; the coverage control failed (v) in 41 of 41; the negative controls ran in the smoke run |
+| A2 | **Doesn't fire**, in either block | `pause2` above |
+| A3 | **Doesn't fire**, in either block | `none` 1.0000; largest backlog 6 and 2 |
+| A4 | **Passes:** `v1proxy`, `v1proxy_s1` and the warm runs | References: v1 itself 6.72 and `v1proxy` / 1.06 = 5.51 CPU-s; v1 itself sent 449 MB to the proxy's 29.5, so part of the gap may be its larger send |
+| A5 | **"Most of staged pgdelta's slowdown is its capture, which v1 removes"** | 1.197 of 1.265, 1.346 and 1.254 s |
+| A6 | **"CPU-seconds is an adequate unit at this load"** | The rule's "otherwise": `v1proxy_s1`'s loss per CPU-s (0.0001–0.0002 s) is at most half of `v1proxy`'s (0.0088–0.0118), but `burn4`'s (0.0284) isn't. **This verdict looks wrong as a reading of its own numbers.** Per calibrated CPU-s, one worker lost about 1/60 to 1/70 of what four did, at its bound (computed here from exp12-cells.csv), and `burn4`, four processes busy at once, lost 2.4–3.2 times as much per CPU-s as `v1proxy`. Neither comparison shows loss following CPU-seconds; both fit loss following how many cores run at once. The rule's text sends a `burn4` that costs more per CPU-s than the proxy to "CPU-seconds", a case it didn't anticipate. As registered, the verdict stands |
+| A7 | **Always** | Time is beside every slowdown number above |
+| A8 | **Flags:** *client wait* on 58 runs (W) and 28 (D), *unsettled* on 1; the clock gate doesn't fire | 14 cells flagged |
+| A9 | **Fragile: yes; near the line: no; latency caveat: none** | Fragile by the flagged cells and by leaving flagged runs out |
+| A10 | **The session is shifted** | On `full`'s idle time (12.07 s), a 20% larger copy; v1's CPU-s and the link test held |
+| A11 | **Nothing was rerun** | Every run is read as recorded |
+| A12 | **Flagged** | C 10.9% below the smoke run's |
+| A13 | **Doesn't fire** | No run failed (a) or (b) |
+
+## What the registered rules say
+
+1. **G4 holds and R3 doesn't fire:** every output taken from the live source under load is correct, and speed work goes on.
+2. **Decision 1 takes row 2, R1: T5 moves ahead of T8,** and slowdown is reported next to time (rule 3). Beside it the proxy reads "7. v1 misses", with the warm reading 7a, hashing, which moves T5 ahead too; the two agree, so no override is needed. R2 doesn't track, so the registered projection isn't made, and the note's "waits for v1's own arm" gives way to R1 (change 4). The row is fragile: with flagged runs left out it would be "4. Proxy not judged".
+3. **Decision 2 is "Cap meets": T10b moves ahead of T8, as "source workers by load".** v1 at 4 source workers slows a busy primary more than `pg_basebackup`; one source core doesn't. So v1 needs a source worker cap on busy primaries, and D50 and D81 get a basis. The design note applies: pgdelta's source pool should size itself from its CPU quota. The row is fragile: not judged with flagged runs left out.
+4. **The HA caveat fires.** EXP-11's qualifier becomes: "v1 is faster than the released copiers tested here (`pg_basebackup` with fsync or syncfs, `pg_probackup catchup -j 4` and `-j 8`) at 2.1 GB on these VMs, and it slows a busy primary more than `pg_basebackup` does": unthrottled, by proxy at 4 source workers and 18,100 transactions per second, 0.070 s of work lost and a worst second 4.2% short, against `pg_basebackup`'s nothing measurable (δ 0.05 s and 0.03). It is fragile by A9.
+5. **The moderate block's verdict differs, and the busy block decides.** At 30% of capacity (0.33 of this trial's C), v1 at 4 source workers meets the bar; at 60% (0.67) it doesn't. A cap then depends on the load, which is T10b's question.
+6. **The warm block gives the same verdict** and names the cause of the proxy's miss: hashing (7a).
+7. **O4 for staged pgdelta, on D04 and D10p: it misses where it wins on time** (0.5 and 2 Gbit/s), recorded in R1's words as "staged pgdelta: source CPU is a blocker", and by A5, "Most of staged pgdelta's slowdown is its capture, which v1 removes". R1's wording names CPU; R2 and A5 show the loss doesn't follow CPU-seconds and is mostly the capture's flush.
+8. **A6: "CPU-seconds is an adequate unit at this load".** Read as registered, D81's budget can be stated in CPU-seconds. Beside it: the numbers A6 compares point to cores (above), and decision 2's cap is in workers. T10b, now ahead of T8, measures the worker count directly.
+9. **A10 marks the session shifted and A12 flags C;** every comparison here is within the session. A11: nothing was rerun.
+
+## Conclusions
+
+1. **Every copy taken from a busy source was correct.** 41 outputs of `pg_basebackup` and staged pgdelta, taken while 18,100 or 9,000 transactions per second committed, and 4 more from the idle source, passed `pg_verifybackup`, recovered and started, and held the load's balance invariant, a consistent cut, coverage, the row counts, the schema and `pg_amcheck`, with 1% of the load's transactions rolled back and none of their effects present. So G4 holds for these two tools, on this load. It says nothing yet about v1's own live read (T8).
+2. **One `pg_basebackup` stream costs a busy primary nothing measurable** at 0.5 or 2 Gbit/s or unthrottled. So O4's bar, on this load and hardware, is "no measurable loss, within δ".
+3. **Staged pgdelta fails O4 by a wide margin, and most of it is its capture.** It loses 1.25–1.35 s of the load's work and stalls it almost completely for one second, at every speed; the capture alone loses 1.20 s. The stall falls in the capture's flush of S on the array that holds the WAL; why commits stall there isn't shown. v1 removes the capture. This adds to D10p's grade X.
+4. **By proxy, v1's source side at 4 workers slows a busy primary more than `pg_basebackup`, and at 1 worker it doesn't.** At 0.67 of this trial's capacity, 4 workers cost 0.05–0.07 s of work and a worst second 4–5% short, at every speed, and raised the load's p95 latency to 69–132 ms during a 3.6-s copy; one worker's loss was far inside δ, in twice the time (7.25–7.55 s, still far faster than a full copy at 0.5 and 2 Gbit/s). At 0.33 of capacity, 4 workers met the bar. With a warm cache the miss grew, so by row 7a its cause is the hashing, not the cold read. These rest on two caveats stated with them: no live v1 (the proxy reads a stopped snapshot, streams no WAL, and sent 29.5 MB where v1 itself, reading the source after the load, sent 449 MB), and the client sharing the source's CPU, so that every deciding cell is flagged and the rows are fragile.
+5. **So, by the registered rules, T5 and T10b both move ahead of T8,** EXP-11's HA qualifier gains "and it slows a busy primary more than `pg_basebackup` does", and v1 needs a source worker cap on busy primaries, sized by load (T10b).
+6. **What this doesn't settle:** v1's own slowdown on a live source (T8); how much of the proxy's small loss an application on another host would see; other loads, a larger working set and TPROC-C (T10b); data beyond RAM and persistent disks (T9); and whether loss follows CPU-seconds or cores at once, where A6's registered verdict ("CPU-seconds") and its own numbers (cores) disagree.
+7. **The session held steady where it was checked, and grew where it wasn't designed to.** loaddb grew to 11.6 times its size, as it grew in the smoke run, so the full copies and S grew by up to 0.3 GB over the busy block and A10's shift is a larger copy, not a slower session. The registered drift check found no drift in the load's latency, so, as the owner decided, nothing is rerun.
