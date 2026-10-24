@@ -7,6 +7,7 @@ stubs of test_exp04_network and test_exp11_core, the emulated WAN and the TCP se
 the link test, the TLS material and one TLS 1.3 handshake run for real over loopback.
 """
 
+import contextlib
 import copy
 import csv
 import io
@@ -19,6 +20,7 @@ import socket
 import ssl
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -138,6 +140,8 @@ class WanFakes:
         self.net_qlen = 0
         self.minrtt_extra = 0.1
         self.qdisc_reads = {'source': 0, 'dest': 0}
+        self.blast_seconds = []  # each link test's sender seconds (None: --link-test-seconds)
+        self.blast_whole_seconds = []  # the receiver's whole seconds for each link test, in turn (then 6)
 
     def wan(self, action, condition=None):
         self.events.append(('wan', action, None if condition is None else condition['label']))
@@ -189,13 +193,15 @@ class WanFakes:
     def band_counters(self):
         return {'source': {'plain': 1, 'delayed': 2}, 'dest': {'plain': 1, 'delayed': 2}}
 
-    def blast(self, direction, streams=1, *, listen=None, connect=None):
+    def blast(self, direction, streams=1, *, listen=None, connect=None, seconds=None):
         self.events.append(('blast', direction, streams, listen, connect))
+        self.blast_seconds.append(seconds)
         rate = round(min(1.92, 2.6 * streams / max(self.applied['rtt_ms'], 1)) if self.applied else 1.92, 4)
+        whole = self.blast_whole_seconds.pop(0) if self.blast_whole_seconds else 6
         return {'sender': {'connect_s': 0.0002 + (self.applied or {}).get('rtt_ms', 0) / 1000,
                            'per_stream_connect_s': [0.06] * streams},
                 'receiver': {'gbit': rate, 'steady_gbit': rate, 'steady_last3_gbit': rate,
-                             'per_second_gbit': [rate] * 6}}
+                             'steady_last3_seconds': list(range(3, whole))[-3:], 'per_second_gbit': [rate] * whole}}
 
     def ssh_probe(self):
         self.events.append('ssh_probe')
@@ -574,33 +580,176 @@ class AgentProcesses(unittest.TestCase):
         self.assertEqual(probe['last_seconds'], 1)
         self.assertGreater(probe['last_gbit'], 0)
 
-    @unittest.skipUnless(Path('/proc/self').exists() and shutil.which('ss'), 'needs Linux and ss')
+    @staticmethod
+    def fake_stunnel(tmp, log, *, marker=None, exit_code=None):
+        """A stand-in for stunnel: its "configuration" is the port it listens on; it writes the log and waits (or,
+        with exit_code, exits at once). With marker, it first writes that file, to show it was launched."""
+        fake = Path(tmp) / 'stunnel4'
+        lines = [f'#!{os.path.realpath(sys.executable)}', 'import socket, sys, time']
+        if marker:
+            lines.append(f'open({str(marker)!r}, "w").write("launched")')
+        if exit_code is not None:
+            lines.append(f'sys.exit({exit_code})')
+        lines += ['listener = socket.socket(); listener.bind(("127.0.0.1", int(sys.argv[1])))', 'listener.listen()',
+                  f'open({str(log)!r}, "w").write({STUNNEL_SERVER_LOG!r})', 'time.sleep(60)']
+        fake.write_text('\n'.join(lines) + '\n')
+        fake.chmod(0o755)
+        return fake
+
+    @staticmethod
+    def free_port():
+        probe = socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        return port
+
+    @staticmethod
+    def listening_here():
+        """agent.listening reads `ss`, which only Linux has: elsewhere a connect to the port on localhost stands in
+        (the fake stunnel never accepts, so the probe's connection only waits in its backlog)."""
+        if Path('/proc/self').exists() and shutil.which('ss'):
+            return contextlib.nullcontext()
+
+        def connects(port):
+            try:
+                socket.create_connection(('127.0.0.1', port), timeout=1).close()
+                return True
+            except OSError:
+                return False
+        return mock.patch.object(agent, 'listening', connects)
+
     def test_stunnel_start_waits_for_its_listener_and_stop_reads_its_log(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        # Run in this process, the fake stunnel is this process's child: once stopped it is a zombie until reaped,
+        # as /proc shows it. stop reaps it rather than waiting 10 s for it and sending SIGKILL to a zombie.
+        with tempfile.TemporaryDirectory() as tmp, self.listening_here():
             log = Path(tmp) / 'server.log'
-            fake = Path(tmp) / 'stunnel4'
-            # Stands in for stunnel: its "configuration" is the port it listens on; it writes the log and waits.
-            fake.write_text(f'#!{os.path.realpath(__import__("sys").executable)}\n'
-                            'import socket, sys, time\n'
-                            'listener = socket.socket(); listener.bind(("127.0.0.1", int(sys.argv[1])))\n'
-                            'listener.listen()\n'
-                            f'open({str(log)!r}, "w").write({STUNNEL_SERVER_LOG!r})\n'
-                            'time.sleep(60)\n')
-            fake.chmod(0o755)
-            probe = socket.socket()
-            probe.bind(('127.0.0.1', 0))
-            port = probe.getsockname()[1]
-            probe.close()
+            fake = self.fake_stunnel(tmp, log)
+            port = self.free_port()
             started = agent.cmd_stunnel(Namespace(action='start', name='server', dir=tmp, config=str(port), port=port,
                                                   log=str(log), stunnel=str(fake), strace_log=None))
+            began = time.monotonic()
             stopped = agent.cmd_stunnel(Namespace(action='stop', name='server', dir=tmp, log=str(log)))
+            self.assertLess(time.monotonic() - began, 5)
+            self.assertFalse(stopped['killed'])
             self.assertEqual(stopped['pid'], started['pid'])
+            with self.assertRaises(ProcessLookupError):  # reaped: no zombie left (and on Linux no /proc entry)
+                os.kill(started['pid'], 0)
             self.assertFalse(Path(f'/proc/{started["pid"]}').exists())
             self.assertEqual(stopped['log']['tls_version'], 'TLSv1.3')
             with self.assertRaises(SystemExit):  # nothing listens on this port: refused after the timeout
                 with mock.patch.object(agent, 'STUNNEL_START_TIMEOUT', 1):
                     agent.cmd_stunnel(Namespace(action='start', name='server', dir=tmp, config=str(port), port=1,
                                                 log=str(log), stunnel=str(fake), strace_log=None))
+
+    def test_stunnel_start_refuses_a_port_something_already_listens_on(self):
+        # A stunnel an interrupted run left keeps its port, with an earlier session's CA: no new one starts beside it.
+        with tempfile.TemporaryDirectory() as tmp, self.listening_here():
+            log, marker = Path(tmp) / 'server.log', Path(tmp) / 'launched'
+            fake = self.fake_stunnel(tmp, log, marker=marker)
+            stale = socket.socket()
+            stale.bind(('127.0.0.1', 0))
+            stale.listen()
+            self.addCleanup(stale.close)
+            port = stale.getsockname()[1]
+            with self.assertRaises(SystemExit) as caught:
+                agent.cmd_stunnel(Namespace(action='start', name='server', dir=tmp, config=str(port), port=port,
+                                            log=str(log), stunnel=str(fake), strace_log=None))
+            self.assertIn('already listens', str(caught.exception))
+            self.assertFalse(marker.exists())
+
+    def test_stunnel_start_fails_when_its_own_process_has_exited(self):
+        # Something else listens on the port by the time it is checked, but this stunnel has exited (EADDRINUSE):
+        # its start fails rather than reporting the dead pid.
+        with tempfile.TemporaryDirectory() as tmp:
+            log, marker = Path(tmp) / 'server.log', Path(tmp) / 'launched'
+            fake = self.fake_stunnel(tmp, log, marker=marker, exit_code=1)
+            calls = []
+
+            def listening(port):
+                # Free before the launch; then "listening" once the fake has run (and exited).
+                calls.append(port)
+                if len(calls) == 1:
+                    return False
+                deadline = time.monotonic() + 5
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                time.sleep(0.3)
+                return True
+
+            with mock.patch.object(agent, 'listening', listening), \
+                    mock.patch.object(agent, 'STUNNEL_START_TIMEOUT', 5), self.assertRaises(SystemExit) as caught:
+                agent.cmd_stunnel(Namespace(action='start', name='server', dir=tmp, config='1', port=1,
+                                            log=str(log), stunnel=str(fake), strace_log=None))
+            self.assertIn('exit 1', str(caught.exception))
+
+    def test_stunnel_under_strace_is_stopped_only_at_setsockopt(self):
+        # strace without --seccomp-bpf stops stunnel at every system call, which slows its read and write loop.
+        process = mock.Mock(pid=4321)
+        process.poll.return_value = None
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(agent.subprocess, 'Popen', return_value=process) as popen, \
+                mock.patch.object(agent, 'listening', side_effect=[False, True]):
+            started = agent.cmd_stunnel(Namespace(action='start', name='server', dir=tmp, config='s.conf', port=7443,
+                                                  log=f'{tmp}/s.log', stunnel='/usr/bin/stunnel4',
+                                                  strace_log=f'{tmp}/s.strace'))
+        argv = popen.call_args.args[0]
+        self.assertEqual(argv, started['argv'])
+        self.assertEqual(argv[:6], ['strace', '-f', '--seccomp-bpf', '-tt', '-e', 'trace=setsockopt'])
+        self.assertEqual(argv[-2:], ['/usr/bin/stunnel4', 's.conf'])
+
+    def test_a_stopped_sampler_reports_its_own_final_record_not_an_earlier_ones(self):
+        # Every arm of a visit used to share one directory: an earlier arm's final record made stop return at once,
+        # before this sampler's reading after the clock, with that arm's counts.
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, agent.NET_SAMPLER_FILES['final']).write_text(json.dumps({'samples': 999, 'pid': 1}))
+            started = agent.cmd_net_sampler(Namespace(action='start', out=tmp, peer=None, exclude_port=[],
+                                                      qdisc_iface=None, interval=0.05))
+            self.assertFalse(Path(tmp, agent.NET_SAMPLER_FILES['final']).exists())
+            time.sleep(0.3)
+            stopped = agent.cmd_net_sampler(Namespace(action='stop', out=tmp))
+        self.assertEqual(stopped['final']['pid'], started['pid'])
+        self.assertNotEqual(stopped['final']['samples'], 999)
+        self.assertEqual(stopped['samples'], stopped['final']['samples'])
+
+    def test_stale_samplers_and_stunnels_are_found_and_stopped(self):
+        ps = ('  101 python3 /home/bench/pg-delta-backup/experiments/network/agent.py net-sampler run --out /data/exp04/'
+              'logs/00-hot/r1-2g-0ms-default-net-sampler-run-full --interval 0.5\n'
+              '  102 /usr/bin/stunnel4 /data/exp04/logs/00-hot/r2-2g-0ms-default-stunnel-client.conf\n'
+              '  103 strace -f --seccomp-bpf -tt -e trace=setsockopt -o /r/x-stunnel-server.strace /usr/bin/stunnel4 '
+              '/r/logs/00-hot/dest/2g-0ms-default-link-test-stunnel-server.conf\n'
+              '  104 python3 /home/bench/pg-delta-backup/experiments/network/agent.py net-sampler stop --out /x\n'
+              '  105 vim /r/logs/stunnel-server.conf\n'
+              '  106 python3 /home/bench/pg-delta-backup/experiments/network/agent.py stale-processes --kill\n')
+        found = agent.stale_processes(ps, own_pid=106)
+        self.assertEqual([(item['pid'], item['what']) for item in found],
+                         [(101, 'net-sampler'), (102, 'stunnel'), (103, 'stunnel')])
+        # --kill stops each one found (here one real sampler, the only process ps is made to show).
+        with tempfile.TemporaryDirectory() as tmp:
+            sampler = subprocess.Popen([sys.executable, str(Path(agent.__file__)), 'net-sampler', 'run', '--out', tmp,
+                                        '--interval', '0.05'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(lambda: sampler.poll() is None and sampler.kill())
+            line = f'{sampler.pid} {sys.executable} {agent.__file__} net-sampler run --out {tmp} --interval 0.05\n'
+            with mock.patch.object(agent, 'text_of', return_value=line):
+                result = agent.cmd_stale_processes(Namespace(kill=True))
+        self.assertEqual([(item['pid'], item['what'], item['killed']) for item in result['found']],
+                         [(sampler.pid, 'net-sampler', False)])
+        self.assertIsNotNone(sampler.poll())
+
+    def test_run_stops_a_command_at_its_timeout(self):
+        # A15: a run that outlasts its bound is a tool failure; the agent stops it there, on the source too.
+        with tempfile.TemporaryDirectory() as tmp:
+            began = time.monotonic()
+            result = agent.cmd_run(Namespace(log=f'{tmp}/x.log', cwd=None, env=None, gnu_time=None, tee=False,
+                                             timeout=0.3, argv=['--', sys.executable, '-c',
+                                                                'import time; time.sleep(30)']))
+            self.assertLess(time.monotonic() - began, 10)
+            self.assertTrue(result['timed_out'])
+            self.assertNotEqual(result['exit_code'], 0)
+            self.assertEqual(result['timeout_s'], 0.3)
+            quick = agent.cmd_run(Namespace(log=f'{tmp}/y.log', cwd=None, env=None, gnu_time=None, tee=False,
+                                            timeout=30, argv=['--', 'true']))
+            self.assertEqual((quick['exit_code'], quick['timed_out']), (0, False))
 
     def test_tls_material_needs_openssl(self):
         with mock.patch.object(agent.subprocess, 'run', return_value=mock.Mock(returncode=1, stderr='no')), \
@@ -955,6 +1104,80 @@ class Visits(Clocked13):
         self.assertNotIn('ssh_probe', orchestrator.events)
         self.assertEqual(len(trial['visits']), 2)
 
+    def test_the_stunnel_link_test_sends_longer_and_needs_3_steady_seconds(self):
+        # The sender's seconds start at its connect to the source's stunnel on localhost; its first byte reaches dest
+        # about 2.5 r later. It sends ceil(3 r) more seconds (at least 1), so the receiver keeps 3 whole seconds after
+        # its 3 s warmup; a test that still has fewer fails its probe rather than giving a rate on 2.
+        self.assertEqual([measure.stunnel_link_test_extra_s(r) for r in (0, 20, 60, 120, 400)], [1, 1, 1, 1, 2])
+        orchestrator = self.orchestrator(extra_args=['--stunnel-link-test', '2:0:default,2:120:tuned'])
+        _, _, trial = self.visit(orchestrator, '2:120:tuned')
+        stunnel = [seconds for event, seconds in zip(
+            [event for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'blast'],
+            orchestrator.blast_seconds) if event[3] is not None]
+        self.assertEqual(stunnel, [7])  # --link-test-seconds 6, plus 1
+        first = trial['first_visit']['2:120:tuned']
+        self.assertEqual(first['stunnel_link_test']['steady_seconds'], [3, 4, 5])
+        self.assertTrue(first['stunnel_link_test']['steady_ok'])
+        # The direct tests keep --link-test-seconds.
+        self.assertEqual(set(orchestrator.blast_seconds) - {7}, {None})
+        orchestrator = self.orchestrator(extra_args=['--stunnel-link-test', '2:0:default'])
+        # The visit's own test (6 whole seconds), its 2 first-visit tests, then the stunnel test with 5 whole seconds:
+        # 2 after the warmup.
+        orchestrator.blast_whole_seconds = [6, 6, 6, 5]
+        _, link, trial = self.visit(orchestrator, '2:0:default')
+        test = trial['first_visit']['2:0:default']['stunnel_link_test']
+        self.assertIn('rests on 2 whole seconds', test['error'])
+        self.assertIn(('stunnel', 'stop'), orchestrator.events)  # the pair stopped all the same
+        # The visit's own link test is no probe: a short one is recorded, and the visit goes on.
+        orchestrator = self.orchestrator()
+        orchestrator.blast_whole_seconds = [5]
+        _, link, trial = self.visit(orchestrator, '2:60:default')
+        self.assertFalse(trial['visits'][0]['link_tests'][0]['steady_ok'])
+        self.assertEqual(trial['visits'][0]['link_tests'][0]['steady_seconds'], [3, 4])
+
+    def test_the_samplers_stop_when_the_tree_cannot_be_read_before_a_link_test(self):
+        orchestrator = self.orchestrator()
+        self.visit(orchestrator, '2:60:default')
+        orchestrator.events.clear()
+        real = orchestrator.wan
+
+        def wan(action, condition=None):
+            if action == 'show':
+                raise run_exp04.CommandError('tc failed')
+            return real(action, condition)
+
+        orchestrator.wan = wan
+        with self.assertRaises(run_exp04.CommandError):
+            orchestrator.link_test('source_to_dest', 8, qdisc=True)
+        kinds = [event[:2] for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'net_samplers']
+        self.assertEqual(kinds, [('net_samplers', 'start'), ('net_samplers', 'stop')])
+
+    def test_a_sampler_that_started_is_stopped_when_the_other_vm_s_fails(self):
+        # Both sides start at once; one failing used to leave the other running tc every 0.5 s for the session.
+        for failing in ('dest', 'source'):
+            with self.subTest(failing=failing):
+                orchestrator = self.orchestrator()
+                calls = []
+
+                def local_agent(*args, timeout=600):
+                    calls.append(('dest', args[:2]))
+                    if failing == 'dest' and args[:2] == ('net-sampler', 'start'):
+                        raise run_exp04.CommandError('dest agent net-sampler failed')
+                    return {'pid': 1}
+
+                def source_agent(*args, timeout=600):
+                    calls.append(('source', args[:2]))
+                    if failing == 'source' and args[:2] == ('net-sampler', 'start'):
+                        raise run_exp04.CommandError('source agent net-sampler failed')
+                    return {'pid': 2}
+
+                orchestrator.local_agent, orchestrator.source.agent = local_agent, source_agent
+                with self.assertRaises(run_exp04.CommandError):
+                    run_exp04.Orchestrator.start_net_samplers(orchestrator, 'run-full')
+                other = 'source' if failing == 'dest' else 'dest'
+                self.assertIn((other, ('net-sampler', 'stop')), calls)
+                self.assertNotIn((failing, ('net-sampler', 'stop')), calls)
+
     def test_the_default_anchors_rates_are_the_zero_delay_rates(self):
         orchestrator = self.orchestrator()
         trial = {'runs': []}
@@ -1036,6 +1259,13 @@ class Runs(Clocked13):
                           row['excluded_reason'], row['inferred'], row['netem_own_drops'], row['retrans_segs_source'],
                           row['minrtt_ms'], row['tbf_overlimits_source']),
                          ('2:60:default', 2.0, 60.0, 'default', True, None, False, 0, 3, 60.1, 7))
+
+    def test_each_arm_samples_into_its_own_directory(self):
+        # One directory per visit let an earlier arm's final record stand for a later arm's.
+        orchestrator = self.orchestrator()
+        for method in ('full', V1):
+            self.run_at(orchestrator, '2:60:default', method)
+            self.assertIn(('net_samplers', 'start', f'run-{method}'), orchestrator.events)
 
     def test_a_drifted_setting_is_reset_by_the_guard_and_one_that_wont_refuses_the_run(self):
         orchestrator = self.orchestrator()
@@ -1330,6 +1560,49 @@ class Invocation(Clocked13):
         self.assertFalse(run['teardown']['source']['tree_is_wan'])
         self.assertEqual(run['teardown']['dest']['qdiscs'][0]['kind'], 'mq')
         self.assertTrue(run['teardown']['tcp']['ok'])
+
+    def test_it_refuses_vms_that_do_not_have_debians_tcp_settings(self):
+        # An interrupted run can leave the tuned maxima: taken as the defaults, every default visit would run tuned.
+        with self.assertRaises(SystemExit) as caught:
+            with mock.patch.object(self.Executing, 'fake_network', lambda stub: (
+                    WanFakes.fake_network(stub),
+                    stub.kernel_tcp['source'].update({'net.ipv4.tcp_rmem': '4096\t131072\t134217728'}))):
+                self.execute()
+        message = str(caught.exception)
+        self.assertIn("source: net.ipv4.tcp_rmem is '4096\\t131072\\t134217728', not Debian's '4096 131072 6291456' "
+                      '(a tuned maximum', message)
+        self.assertNotIn('dest:', message)
+        self.assertIn("sudo sysctl -w net.ipv4.tcp_rmem='4096 131072 6291456'", message)
+        self.assertEqual(measure.tcp_defaults_problems(DEBIAN_TCP), [])
+        self.assertEqual(len(measure.tcp_defaults_problems({'net.ipv4.tcp_rmem': '4096 87380 6291456',
+                                                            'net.ipv4.tcp_wmem': '4096\t16384\t4194304'})), 1)
+
+    def test_the_preflight_stops_what_an_interrupted_run_left(self):
+        orchestrator, code, run = self.execute()
+        self.assertEqual(code, 0)
+        self.assertIn(('source_agent', ('stale-processes', '--kill')), orchestrator.events)
+        self.assertIn(('local_agent', ('stale-processes', '--kill')), orchestrator.events)
+        self.assertEqual(run['t12_preflight']['stale_processes'], {'source': [], 'dest': []})
+        self.assertTrue(run['t12_preflight']['tcp_defaults_check']['ok'])
+
+    def test_a_network_left_unreset_fails_the_invocation(self):
+        # The trials passed, but a VM kept the tree or the tuned settings: the next invocation would start from them.
+        def network_off(stub):
+            if ('trial', 'hot') in stub.events:  # the teardown's, after the trials (the preflight's works)
+                raise run_exp04.CommandError('ssh died')
+            return run_exp04.Orchestrator.network_off(stub)
+
+        with mock.patch.object(self.Executing, 'network_off', network_off):
+            _, code, run = self.execute()
+        self.assertEqual(code, 1)
+        self.assertEqual(run['status'], 'fail')
+        self.assertIn('error', run['teardown'])
+        self.assertFalse(measure.teardown_ok({'source': {'tree_is_wan': False}, 'dest': {'tree_is_wan': False},
+                                              'tcp': {'ok': False}}))
+        self.assertFalse(measure.teardown_ok({'source': {'tree_is_wan': True}, 'dest': {'tree_is_wan': False},
+                                              'tcp': {'ok': True}}))
+        self.assertTrue(measure.teardown_ok({'source': {'tree_is_wan': False}, 'dest': {'tree_is_wan': False},
+                                             'tcp': {'ok': True}}))
 
     def test_the_idle_noise_is_measured_by_window_length(self):
         orchestrator = self.orchestrator()

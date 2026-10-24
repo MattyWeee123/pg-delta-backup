@@ -65,6 +65,8 @@ EXP-13 (T12), latency and transport:
     agent.py tls-material --dir DIR        a per-session CA and the stunnel pair's certificates
     agent.py stunnel start|stop --name N --dir DIR --log FILE [--config FILE --port P]
                                            one end of the stunnel pair; stop reads its log
+    agent.py stale-processes --kill        network samplers and stunnels an interrupted run left
+    agent.py run --timeout SECONDS ...     the command stopped once it has run that long (A15)
     agent.py snapshot --tcp --qdisc        and nstat's TCP counters and the tree's qdisc counters
     agent.py blast-recv/blast-send         each records per-second byte counts and each stream's
                                            TCP connect time (--after-connect: seconds from it)
@@ -80,6 +82,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import resource
 import select
 import shutil
@@ -127,6 +130,7 @@ NET_SAMPLER_FILES = {'samples': 'net-samples.jsonl', 'pid': 'net-sampler.pid', '
                      'log': 'net-sampler.log'}
 STUNNEL = '/usr/bin/stunnel4'
 STUNNEL_START_TIMEOUT = 15
+RUN_KILL_GRACE = 10  # run --timeout: seconds from SIGTERM to SIGKILL
 SSH_PROBE_CIPHER = 'aes128-gcm@openssh.com'  # EXP-11's pg_probackup's (measure.PROBACKUP_SSH_OPTIONS)
 
 
@@ -311,9 +315,30 @@ def cmd_run(args) -> dict:
     started_utc = time.time()
     started = time.monotonic()
     tee = getattr(args, 'tee', False)
+    timeout = getattr(args, 'timeout', None)
+    expired: list = []
     with open(log, 'wb') as stream:
+        # With --timeout (EXP-13's bound on a run, A15), the command runs in its own session, and the whole session
+        # is stopped once the timeout passes (SIGTERM, then SIGKILL after RUN_KILL_GRACE).
         process = subprocess.Popen(launch, stdout=subprocess.PIPE if tee else stream, stderr=subprocess.STDOUT,
-                                   stdin=subprocess.DEVNULL, cwd=args.cwd or None, env=env)
+                                   stdin=subprocess.DEVNULL, cwd=args.cwd or None, env=env,
+                                   start_new_session=bool(timeout))
+        timer = None
+        if timeout:
+            def expire():
+                expired.append(time.monotonic() - started)
+                for signum, grace in ((signal.SIGTERM, RUN_KILL_GRACE), (signal.SIGKILL, 0)):
+                    try:
+                        os.killpg(process.pid, signum)
+                    except (ProcessLookupError, PermissionError):
+                        return
+                    if grace and done.wait(grace):
+                        return
+
+            done = threading.Event()
+            timer = threading.Timer(timeout, expire)
+            timer.daemon = True
+            timer.start()
         if tee:
             # EXP-12: each line to this agent's stdout too, as it arrives, so the orchestrator can stamp it on
             # arrival over SSH (the staged capture's --verbose lines).
@@ -325,6 +350,9 @@ def cmd_run(args) -> dict:
             process.stdout.close()
         _, status, usage = os.wait4(process.pid, 0)
         process.returncode = os.waitstatus_to_exitcode(status)
+        if timer is not None:
+            done.set()
+            timer.cancel()
     wall = time.monotonic() - started
     with open(log, 'rb') as stream:
         size = stream.seek(0, os.SEEK_END)
@@ -335,7 +363,7 @@ def cmd_run(args) -> dict:
             'started_utc': started_utc, 'rusage': measure.rusage_record(usage),
             'peak_rss_kb': timing['maxrss_kb'] if timing else None, 'gnu_time': timing,
             'launcher': launch[:5] if gnu_time else None,
-            'log': str(log), 'log_tail': tail}
+            'log': str(log), 'log_tail': tail, 'timeout_s': timeout, 'timed_out': bool(expired)}
 
 
 def _hostport(text: str) -> tuple[str, int]:
@@ -1260,7 +1288,7 @@ def net_sampler_run(args) -> dict:
         stream.write(json.dumps(net_sample(args), separators=(',', ':')) + '\n')
         count += 1
     usage = resource.getrusage(resource.RUSAGE_SELF)
-    final = {'samples': count, 'late': late, 'interval_s': args.interval,
+    final = {'pid': os.getpid(), 'samples': count, 'late': late, 'interval_s': args.interval,
              'seconds': round(time.monotonic() - started, 3),
              'cpu_seconds': round(usage.ru_utime + usage.ru_stime, 3), 'ended_utc': time.time()}
     paths['final'].write_text(json.dumps(final))
@@ -1292,14 +1320,25 @@ def net_sampler_summary(out) -> dict:
     return result
 
 
+def net_sampler_final(path, pid: int) -> dict | None:
+    """The sampler's final record, if it is the one process `pid` wrote."""
+    try:
+        final = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    return final if isinstance(final, dict) and final.get('pid') == pid else None
+
+
 def cmd_net_sampler(args) -> dict:
-    """start: the network sampler under setsid (`net-sampler run`), its PID in DIR. stop: SIGTERM, then its final
-    record and the summary of its readings (net_sampler_summary). run: the loop itself."""
+    """start: the network sampler under setsid (`net-sampler run`), its PID in DIR, an earlier sampler's final
+    record removed. stop: SIGTERM, then, once this sampler has written its final record (the reading after the
+    clock) or has gone, that record and the summary of its readings (net_sampler_summary). run: the loop itself."""
     paths = net_sampler_paths(args.out)
     if args.action == 'run':
         return net_sampler_run(args)
     if args.action == 'start':
         Path(args.out).mkdir(parents=True, exist_ok=True)
+        paths['final'].unlink(missing_ok=True)
         argv = [sys.executable, str(Path(__file__).resolve()), 'net-sampler', 'run', '--out', str(args.out),
                 '--interval', str(args.interval)]
         if args.peer:
@@ -1320,12 +1359,11 @@ def cmd_net_sampler(args) -> dict:
     except ProcessLookupError:
         pass
     deadline = time.monotonic() + 30
-    while time.monotonic() < deadline and not paths['final'].exists():
+    final = net_sampler_final(paths['final'], pid)
+    while final is None and not process_gone(pid) and time.monotonic() < deadline:
         time.sleep(0.05)
-    try:
-        final = json.loads(paths['final'].read_text())
-    except (OSError, ValueError):
-        final = None
+        final = net_sampler_final(paths['final'], pid)
+    final = final or net_sampler_final(paths['final'], pid)
     return {'pid': pid, 'final': final, 'stopped_utc': time.time(), **net_sampler_summary(args.out)}
 
 
@@ -1413,27 +1451,81 @@ def listening(port: int) -> bool:
     return bool((text_of(['ss', '-Hltn', f'sport = :{port}']) or '').strip())
 
 
+# strace for smoke item 12's TCP_NODELAY check: with --seccomp-bpf (strace 5.3 and later, with -f) the kernel stops
+# stunnel only at setsockopt, not at every system call, so its 16 KB read and write loop runs at its own pace.
+STRACE_SETSOCKOPT = ('strace', '-f', '--seccomp-bpf', '-tt', '-e', 'trace=setsockopt')
+
+
+def process_gone(pid: int) -> bool:
+    """Whether a process has exited. This process's own child is reaped here (a zombie keeps /proc/<pid> until its
+    parent waits for it, as a stunnel started in-process does in the tests); another parent's zombie counts as gone;
+    without /proc (macOS), whether it can still be signalled."""
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0]:
+            return True
+    except ChildProcessError:  # not this process's child (or already reaped)
+        pass
+    if Path('/proc/self').exists():
+        stat = read(f'/proc/{pid}/stat')
+        return stat is None or stat[stat.rindex(')') + 2:].split()[:1] == ['Z']
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def stop_process(pid: int, grace: float) -> bool:
+    """SIGTERM, then SIGKILL after `grace` seconds if it is still there; whether it had to be killed."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + grace
+    while not process_gone(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if process_gone(pid):
+        return False
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 5
+    while not process_gone(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return True
+
+
 def cmd_stunnel(args) -> dict:
-    """start: stunnel with --config, in its own session, until something listens on --port (it starts before the
-    clock); with --strace-log, under strace -e trace=setsockopt (smoke item 12: TCP_NODELAY on each of its sockets).
-    stop: SIGTERM, its own CPU from /proc first, then its log (--log) read: connections, protocol and suite
+    """start: stunnel with --config, in its own session, until it listens on --port (it starts before the clock);
+    refused if something listens there already (a stunnel an interrupted run left, with an earlier session's CA),
+    and failed if stunnel itself has exited once something listens; with --strace-log, under strace -e
+    trace=setsockopt (STRACE_SETSOCKOPT; smoke item 12: TCP_NODELAY on each of its sockets). stop: SIGTERM (SIGKILL
+    after 10 s), its own CPU from /proc first, then its log (--log) read: connections, protocol and suite
     (measure.parse_stunnel_log)."""
     paths = stunnel_paths(args.dir, args.name)
     if args.action == 'start':
         Path(args.dir).mkdir(parents=True, exist_ok=True)
+        if listening(args.port):
+            raise SystemExit(f'stunnel {args.name}: something already listens on port {args.port}, perhaps a stunnel '
+                             'an earlier run left (agent.py stale-processes --kill stops those)')
         argv = [args.stunnel, args.config]
         if args.strace_log:
-            argv = ['strace', '-f', '-tt', '-e', 'trace=setsockopt', '-o', args.strace_log, *argv]
+            argv = [*STRACE_SETSOCKOPT, '-o', args.strace_log, *argv]
         started = time.monotonic()
         with open(paths['stderr'], 'w') as stream:
             process = subprocess.Popen(argv, stdout=stream, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                        start_new_session=True)
         paths['pid'].write_text(str(process.pid))
-        while not listening(args.port):
+        while not listening(args.port) or process.poll() is not None:
             if process.poll() is not None or time.monotonic() - started > STUNNEL_START_TIMEOUT:
                 process.kill()
-                raise SystemExit(f'stunnel {args.name} did not listen on port {args.port}: '
-                                 f'{(read(paths["stderr"]) or "")[-2000:]} {(read(args.log) or "")[-2000:]}')
+                process.wait()
+                raise SystemExit(f'stunnel {args.name} did not listen on port {args.port} '
+                                 f'(exit {process.returncode}): {(read(paths["stderr"]) or "")[-2000:]} '
+                                 f'{(read(args.log) or "")[-2000:]}')
             time.sleep(0.02)
         return {'name': args.name, 'pid': process.pid, 'argv': argv, 'port': args.port,
                 'seconds': round(time.monotonic() - started, 3), 'utc': time.time()}
@@ -1442,20 +1534,43 @@ def cmd_stunnel(args) -> dict:
     except (OSError, ValueError):
         raise SystemExit(f'no stunnel {args.name} runs ({paths["pid"]})')
     ticks = proc_ticks(pid)
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    deadline = time.monotonic() + 10
-    while Path(f'/proc/{pid}').exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    if Path(f'/proc/{pid}').exists():
-        os.kill(pid, signal.SIGKILL)
+    killed = stop_process(pid, 10)
     text = read(args.log) or ''
-    return {'name': args.name, 'pid': pid, 'utc': time.time(),
+    return {'name': args.name, 'pid': pid, 'utc': time.time(), 'killed': killed,
             'cpu_seconds': None if ticks is None else round(ticks[0] / os.sysconf('SC_CLK_TCK'), 3),
             'log': measure.parse_stunnel_log(text), 'log_tail': text[-4000:],
             'stderr_tail': (read(paths['stderr']) or '')[-2000:]}
+
+
+# The harness's own background processes an interrupted run can leave (EXP-13): the network sampler, and a stunnel
+# (or the strace around one) with one of start_stunnels' configurations.
+STALE_PATTERNS = {'net-sampler': re.compile(r'\bagent\.py net-sampler run\b'),
+                  'stunnel': re.compile(r'(^|/)stunnel4?\s.*stunnel-(server|client)\.conf(\s|$)')}
+
+
+def stale_processes(ps_text: str, own_pid: int) -> list[dict]:
+    """The lines of `ps -eo pid=,args=` that are a STALE_PATTERNS process, this one left out."""
+    found = []
+    for line in ps_text.splitlines():
+        pid, _, command = line.strip().partition(' ')
+        if not pid.isdigit() or int(pid) == own_pid:
+            continue
+        for what, pattern in STALE_PATTERNS.items():
+            if pattern.search(command.strip()):
+                found.append({'pid': int(pid), 'what': what, 'args': command.strip()[:500]})
+                break
+    return found
+
+
+def cmd_stale_processes(args) -> dict:
+    """EXP-13's preflight: the network samplers and stunnels an earlier, interrupted run left (stale_processes);
+    with --kill, each stopped (SIGTERM, SIGKILL after 5 s). None of this run's can be running yet."""
+    text = text_of(['ps', '-eo', 'pid=,args=']) or ''
+    found = stale_processes(text, os.getpid())
+    if args.kill:
+        for item in found:
+            item['killed'] = stop_process(item['pid'], 5)
+    return {'found': found, 'utc': time.time()}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1490,6 +1605,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="run the command under GNU time and report its own peak RSS")
     sub.add_argument('--tee', action='store_true',
                      help="copy the command's output to stdout as it arrives, and exit with its exit code")
+    sub.add_argument('--timeout', type=float, metavar='SECONDS',
+                     help='EXP-13: stop the command (its whole session) once it has run this long; timed_out says so')
     sub.add_argument('argv', nargs=argparse.REMAINDER)
     sub.set_defaults(func=cmd_run)
     sub = commands.add_parser('blast-recv')
@@ -1638,6 +1755,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('--stunnel', default=STUNNEL)
     sub.add_argument('--strace-log', help='start: run it under strace -e trace=setsockopt into this file')
     sub.set_defaults(func=cmd_stunnel)
+    sub = commands.add_parser('stale-processes')
+    sub.add_argument('--kill', action='store_true', help='stop each one found')
+    sub.set_defaults(func=cmd_stale_processes)
     return parser
 
 

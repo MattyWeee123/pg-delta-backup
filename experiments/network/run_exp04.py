@@ -977,14 +977,14 @@ class Orchestrator:
         return {'source': source, 'dest': dest}
 
     def blast(self, direction: str, streams: int = 1, *, listen: str | None = None,
-              connect: str | None = None) -> dict:
+              connect: str | None = None, seconds: float | None = None) -> dict:
         """The link test in one direction: one bulk TCP stream, or `streams` at once (T2's 8).
 
         EXP-13 (--link-test-warmup): the receiver's warmup is that, it counts each second's bytes, and each stream
-        sends for --link-test-seconds from its own connect. listen and connect (dest's and the source's ends)
-        replace the direct path: the stunnel pair's link test.
+        sends for --link-test-seconds (or `seconds`) from its own connect. listen and connect (dest's and the
+        source's ends) replace the direct path: the stunnel pair's link test.
         """
-        seconds = str(self.args.link_test_seconds)
+        seconds = str(self.args.link_test_seconds if seconds is None else seconds)
         many = ['--streams', str(streams)] if streams > 1 else []
         warmup = getattr(self.args, 'link_test_warmup', None)
         receive_extra = ['--warmup', f'{warmup:g}'] if warmup is not None else []
@@ -1242,7 +1242,8 @@ class Orchestrator:
         trial.setdefault('visits', []).append(visit)
         if not checks['ok']:
             raise InfrastructureFault(f'the visit to {label} failed its checks twice (A11 (i)): {checks["problems"]}')
-        one = self.link_test('source_to_dest', 1)
+        # Not a probe: a steady rate on fewer than 3 seconds is recorded (steady_ok), and the visit goes on.
+        one = self.link_test('source_to_dest', 1, need_steady=False)
         visit['link_tests'] = [one]
         visit['bands']['after_link_test'] = self.band_counters()
         first = trial.setdefault('first_visit', {})
@@ -1284,24 +1285,35 @@ class Orchestrator:
         return link
 
     def link_test(self, direction: str, streams: int, *, qdisc: bool = False, listen: str | None = None,
-                  connect: str | None = None, name: str | None = None) -> dict:
+                  connect: str | None = None, name: str | None = None, seconds: float | None = None,
+                  need_steady: bool = True) -> dict:
         """One EXP-13 link test, after a TCP metrics flush: its rate, the per-second rates and the steady rate (the
         median of the last 3 after the warmup), each stream's connect time; with qdisc, both VMs' tree counters
         before and after (netem's and the tbf's drops from the same snapshots) and the tc sampler's largest
-        netem backlog meanwhile (smoke item 5)."""
+        netem backlog meanwhile (smoke item 5). steady_seconds names the seconds the steady rate rests on; with
+        need_steady (every link test run as a probe), fewer than measure.STEADY_SECONDS of them fail the test
+        (CommandError), since its steady rate would not be the registered one."""
         flush = self.tcp_metrics_flush()
         samplers = self.start_net_samplers(name or f'link-{direction}-{streams}', ss=False) if qdisc else None
-        before = self.wan('show') if qdisc else None
+        before = None
         try:
-            test = self.blast(direction, streams, listen=listen, connect=connect)
+            before = self.wan('show') if qdisc else None
+            test = self.blast(direction, streams, listen=listen, connect=connect, seconds=seconds)
         finally:
             sampled = self.stop_net_samplers(samplers) if samplers else None
         receiver, sender = test['receiver'], test['sender']
+        steady_seconds = receiver.get('steady_last3_seconds')
         result = {'direction': direction, 'streams': streams, 'utc': utc_now(), 'tcp_metrics': flush,
                   'gbit': receiver.get('gbit'),
                   'steady_gbit': receiver.get('steady_last3_gbit', receiver.get('steady_gbit')),
+                  'steady_seconds': steady_seconds,
+                  'steady_ok': None if steady_seconds is None else len(steady_seconds) == measure.STEADY_SECONDS,
                   'per_second_gbit': receiver.get('per_second_gbit'), 'connect_s': sender.get('connect_s'),
-                  'per_stream_connect_s': sender.get('per_stream_connect_s'), 'test': test}
+                  'per_stream_connect_s': sender.get('per_stream_connect_s'), 'sender_seconds': seconds,
+                  'test': test}
+        if need_steady and result['steady_ok'] is False:
+            raise CommandError(f'the steady rate rests on {len(steady_seconds)} whole seconds after the warmup, not '
+                               f'{measure.STEADY_SECONDS} ({receiver.get("per_second_gbit")} Gbit/s)')
         if qdisc:
             after = self.wan('show')
             result['qdisc'] = {}
@@ -1331,7 +1343,7 @@ class Orchestrator:
             first['ssh_probe'] = self.probe(f'the SSH probe at {label}', self.ssh_probe)
         if label in self.t12_plan['stunnel_link_test']:
             first['stunnel_link_test'] = self.probe(f'the stunnel link test at {label}',
-                                                    lambda: self.stunnel_link_test(slug))
+                                                    lambda: self.stunnel_link_test(condition))
         return first
 
     def zero_delay_tests(self) -> dict:
@@ -1367,13 +1379,30 @@ class Orchestrator:
 
     def start_net_samplers(self, name: str, ss: bool = True) -> dict:
         """The network samplers, started before a clock: on the source, `ss -tin` of its sockets to dest (the
-        control port left out; with ss) and the tree's qdisc counters; on dest, its qdisc counters. Every 0.5 s."""
+        control port left out; with ss) and the tree's qdisc counters; on dest, its qdisc counters. Every 0.5 s.
+        Each in its own directory (`name`: a run's is its arm's). If one VM's fails to start, the other's, if it
+        started, is stopped before the error goes on, so no sampler outlives the step that needed it."""
         out = {'source': self.source_log(f'net-sampler-{name}'), 'dest': str(self.dest_log(f'net-sampler-{name}'))}
         ss_args = ['--peer', self.dest_ip, '--exclude-port', str(self.args.control_port)] if ss else []
-        source, dest = self.both(
-            lambda: self.local_agent('net-sampler', 'start', '--out', out['dest'], '--qdisc-iface', self.dest_iface),
-            lambda: self.source.agent('net-sampler', 'start', '--out', out['source'], *ss_args, '--qdisc-iface',
-                                      self.source_iface))
+        future = self.pool.submit(lambda: self.source.agent('net-sampler', 'start', '--out', out['source'], *ss_args,
+                                                            '--qdisc-iface', self.source_iface))
+        dest = error = None
+        try:
+            dest = self.local_agent('net-sampler', 'start', '--out', out['dest'], '--qdisc-iface', self.dest_iface)
+        except BaseException as exc:
+            error = exc
+        settle(future)
+        source = None if future.exception() is not None else future.result()
+        error = error or future.exception()
+        if error is not None:
+            for started, stop in ((dest, lambda: self.local_agent('net-sampler', 'stop', '--out', out['dest'])),
+                                  (source, lambda: self.source.agent('net-sampler', 'stop', '--out', out['source']))):
+                if started is not None:
+                    try:
+                        stop()
+                    except Exception as exc:
+                        log(f'  a network sampler could not be stopped: {exc}')
+            raise error
         return {'source': source, 'dest': dest, 'out': out}
 
     def stop_net_samplers(self, started: dict) -> dict:
@@ -1462,13 +1491,18 @@ class Orchestrator:
                       connections=server.get('connections'), stop_errors=errors)
         return result
 
-    def stunnel_link_test(self, slug: str) -> dict:
+    def stunnel_link_test(self, condition: dict) -> dict:
         """A one-stream link test through the stunnel pair (smoke item 12): the receiver on dest's localhost behind
-        its stunnel, the sender into the source's stunnel on localhost."""
-        started = self.start_stunnels(f'{slug}-link-test-')
+        its stunnel, the sender into the source's stunnel on localhost. The sender's seconds start at its connect to
+        the source's stunnel on localhost, and its first byte reaches dest only after the WAN connect and TLS 1.3's
+        handshake (about 2.5 r), so it sends measure.stunnel_link_test_extra_s seconds more; the steady rate must
+        rest on 3 whole seconds (link_test's need_steady), or the probe fails."""
+        started = self.start_stunnels(f'{condition["slug"]}-link-test-')
         try:
             test = self.link_test('source_to_dest', 1, listen=f'127.0.0.1:{PGDELTA_PORT}',
-                                  connect=f'127.0.0.1:{measure.STUNNEL_CLIENT_PORT}')
+                                  connect=f'127.0.0.1:{measure.STUNNEL_CLIENT_PORT}',
+                                  seconds=self.args.link_test_seconds
+                                  + measure.stunnel_link_test_extra_s(condition['rtt_ms']))
         finally:
             stopped = self.stop_stunnels(started)
         return {**test, 'stunnel': stopped}
@@ -2865,7 +2899,7 @@ class Orchestrator:
                     daemon_holder['stunnel'] = self.start_stunnels('')
                 # The samplers start before the clock, the same in every arm; then a TCP metrics flush, the last
                 # step before the cache drop, so no connection starts from a cached slow-start threshold.
-                daemon_holder['net_samplers'] = self.start_net_samplers('run')
+                daemon_holder['net_samplers'] = self.start_net_samplers(f'run-{method}')
                 record['tcp_metrics'] = self.tcp_metrics_flush()
             if record['source_cache'] == 'warm':
                 # T2's warm-source block: the source is read instead of dropped; dest is dropped.
@@ -5411,9 +5445,45 @@ class Orchestrator:
                 'busy_threshold': ("each pgdelta sender gets --busy-inflight-bytes, the visit's one-stream steady rate "
                                    'times its ping minimum, where both VMs\' pgdelta takes it')}
 
+    def stale_processes(self) -> dict:
+        """Both VMs' network samplers and stunnels an earlier, interrupted run left, stopped (agent.py
+        stale-processes --kill): none of this run's runs yet. A stale stunnel would keep its port, with an earlier
+        session's CA, and a stale sampler would run tc every 0.5 s for the whole session."""
+        source, dest = self.both(lambda: self.local_agent('stale-processes', '--kill'),
+                                 lambda: self.source.agent('stale-processes', '--kill'))
+        found = {vm: result.get('found') or [] for vm, result in (('source', source), ('dest', dest))}
+        for vm, items in found.items():
+            for item in items:
+                log(f'stopped a {item["what"]} an earlier run left on {vm}: pid {item["pid"]} ({item["args"][:120]})')
+        return found
+
+    def check_tcp_defaults(self) -> dict:
+        """Both VMs' tcp_rmem and tcp_wmem, as found before the first trial, against Debian's (measure.DEBIAN_TCP_MEM,
+        the TCP settings table's default row): they become the default host setting, which every default visit and
+        every reset writes back. SystemExit if either VM has other values, such as the tuned maxima an interrupted run
+        left (sysctl -w resets them)."""
+        found = self.tcp_settings()
+        unknown = {vm: name for vm, values in found.items() for name in measure.TCP_MEM_SYSCTLS
+                   if measure.tcp_mem(values.get(name)) is None}
+        if unknown:
+            raise SystemExit(f'cannot read the TCP settings EXP-13 changes: {unknown}')
+        problems = {vm: measure.tcp_defaults_problems(values, self.args.tuned_tcp_max_bytes)
+                    for vm, values in found.items()}
+        if any(problems.values()):
+            raise SystemExit("EXP-13's default host setting is Debian's TCP settings, and these VMs have others: "
+                             + '; '.join(f'{vm}: {", ".join(found)}' for vm, found in problems.items() if found)
+                             + '. Set them back first (sudo sysctl -w '
+                             + ' '.join(f"{name}='{' '.join(map(str, values))}'"
+                                        for name, values in measure.DEBIAN_TCP_MEM.items()) + ' on both VMs)')
+        self.tcp_defaults = found  # only once they are Debian's: no reset then writes anything else back
+        return {'debian': {name: ' '.join(map(str, values)) for name, values in measure.DEBIAN_TCP_MEM.items()},
+                'problems': problems, 'ok': True}
+
     def preflight_t12(self) -> dict:
         """What an EXP-13 run checks and records before its first trial:
-        - each VM's TCP settings as found: Debian's defaults, which every default visit and every reset write back;
+        - the network samplers and stunnels an earlier, interrupted run left, stopped (stale_processes);
+        - each VM's TCP settings as found, which must be Debian's (check_tcp_defaults): every default visit and every
+          reset writes them back;
         - the tc commands of every condition (wan.sh's dry run), for run.json;
         - the control no-ops' reference, with the tree at the anchor (the first r = 0 condition's rate) and default
           settings;
@@ -5423,12 +5493,8 @@ class Orchestrator:
         """
         args = self.args
         environment = self.run['environment']
-        result: dict = {}
-        self.tcp_defaults = self.tcp_settings()
-        unknown = {vm: name for vm, values in self.tcp_defaults.items() for name in measure.TCP_MEM_SYSCTLS
-                   if measure.tcp_mem(values.get(name)) is None}
-        if unknown:
-            raise SystemExit(f'cannot read the TCP settings EXP-13 changes: {unknown}')
+        result: dict = {'stale_processes': self.stale_processes()}
+        result['tcp_defaults_check'] = self.check_tcp_defaults()
         result['tcp_defaults'] = self.tcp_defaults
         result['tc_commands'] = {
             condition['label']: self.local_agent('wan', 'commands', condition['tc_rate'],
@@ -5752,6 +5818,11 @@ class Orchestrator:
             self.pool.shutdown(wait=False)
         statuses = list(self.run['trials'].values())
         self.run['status'] = 'pass' if statuses and all(s == 'pass' for s in statuses) else 'fail'
+        if self.t12 and self.run and not measure.teardown_ok(self.run.get('teardown')):
+            # EXP-13: a VM left with the tree or the tuned TCP settings fails the invocation, whatever its trials did:
+            # the next one would start from them (preflight_t12 refuses that, and says so).
+            self.run['status'] = 'fail'
+            log('the network was not reset on both VMs (run.json teardown): the invocation fails')
         self.run['finished_utc'] = utc_now()
         save_json(self.out / 'run.json', self.run)
         log(f'done: {self.run["status"]}; results in {self.out}')

@@ -2512,6 +2512,9 @@ TCP_SYSCTLS = (*TCP_MEM_SYSCTLS, 'net.ipv4.tcp_congestion_control', 'net.ipv4.tc
                'net.ipv4.tcp_slow_start_after_idle', 'net.ipv4.tcp_no_metrics_save', 'net.core.rmem_max',
                'net.core.wmem_max', 'net.core.default_qdisc')
 TUNED_TCP_MAX_BYTES = 128 << 20
+# Debian 12's tcp_rmem and tcp_wmem (kernel 6.1's), as EXP-11's run.json recorded them: the TCP settings table's
+# default row. Every invocation must find them on both VMs (run_exp04's check_tcp_defaults).
+DEBIAN_TCP_MEM = {'net.ipv4.tcp_rmem': (4096, 131072, 6291456), 'net.ipv4.tcp_wmem': (4096, 16384, 4194304)}
 # infra/gcp/wan.sh's tree: the prio root's plain band 1:1, its delayed band 1:2 with netem (20:) and netem's
 # tbf child (30:, parent 20:1).
 WAN_NETEM_LIMIT = 1000000
@@ -2714,6 +2717,31 @@ def condition_tcp_settings(host: str, defaults: dict, tuned_max: int = TUNED_TCP
             values = (*values[:2], int(tuned_max))
         wanted[name] = ' '.join(str(value) for value in values)
     return wanted
+
+
+def tcp_defaults_problems(found: dict, tuned_max: int = TUNED_TCP_MAX_BYTES) -> list[str]:
+    """How one VM's tcp_rmem and tcp_wmem differ from Debian's (DEBIAN_TCP_MEM); a maximum at or above the tuned
+    one is named as such (what an interrupted run leaves)."""
+    problems = []
+    for name, debian in DEBIAN_TCP_MEM.items():
+        values = tcp_mem(found.get(name))
+        if values == debian:
+            continue
+        tuned = values is not None and values[2] >= tuned_max
+        problems.append(f"{name} is {found.get(name)!r}, not Debian's {' '.join(map(str, debian))!r}"
+                        + (' (a tuned maximum: an earlier run did not reset it)' if tuned else ''))
+    return problems
+
+
+def teardown_ok(teardown) -> bool:
+    """Whether an EXP-13 invocation's teardown (run.json's) left both VMs as they came: Debian's qdisc rather than
+    wan.sh's tree, and the default TCP settings back and checked."""
+    if not isinstance(teardown, dict) or 'error' in teardown:
+        return False
+    if (teardown.get('tcp') or {}).get('ok') is not True:
+        return False
+    return all(isinstance(teardown.get(vm), dict) and teardown[vm].get('tree_is_wan') is False
+               for vm in ('source', 'dest'))
 
 
 def tcp_settings_problems(found: dict, wanted: dict) -> list[str]:
@@ -3163,7 +3191,20 @@ def ss_summary(connections) -> dict:
                 'bytes_acked': last.get('bytes_acked')}}
 
 
-def steady_last(per_second_bytes, warmup_s: float, count: int = 3) -> dict:
+STEADY_SECONDS = 3  # a link test's steady rate: the median of the last 3 whole one-second rates after the warmup
+# The stunnel link test's sender counts its seconds from its connect to the source's stunnel on localhost, and its
+# first byte reaches dest only after the WAN connect and TLS 1.3's handshake (about 2.5 r): it sends ceil(3 r) more,
+# and at least 1 (at r = 0 the handshake still takes a few ms, which would cost a whole second), so the receiver
+# keeps STEADY_SECONDS whole seconds after its warmup.
+STUNNEL_SETUP_RTTS = 3
+
+
+def stunnel_link_test_extra_s(rtt_ms) -> int:
+    """The seconds the stunnel link test's sender adds to --link-test-seconds at a round trip of rtt_ms."""
+    return max(1, math.ceil(STUNNEL_SETUP_RTTS * float(rtt_ms) / 1000))
+
+
+def steady_last(per_second_bytes, warmup_s: float, count: int = STEADY_SECONDS) -> dict:
     """A link test's steady rate: the median of the last `count` complete one-second rates after the warmup
     (per_second_bytes[i] holds the bytes received in second i after the first byte; only whole seconds)."""
     first = math.ceil(warmup_s)
