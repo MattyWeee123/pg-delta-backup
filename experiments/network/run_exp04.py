@@ -134,7 +134,7 @@ from benchmarks.backup import atomic_json, basebackup_command, combine_command  
 from benchmarks.methods import RSYNC_OPTIONS, parse_pgdelta_stats, rsync_transfer_stats  # noqa: E402
 from experiments.change_patterns import workloads  # noqa: E402
 from experiments.network import durability_audit, measure, source_cluster  # noqa: E402
-from experiments.network.agent import RESULT_PREFIX  # noqa: E402
+from experiments.network.agent import RESULT_PREFIX, qdisc_counters  # noqa: E402
 
 SCHEMA_RUN = 'exp04-method-run/1'
 SCHEMA_TRIAL = 'exp04-trial/1'
@@ -208,6 +208,7 @@ WARM_BLOCKS = ('warm_source', 'warm')
 CONTROL_SLOTS = (('busy_start', 'busy'), ('busy_end', 'busy'), ('moderate_start', 'moderate'))
 CLOCK_PORT = 7300  # EXP-12: the clock probe's TCP exchange
 TAIL_VIEW_MARGIN_S = 0.05  # EXP-12: the quiet tail runs this far past the 15-s view's last bucket (quiet_tail)
+PROCESSES_SNAPSHOT_S = 5.0  # EXP-13: probackup8's ps of both VMs, this far into its clock (smoke item 16)
 # EXP-12: the clock probe tried this many times, the back-off growing by this much each time; no offset, no load.
 CLOCK_PROBE_ATTEMPTS, CLOCK_PROBE_BACKOFF_S = 3, 2.0
 BACKUP_LABEL = 't10a'  # EXP-12: the label of bracket's and the proxies' backups
@@ -271,15 +272,23 @@ class CommandError(RuntimeError):
     pass
 
 
-class Source:
-    """pgd-source over one multiplexed SSH connection."""
+class InfrastructureFault(CommandError):
+    """EXP-13's A11 (i): a visit's checks failed twice, before any run; the trial stops, recorded as such."""
 
-    def __init__(self, ip: str, user: str, key: str, repo: str, python: str = 'python3'):
-        self.ip, self.repo, self.python = ip, repo, python
+
+class Source:
+    """pgd-source over one multiplexed SSH connection.
+
+    With `port` (EXP-13's --control-port), the connection goes to the source's sshd on that port, which the
+    emulated WAN (infra/gcp/wan.sh) leaves neither delayed nor shaped; port 22 stays for the methods' own SSH.
+    """
+
+    def __init__(self, ip: str, user: str, key: str, repo: str, python: str = 'python3', port: int | None = None):
+        self.ip, self.repo, self.python, self.port = ip, repo, python, port
         self.control = f'/tmp/exp04-ssh-{os.getpid()}'
         self.options = ['-i', key, '-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new',
                         '-o', f'ControlPath={self.control}', '-o', 'ServerAliveInterval=15',
-                        '-o', 'ServerAliveCountMax=8']
+                        '-o', 'ServerAliveCountMax=8', *(['-o', f'Port={port}'] if port else [])]
         self.target = f'{user}@{ip}'
 
     def open(self) -> None:
@@ -358,24 +367,33 @@ def messages_env() -> dict:
     return {**env, 'LC_MESSAGES': 'C'}
 
 
-def checksum_problem(methods, checksums: str, load=None) -> str | None:
+def checksum_problem(methods, checksums: str, load=None, conditions=None) -> str | None:
     """Why the selected methods can't run with these manifest checksums, or None.
 
     EXP-11's rule 7: CRC32C for every pg_basebackup, B0 included. --manifest-checksums still defaults
     to SHA256, EXP-04's setting, so T2's methods refuse to run without CRC32C. So do EXP-12's arms and any
-    run under its load (--load): B0, full and the staged capture (its rule 7).
+    run under its load (--load): B0, full and the staged capture (its rule 7); and EXP-13's arms and any run at
+    its conditions (--conditions).
     """
-    t2 = [method for method in methods if method in measure.T2_METHODS or method in measure.T10A_METHODS]
+    t2 = [method for method in methods if method in measure.T2_METHODS or method in measure.T10A_METHODS
+          or method in measure.T12_METHODS]
     if load and not t2:
         t2 = [f'--load {load}']
+    if conditions and not t2:
+        t2 = ['--conditions']
     if t2 and checksums != T2_MANIFEST_CHECKSUMS:
-        return (f'{", ".join(t2)} need --manifest-checksums {T2_MANIFEST_CHECKSUMS} (EXP-11 and EXP-12, rule 7), '
-                f'not {checksums}')
+        return (f'{", ".join(t2)} need --manifest-checksums {T2_MANIFEST_CHECKSUMS} (EXP-11, EXP-12 and EXP-13, '
+                f'rule 7), not {checksums}')
     return None
 
 
 def method_list(text: str) -> list[str]:
     return [method.strip() for method in (text or '').split(',') if method.strip()]
+
+
+def find_window(reported: dict):
+    """The request window pgdelta's statistics report (its sender's), or None."""
+    return measure.find_stat(reported, 'window')
 
 
 def block_problems(args, methods) -> list[str]:
@@ -616,7 +634,8 @@ class Orchestrator:
         self.bin = Path(args.bin_dir)
         self.repo = str(REPO_ROOT)
         self.remote_repo = args.remote_repo or self.repo
-        self.source = Source(args.source_ip, args.ssh_user, args.ssh_key, self.remote_repo)
+        self.source = Source(args.source_ip, args.ssh_user, args.ssh_key, self.remote_repo,
+                             port=getattr(args, 'control_port', None))
         self.rng = random.Random(args.order_seed)
         # Its own stream, so the speed orders do not shift the method orders.
         self.speed_rng = random.Random(f'exp04-speed-order-{args.order_seed}')
@@ -686,6 +705,18 @@ class Orchestrator:
                                        if getattr(args, 'moderate_method_speeds', None) else {})
         self.calibration_methods = method_list(getattr(args, 'calibration_methods', ''))
         self.calibration_speed = measure.parse_speed(getattr(args, 'calibration_speed', '2') or '2')
+        # EXP-13 (T12), at the emulated WAN's conditions (--conditions); parse_args has checked its options.
+        self.conditions: list = measure.parse_conditions(args.conditions) if getattr(args, 'conditions', '') else []
+        self.t12_plan: dict = t12_plan(args) if self.conditions else {}
+        self.condition: dict | None = None  # the condition visited now, with its visit's readings (set_condition)
+        self.tcp_defaults: dict | None = None  # each VM's TCP settings as found at the start: host -> name -> value
+        self.control_reference: list | None = None  # the control no-ops' seconds with the tree at the anchor
+        self.noise_table: dict | None = None  # check (a)'s noise by window length (--dirty-noise-table and measured)
+        self.busy_flag = False  # whether both VMs' pgdelta send takes --busy-inflight-bytes
+        self.tls: dict | None = None  # the session's TLS material and stunnel configurations (preflight_t12)
+        self.visited: set = set()  # this trial's condition labels visited so far
+        self.zero_delay: dict = {}  # this trial's zero-delay rates by tbf rate: {'one_stream', 'bound'} (Gbit/s)
+        self.current_trial_record: dict | None = None
 
     # --- paths -------------------------------------------------------------
 
@@ -730,11 +761,17 @@ class Orchestrator:
         return getattr(self.args, 'load', None) is not None
 
     @property
+    def t12(self) -> bool:
+        """Whether this run is EXP-13's: at the emulated WAN's conditions (--conditions)."""
+        return bool(self.conditions)
+
+    @property
     def pinned_methods(self) -> list[str]:
         """Every method this run may run, for run.json's pins and pgdelta's checks: --methods, and under EXP-12 its
         calibration block's (v1 itself among them) and its controls."""
         extra = [*self.calibration_methods, *self.controls] if self.t10a else []
-        return list(dict.fromkeys([*self.methods, *extra]))
+        control = (self.t12_plan.get('negative_control') or {}).get('method') if self.t12 else None
+        return list(dict.fromkeys([*self.methods, *extra, *([control] if control else [])]))
 
     @property
     def snapshot_data(self) -> str:
@@ -751,10 +788,11 @@ class Orchestrator:
         return f'{self.load_dir}/sampler'
 
     def dest_log(self, name: str) -> Path:
-        return self.out / 'logs' / self.trial_id / 'dest' / (self.log_prefix + name)
+        # Before the first trial (EXP-13's preflight), under logs/preflight.
+        return self.out / 'logs' / (self.trial_id or 'preflight') / 'dest' / (self.log_prefix + name)
 
     def source_log(self, name: str) -> str:
-        return f'{self.work}/logs/{self.trial_id}/{self.log_prefix}{name}'
+        return f'{self.work}/logs/{self.trial_id or "preflight"}/{self.log_prefix}{name}'
 
     # --- primitives --------------------------------------------------------
 
@@ -791,9 +829,13 @@ class Orchestrator:
         return self.both(local, remote)
 
     def snapshot_source(self) -> dict:
-        return self.source.agent('snapshot', '--iface', self.source_iface, timeout=60)
+        # EXP-13: nstat's TCP counters and the emulated WAN's qdisc counters too, from the same snapshot.
+        extra = ['--tcp', '--qdisc'] if self.t12 else []
+        return self.source.agent('snapshot', '--iface', self.source_iface, *extra, timeout=60)
 
     def snapshot_dest(self) -> dict:
+        if self.t12:
+            return {**measure.snapshot(self.dest_iface, tcp=True), 'qdisc': qdisc_counters(self.dest_iface)}
         return measure.snapshot(self.dest_iface)
 
     def local_command(self, argv, log_name: str, *, timeout: float | None = None,
@@ -861,7 +903,8 @@ class Orchestrator:
                  'failures': failed(commands)}
         # Dirty and Writeback at each end of the window, and each disk's bytes (EXP-11's checks). dest's
         # are read just before the clock starts and first after it stops.
-        for key in ('memory', 'disk'):
+        # EXP-13: the window's TCP counters (nstat) and the emulated WAN's qdisc counters on each VM too.
+        for key in ('memory', 'disk', 'nstat', 'qdisc'):
             if key in source or key in dest:
                 phase[key] = {'source': source.get(key), 'dest': dest.get(key)}
         return phase
@@ -933,27 +976,36 @@ class Orchestrator:
             lambda: self.source.agent('throttle', rate, '--iface', self.source_iface))
         return {'source': source, 'dest': dest}
 
-    def blast(self, direction: str, streams: int = 1) -> dict:
-        """The link test in one direction: one bulk TCP stream, or `streams` at once (T2's 8)."""
+    def blast(self, direction: str, streams: int = 1, *, listen: str | None = None,
+              connect: str | None = None) -> dict:
+        """The link test in one direction: one bulk TCP stream, or `streams` at once (T2's 8).
+
+        EXP-13 (--link-test-warmup): the receiver's warmup is that, it counts each second's bytes, and each stream
+        sends for --link-test-seconds from its own connect. listen and connect (dest's and the source's ends)
+        replace the direct path: the stunnel pair's link test.
+        """
         seconds = str(self.args.link_test_seconds)
         many = ['--streams', str(streams)] if streams > 1 else []
+        warmup = getattr(self.args, 'link_test_warmup', None)
+        receive_extra = ['--warmup', f'{warmup:g}'] if warmup is not None else []
+        send_extra = ['--after-connect'] if self.t12 else []
         if direction == 'source_to_dest':
             receiver = subprocess.Popen(
                 [sys.executable, str(REPO_ROOT / AGENT), 'blast-recv', '--listen',
-                 f'{self.dest_ip}:{BLAST_PORT}', '--timeout', '120', *many],
+                 listen or f'{self.dest_ip}:{BLAST_PORT}', '--timeout', '120', *many, *receive_extra],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             sender = lambda: self.source.agent('blast-send', '--connect',  # noqa: E731
-                                               f'{self.dest_ip}:{BLAST_PORT}',
-                                               '--seconds', seconds, *many, timeout=300)
+                                               connect or f'{self.dest_ip}:{BLAST_PORT}',
+                                               '--seconds', seconds, *many, *send_extra, timeout=300)
         else:
             receiver = subprocess.Popen(
                 self.source.agent_argv('blast-recv', '--listen', f'{self.source.ip}:{BLAST_PORT}',
-                                       '--timeout', '120', *many),
+                                       '--timeout', '120', *many, *receive_extra),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 stdin=subprocess.DEVNULL)
             sender = lambda: self.local_agent('blast-send', '--connect',  # noqa: E731
                                               f'{self.source.ip}:{BLAST_PORT}',
-                                              '--seconds', seconds, *many, timeout=300)
+                                              '--seconds', seconds, *many, *send_extra, timeout=300)
         try:
             ready = receiver.stdout.readline()
             if 'LISTENING' not in ready:
@@ -1021,6 +1073,498 @@ class Orchestrator:
             lambda: self.local_agent('throttle', 'show', '--iface', self.dest_iface),
             lambda: self.source.agent('throttle', 'show', '--iface', self.source_iface))
         return {'source': source['qdisc'], 'dest': dest['qdisc']}
+
+    # --- EXP-13 (T12): the emulated WAN, each visit's checks, the samplers and the TLS stand-in ---------------
+
+    def wan(self, action: str, condition: dict | None = None) -> dict:
+        """infra/gcp/wan.sh on both VMs (agent.py wan): apply a condition's tree, off, or show; each VM's peer is
+        the other. {'source', 'dest'}."""
+        def argv(iface, peer):
+            if action == 'apply':
+                return ('wan', 'apply', condition['tc_rate'], f'{condition["delay_ms"]:g}', '--peer', peer,
+                        '--control-port', str(self.args.control_port), '--iface', iface)
+            return ('wan', action, '--iface', iface)
+
+        source, dest = self.both(lambda: self.local_agent(*argv(self.dest_iface, self.source.ip)),
+                                 lambda: self.source.agent(*argv(self.source_iface, self.dest_ip)))
+        return {'source': source, 'dest': dest}
+
+    def tcp_settings(self) -> dict:
+        """Both VMs' TCP settings now (measure.TCP_SYSCTLS)."""
+        source, dest = self.both(lambda: self.local_agent('sysctl', 'get', *measure.TCP_SYSCTLS)['values'],
+                                 lambda: self.source.agent('sysctl', 'get', *measure.TCP_SYSCTLS)['values'])
+        return {'source': source, 'dest': dest}
+
+    def wanted_tcp(self, host_setting: str) -> dict:
+        """The tcp_rmem and tcp_wmem a host setting wants on each VM: its recorded defaults, maxima raised if tuned."""
+        return {vm: measure.condition_tcp_settings(host_setting, self.tcp_defaults[vm], self.args.tuned_tcp_max_bytes)
+                for vm in ('source', 'dest')}
+
+    def set_tcp(self, host_setting: str) -> dict:
+        """Both VMs' tcp_rmem and tcp_wmem set to a host setting's values (agent.py sysctl set, sudo)."""
+        wanted = self.wanted_tcp(host_setting)
+
+        def assignments(vm):
+            return [f'{name}={value}' for name, value in wanted[vm].items()]
+
+        source, dest = self.both(lambda: self.local_agent('sysctl', 'set', *assignments('dest')),
+                                 lambda: self.source.agent('sysctl', 'set', *assignments('source')))
+        return {'host_tcp': host_setting, 'source': source, 'dest': dest}
+
+    def tcp_check(self, host_setting: str) -> dict:
+        """Both VMs' TCP settings now against a host setting's: every setting in force, what was wanted, the
+        differences, and whether there are none (ok)."""
+        wanted, found = self.wanted_tcp(host_setting), self.tcp_settings()
+        problems = {vm: measure.tcp_settings_problems(found[vm], wanted[vm]) for vm in found}
+        return {**found, 'host_tcp': host_setting, 'wanted': wanted, 'problems': problems,
+                'ok': not any(problems.values())}
+
+    def tcp_guard(self, host_setting: str) -> dict:
+        """The guard before every EXP-13 run: both VMs' tcp_rmem and tcp_wmem at the condition's values. Settings
+        found otherwise are set once more (guard_reset) and read again; run_method refuses the run (A11 (ii): a
+        failed guard) if they still differ."""
+        result = self.tcp_check(host_setting)
+        if not result['ok']:
+            reset = {'found': result['problems']}
+            try:
+                reset['set'] = self.set_tcp(host_setting)
+            except Exception as exc:
+                reset['error'] = f'{type(exc).__name__}: {exc}'
+            result = {**self.tcp_check(host_setting), 'guard_reset': reset}
+            log(f"  the TCP settings were not the condition's ({reset['found']}); "
+                + ('reset by the guard' if result['ok'] else 'the guard could not reset them'))
+        return result
+
+    def reset_tcp(self) -> dict:
+        """Both VMs' tcp_rmem and tcp_wmem back to their recorded defaults, then checked (CommandError if not)."""
+        written = self.set_tcp('default')
+        check = self.tcp_check('default')
+        if not check['ok']:
+            raise CommandError(f'the TCP settings did not return to their defaults: {check["problems"]}')
+        return {**written, 'check': check}
+
+    def network_off(self) -> dict:
+        """The tree off and the recorded TCP defaults back, on both VMs: outside every visit, at the end of the
+        repeats, and in every finally. Both are tried whatever the other did; CommandError if either failed."""
+        result, errors = {}, []
+        for name, step in (('wan', lambda: self.wan('off')),
+                           ('tcp', lambda: self.reset_tcp() if self.tcp_defaults is not None else None)):
+            try:
+                result[name] = step()
+            except Exception as exc:
+                result[name] = {'error': f'{type(exc).__name__}: {exc}'}
+                errors.append(f'{name}: {exc}')
+        if errors:
+            raise CommandError('the network could not be reset: ' + '; '.join(errors))
+        return result
+
+    def tcp_metrics_flush(self) -> dict:
+        """ip tcp_metrics flush all on both VMs, before every run and every link test: no connection then starts
+        from a slow-start threshold Linux cached from the last one to the same host."""
+        source, dest = self.both(lambda: self.local_agent('tcp-metrics-flush'),
+                                 lambda: self.source.agent('tcp-metrics-flush'))
+        return {'source': source, 'dest': dest}
+
+    def ping_check(self) -> dict:
+        """measure.PING_COUNT pings from dest to the source, PING_INTERVAL_S apart, as root: the delayed band both ways."""
+        return self.local_agent('ping-check', self.source.ip, '--count', str(measure.PING_COUNT), '--interval',
+                                f'{measure.PING_INTERVAL_S:g}', timeout=120)
+
+    def control_noops(self, count: int = measure.CONTROL_NOOPS) -> list[float]:
+        """`count` no-ops over the control path (`true` through the multiplexed SSH connection): each one's seconds."""
+        seconds = []
+        for _ in range(count):
+            started = time.perf_counter()
+            subprocess.run(self.source.argv(['true']), check=True, capture_output=True, timeout=60,
+                           stdin=subprocess.DEVNULL)
+            seconds.append(round(time.perf_counter() - started, 6))
+        return seconds
+
+    def band_counters(self) -> dict:
+        """Both VMs' packets so far in the plain band and in the delayed one (netem's), from one tc reading each:
+        what the visit records around its pings and its control no-ops (smoke item 1)."""
+        shown = self.wan('show')
+        return {vm: {'plain': (shown[vm]['tree'].get('plain') or {}).get('packets'),
+                     'delayed': (shown[vm]['tree'].get('netem') or {}).get('packets')} for vm in shown}
+
+    def visit_checks(self, condition: dict) -> dict:
+        """The checks at every visit, before any run: the tree on both VMs (measure.wan_problems: the filters,
+        netem with r/2 and its limit, the tbf with its rate and queue), 20 pings (minimum in [r, r + 1 ms], median
+        at most minimum + 2 ms), 5 control no-ops each within 5 ms of the anchor's, and both VMs' TCP settings. The
+        bands' packet counters are read around the pings and the no-ops."""
+        peers = {'source': self.dest_ip, 'dest': self.source.ip}
+        shown = self.wan('show')
+        tree = {}
+        for vm, peer in peers.items():
+            expected = measure.wan_expected(condition, peer, self.args.control_port)
+            tree[vm] = {'tree': shown[vm]['tree'], 'filters': shown[vm]['filters'], 'expected': expected,
+                        'problems': measure.wan_problems(shown[vm]['tree'], shown[vm]['filters'], expected)}
+        bands = {'before_pings': {vm: {'plain': (shown[vm]['tree'].get('plain') or {}).get('packets'),
+                                       'delayed': (shown[vm]['tree'].get('netem') or {}).get('packets')}
+                                  for vm in shown}}
+        pings = self.ping_check()
+        bands['after_pings'] = self.band_counters()
+        noops = self.control_noops()
+        bands['after_noops'] = self.band_counters()
+        tcp = self.tcp_check(condition['host_tcp'])
+        problems = {'tree': [f'{vm}: {problem}' for vm in tree for problem in tree[vm]['problems']],
+                    'pings': measure.ping_problems(pings, condition['rtt_ms']),
+                    'control_noops': measure.control_noop_problems(noops, self.control_reference),
+                    'sysctl': [f'{vm}: {problem}' for vm, found in tcp['problems'].items() for problem in found]}
+        return {'ok': not any(problems.values()), 'problems': problems, 'tree': tree, 'pings': pings,
+                'control_noops': {'seconds': noops, 'reference': self.control_reference}, 'sysctl': tcp,
+                'bands': bands}
+
+    def set_condition(self, condition: dict, trial: dict, repeat: int) -> dict:
+        """One visit (EXP-13's step 4): the tree and the TCP settings on both VMs, the visit's checks (A11 (i): if
+        they fail, the tree and the settings are reset and set and checked once more, before any run; a second
+        failure stops the trial as an infrastructure fault), then the one-stream link test from source to dest, and
+        at the trial's first visit to the condition its first-visit probes. The visit goes to the trial record's
+        `visits` (and `first_visit`); self.condition holds what each run's record carries of it. Returns the link
+        dict the runs' records keep (the rates under keys ending in gbit)."""
+        label = condition['label']
+        log(f'condition {label}: tc {condition["tc_rate"]}, netem {condition["delay_ms"]:g} ms on each VM, '
+            f'{condition["host_tcp"]} TCP settings')
+        attempts = []
+        for attempt in range(2):
+            entry: dict = {}
+            attempts.append(entry)
+            if attempt:
+                entry['reset'] = self.probe('the network reset', self.network_off)
+            entry['applied'] = {'wan': self.wan('apply', condition), 'tcp': self.set_tcp(condition['host_tcp'])}
+            entry['checks'] = checks = self.visit_checks(condition)
+            if checks['ok']:
+                break
+            log(f'  the visit to {label} failed its checks: {checks["problems"]}')
+        visit = {'condition': label, 'repeat': repeat, 'utc': utc_now(), 'attempts': attempts,
+                 'tree': checks['tree'], 'pings': checks['pings'], 'control_noops': checks['control_noops'],
+                 'sysctl': checks['sysctl'], 'bands': checks['bands'], 'ok': checks['ok']}
+        trial.setdefault('visits', []).append(visit)
+        if not checks['ok']:
+            raise InfrastructureFault(f'the visit to {label} failed its checks twice (A11 (i)): {checks["problems"]}')
+        one = self.link_test('source_to_dest', 1)
+        visit['link_tests'] = [one]
+        visit['bands']['after_link_test'] = self.band_counters()
+        first = trial.setdefault('first_visit', {})
+        if label not in self.visited:
+            self.visited.add(label)
+            first[label] = self.first_visit_probes(condition, trial)
+        if condition['rtt_ms'] == 0 and condition['host_tcp'] == 'default':
+            # The zero-delay rates at this tbf rate (the crossovers' x; A9's comparison), unless a probe gave them.
+            zero = self.zero_delay.setdefault(condition['gbit'], {})
+            zero.setdefault('one_stream', one['steady_gbit'])
+            if 'bound' not in zero:
+                zero['bound'] = next((test.get('steady_gbit') for test in (first.get(label) or {}).get('link_tests', ())
+                                      if test.get('streams') == LINK_TEST_STREAMS
+                                      and test.get('direction') == 'source_to_dest'), None)
+        ping_min = checks['pings'].get('min_ms')
+        steady = one['steady_gbit']
+        zero = self.zero_delay.get(condition['gbit'], {})
+        self.condition = {
+            **{key: condition[key] for key in ('label', 'gbit', 'rtt_ms', 'delay_ms', 'host_tcp')},
+            'visit_index': len(trial['visits']) - 1, 'ping_min_ms': ping_min, 'visit_one_stream_gbit': steady,
+            'zero_delay_gbit': zero.get('one_stream'), 'zero_delay_bound_gbit': zero.get('bound'),
+            # pgdelta's busy threshold: what the path holds without queueing, the visit's one-stream rate times
+            # its ping minimum (passed to each pgdelta sender as --busy-inflight-bytes where it takes it).
+            'busy_inflight_bytes': (None if steady is None or ping_min is None
+                                    else int(steady * 1e9 / 8 * ping_min / 1000))}
+        visit['busy_inflight_bytes'] = self.condition['busy_inflight_bytes']
+        link = {'condition': label, 'visit_index': self.condition['visit_index'],
+                'source_to_dest_gbit': one['gbit'], 'source_to_dest_steady_gbit': steady,
+                'zero_delay_gbit': zero.get('one_stream'), 'zero_delay_bound_gbit': zero.get('bound')}
+        for test in (first.get(label) or {}).get('link_tests', ()):
+            if test.get('error'):
+                continue
+            if test['direction'] == 'dest_to_source':
+                link.update(dest_to_source_gbit=test['gbit'], dest_to_source_steady_gbit=test['steady_gbit'])
+            elif test['streams'] > 1:
+                link.update({f'source_to_dest_{test["streams"]}streams_gbit': test['gbit'],
+                             f'source_to_dest_{test["streams"]}streams_steady_gbit': test['steady_gbit']})
+        self.current_speed = condition
+        return link
+
+    def link_test(self, direction: str, streams: int, *, qdisc: bool = False, listen: str | None = None,
+                  connect: str | None = None, name: str | None = None) -> dict:
+        """One EXP-13 link test, after a TCP metrics flush: its rate, the per-second rates and the steady rate (the
+        median of the last 3 after the warmup), each stream's connect time; with qdisc, both VMs' tree counters
+        before and after (netem's and the tbf's drops from the same snapshots) and the tc sampler's largest
+        netem backlog meanwhile (smoke item 5)."""
+        flush = self.tcp_metrics_flush()
+        samplers = self.start_net_samplers(name or f'link-{direction}-{streams}', ss=False) if qdisc else None
+        before = self.wan('show') if qdisc else None
+        try:
+            test = self.blast(direction, streams, listen=listen, connect=connect)
+        finally:
+            sampled = self.stop_net_samplers(samplers) if samplers else None
+        receiver, sender = test['receiver'], test['sender']
+        result = {'direction': direction, 'streams': streams, 'utc': utc_now(), 'tcp_metrics': flush,
+                  'gbit': receiver.get('gbit'),
+                  'steady_gbit': receiver.get('steady_last3_gbit', receiver.get('steady_gbit')),
+                  'per_second_gbit': receiver.get('per_second_gbit'), 'connect_s': sender.get('connect_s'),
+                  'per_stream_connect_s': sender.get('per_stream_connect_s'), 'test': test}
+        if qdisc:
+            after = self.wan('show')
+            result['qdisc'] = {}
+            for vm in ('source', 'dest'):
+                first, last = (measure.qdisc_counters(shown[vm]['tree']) for shown in (before, after))
+                result['qdisc'][vm] = {'before': first, 'after': last, 'delta': measure.qdisc_delta(first, last),
+                                       'samples': (sampled or {}).get(vm, {}).get('qdisc')}
+        return result
+
+    def first_visit_probes(self, condition: dict, trial: dict) -> dict:
+        """At a trial's first visit to a condition: one stream from dest to source, 8 streams from source to dest
+        (and any --first-visit-link-streams), each with the tree's counters; the SSH probe at r > 0 (with
+        --ssh-probe-port); the stunnel link test where --stunnel-link-test names the condition. Each is a probe: its
+        error is recorded and the visit goes on."""
+        label, slug = condition['label'], condition['slug']
+        planned = [('dest_to_source', 1, False)] + [
+            ('source_to_dest', streams, True)
+            for streams in (LINK_TEST_STREAMS, *self.t12_plan['first_visit_streams'].get(label, ()))]
+        tests = []
+        for direction, streams, qdisc in planned:
+            test = self.probe(f'the {streams}-stream link test ({direction}) at {label}',
+                              lambda: self.link_test(direction, streams, qdisc=qdisc,
+                                                     name=f'{slug}-{direction}-{streams}'))
+            tests.append({'direction': direction, 'streams': streams, **test})
+        first = {'condition': label, 'utc': utc_now(), 'link_tests': tests}
+        if getattr(self.args, 'ssh_probe_port', None) and condition['rtt_ms'] > 0:
+            first['ssh_probe'] = self.probe(f'the SSH probe at {label}', self.ssh_probe)
+        if label in self.t12_plan['stunnel_link_test']:
+            first['stunnel_link_test'] = self.probe(f'the stunnel link test at {label}',
+                                                    lambda: self.stunnel_link_test(slug))
+        return first
+
+    def zero_delay_tests(self) -> dict:
+        """EXP-13's step 3: at each --zero-delay-link-rates rate, one stream from source to dest through the tree at
+        r = 0 on default hosts; its steady rate is the crossovers' x there (and A9's zero-delay rate). The tree is
+        off again after."""
+        results = {}
+        try:
+            for gbit in self.t12_plan['zero_delay_rates']:
+                condition = measure.parse_condition(f'{gbit:g}:0:default')
+                self.wan('apply', condition)
+                test = self.probe(f'the zero-delay link test at {gbit:g} Gbit/s',
+                                  lambda: self.link_test('source_to_dest', 1, name=f'{condition["slug"]}-zero-delay'))
+                results[condition['label']] = test
+                if test.get('steady_gbit') is not None:
+                    self.zero_delay[condition['gbit']] = {'one_stream': test['steady_gbit'],
+                                                          'bound': test['steady_gbit'], 'from': 'probe'}
+        finally:
+            self.wan('off')
+        return results
+
+    def ssh_probe(self) -> dict:
+        """The SSH probe (agent.py ssh-probe on dest, after a TCP metrics flush): one channel from the source's
+        sshd on --ssh-probe-port (22, delayed), cat /dev/zero for the link test's seconds; its rate over the last
+        seconds after the warmup."""
+        flush = self.tcp_metrics_flush()
+        warmup = getattr(self.args, 'link_test_warmup', None)
+        probe = self.local_agent('ssh-probe', '--host', self.source.ip, '--user', self.args.ssh_user, '--key',
+                                 self.args.ssh_key, '--port', str(self.args.ssh_probe_port), '--seconds',
+                                 f'{self.args.link_test_seconds:g}', '--warmup', f'{3 if warmup is None else warmup:g}',
+                                 timeout=300)
+        return {**probe, 'tcp_metrics': flush}
+
+    def start_net_samplers(self, name: str, ss: bool = True) -> dict:
+        """The network samplers, started before a clock: on the source, `ss -tin` of its sockets to dest (the
+        control port left out; with ss) and the tree's qdisc counters; on dest, its qdisc counters. Every 0.5 s."""
+        out = {'source': self.source_log(f'net-sampler-{name}'), 'dest': str(self.dest_log(f'net-sampler-{name}'))}
+        ss_args = ['--peer', self.dest_ip, '--exclude-port', str(self.args.control_port)] if ss else []
+        source, dest = self.both(
+            lambda: self.local_agent('net-sampler', 'start', '--out', out['dest'], '--qdisc-iface', self.dest_iface),
+            lambda: self.source.agent('net-sampler', 'start', '--out', out['source'], *ss_args, '--qdisc-iface',
+                                      self.source_iface))
+        return {'source': source, 'dest': dest, 'out': out}
+
+    def stop_net_samplers(self, started: dict) -> dict:
+        """The samplers stopped after the clock, and what they read (agent.py net-sampler stop's summary)."""
+        source, dest = self.both(lambda: self.local_agent('net-sampler', 'stop', '--out', started['out']['dest']),
+                                 lambda: self.source.agent('net-sampler', 'stop', '--out', started['out']['source']))
+        return {'source': source, 'dest': dest}
+
+    @property
+    def tls_dir(self) -> str:
+        """The TLS material's directory, the same path on both VMs (never in the results)."""
+        return f'{self.work}/tls'
+
+    def setup_tls(self) -> dict:
+        """The session's TLS material, made on dest (agent.py tls-material), and the client's certificate and key,
+        the CA's certificate and the wrong CA's client pair copied to the source over the control path (keys
+        0600). It never leaves the VMs: the record keeps the certificates' subjects and fingerprints only."""
+        material = self.local_agent('tls-material', '--dir', self.tls_dir)
+        names = ('ca.crt', 'client.crt', 'client.key', 'wrong-client.crt', 'wrong-client.key')
+        for name in names:
+            self.source.write(f'{self.tls_dir}/{name}', Path(material['files'][name]).read_text())
+        self.source.agent('run', '--log', f'{self.work}/logs/tls-chmod.log', '--', 'chmod', '600',
+                          f'{self.tls_dir}/client.key', f'{self.tls_dir}/wrong-client.key')
+        return {'dir': self.tls_dir, 'certificates': material['certificates'], 'copied_to_source': list(names)}
+
+    def stunnel_configs(self, server_log, client_log) -> dict:
+        """The pair's configurations (measure.stunnel_config): dest's server on its address's STUNNEL_SERVER_PORT,
+        forwarding to the receiver on localhost; the source's client on localhost's STUNNEL_CLIENT_PORT, opening
+        TLS 1.3 to dest's."""
+        tls = self.tls_dir
+        return {'server': measure.stunnel_config(
+                    'server', accept=f'{self.dest_ip}:{measure.STUNNEL_SERVER_PORT}', connect=f'127.0.0.1:{PGDELTA_PORT}',
+                    cert=f'{tls}/server.crt', key=f'{tls}/server.key', ca=f'{tls}/ca.crt', log=server_log),
+                'client': measure.stunnel_config(
+                    'client', accept=f'127.0.0.1:{measure.STUNNEL_CLIENT_PORT}',
+                    connect=f'{self.dest_ip}:{measure.STUNNEL_SERVER_PORT}', cert=f'{tls}/client.crt',
+                    key=f'{tls}/client.key', ca=f'{tls}/ca.crt', log=client_log)}
+
+    def start_stunnels(self, tag: str, server_only: bool = False) -> dict:
+        """The stunnel pair started before a clock, each with its configuration and log beside the run's logs; under
+        strace -e trace=setsockopt with --stunnel-strace (smoke item 12)."""
+        logs = {'server': str(self.dest_log(f'{tag}stunnel-server.log')),
+                'client': self.source_log(f'{tag}stunnel-client.log')}
+        configs = self.stunnel_configs(logs['server'], logs['client'])
+        paths = {'server': str(self.dest_log(f'{tag}stunnel-server.conf')),
+                 'client': self.source_log(f'{tag}stunnel-client.conf')}
+        Path(paths['server']).parent.mkdir(parents=True, exist_ok=True)
+        Path(paths['server']).write_text(configs['server'])
+        started = {'configs': configs, 'logs': logs, 'tag': tag}
+
+        def start(name, port):
+            argv = ['stunnel', 'start', '--name', name, '--dir', self.tls_dir, '--config', paths[name], '--port',
+                    str(port), '--log', logs[name], '--stunnel', self.args.stunnel]
+            if self.args.stunnel_strace:
+                argv += ['--strace-log', logs[name].replace('.log', '.strace')]
+            return argv
+
+        started['server'] = self.local_agent(*start('server', measure.STUNNEL_SERVER_PORT))
+        if not server_only:
+            try:
+                self.source.write(paths['client'], configs['client'])
+                started['client'] = self.source.agent(*start('client', measure.STUNNEL_CLIENT_PORT))
+            except BaseException:
+                self.stop_stunnels(started)
+                raise
+        return started
+
+    def stop_stunnels(self, started: dict) -> dict:
+        """The pair stopped after the clock: each one's log read (connections, protocol, suite) and its own CPU.
+        The TLS connection's protocol and suite are dest's (the server's) log's."""
+        result: dict = {'configs': started['configs'], 'logs': started['logs']}
+        errors = []
+        for name, stop in (('server', lambda: self.local_agent('stunnel', 'stop', '--name', 'server', '--dir',
+                                                               self.tls_dir, '--log', started['logs']['server'])),
+                           ('client', lambda: self.source.agent('stunnel', 'stop', '--name', 'client', '--dir',
+                                                                self.tls_dir, '--log', started['logs']['client']))):
+            if name not in started:
+                continue
+            try:
+                result[name] = stop()
+            except Exception as exc:
+                result[name] = {'error': f'{type(exc).__name__}: {exc}'}
+                errors.append(name)
+        server = (result.get('server') or {}).get('log') or {}
+        result.update(tls_version=server.get('tls_version'), tls_suite=server.get('tls_suite'),
+                      connections=server.get('connections'), stop_errors=errors)
+        return result
+
+    def stunnel_link_test(self, slug: str) -> dict:
+        """A one-stream link test through the stunnel pair (smoke item 12): the receiver on dest's localhost behind
+        its stunnel, the sender into the source's stunnel on localhost."""
+        started = self.start_stunnels(f'{slug}-link-test-')
+        try:
+            test = self.link_test('source_to_dest', 1, listen=f'127.0.0.1:{PGDELTA_PORT}',
+                                  connect=f'127.0.0.1:{measure.STUNNEL_CLIENT_PORT}')
+        finally:
+            stopped = self.stop_stunnels(started)
+        return {**test, 'stunnel': stopped}
+
+    def tls_refusals(self) -> dict:
+        """Smoke item 12's refusals: dest's stunnel alone, then from the source openssl s_client with no client
+        certificate, and with one from a wrong CA. Each attempt's exit and output, and dest's stunnel's log: its
+        refusal lines, and the connections it forwarded to the receiver's port (there should be none)."""
+        results = {}
+        ca = f'{self.tls_dir}/ca.crt'
+        for case, extra in (('no_certificate', ''),
+                            ('wrong_ca', f' -cert {self.tls_dir}/wrong-client.crt -key {self.tls_dir}/wrong-client.key')):
+            started = self.start_stunnels(f'refusal-{case}-', server_only=True)
+            try:
+                attempt = self.source.agent(
+                    'run', '--log', f'{self.work}/logs/tls-refusal-{case}.log', '--', 'sh', '-c',
+                    f'echo x | timeout 20 openssl s_client -connect {self.dest_ip}:{measure.STUNNEL_SERVER_PORT} '
+                    f'-tls1_3 -CAfile {ca}{extra} -quiet', timeout=120)
+            finally:
+                stopped = self.stop_stunnels(started)
+            log_text = (stopped.get('server') or {}).get('log_tail') or ''
+            results[case] = {'client_exit_code': attempt.get('exit_code'),
+                             'client_tail': (attempt.get('log_tail') or '')[-2000:],
+                             'refusals': ((stopped.get('server') or {}).get('log') or {}).get('refusals'),
+                             'forwarded': [line for line in log_text.splitlines()
+                                           if f':{PGDELTA_PORT}' in line and 'connected' in line]}
+            results[case]['refused'] = bool(results[case]['refusals']) and not results[case]['forwarded']
+        return results
+
+    def processes_snapshot(self) -> dict:
+        """A `ps` of both VMs (probackup8 at EXP-13: its SSH connections, mid-run), the lines of SSH, pg_probackup
+        and walsenders."""
+        argv = ['ps', '-eo', 'pid,ppid,etimes,comm,args', '--sort=pid']
+        keep = ('ssh', 'probackup', 'walsender', 'psql')
+        dest = subprocess.run(argv, capture_output=True, text=True, timeout=60).stdout
+        source = self.source.agent('run', '--log', self.source_log('processes.log'), '--', *argv)['log_tail']
+        return {'utc': time.time(), 'argv': argv,
+                **{vm: [line for line in text.splitlines() if any(word in line for word in keep)]
+                   for vm, text in (('source', source), ('dest', dest))}}
+
+    def t12_after_clock(self, record: dict, daemon_holder: dict) -> None:
+        """After an EXP-13 run's clock: the samplers stopped and their readings in the record (`ss`: the source's
+        sockets to dest, per connection in ss_connections; `qdisc.samples`: netem's largest sampled backlog on each
+        VM), and v1_tls's stunnel pair stopped, its logs read (`stunnel`: the connection, the protocol and suite).
+        Each once, whichever path gets here first (run_method's, or its finally after a failure)."""
+        samplers, stunnel = daemon_holder.pop('net_samplers', None), daemon_holder.pop('stunnel', None)
+        errors = []
+        if samplers is not None:
+            try:
+                stopped = self.stop_net_samplers(samplers)
+                record['ss'] = stopped['source'].get('ss')
+                record['ss_connections'] = stopped['source'].get('ss_connections')
+                record.setdefault('qdisc', {})['samples'] = {vm: stopped[vm].get('qdisc') for vm in ('source', 'dest')}
+                record['net_samplers'] = {vm: {key: stopped[vm].get(key) for key in ('pid', 'final', 'samples')}
+                                          for vm in ('source', 'dest')}
+            except Exception as exc:
+                errors.append(f'the samplers: {type(exc).__name__}: {exc}')
+        if stunnel is not None:
+            try:
+                record['stunnel'] = self.stop_stunnels(stunnel)
+            except Exception as exc:
+                errors.append(f'the stunnel pair: {type(exc).__name__}: {exc}')
+        if errors:
+            raise CommandError('; '.join(errors))
+
+    def t12_checks(self, record: dict, method: str, verification: dict) -> None:
+        """An EXP-13 run's own checks, after its verification: the receiver's wall (its launch to its exit; the drain
+        is that less publish_s) for pgdelta's arms; for v1_tls, stunnel's log showing the connection, TLS 1.3 and its
+        suite, or the run fails verification; and A11 (ii)'s network checks (measure.network_checks)."""
+        if method in measure.PGDELTA_METHODS:
+            receiver = next((command for phase in (record.get('phases') or {}).values()
+                             for command in phase.get('commands', ())
+                             if command.get('host') == 'dest' and 'receiver' in str(command.get('role', ''))), None)
+            record['receiver_wall_s'] = None if receiver is None else receiver.get('wall_seconds')
+        if method in measure.TLS_METHODS:
+            tls = record.get('stunnel') or {}
+            ok = (tls.get('tls_version') == 'TLSv1.3' and bool(tls.get('tls_suite'))
+                  and (tls.get('connections') or 0) >= 1)
+            verification['tls'] = {'tls_version': tls.get('tls_version'), 'tls_suite': tls.get('tls_suite'),
+                                   'connections': tls.get('connections'), 'ok': ok}
+            verification['verified'] = bool(verification.get('verified')) and ok
+        if method in measure.PROBACKUP_METHODS:
+            record['processes'] = next((phase['processes'] for phase in (record.get('phases') or {}).values()
+                                        if phase.get('processes')), None)
+        record['network_checks'] = measure.network_checks(record)
+
+    def t12_methods_at(self, condition: dict, repeat: int) -> list[str]:
+        """The arms that run at a condition in a repeat (counted from 0 here, from 1 in the options)."""
+        return measure.t12_methods_at(self.methods, condition['label'], repeat + 1, self.t12_plan)
+
+    def user_table_files(self) -> dict:
+        """A15's user tables' files (measure.USER_TABLE_FILES_SQL, from the catalog: no user table is read)."""
+        answer = self.query(measure.USER_TABLE_FILES_SQL, host=self.source.ip, port=PG_PORT,
+                            log_name='user-table-files.log')
+        rows = json.loads(answer or '[]')
+        return {'relations': rows, 'paths': sorted({row['path'] for row in rows})}
 
     # --- methods -----------------------------------------------------------
 
@@ -1117,8 +1661,21 @@ class Orchestrator:
         pg_logical_emit_message(false, ..., flush => true) writes and flushes a non-transactional WAL
         record and nothing else: no table, no data file and no transaction status changes (EXP-11's smoke
         run, October 24). It keeps WAL arriving at pg_probackup's stream, as on a live primary.
+
+        EXP-13 runs it on the source instead, over its Unix socket, launched over the control path, so its pace
+        doesn't change with the round trip: psql reads the script on the source, and stops when the SSH channel's
+        stdin closes (the shell around it kills it then).
         """
+        if self.t12:
+            psql = [str(part) for part in self.psql_argv(f'{self.source_root}/s', PG_PORT, 'SELECT 1')[:-2]]
+            return self.source.argv(['sh', '-c', '"$@" -f "$0" & p=$!; read x; kill $p; wait $p',
+                                     self.wal_ticker_script, *psql])
         return [str(part) for part in self.psql_argv(self.source.ip, PG_PORT, 'SELECT 1')[:-2]]
+
+    @property
+    def wal_ticker_script(self) -> str:
+        """EXP-13: the WAL ticker's script on the source."""
+        return f'{self.work}/wal-ticker.sql'
 
     def start_wal_ticker(self, method):
         """probackup*: the WAL ticker, started untimed before the phase, or None when it is off."""
@@ -1129,20 +1686,31 @@ class Orchestrator:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         handle = log_path.open('w')
         script = (f"SELECT pg_logical_emit_message(false, 'pgd-tick', '', true) \\watch {interval}\n")
+        if self.t12:
+            self.source.write(self.wal_ticker_script, script)
         process = subprocess.Popen(self.wal_ticker_argv(), stdin=subprocess.PIPE, stdout=handle,
                                    stderr=subprocess.STDOUT, text=True, env=server_env())
-        process.stdin.write(script)
-        process.stdin.flush()
-        return {'process': process, 'log': handle, 'interval_s': interval, 'started': time.perf_counter()}
+        if not self.t12:
+            process.stdin.write(script)
+            process.stdin.flush()
+        return {'process': process, 'log': handle, 'interval_s': interval, 'started': time.perf_counter(),
+                'on': 'source' if self.t12 else 'dest'}
 
     def stop_wal_ticker(self, ticker) -> dict | None:
         """Stops the ticker after the phase; its record (interval, seconds, exit). A ticker that died early
-        is reported, not fatal: the run then shows what pg_probackup does on an idle source."""
+        is reported, not fatal: the run then shows what pg_probackup does on an idle source. On the source
+        (EXP-13) the SSH channel's stdin is closed first, which stops it there."""
         if ticker is None:
             return None
         process = ticker['process']
         early = process.poll()
-        if early is None:
+        if early is None and ticker.get('on') == 'source':
+            process.stdin.close()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        if early is None and process.poll() is None:
             process.terminate()
             try:
                 process.wait(timeout=10)
@@ -1180,16 +1748,35 @@ class Orchestrator:
                                 'wall_seconds': round(time.perf_counter() - started, 3)}
             return [catchup, sync]
 
+        # EXP-13 (smoke item 16): a ps of both VMs mid-run, PROCESSES_SNAPSHOT_S into the clock: its SSH connections.
+        processes: dict = {}
+        timer = None
+        if self.t12:
+            def take():
+                try:
+                    processes.update(self.processes_snapshot())
+                except Exception as exc:
+                    processes['error'] = f'{type(exc).__name__}: {exc}'
+
+            timer = threading.Timer(PROCESSES_SNAPSHOT_S, take)
+            timer.daemon = True
         # The WAL ticker (--probackup-wal-ticker; added after EXP-11's smoke run): on an idle source,
         # pg_probackup's WAL stream notices the stop LSN only at its next timer tick, about 10 s after the
         # stream started, so an idle source alone added up to 8 s to every catchup. Started before the clock.
         ticker = self.start_wal_ticker(method)
         try:
+            if timer is not None:
+                timer.start()
             phase = self.timed_phase(measure.PROBACKUP_PHASE, body)
         finally:
+            if timer is not None:
+                timer.cancel()
+                timer.join(60)
             ticked = self.stop_wal_ticker(ticker)
         phase['steps'] = steps
         phase['wal_ticker'] = ticked
+        if timer is not None:
+            phase['processes'] = processes or None
         return {measure.PROBACKUP_PHASE: phase}
 
     def verify_probackup(self, method, paths) -> dict:
@@ -1392,8 +1979,10 @@ class Orchestrator:
             target = ['--basis', paths['output']]
         else:
             target = ['--basis', self.b0, '--output', paths['output']]
+        # EXP-13's v1_tls: the receiver is reachable only through dest's stunnel, on localhost.
+        listen = (f'127.0.0.1:{PGDELTA_PORT}' if method in measure.TLS_METHODS else f'{self.dest_ip}:{PGDELTA_PORT}')
         return [sys.executable, '-m', 'pgdelta', 'receive', *target,
-                '--listen', f'{self.dest_ip}:{PGDELTA_PORT}',
+                '--listen', listen,
                 '--pg-controldata', self.bin / 'pg_controldata', *measure.PGDELTA_ARGS[method]['receive']]
 
     def pgdelta_send_argv(self, method, paths) -> list:
@@ -1401,10 +1990,17 @@ class Orchestrator:
         # flags): the source's, or EXP-12's snapshot for the proxies (method_paths' source_data); the
         # staged methods read the capture S.
         source = paths['source_data'] if method in measure.PGDELTA_DIRECT_METHODS else self.source_capture
+        # EXP-13's v1_tls connects to the source's stunnel on localhost, which opens TLS 1.3 to dest's.
+        connect = (f'127.0.0.1:{measure.STUNNEL_CLIENT_PORT}' if method in measure.TLS_METHODS
+                   else f'{self.dest_ip}:{PGDELTA_PORT}')
+        # EXP-13: the busy threshold of the sender's waits (the visit's one-stream rate times its ping minimum),
+        # where both VMs' pgdelta takes it (preflight_t12).
+        busy = (self.condition or {}).get('busy_inflight_bytes') if self.t12 and self.busy_flag else None
         return [self.source.python, '-m', 'pgdelta', 'send', '--source', source,
-                '--connect', f'{self.dest_ip}:{PGDELTA_PORT}',
+                '--connect', connect,
                 '--pg-controldata', self.bin / 'pg_controldata', '--stats-json', paths['stats'],
-                *measure.PGDELTA_ARGS[method]['send']]
+                *measure.PGDELTA_ARGS[method]['send'],
+                *(['--busy-inflight-bytes', str(busy)] if busy is not None else [])]
 
     def receive_argv(self, method, paths) -> list:
         """The receiver a method launches on dest: parcopy's for parcopy*, pgdelta's otherwise."""
@@ -2117,7 +2713,15 @@ class Orchestrator:
                     'worker_start_method': {'source': reported.get('worker_start_method'),
                                             'dest': (reported.get('receiver') or {}).get('worker_start_method')},
                     'by_category': {'source_to_dest': reported.get('bytes_source_to_dest'),
-                                    'dest_to_source': reported.get('bytes_dest_to_source')}}
+                                    'dest_to_source': reported.get('bytes_dest_to_source')},
+                    # EXP-13: the protocol timers (each sender wait with its _busy_s and _idle_s; the receiver's
+                    # under `receiver`), the leaf requests, the window and the fallback, read defensively; and
+                    # whether the window and the fallback in effect are the ones the method pins.
+                    **measure.pgdelta_protocol_report(reported),
+                    'window_ok': (None if engine.get('window') is None or find_window(reported) is None
+                                  else find_window(reported) == engine['window']),
+                    'high_churn_ok': (reported.get('high_churn_node_fraction') == engine['high_churn']
+                                      if engine.get('high_churn') is not None else None)}
         if method in measure.RSYNC_METHODS and transfer:
             sender = next(c for c in transfer['commands'] if c['host'] == 'source')
             stats = rsync_transfer_stats(sender.get('log_tail', ''))
@@ -2226,8 +2830,11 @@ class Orchestrator:
         log(f'{self.trial_id} r{repeat} {speed["label"]} [{order_index + 1}/{len(order)}] {method}'
             + ('' if record['block'] == 'main' else f' ({record["block"]})'))
         daemon_holder: dict = {}
-        self.log_prefix = f'r{repeat}-{speed["label"]}-'
+        self.log_prefix = f'r{repeat}-{speed.get("slug") or speed["label"]}-'
         self.current_run = (repeat, speed['label'])
+        if self.t12:
+            # EXP-13: the condition and what its visit measured (the ping minimum, the one-stream rate, ...).
+            record['condition'] = dict(self.condition or {})
         try:
             stuck = self.output_stuck
             if stuck and (str(paths['output']) == stuck['data'] or method in measure.OUTPUT_START_METHODS):
@@ -2243,9 +2850,23 @@ class Orchestrator:
                 # effect during the run.
                 sysctl = record['sysctl'] = {}
                 sysctl['before'] = self.check_dirty_writeback(sysctl)
+            if self.t12:
+                # EXP-13's guard before every run: both VMs' tcp_rmem and tcp_wmem at the condition's values (every
+                # TCP setting in force recorded). A failed guard refuses the run (A11 (ii)).
+                tcp = record.setdefault('sysctl', {})['tcp'] = self.tcp_guard(speed['host_tcp'])
+                if not tcp['ok']:
+                    raise CommandError(f"the TCP settings are not the condition's: {tcp['problems']}")
             record['preparation'] = self.prepare(method, paths, daemon_holder)
             if daemon_holder.get('dirty_writeback'):
                 record.setdefault('sysctl', {})['during'] = daemon_holder['dirty_writeback']['values']
+            if self.t12:
+                if method in measure.TLS_METHODS:
+                    # v1_tls's stunnel pair, started before the clock (stopped after it: t12_after_clock).
+                    daemon_holder['stunnel'] = self.start_stunnels('')
+                # The samplers start before the clock, the same in every arm; then a TCP metrics flush, the last
+                # step before the cache drop, so no connection starts from a cached slow-start threshold.
+                daemon_holder['net_samplers'] = self.start_net_samplers('run')
+                record['tcp_metrics'] = self.tcp_metrics_flush()
             if record['source_cache'] == 'warm':
                 # T2's warm-source block: the source is read instead of dropped; dest is dropped.
                 record['warm_source'] = self.warm_source()
@@ -2258,6 +2879,8 @@ class Orchestrator:
                 record['cache_drop'] = self.drop_caches()
                 record['caches_dropped'] = True
             phases.update(self.run_phases(method, paths, daemon_holder))
+            if self.t12:
+                self.t12_after_clock(record, daemon_holder)
             record['totals'] = measure.phase_totals(phases)
             if method in measure.RSYNC_METHODS:
                 record['totals_in_place'] = measure.phase_totals(
@@ -2294,8 +2917,11 @@ class Orchestrator:
                 None if record['output_bytes'] is None or padding is None
                 else record['output_bytes'] - padding)
             # T2's checks (a) and (b) on the run's one counter window; durability_ok, apart from status.
+            # EXP-13: with a noise table, (a)'s limit follows the run's clock.
             record['durability'] = measure.durability_check(record, record['output_bytes'],
-                                                            self.idle_noise_bytes)
+                                                            self.idle_noise_bytes, self.noise_table)
+            if self.t12:
+                self.t12_checks(record, method, verification)
             if verification['basis_changes']:
                 raise CommandError('B0 changed: ' + '; '.join(verification['basis_changes']))
             record['status'] = 'pass' if verification['verified'] else 'fail'
@@ -2312,6 +2938,15 @@ class Orchestrator:
             record['traceback'] = traceback.format_exc()
             log(f'  ERROR {record["error"]}')
         finally:
+            if self.t12:
+                # EXP-13: samplers and stunnels a failure left running are stopped, and the run's network checks
+                # recorded whatever happened (A11 (ii)).
+                try:
+                    self.t12_after_clock(record, daemon_holder)
+                except Exception as exc:
+                    record['t12_cleanup_error'] = f'{type(exc).__name__}: {exc}'
+                if 'network_checks' not in record:
+                    record['network_checks'] = measure.network_checks(record)
             if 'dirty_writeback' in daemon_holder:
                 # full_wb: dest's write-back settings back to their defaults, whatever happened.
                 del daemon_holder['dirty_writeback']
@@ -2519,6 +3154,11 @@ class Orchestrator:
             return None
         reference_match = trial.get('reference_match')
         check: dict = {'reference_match': reference_match, 'runs': []}
+        # EXP-13's A15: a probackup* difference is void only if a user-table file differs between the reference
+        # digests (catalogs change in every trial); EXP-11's rule voided it whenever any file did.
+        void_match = trial.get('reference_user_tables_match') if self.t12 else reference_match
+        if self.t12:
+            check.update(void_rule='A15: user-table files only', reference_user_tables_match=void_match)
         source = None
         if pending:
             started = time.perf_counter()
@@ -2534,11 +3174,12 @@ class Orchestrator:
                 match, differences = measure.compare_logical(source, verification.get('logical') or {})
                 verification.update(logical_match=match, logical_differences=differences, source_logical=source)
                 if method in measure.PROBACKUP_METHODS:
-                    record['status'] = measure.probackup_outcome(True, match, reference_match)
+                    record['status'] = measure.probackup_outcome(True, match, void_match)
                     verification['void'] = record['status'] == 'void'
                     if record['status'] == 'void':
                         record['void_reason'] = ("its digest differs from the source's, and the source changed "
-                                                 'during the trial (its reference digests differ)')
+                                                 'during the trial (its reference digests differ'
+                                                 + (' in a user-table file)' if self.t12 else ')'))
                 else:
                     record['status'] = 'pass' if match else 'fail'
                 if record['status'] == 'fail':
@@ -2659,6 +3300,14 @@ class Orchestrator:
                                  source_cluster.backup_hold_statements(BACKUP_LABEL)))
             elif method in measure.PGDELTA_STAGED_METHODS and self.t10a:
                 flags['capture_argv'] = [str(part) for part in self.capture_argv()]
+            elif self.t12:
+                # EXP-13: each arm's whole command line (each run's own, with the visit's busy threshold where
+                # pgdelta takes it, is in its record), and v1_tls's stunnel pair.
+                paths = self.method_paths(method)
+                flags.update(send_argv=[str(part) for part in self.pgdelta_send_argv(method, paths)],
+                             receive_argv=[str(part) for part in self.pgdelta_receive_argv(method, paths)])
+                if method in measure.TLS_METHODS:
+                    flags['stunnel'] = self.stunnel_configs("<the run's server log>", "<the run's client log>")
             return flags
         if method in measure.PGBACKREST_METHODS:
             return {'restore': ['--delta', f'--process-max={measure.PGBACKREST_PROCESS_MAX}'],
@@ -2705,8 +3354,10 @@ class Orchestrator:
     # --- trials ------------------------------------------------------------
 
     def record_path(self, record: dict) -> Path:
+        # EXP-13's conditions are named by their slug (2g-60ms-tuned) in file names, their label (2:60:tuned) inside.
+        speed = record['speed']
         return (self.out / 'runs' / record['trial_id']
-                / f'r{record["repeat"]}-{record["speed"]["label"]}-{record["method"]}.json')
+                / f'r{record["repeat"]}-{speed.get("slug") or speed["label"]}-{record["method"]}.json')
 
     def cluster_args(self, trial: dict) -> list[str]:
         argv = ['--root', self.source_root, '--bin-dir', str(self.bin),
@@ -2759,11 +3410,18 @@ class Orchestrator:
         self.reference_digests = {}
         self.byte_views = {}
         self.probe_relation_path = None
+        self.visited, self.zero_delay = set(), {}
         trial = {'schema': SCHEMA_TRIAL, 'trial_id': self.trial_id, 'pattern': pattern,
                  'fraction': fraction, 'scale': args.scale, 'seed': args.seed,
                  'started_utc': utc_now(), 'status': 'running', 'links': [], 'runs': []}
+        if self.t12:
+            # EXP-13: every visit (the tree, pings, control no-ops, link tests) and each condition's first-visit probes.
+            trial.update(visits=[], first_visit={})
         save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
         try:
+            if self.t12:
+                # EXP-13: the cluster, B0 and the workload with the tree off and Debian's TCP settings.
+                trial['network_off'] = self.network_off()
             self.throttle('off')
             log(f'{self.trial_id}: source cluster and dataset (scale {args.scale})')
             setup = self.source.script(SOURCE_CLUSTER, 'setup', *self.cluster_args(trial),
@@ -2789,21 +3447,32 @@ class Orchestrator:
             if self.t2:
                 # The single reader's file, from the catalog, before the start reference digest.
                 trial['probe_relation'] = self.probe('the probe relation', self.probe_relation)
+                if self.t12:
+                    # A15: the user tables' files, from the catalog too, for the void rule at the trial's end.
+                    trial['user_table_files'] = self.probe("the user tables' files", self.user_table_files)
                 log(f'{self.trial_id}: the start reference digest')
                 trial['reference_digests'] = {'start': self.reference_digest('start')}
                 trial['probes'] = self.trial_probes()
+                save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
+            if self.t12 and self.t12_plan['zero_delay_rates']:
+                # EXP-13's step 3: the zero-delay one-stream rates (the crossovers' x where no anchor runs).
+                trial['zero_delay_link_tests'] = self.zero_delay_tests()
                 save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
             trial['speed_orders'] = []
             for repeat in range(args.repeats):
                 speeds = measure.order_speeds(self.speeds, self.speed_rng, args.speed_order,
                                               repeat)
+                if self.t12:
+                    # EXP-13: a condition where no arm runs in this repeat isn't visited in it.
+                    speeds = [speed for speed in speeds if self.t12_methods_at(speed, repeat)]
                 labels = [speed['label'] for speed in speeds]
                 trial['speed_orders'].append(labels)
                 self.run.setdefault('speed_orders', {}).setdefault(self.trial_id, []).append(
                     labels)
                 log(f'{self.trial_id} r{repeat}: speed order {", ".join(labels)}')
                 for speed_index, speed in enumerate(speeds):
-                    here = measure.methods_at(self.methods, self.method_speeds, speed['label'])
+                    here = (self.t12_methods_at(speed, repeat) if self.t12
+                            else measure.methods_at(self.methods, self.method_speeds, speed['label']))
                     self.run_cell(trial, 'main', repeat, speed, here,
                                   {'speed_index': speed_index, 'speed_order': labels})
             # T2: the extension, then the warm-source block, unthrottled, each repeat in its own order.
@@ -2818,6 +3487,10 @@ class Orchestrator:
                                   {'speed_index': 0, 'speed_order': [unthrottled['label']],
                                    'block_repeat': block_repeat})
                     repeat += 1
+            if self.t12:
+                # EXP-13's step 5: the tree off and Debian's TCP settings, before the trial's end.
+                trial['network_off_end'] = self.network_off()
+                self.condition = None
             self.throttle('off')
             if self.t2:
                 trial['probes']['durable_write_floor'].append(
@@ -2829,6 +3502,13 @@ class Orchestrator:
                 # If they differ, the source changed during the trial: a probackup* logical difference is void.
                 trial['reference_match'] = same
                 trial['reference_differences'] = differences
+                if self.t12:
+                    # A15 (EXP-13): void only if a user-table file differs; the differences by file class.
+                    user = trial.get('user_table_files') or {}
+                    classes = measure.reference_classes(self.reference_digests['start'],
+                                                        self.reference_digests['end'], user.get('paths'))
+                    trial['reference_classes'] = classes
+                    trial['reference_user_tables_match'] = classes['user_tables_match']
                 save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
             # pgBackRest's restored copies against the source, now that no method is left to run.
             logical_check = self.finish_logical_checks(trial)
@@ -2848,6 +3528,8 @@ class Orchestrator:
             trial['status'] = 'error'
             trial['error'] = f'{type(exc).__name__}: {exc}'
             trial['traceback'] = traceback.format_exc()
+            if isinstance(exc, InfrastructureFault):
+                trial['infrastructure_fault'] = str(exc)  # EXP-13's A11 (i): recorded as such, nothing rerun
             log(f'{self.trial_id}: ERROR {trial["error"]}')
         finally:
             self.cleanup_trial(trial)
@@ -2856,9 +3538,10 @@ class Orchestrator:
         return trial
 
     def run_cell(self, trial: dict, block: str, repeat: int, speed: dict, methods, extra: dict) -> None:
-        """One (block, repeat, speed): the link set and tested, then each method once, in a new random order."""
+        """One (block, repeat, speed): the link set and tested, then each method once, in a new random order.
+        EXP-13: the speed is a condition, set and checked by set_condition."""
         args = self.args
-        link = self.set_speed(speed)
+        link = self.set_condition(speed, trial, repeat) if self.t12 else self.set_speed(speed)
         link.update(repeat=repeat, block=block, source_cache='warm' if block in WARM_BLOCKS else 'cold',
                     **extra)
         order = measure.method_orders(methods, self.rng, 1)[0]
@@ -2970,7 +3653,8 @@ class Orchestrator:
                                   '--bin-dir', str(self.bin), '--repeats', str(BRACKET_REPEATS), timeout=3600)
 
     def cleanup_trial(self, trial: dict) -> None:
-        steps = (('throttle off', lambda: self.throttle('off')),
+        steps = ((('network off', self.network_off),) if self.t12 else ()) + (
+                 ('throttle off', lambda: self.throttle('off')),
                  ('stop source cluster', lambda: self.source.script(
                      SOURCE_CLUSTER, 'stop', '--root', self.source_root, '--bin-dir', str(self.bin),
                      *([] if self.args.keep_cluster else ['--remove']))),
@@ -4686,6 +5370,104 @@ class Orchestrator:
         return {'windows': windows, 'window_seconds': seconds, 'increases_bytes': increases,
                 'max_increase_bytes': max(increases)}
 
+    def dirty_idle_noise_plan(self, plan) -> dict:
+        """EXP-13's check (a) noise (--idle-noise-plan): dest's Dirty + Writeback increase over each idle window, by
+        window length (smoke item 18: 20 windows of 5 s, 6 of 30 s, 3 of 120 s); each length's largest."""
+        increases: dict = {}
+        for seconds, windows in plan:
+            for _ in range(windows):
+                before = self.snapshot_dest()
+                time.sleep(seconds)
+                after = self.snapshot_dest()
+                increases.setdefault(f'{seconds:g}', []).append(
+                    measure.memory_delta(before['meminfo'], after['meminfo'])['dirty_writeback_increase_bytes'])
+        return {'plan': [[seconds, windows] for seconds, windows in plan], 'increases_bytes': increases,
+                'max_increase_bytes': {length: max(values) for length, values in increases.items()}}
+
+    def t12_run_record(self) -> dict:
+        """What run.json says about EXP-13: its conditions, each one's arms by repeat, the plan's options, and the
+        policies: the tree, the control path, the checks and the clock."""
+        return {'conditions': self.conditions,
+                'plan': self.t12_plan,
+                'tuned_tcp_max_bytes': self.args.tuned_tcp_max_bytes,
+                'control_port': self.args.control_port,
+                'link_test': {'seconds': self.args.link_test_seconds, 'warmup': self.args.link_test_warmup,
+                              'steady': 'the median of the last 3 one-second rates after the warmup',
+                              'after_connect': True},
+                'wan': ('infra/gcp/wan.sh on both VMs: a prio root; u32 filters send to the delayed band only traffic '
+                        'to the peer VM, except TCP with the control port as source or destination port; the delayed '
+                        "band is netem delay r/2 limit 1000000, then a tbf at the condition's rate with throttle.sh's "
+                        'burst and a queue of max(50 ms, r). Off outside every visit'),
+                'checks': {'visit': 'the tree on both VMs, 20 pings (min in [r, r + 1 ms], median at most min + 2 ms), '
+                                    "5 control no-ops (each at most 5 ms above the anchor's), both VMs' TCP settings; "
+                                    'A11 (i): reset and checked once more, then the trial stops',
+                           'run': "the guard (both VMs' tcp_rmem and tcp_wmem), a TCP metrics flush, the samplers "
+                                  "(ss on the source every 0.5 s, tc on both); A11 (ii): netem's own drops 0, its "
+                                  "sampled backlog below its limit, netem's bytes at least 0.98 x the wire bytes, the "
+                                  "sending sockets' minrtt in [r, r + 2 ms] (network_checks)"},
+                'void_rule': 'A15: a probackup* run is void only if a user-table file differs between the reference '
+                             'digests; catalog differences are reported by file class',
+                'wal_ticker': 'on the source over its Unix socket, launched over the control path',
+                'busy_threshold': ("each pgdelta sender gets --busy-inflight-bytes, the visit's one-stream steady rate "
+                                   'times its ping minimum, where both VMs\' pgdelta takes it')}
+
+    def preflight_t12(self) -> dict:
+        """What an EXP-13 run checks and records before its first trial:
+        - each VM's TCP settings as found: Debian's defaults, which every default visit and every reset write back;
+        - the tc commands of every condition (wan.sh's dry run), for run.json;
+        - the control no-ops' reference, with the tree at the anchor (the first r = 0 condition's rate) and default
+          settings;
+        - whether pgdelta send takes --busy-inflight-bytes on both VMs (without it, only unsent bytes are busy);
+        - where v1_tls or a stunnel link test runs: stunnel and openssl on both VMs, and the session's TLS material
+          (setup_tls); with --tls-refusal-check, smoke item 12's refusals.
+        """
+        args = self.args
+        environment = self.run['environment']
+        result: dict = {}
+        self.tcp_defaults = self.tcp_settings()
+        unknown = {vm: name for vm, values in self.tcp_defaults.items() for name in measure.TCP_MEM_SYSCTLS
+                   if measure.tcp_mem(values.get(name)) is None}
+        if unknown:
+            raise SystemExit(f'cannot read the TCP settings EXP-13 changes: {unknown}')
+        result['tcp_defaults'] = self.tcp_defaults
+        result['tc_commands'] = {
+            condition['label']: self.local_agent('wan', 'commands', condition['tc_rate'],
+                                                 f'{condition["delay_ms"]:g}', '--peer', self.source.ip,
+                                                 '--control-port', str(args.control_port), '--iface',
+                                                 self.dest_iface)['commands']
+            for condition in self.conditions}
+        anchor = next((condition for condition in self.conditions
+                       if condition['rtt_ms'] == 0 and condition['host_tcp'] == 'default'),
+                      measure.parse_condition(f'{self.conditions[0]["gbit"]:g}:0:default'))
+        try:
+            self.wan('apply', anchor)
+            self.control_reference = self.control_noops()
+        finally:
+            self.network_off()
+        result['control_reference'] = {'condition': anchor['label'], 'seconds': self.control_reference}
+        helps = {'dest': subprocess.run([sys.executable, '-m', 'pgdelta', 'send', '--help'], cwd=self.repo,
+                                        capture_output=True, text=True, timeout=120).stdout,
+                 'source': self.source.agent('run', '--log', f'{self.work}/logs/pgdelta-send-help-t12.log', '--cwd',
+                                             self.remote_repo, '--', self.source.python, '-m', 'pgdelta', 'send',
+                                             '--help').get('log_tail', '')}
+        self.busy_flag = all(pgdelta_supports(text, ('--busy-inflight-bytes',)) for text in helps.values())
+        result['busy_inflight_flag'] = self.busy_flag
+        if not self.busy_flag:
+            log("pgdelta send has no --busy-inflight-bytes on both VMs: its waits' busy parts count unsent bytes only")
+        tls = (any(method in measure.TLS_METHODS for method in self.methods) or self.t12_plan['stunnel_link_test']
+               or args.tls_refusal_check)
+        if tls:
+            missing = [f'{vm}: {tool}' for vm, env in environment.items() for tool in ('stunnel', 'openssl')
+                       if not env.get(tool)]
+            if missing:
+                raise SystemExit(f'v1_tls needs stunnel4 and openssl on both VMs (infra/gcp/startup.sh installs '
+                                 f'them): {", ".join(missing)} missing')
+            self.tls = result['tls'] = self.setup_tls()
+            result['stunnel_configs'] = self.stunnel_configs('<the run\'s server log>', '<the run\'s client log>')
+            if args.tls_refusal_check:
+                result['tls_refusals'] = self.tls_refusals()
+        return result
+
     def preflight_t2(self) -> dict:
         """What a T2 run checks before its first trial, and dest's write-back defaults.
 
@@ -4760,16 +5542,22 @@ class Orchestrator:
             self.method_speeds = measure.parse_method_speeds(args.method_speeds, self.methods, self.speeds)
         except ValueError as exc:
             raise SystemExit(str(exc))
-        problems = block_problems(args, self.methods) + load_problems(args, self.methods) + [
-            problem for problem in [checksum_problem(self.methods, args.manifest_checksums, args.load)] if problem]
+        problems = block_problems(args, self.methods) + load_problems(args, self.methods) + \
+            t12_problems(args, self.methods) + [
+                problem for problem in [checksum_problem(self.methods, args.manifest_checksums, args.load,
+                                                         getattr(args, 'conditions', ''))] if problem]
         if self.t10a and (args.load_rate <= 0 or (args.moderate_repeats and args.moderate_rate <= 0)):
             problems.append('EXP-12 needs --load-rate (and --moderate-rate for its moderate block) above 0: the smoke '
                             "run's R_busy and R_mod (its item 2)")
         if problems:
             raise SystemExit('; '.join(problems))
+        if self.t12:
+            # EXP-13: its conditions take the speeds' place; one where no method runs in any repeat isn't visited.
+            self.speeds = [condition for condition in self.conditions
+                           if any(self.t12_methods_at(condition, repeat) for repeat in range(args.repeats))]
         # A speed at which --method-speeds leaves no method is not visited at all.
         self.speeds = [speed for speed in self.speeds
-                       if measure.methods_at(self.methods, self.method_speeds, speed['label'])]
+                       if self.t12 or measure.methods_at(self.methods, self.method_speeds, speed['label'])]
         patterns = [p.strip() for p in args.patterns.split(',') if p.strip()]
         fractions = [float(f) for f in args.fractions.split(',') if f.strip()]
         for pattern in patterns:
@@ -4847,8 +5635,10 @@ class Orchestrator:
                              'child processes and are not covered'
                              if self.gnu_time else 'not measured (--gnu-time none)'),
                 'method_speeds': self.method_speeds,
-                'methods_by_speed': {speed['label']: measure.methods_at(self.methods, self.method_speeds,
-                                                                        speed['label'])
+                'methods_by_speed': {speed['label']: (measure.methods_at(self.methods, self.method_speeds,
+                                                                         speed['label']) if not self.t12 else
+                                                      {repeat + 1: self.t12_methods_at(speed, repeat)
+                                                       for repeat in range(args.repeats)})
                                      for speed in self.speeds},
                 'method_flags': {method: self.method_flags(method) for method in self.pinned_methods},
                 'pgbackrest': self.pgbackrest_run_record(),
@@ -4863,6 +5653,10 @@ class Orchestrator:
                 'durability': DURABILITY_POLICY,
                 # EXP-12 (T10a): its load, blocks, timeline and oracle; None outside it.
                 't10a': self.load_run_record() if self.t10a else None,
+                # EXP-13 (T12): its conditions, schedule and the control path; None outside it.
+                't12': self.t12_run_record() if self.t12 else None,
+                'control': {'port': getattr(args, 'control_port', 0) or 22, 'multiplexed': True,
+                            'control_path': self.source.control, 'ssh_options': self.source.options},
                 'trials': {}, 'status': 'running'}
             self.throttle('off')
             self.run['environment'] = self.environment()
@@ -4888,6 +5682,9 @@ class Orchestrator:
                 self.run['t2_preflight'] = self.preflight_t2()
             if self.t10a:
                 self.run['t10a_preflight'] = self.preflight_t10a()
+            if self.t12:
+                self.run['t12_preflight'] = self.preflight_t12()
+                save_json(self.out / 'run.json', self.run)
             if args.syscall_audit:
                 self.run['syscall_audit'] = self.preflight_audit()
             if self.gnu_time:
@@ -4910,6 +5707,17 @@ class Orchestrator:
                 measured = (self.run.get('dirty_idle_noise') or {}).get('max_increase_bytes') or 0
                 self.idle_noise_bytes = max(int(args.dirty_noise_mib * (1 << 20)), measured, 0)
                 self.run['idle_noise_bytes'] = self.idle_noise_bytes
+            if args.idle_noise_plan or args.dirty_noise_table:
+                # EXP-13: check (a)'s noise per window length, given and measured; each run's limit follows its clock.
+                measured = {}
+                if args.idle_noise_plan:
+                    # In place of EXP-11's one window length (--idle-noise-windows, refused beside it).
+                    self.run['dirty_idle_noise'] = self.dirty_idle_noise_plan(
+                        measure.parse_noise_plan(args.idle_noise_plan))
+                    measured = {float(length): value for length, value in
+                                self.run['dirty_idle_noise']['max_increase_bytes'].items()}
+                self.noise_table = measure.noise_table(measure.parse_noise_table(args.dirty_noise_table), measured)
+                self.run['noise_table_bytes'] = {f'{length:g}': value for length, value in self.noise_table.items()}
             if args.phase_floor_repeats:
                 self.run['phase_floor'] = self.phase_floor(args.phase_floor_repeats)
             save_json(self.out / 'run.json', self.run)
@@ -4925,6 +5733,17 @@ class Orchestrator:
                 if self.writeback_stuck or (trial['status'] == 'error' and args.stop_on_error):
                     break
         finally:
+            if self.t12 and self.run:
+                # EXP-13: no tree and Debian's TCP settings on both VMs, whatever happened; what tc then shows.
+                try:
+                    off = self.network_off()
+                    self.run['teardown'] = {vm: {'qdiscs': off['wan'][vm].get('qdiscs'),
+                                                 'tree_is_wan': (off['wan'][vm].get('tree') or {}).get('is_wan')}
+                                            for vm in ('source', 'dest')}
+                    self.run['teardown']['tcp'] = (off.get('tcp') or {}).get('check')
+                except Exception as exc:
+                    self.run['teardown'] = {'error': f'{type(exc).__name__}: {exc}'}
+                    log(f'could not reset the network: {exc}')
             try:
                 self.throttle('off')
             except Exception as exc:
@@ -5036,6 +5855,53 @@ def parse_args(argv=None):
                         help='keep the source cluster and B0 after each trial')
     parser.add_argument('--stop-on-error', action='store_true')
     parser.add_argument('--allow-code-mismatch', action='store_true')
+    # EXP-13 (T12): latency and transport, at the emulated WAN's conditions (infra/gcp/wan.sh).
+    wan = parser.add_argument_group('EXP-13 (T12)')
+    wan.add_argument('--conditions', default='', metavar='RATE:RTT_MS:HOST,...',
+                     help='EXP-13: comma list of conditions in place of --speeds, each a link rate (Gbit/s), an added '
+                          'round trip (ms; half on each VM) and a host TCP setting (default or tuned), e.g. '
+                          '2:0:default,2:60:tuned. Each repeat visits them in a seeded random order')
+    wan.add_argument('--method-conditions', action='append', default=[], metavar='METHODS=CONDITIONS',
+                     help='run some methods at some conditions only (methods joined with +); repeatable')
+    wan.add_argument('--method-repeats', action='append', default=[], metavar='METHODS=REPEATS',
+                     help='run some methods in some repeats only (counted from 1), e.g. probackup8=1,3,5')
+    wan.add_argument('--baseline-methods', default='', metavar='METHODS',
+                     help='these methods (those of --methods) run in --baseline-repeats only')
+    wan.add_argument('--baseline-repeats', default='', metavar='REPEATS', help='e.g. 2,4 (counted from 1)')
+    wan.add_argument('--baseline-every-repeat', default='', metavar='CONDITIONS',
+                     help='where the baseline methods run in every repeat')
+    wan.add_argument('--negative-control', default='', metavar='METHOD@CONDITIONS',
+                     help="e.g. full_nosync@2:0:default: that method at those conditions in each trial's first repeat")
+    wan.add_argument('--zero-delay-link-rates', default='', metavar='GBITS',
+                     help="the trial's one-stream link tests through the tree at r = 0, before the repeats, at these "
+                          "rates (the crossovers' x where no anchor runs)")
+    wan.add_argument('--first-visit-link-streams', action='append', default=[], metavar='N@CONDITIONS',
+                     help="at a trial's first visit to those conditions, an N-stream link test too (besides the "
+                          '8-stream one); repeatable')
+    wan.add_argument('--ssh-probe-port', type=int, default=0,
+                     help="the SSH probe at each trial's first visit to a condition with r > 0, on this port (22)")
+    wan.add_argument('--stunnel-link-test', default='', metavar='CONDITIONS',
+                     help="a one-stream link test through the stunnel pair at the trial's first visit there")
+    wan.add_argument('--control-port', type=int, default=0,
+                     help="the source's sshd port for the harness's control path (2222), which wan.sh leaves undelayed")
+    wan.add_argument('--tuned-tcp-max-bytes', type=int, default=measure.TUNED_TCP_MAX_BYTES,
+                     help="tuned hosts' tcp_rmem and tcp_wmem maxima, on both VMs")
+    wan.add_argument('--link-test-warmup', type=float, default=None, metavar='SECONDS',
+                     help="the link test receiver's warmup (blast-recv --warmup); the steady rate is then the median "
+                          'of the last 3 one-second rates after it')
+    wan.add_argument('--idle-noise-plan', default='', metavar='SECONDS:WINDOWS,...',
+                     help="check (a)'s idle noise measured at the start over this many idle windows of each length, "
+                          "e.g. 5:20,30:6,120:3 (in place of --idle-noise-windows)")
+    wan.add_argument('--dirty-noise-table', default='', metavar='SECONDS:MIB,...',
+                     help="check (a)'s idle noise per window length, as the smoke run measured it (in place of "
+                          "--dirty-noise-mib): a run's limit is max(4 MiB, the noise of the shortest length that "
+                          'covers its clock)')
+    wan.add_argument('--stunnel', default='/usr/bin/stunnel4', help="v1_tls's proxy (Debian's stunnel4)")
+    wan.add_argument('--stunnel-strace', action='store_true',
+                     help='smoke item 12: run each stunnel under strace -e trace=setsockopt (TCP_NODELAY)')
+    wan.add_argument('--tls-refusal-check', action='store_true',
+                     help="smoke item 12: before the first trial, dest's stunnel refuses a client without a "
+                          'certificate and one from a wrong CA')
     # EXP-12 (T10a): the source's slowdown under a fixed-rate load. Its blocks: busy (--repeats, --speeds,
     # --methods, --method-speeds), warm (--warm-source-*), moderate (--moderate-*), calibration (--calibration-*).
     load = parser.add_argument_group('EXP-12 (T10a)')
@@ -5105,11 +5971,92 @@ def parse_args(argv=None):
         measure.parse_method_speeds(args.method_speeds, methods, speeds)
     except ValueError as exc:
         parser.error(str(exc))
-    problems = block_problems(args, methods) + load_problems(args, methods) + [
-        problem for problem in [checksum_problem(methods, args.manifest_checksums, args.load)] if problem]
+    problems = block_problems(args, methods) + load_problems(args, methods) + t12_problems(args, methods) + [
+        problem for problem in [checksum_problem(methods, args.manifest_checksums, args.load, args.conditions)]
+        if problem]
     if problems:
         parser.error('; '.join(problems))
     return args
+
+
+def t12_plan(args) -> dict:
+    """EXP-13's schedule and probes from its options (t12_problems has checked them): each arm's conditions and
+    repeats, the baselines' repeats, the negative control, the first-visit link tests, the stunnel link tests and
+    the zero-delay rates. Repeats are counted from 1, as the specification counts them."""
+    conditions = measure.parse_conditions(args.conditions)
+    methods = method_list(args.methods)
+
+    def labels(text):
+        return [condition['label'] for condition in measure.parse_conditions(text)] if text else []
+
+    return {'method_conditions': measure.parse_method_conditions(args.method_conditions, methods, conditions),
+            'method_repeats': measure.parse_method_repeats(args.method_repeats, methods),
+            'baseline_methods': [method for method in method_list(args.baseline_methods) if method in methods],
+            'baseline_repeats': measure.parse_repeats(args.baseline_repeats),
+            'baseline_every': labels(args.baseline_every_repeat),
+            'negative_control': measure.parse_method_at(args.negative_control, conditions),
+            'first_visit_streams': measure.parse_count_at(args.first_visit_link_streams, conditions),
+            'stunnel_link_test': labels(args.stunnel_link_test),
+            'zero_delay_rates': [measure.parse_speed(rate)['gbit'] for rate in method_list(args.zero_delay_link_rates)]}
+
+
+T12_OPTIONS = ('method_conditions', 'method_repeats', 'baseline_methods', 'baseline_repeats', 'baseline_every_repeat',
+               'negative_control', 'zero_delay_link_rates', 'ssh_probe_port', 'stunnel_link_test',
+               'first_visit_link_streams', 'tls_refusal_check')
+
+
+def t12_problems(args, methods) -> list[str]:
+    """What is wrong with EXP-13's options for these --methods (an empty list if nothing is).
+
+    Its arms and options need --conditions; --conditions needs --control-port (the harness's SSH must stay
+    outside the emulated WAN) and replaces --speeds and --method-speeds; EXP-12's load and EXP-11's later blocks
+    don't run with it. Every condition an option names must be one of --conditions.
+    """
+    problems = []
+    given = [f'--{name.replace("_", "-")}' for name in T12_OPTIONS if getattr(args, name, None)]
+    t12 = [method for method in methods if method in measure.T12_METHODS]
+    for name, text in (('--idle-noise-plan', args.idle_noise_plan), ('--dirty-noise-table', args.dirty_noise_table)):
+        try:
+            (measure.parse_noise_plan if name == '--idle-noise-plan' else measure.parse_noise_table)(text)
+        except ValueError as exc:
+            problems.append(f'{name}: {exc}')
+    if args.link_test_warmup is not None and not 0 <= args.link_test_warmup < args.link_test_seconds:
+        problems.append('--link-test-warmup must be 0 or more and less than --link-test-seconds')
+    if args.idle_noise_plan and args.idle_noise_windows:
+        problems.append('--idle-noise-plan replaces --idle-noise-windows: give one')
+    if args.dirty_noise_table and args.dirty_noise_mib:
+        problems.append('--dirty-noise-table replaces --dirty-noise-mib: give one')
+    if not args.conditions:
+        if t12 or given:
+            problems.append(f'{", ".join(t12 + given)} need --conditions (EXP-13)')
+        return problems
+    if not args.control_port:
+        problems.append("--conditions needs --control-port: the harness's SSH stays outside the emulated WAN")
+    if args.method_speeds:
+        problems.append('--method-speeds is for --speeds; with --conditions, use --method-conditions')
+    if getattr(args, 'load', None) is not None or args.extension_repeats or args.warm_source_repeats:
+        problems.append("--conditions doesn't run with --load, --extension-repeats or --warm-source-repeats")
+    if args.tuned_tcp_max_bytes < 1:
+        problems.append('--tuned-tcp-max-bytes must be positive')
+    try:
+        plan = t12_plan(args)
+    except ValueError as exc:
+        return problems + [str(exc)]
+    labels = [condition['label'] for condition in measure.parse_conditions(args.conditions)]
+    for name, chosen in (('--baseline-every-repeat', plan['baseline_every']),
+                         ('--stunnel-link-test', plan['stunnel_link_test'])):
+        unknown = [label for label in chosen if label not in labels]
+        if unknown:
+            problems.append(f'{name}: {", ".join(unknown)} not in --conditions')
+    unknown = [method for method in method_list(args.baseline_methods) if method not in measure.ALL_METHODS]
+    if unknown:
+        problems.append(f'--baseline-methods: {", ".join(unknown)} are not methods')
+    control = plan['negative_control']
+    if control and control['method'] not in measure.ALL_METHODS:
+        problems.append(f'--negative-control: {control["method"]} is not a method')
+    if not methods and not control:
+        problems.append('--conditions needs --methods')
+    return problems
 
 
 def load_problems(args, methods) -> list[str]:
