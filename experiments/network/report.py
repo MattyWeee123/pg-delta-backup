@@ -153,12 +153,21 @@ def with_in_place(rows) -> list[dict]:
 
 
 def speed_order(rows) -> list[str]:
-    """Speed labels from slowest to fastest; unthrottled by its measured rate."""
+    """Speed labels from slowest to fastest; unthrottled by its measured rate. EXP-13's conditions
+    (RATE:RTT_MS:HOST) by rate, then by round trip (default hosts before tuned at the same one)."""
     rates: dict[str, list[float]] = {}
     for row in rows:
         rate = row['target_gbit'] if row['target_gbit'] is not None else row['measured_s2d_gbit']
         rates.setdefault(row['speed'], []).append(rate if rate is not None else math.inf)
-    return sorted(rates, key=lambda label: (statistics.median(rates[label]), label))
+
+    def key(label):
+        parts = str(label).split(':')
+        try:
+            rtt = float(parts[1]) if len(parts) == 3 else 0.0
+        except ValueError:
+            rtt = 0.0
+        return statistics.median(rates[label]), rtt, len(parts) == 3 and parts[2] != 'default', label
+    return sorted(rates, key=key)
 
 
 def medians(rows, value: str = 'total_s') -> dict:
