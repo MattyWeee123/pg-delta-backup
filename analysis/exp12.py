@@ -29,7 +29,8 @@ the median (or, in the maxima view, the maximum) of one window per run, `--null-
 every robustness view uses the null of its own statistic.
 
 How this script reads what the text leaves open (recorded in the write-up before the sweep):
-- A window's last bucket ends at t0 + T, so it can run up to 1 s past t1 + 10 s. The robustness views' D at 0.5-s
+- A window's last bucket ends at t0 + T, so it can run up to 1 s past t1 + 10 s; the 15-s view's at t0 + T15, up to
+  1 s past t1 + 15 s, and the harness's quiet tail waits that out (its view_end_utc). The robustness views' D at 0.5-s
   and 2-s buckets and the null of them use blocks of 10 s too (20 and 5 buckets); a 2-s bucket at a window's odd end
   holds its last second alone in the run, and its null draws whole 2-s buckets.
 - Latency percentiles are nearest-rank over every logged transaction; a transaction's lateness is its latency from

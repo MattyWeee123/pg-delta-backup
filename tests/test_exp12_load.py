@@ -14,6 +14,7 @@
 
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -756,8 +757,8 @@ class LoadStub(T2Stub):
         self.at('mark', f'run {link["block"]}')
         return super().run_load_method(trial, repeat, speed, link, method, order_index, order)
 
-    def quiet_tail(self, clock_stopped, clock_stopped_utc, seconds):
-        result = super().quiet_tail(clock_stopped, clock_stopped_utc, seconds)
+    def quiet_tail(self, clock_stopped, clock_stopped_utc, seconds, window=None):
+        result = super().quiet_tail(clock_stopped, clock_stopped_utc, seconds, window)
         self.at('mark', 'tail end')
         return result
 
@@ -932,6 +933,23 @@ class WholeTrial(Stubbed):
                 self.fail(f'{what} reached the source in a tail')
             if kind == 'dest' and state == 'window':
                 self.assertIn(what, ('pg_basebackup',), f'dest work {what} inside a timed phase')
+
+    def test_the_quiet_tail_outlasts_the_15_s_views_last_bucket(self):
+        # The analysis's 15-s view ends at t0 + ceil(t1 + 15 - t0), up to 1 s past t1 + 15: the tail waits it out,
+        # so the next step on the source falls outside every view.
+        orchestrator, _ = self.trial()
+        loaded = [record for record in orchestrator.records if record['block'] != 'calibration']
+        fractional = 0
+        for record in loaded:
+            window, tail = record['window'], record['tail']
+            view_end = window['t0_utc'] + math.ceil(window['t1_utc'] + 15 - window['t0_utc'] - 1e-9)
+            fractional += view_end > record['window']['t1_utc'] + 15 + 1e-6
+            self.assertGreaterEqual(tail['ended_utc'], view_end + run_exp04.TAIL_VIEW_MARGIN_S - 1e-6, record['method'])
+            self.assertAlmostEqual(tail['view_end_utc'], view_end + run_exp04.TAIL_VIEW_MARGIN_S, places=5)
+        self.assertGreater(fractional, 0)  # runs whose view does reach past t1 + 15
+        # Without the load (calibration) there is no tail to wait.
+        calibration = [record for record in orchestrator.records if record['block'] == 'calibration']
+        self.assertTrue(all(record['tail']['view_end_utc'] is None for record in calibration))
 
     def test_check_c_flushes_inside_the_phase_and_verification_after_the_last_read(self):
         orchestrator, _ = self.trial()

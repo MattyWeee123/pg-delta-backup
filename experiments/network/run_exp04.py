@@ -111,6 +111,7 @@ import fcntl
 import hashlib
 import itertools
 import json
+import math
 import os
 from pathlib import Path
 import random
@@ -206,6 +207,7 @@ WARM_BLOCKS = ('warm_source', 'warm')
 # EXP-12's control slots: pause2 and burn4 at the busy block's start and end, pause2 at the moderate block's start.
 CONTROL_SLOTS = (('busy_start', 'busy'), ('busy_end', 'busy'), ('moderate_start', 'moderate'))
 CLOCK_PORT = 7300  # EXP-12: the clock probe's TCP exchange
+TAIL_VIEW_MARGIN_S = 0.05  # EXP-12: the quiet tail runs this far past the 15-s view's last bucket (quiet_tail)
 # EXP-12: the clock probe tried this many times, the back-off growing by this much each time; no offset, no load.
 CLOCK_PROBE_ATTEMPTS, CLOCK_PROBE_BACKOFF_S = 3, 2.0
 BACKUP_LABEL = 't10a'  # EXP-12: the label of bracket's and the proxies' backups
@@ -3575,12 +3577,23 @@ class Orchestrator:
                 't1_source_utc': None if t1 is None or offset is None else round(t1 + offset, 6),
                 'tail_s': self.args.window_tail_s}
 
-    def quiet_tail(self, clock_stopped: float, clock_stopped_utc: float, seconds: float) -> dict:
+    def quiet_tail(self, clock_stopped: float, clock_stopped_utc: float, seconds: float, window=None) -> dict:
         """The quiet tail: `seconds` from the clock's stop with nothing on the source but the load. Dest's
-        verification ran inside it, from the clock's stop (and after (a) and (b)); what is left is waited out."""
+        verification ran inside it, from the clock's stop (and after (a) and (b)); what is left is waited out.
+
+        Then, with the run's window, until the last 1-s bucket of the analysis's 15-s-tail view has ended too: it
+        ends at t0 + ceil(t1 + seconds - t0), up to 1 s past t1 + seconds, and the clock stops a counter read after
+        t1, so the view would otherwise hold the harness's next step on the source (`view_end_utc`, on dest's clock;
+        the offset maps t0 and the view's end alike, so it cancels), plus TAIL_VIEW_MARGIN_S."""
         used = time.perf_counter() - clock_stopped
         self.pause(seconds - used)
+        view_end = None
+        if seconds > 0 and window and window.get('t0_utc') is not None and window.get('t1_utc') is not None:
+            t0, t1 = window['t0_utc'], window['t1_utc']
+            view_end = t0 + max(1, math.ceil(t1 + seconds - t0 - 1e-9)) + TAIL_VIEW_MARGIN_S
+            self.pause(view_end - time.time())
         return {'started_utc': clock_stopped_utc, 'ended_utc': time.time(), 'seconds': seconds,
+                'view_end_utc': None if view_end is None else round(view_end, 6),
                 'verification_s': round(used, 3), 'overran_s': round(max(0.0, used - seconds), 3)}
 
     def load_tool_reported(self, method, paths, phases) -> dict:
@@ -3719,7 +3732,7 @@ class Orchestrator:
             if not self.tool_aborted(method, phases, record):
                 # 4. Dest's verification, inside the tail: after the clock and after (a) and (b)'s last read.
                 self.verify_load_run(method, paths, phases, record)
-            record['tail'] = self.quiet_tail(stopped, stopped_utc, tail_seconds)
+            record['tail'] = self.quiet_tail(stopped, stopped_utc, tail_seconds, record['window'])
         except Exception as exc:  # record, clean up, carry on with the next method
             record['status'] = 'error'
             record['failure_kind'] = record['failure_kind'] or 'harness'
