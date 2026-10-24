@@ -86,13 +86,18 @@ def series(table, pattern, method, col='total_s'):
     return sorted(points)
 
 
-def crossover(table, pattern, method, col='total_s'):
-    """Measured link speed (Gbit/s) where method/full crosses 1, interpolated in log-log; or a bound."""
+def crossover(table, pattern, method, col='total_s', baseline='full'):
+    """Measured link speed (Gbit/s) where method/baseline crosses 1, interpolated in log-log; or a bound.
+
+    `baseline` names another entry of each (pattern, speed) cell, whose total_s divides the method's
+    `col`: the full copy here (EXP-04, D78), or a chosen baseline such as EXP-11's envelopes, which
+    analysis/exp11.py puts in the cells under their own names.
+    """
     pts = []
     for speed_gbit, value, _, speed in series(table, pattern, method, col):
-        full = table[(pattern, speed)].get('full', {}).get('total_s')
-        if full:
-            pts.append((speed_gbit, value / full))
+        base = table[(pattern, speed)].get(baseline, {}).get('total_s')
+        if base:
+            pts.append((speed_gbit, value / base))
     if not pts:
         return None, 'no data'
     if all(r < 1 for _, r in pts):
