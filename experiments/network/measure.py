@@ -3536,26 +3536,35 @@ def t12_columns(record: dict) -> dict:
         columns[name] = reported.get(name)
     for base in PGDELTA_RECEIVER_TIMERS:
         columns[f'{base}_s'] = receiver.get(f'{base}_s')
-    # The drain (A3): the receiver's exit less its publication, both on dest's clock where the record has them
-    # (its launch plus its wall; pgdelta's published_utc). Else its wall less publish_s, which also holds the
-    # interpreter's start-up before pgdelta's clock starts.
-    publish, published, exit_utc = columns.get('publish_s'), receiver.get('published_utc'), receiver_exit_utc(record)
-    if published is not None and exit_utc is not None:
-        columns['drain_s'] = round(exit_utc - published, 6)
+    # publish_s, from the receiver's launch to its publication, and the drain (A3), from the publication to its exit:
+    # on dest's clock where the record has both ends (its command's launch and wall; pgdelta's published_utc), so
+    # they add up to its wall. Else pgdelta's own publish_s, which counts from the interpreter's start (python -m
+    # pgdelta), and the wall less it, which then also holds the interpreter's start-up.
+    published, command = receiver.get('published_utc'), receiver_command(record)
+    if published is not None and command is not None:
+        columns['publish_s'] = round(published - command['started_utc'], 6)
+        columns['drain_s'] = round(command['started_utc'] + command['wall_seconds'] - published, 6)
     else:
+        publish = columns.get('publish_s')
         columns['drain_s'] = (None if publish is None or columns['receiver_wall_s'] is None
                               else round(columns['receiver_wall_s'] - publish, 6))
     return columns
 
 
-def receiver_exit_utc(record: dict):
-    """pgdelta's receiver's exit on dest's clock: its command's launch (started_utc) plus its wall; None without."""
+def receiver_command(record: dict):
+    """pgdelta's receiver's command record on dest, if it has its launch (started_utc) and its wall; else None."""
     for phase in (record.get('phases') or {}).values():
         for command in phase.get('commands', ()) if isinstance(phase, dict) else ():
             if command.get('host') == 'dest' and 'receiver' in str(command.get('role', '')):
                 if command.get('started_utc') is not None and command.get('wall_seconds') is not None:
-                    return command['started_utc'] + command['wall_seconds']
+                    return command
     return None
+
+
+def receiver_exit_utc(record: dict):
+    """pgdelta's receiver's exit on dest's clock: its command's launch plus its wall; None without."""
+    command = receiver_command(record)
+    return None if command is None else command['started_utc'] + command['wall_seconds']
 
 
 T12_FIELDS = (

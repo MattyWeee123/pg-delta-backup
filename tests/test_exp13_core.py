@@ -813,13 +813,15 @@ class Statistics(unittest.TestCase):
         self.assertEqual((row['window'], row['leaf_wait_idle_s'], row['publish_s'], row['drain_s'],
                           row['busy_split_valid'], row['prefetch_bytes']), (16, 1.0, 6.5, 0.12, True, 2 << 30))
         self.assertFalse(measure.summary_row({**record, 'method': TLS})['busy_split_valid'])
-        # With the receiver's launch on dest's clock and pgdelta's publication on the same clock, the drain is read
-        # there: its exit less its publication, without the interpreter's start-up that publish_s leaves out.
+        # With the receiver's launch on dest's clock and pgdelta's publication on the same clock, publish_s and the
+        # drain are read there: from its launch to its publication, then to its exit, adding up to its wall.
         record['tool_reported']['receiver']['published_utc'] = 1790000006.45
         record['phases'] = {measure.DIRECT_PHASE: {'commands': [
             {'host': 'dest', 'role': 'receiver', 'started_utc': 1790000000.0, 'wall_seconds': 6.62}]}}
         self.assertEqual(measure.receiver_exit_utc(record), 1790000006.62)
-        self.assertEqual(measure.summary_row(record)['drain_s'], 0.17)
+        row = measure.summary_row(record)
+        self.assertEqual((row['publish_s'], row['drain_s'], row['receiver_wall_s']), (6.45, 0.17, 6.62))
+        self.assertEqual(record['tool_reported']['receiver']['publish_s'], 6.5)  # pgdelta's own stays in the record
 
 
 # --- durability: check (a)'s limit by the run's clock -------------------------------------------------------------

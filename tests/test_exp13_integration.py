@@ -406,11 +406,15 @@ class PgdeltaThroughTheHarness(unittest.TestCase):
                              'receiver_wall_s', 'drain_s', 'prefetch_bytes'):
                     self.assertIsNotNone(row[name], name)
                 self.assertIs(row['busy_split_valid'], True)
-                # The receiver exits after the sender closes (its drain, up to 2 s); the drain is read on dest's
-                # clock, so it never holds the interpreter's start-up that publish_s leaves out.
+                # The receiver exits after the sender closes (its drain, up to 2 s). publish_s and the drain are read
+                # on dest's clock, from the receiver's launch: they add up to its wall, and publish_s holds the
+                # interpreter's start-up that pgdelta's own publish_s leaves out.
                 self.assertLessEqual(0.0, row['drain_s'])
                 self.assertLess(row['drain_s'], 2.5)
-                self.assertLess(row['drain_s'], row['receiver_wall_s'] - row['publish_s'] + 1e-3)
+                self.assertAlmostEqual(row['publish_s'] + row['drain_s'], row['receiver_wall_s'], delta=2e-6)
+                own = record['tool_reported']['receiver']['publish_s']
+                self.assertGreater(row['publish_s'], own)
+                self.assertLess(row['publish_s'] - own, 2.0)
 
     @needs_venv
     def test_the_analysis_reads_a3s_parts_from_them(self):
