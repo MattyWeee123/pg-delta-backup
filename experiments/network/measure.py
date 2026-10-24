@@ -1651,6 +1651,28 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
             **({'fsync_count': fsync_count} if fsync_count is not None else {})}
 
 
+# EXP-11's directory rule (a directory change is durable once a later fsync or syncfs on the same
+# filesystem commits a journal transaction), and so pg_basebackup's and parcopy's not fsyncing the
+# output's parent, rest on ext4's ordered journal: /data must be ext4 as startup.sh makes it, its journal
+# in data=ordered mode (the default, which the mount options need not list), with write barriers on.
+DATA_MOUNT_REFUSED_OPTIONS = ('data=writeback', 'data=journal', 'nobarrier', 'barrier=0')
+
+
+def data_mount_problem(text) -> str | None:
+    """Why /data, as `findmnt -n -o SOURCE,FSTYPE,OPTIONS,SIZE /data` reports it (agent.py env's
+    data_mount), isn't the ext4 in data=ordered mode EXP-11's durability definition assumes; None if it is."""
+    fields = (text or '').split()
+    if len(fields) < 3:
+        return f'findmnt reports no filesystem at /data ({text!r})'
+    fstype, options = fields[1], fields[2].split(',')
+    if fstype != 'ext4':
+        return f'/data is {fstype}, not ext4'
+    refused = [option for option in options if option in DATA_MOUNT_REFUSED_OPTIONS]
+    if refused:
+        return f'/data is ext4 mounted with {", ".join(refused)}'
+    return None
+
+
 # What every clean stop of the source rewrites, left out of the reference digests (EXP-11's steps 2
 # and 7): pg_control, the WAL, and (since PostgreSQL 15) the cumulative statistics in pg_stat/.
 REFERENCE_EXCLUDED_FILES = ('global/pg_control',)

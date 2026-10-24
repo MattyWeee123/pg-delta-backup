@@ -553,7 +553,7 @@ class Preflight(core.Clocked):
 
             def environment(self):
                 env = {'deployed': {'tree_sha256': 'x'}, 'strace': 'strace -- version 6.1',
-                       'pg_basebackup_sync_method': True, 'pg_probackup': VERSION}
+                       'pg_basebackup_sync_method': True, 'pg_probackup': VERSION, 'data_mount': core.EXT4_MOUNT}
                 return {'source': dict(env), 'dest': dict(env)}
 
             def _source_agent(self, *args, timeout=600):

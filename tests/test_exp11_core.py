@@ -30,6 +30,8 @@ T2_ARMS = ('full', 'full_nosync', 'full_syncfs', 'full_wb', 'probackup8', 'proba
 CRC32C = ['--manifest-checksums', 'CRC32C']
 UNTHROTTLED = {'label': 'unthrottled', 'gbit': None, 'tc_rate': 'off'}
 MIB = 1 << 20
+# `findmnt -n -o SOURCE,FSTYPE,OPTIONS,SIZE /data` on a VM as startup.sh makes it (agent.py env's data_mount).
+EXT4_MOUNT = '/dev/md127 ext4 rw,noatime 1.5T'
 
 # pg_basebackup 17 --verbose to a plain directory, streaming WAL, as Child(stamp_lines=True) logs it
 # (stdout and stderr through one pipe, each line stamped with the seconds since the launch).
@@ -376,10 +378,13 @@ class RunJson(Clocked):
 
         def environment(self):
             env = {'deployed': {'tree_sha256': 'x'}, 'strace': 'strace -- version 6.1',
-                   'pg_basebackup_sync_method': True, 'pg_probackup': 'pg_probackup-17 2.5.16'}
-            return {'source': dict(env), 'dest': dict(self.dest_env, **{'deployed': {'tree_sha256': 'x'}})}
+                   'pg_basebackup_sync_method': True, 'pg_probackup': 'pg_probackup-17 2.5.16',
+                   'data_mount': EXT4_MOUNT, **self.source_env}
+            return {'source': env, 'dest': {'data_mount': EXT4_MOUNT, **self.dest_env,
+                                            'deployed': {'tree_sha256': 'x'}}}
 
         dest_env = {'strace': 'strace -- version 6.1', 'pg_basebackup_sync_method': True}
+        source_env: dict = {}
 
         def check_pgdelta_jobs(self):
             return {}
@@ -451,6 +456,25 @@ class RunJson(Clocked):
         with self.assertRaises(SystemExit) as refused:
             self.execute(['full', 'full_wb'], cls=Tuned)
         self.assertIn('vm.dirty_background_bytes is not 0', str(refused.exception))
+
+    def test_a_t2_run_refuses_unless_data_is_ext4_in_ordered_mode_on_both(self):
+        orchestrator, code, run = self.execute(['full', 'full_nosync'])
+        self.assertEqual(code, 0)
+        self.assertEqual(run['t2_preflight']['data_mount'], {'source': EXT4_MOUNT, 'dest': EXT4_MOUNT})
+        cases = {'dest: /data is xfs, not ext4': ({'data_mount': '/dev/md127 xfs rw,noatime,attr2,inode64 1.5T'}, {}),
+                 'source: /data is ext4 mounted with data=writeback': (
+                     {}, {'data_mount': '/dev/md127 ext4 rw,noatime,data=writeback 1.5T'}),
+                 'dest: /data is ext4 mounted with nobarrier': ({'data_mount': '/dev/md127 ext4 rw,nobarrier 1.5T'}, {}),
+                 'dest: findmnt reports no filesystem at /data': ({'data_mount': None}, {})}
+        for message, (dest, source) in cases.items():
+            with self.subTest(message=message):
+                cls = type('Mounted', (self.Executing,), {'dest_env': {**self.Executing.dest_env, **dest},
+                                                          'source_env': source})
+                with tempfile.TemporaryDirectory() as tmp, mock.patch.object(self.tmp, 'name', tmp), \
+                        self.assertRaises(SystemExit) as refused:
+                    self.execute(['full', 'full_nosync'], cls=cls)
+                self.assertIn(message, str(refused.exception))
+                self.assertIn('ext4 in data=ordered mode', str(refused.exception))
 
     def test_the_probackup_preflight_hook_is_the_blocks_check(self):
         class Unprovisioned(self.Executing):
@@ -668,6 +692,18 @@ class Durability(unittest.TestCase):
         control = measure.durability_check(self.record('full_nosync', 1_900_000_000, 0), output)
         self.assertEqual((control['durable'], control['a_ok'], control['b_ok'], control['ok']), (False, False, False,
                                                                                                   False))
+
+    def test_data_must_be_ext4_in_ordered_mode_with_barriers(self):
+        # The directory rule rests on ext4's ordered journal (EXP-11's Setup and Durability).
+        for text in (EXT4_MOUNT, '/dev/md127 ext4 rw,noatime,data=ordered 1.5T', '/dev/nvme0n1 ext4 rw 375G'):
+            self.assertIsNone(measure.data_mount_problem(text), text)
+        for text, problem in (('/dev/md127 xfs rw,noatime,attr2,inode64,logbufs=8 1.5T', '/data is xfs, not ext4'),
+                              ('/dev/md127 ext4 rw,data=journal 1.5T', 'with data=journal'),
+                              ('/dev/md127 ext4 rw,noatime,data=writeback,nobarrier 1.5T',
+                               'with data=writeback, nobarrier'),
+                              ('/dev/md127 ext4 rw,barrier=0 1.5T', 'with barrier=0'),
+                              ('', 'findmnt reports no filesystem'), (None, 'findmnt reports no filesystem')):
+            self.assertIn(problem, measure.data_mount_problem(text), text)
 
     def test_check_b_needs_the_output_on_the_array_inside_the_window(self):
         output = 2_100_000_000

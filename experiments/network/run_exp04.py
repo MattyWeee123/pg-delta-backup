@@ -2831,15 +2831,24 @@ class Orchestrator:
     def preflight_t2(self) -> dict:
         """What a T2 run checks before its first trial, and dest's write-back defaults.
 
-        strace on dest (EXP-11's syscall audit); pg_basebackup's --sync-method on dest where
-        full_syncfs runs; the pg_probackup and parcopy blocks' own checks where those arms run;
+        /data on both VMs ext4 in data=ordered mode (measure.data_mount_problem), on which EXP-11's
+        directory rule rests; strace on dest (EXP-11's syscall audit); pg_basebackup's --sync-method on
+        dest where full_syncfs runs; the pg_probackup and parcopy blocks' own checks where those arms run;
         dest's vm.dirty_background_* (record_writeback_defaults), which every run's guard requires.
         """
-        dest = self.run['environment']['dest']
+        environment = self.run['environment']
+        mounts = {host: environment[host].get('data_mount') for host in ('source', 'dest')}
+        wrong = {host: problem for host, text in mounts.items() if (problem := measure.data_mount_problem(text))}
+        if wrong:
+            raise SystemExit('EXP-11 needs /data on ext4 in data=ordered mode with barriers, as infra/gcp/startup.sh '
+                             'makes it (its directory rule rests on the ordered journal): '
+                             + '; '.join(f'{host}: {problem}' for host, problem in wrong.items())
+                             + ' (infra/gcp/reformat_dest_ext4.sh makes dest ext4 again)')
+        dest = environment['dest']
         if not dest.get('strace'):
             raise SystemExit("strace is not installed on dest (infra/gcp/startup.sh installs it); EXP-11's "
                              'syscall audit needs it')
-        result = {'strace': dest['strace']}
+        result = {'data_mount': mounts, 'strace': dest['strace']}
         if 'full_syncfs' in self.methods and not dest.get('pg_basebackup_sync_method'):
             raise SystemExit("pg_basebackup on dest has no --sync-method (PostgreSQL 17's), which full_syncfs "
                              'needs')
