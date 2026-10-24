@@ -589,6 +589,21 @@ def failed(commands) -> list[str]:
             for command in commands if command['exit_code'] != 0]
 
 
+SSH_FAILED = 255  # ssh's own exit status when the connection fails
+
+
+def harness_failure(command: dict) -> bool:
+    """A failed timed command whose failure is the harness's, not the tool's (EXP-12's "unverified" causes): SSH
+    itself failing for a command run straight over it (ssh exits 255: the proxy's backup-hold), or a command stamped
+    over SSH whose agent never wrote its result line (the SSH session or the agent ended first). A timeout or any
+    other exit is the tool's: the copy didn't finish."""
+    if command.get('exit_code') == 0 or command.get('timed_out'):
+        return False
+    if command.get('over_ssh') and command.get('exit_code') == SSH_FAILED:
+        return True
+    return bool(command.get('stamped_over_ssh')) and command.get('reported_exit_code') is None
+
+
 class Orchestrator:
     def __init__(self, args):
         self.args = args
@@ -3113,7 +3128,7 @@ class Orchestrator:
             backup = agent_result(stdout or '')
         except ValueError:
             backup = None
-        return {'host': 'source', 'argv': hold['argv'], 'exit_code': process.returncode,
+        return {'host': 'source', 'argv': hold['argv'], 'exit_code': process.returncode, 'over_ssh': True,
                 'wall_seconds': round(time.perf_counter() - hold['started'], 6), 'started_utc': hold['started_utc'],
                 'rusage': None, 'role': 'backup mode held in one session around the transfer (backup-hold)',
                 'start_line': hold.get('start'), 'start_received_utc': hold.get('received_utc'),
@@ -3417,9 +3432,10 @@ class Orchestrator:
 
     def set_load_status(self, record: dict) -> None:
         """A run's status under EXP-12 from its verification: a live output's by its oracle (measure.oracle_status),
-        the capture's by its S check, any other's by verify (pass or fail)."""
+        the capture's by its S check, any other's by verify (pass or fail). An error, or a copy its own tool aborted
+        (wrong already: tool_aborted), keeps its status."""
         verification = record.get('verification') or {}
-        if record.get('status') == 'error':
+        if record.get('status') == 'error' or record.get('failure_kind') == 'tool':
             return
         if 'oracle' in verification:
             status = measure.oracle_status(verification['oracle'])
@@ -3583,6 +3599,51 @@ class Orchestrator:
                     'control': phases[measure.CONTROL_PHASE].get('control')}
         return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None, 'scope': 'nothing runs'}
 
+    def tool_aborted(self, method, phases, record) -> bool:
+        """A command of the run's timed phases failed (exited non-zero or timed out). The harness's own failure
+        (harness_failure: SSH, or a stamped command's agent without its result) raises, an error of kind 'harness'
+        (unverified). Any other is the tool's (failure_kind 'tool'): for an arm with an output
+        (measure.TOOL_ABORT_WRONG_METHODS) the copy it aborted doesn't exist, so it can't start, and the run is
+        wrong (status 'fail'; R3 reads it); for any other arm it raises, an error of kind 'tool'. True when the run
+        is wrong this way, so nothing is verified."""
+        problems = [problem for phase in phases.values() for problem in phase['failures']]
+        if not problems:
+            return False
+        commands = [command for phase in phases.values() for command in phase.get('commands', ())]
+        if any(harness_failure(command) for command in commands):
+            raise CommandError('; '.join(problems))
+        record['failure_kind'] = 'tool'
+        if method not in measure.TOOL_ABORT_WRONG_METHODS:
+            raise CommandError('; '.join(problems))
+        record['status'] = 'fail'
+        record['error'] = 'wrong: the copy itself failed (no output to start): ' + '; '.join(problems)
+        log(f'  WRONG {record["error"]}')
+        return True
+
+    def verify_load_run(self, method, paths, phases, record) -> None:
+        """Dest's verification of a run under EXP-12, inside the tail: after the clock and after (a) and (b)'s last
+        read; then the run's status (set_load_status)."""
+        record['tool_reported'] = (None if method in measure.PGDELTA_METHODS
+                                   else self.load_tool_reported(method, paths, phases))
+        if self.args.syscall_audit:
+            record['audit'] = self.syscall_audit(method, paths, phases)
+        verification = self.verify(method, paths, phases)
+        record['verification'] = verification
+        record['output_bytes'] = verification.get('output_bytes')
+        record['capture_bytes'] = verification.get('capture_bytes')
+        record['wal'] = verification.get('wal')
+        padding = (record['wal'] or {}).get('wal_padding_bytes')
+        record['output_minus_wal_padding_bytes'] = (
+            None if record['output_bytes'] is None or padding is None else record['output_bytes'] - padding)
+        record['durability'] = measure.durability_check(record, record['output_bytes'], self.idle_noise_bytes)
+        if method in measure.G4_METHODS:
+            record['g4'] = self.g4_boundaries(method, record)
+        if method in measure.V1PROXY_METHODS:
+            record['proxy'] = {'backup': phases[measure.V1PROXY_PHASE].get('backup'), 'hashed': None}
+        if verification['basis_changes']:
+            raise CommandError('B0 changed: ' + '; '.join(verification['basis_changes']))
+        self.set_load_status(record)
+
     def run_load_method(self, trial: dict, repeat: int, speed: dict, link: dict, method: str,
                         order_index: int, order: list[str]) -> dict:
         """One run under EXP-12's timeline (its "Each run"):
@@ -3646,31 +3707,9 @@ class Orchestrator:
             record['totals'] = measure.phase_totals(phases)
             if method in measure.STAGED_METHODS:
                 record['totals_serial'] = measure.serial_totals(phases)
-            problems = [problem for phase in phases.values() for problem in phase['failures']]
-            if problems:
-                record['failure_kind'] = 'tool'
-                raise CommandError('; '.join(problems))
-            # 4. Dest's verification, inside the tail: after the clock and after (a) and (b)'s last read.
-            record['tool_reported'] = (None if method in measure.PGDELTA_METHODS
-                                       else self.load_tool_reported(method, paths, phases))
-            if self.args.syscall_audit:
-                record['audit'] = self.syscall_audit(method, paths, phases)
-            verification = self.verify(method, paths, phases)
-            record['verification'] = verification
-            record['output_bytes'] = verification.get('output_bytes')
-            record['capture_bytes'] = verification.get('capture_bytes')
-            record['wal'] = verification.get('wal')
-            padding = (record['wal'] or {}).get('wal_padding_bytes')
-            record['output_minus_wal_padding_bytes'] = (
-                None if record['output_bytes'] is None or padding is None else record['output_bytes'] - padding)
-            record['durability'] = measure.durability_check(record, record['output_bytes'], self.idle_noise_bytes)
-            if method in measure.G4_METHODS:
-                record['g4'] = self.g4_boundaries(method, record)
-            if method in measure.V1PROXY_METHODS:
-                record['proxy'] = {'backup': phases[measure.V1PROXY_PHASE].get('backup'), 'hashed': None}
-            if verification['basis_changes']:
-                raise CommandError('B0 changed: ' + '; '.join(verification['basis_changes']))
-            self.set_load_status(record)
+            if not self.tool_aborted(method, phases, record):
+                # 4. Dest's verification, inside the tail: after the clock and after (a) and (b)'s last read.
+                self.verify_load_run(method, paths, phases, record)
             record['tail'] = self.quiet_tail(stopped, stopped_utc, tail_seconds)
         except Exception as exc:  # record, clean up, carry on with the next method
             record['status'] = 'error'

@@ -83,6 +83,7 @@ WARM_SPEED = '2g'
 V1 = 'pgdelta_direct_inplace'
 PROXY, PROXY_S1 = measure.V1PROXY_METHODS
 LIVE = measure.G4_METHODS  # full and staged pgdelta: the live outputs G4 checks
+OUTPUT_ARMS = measure.TOOL_ABORT_WRONG_METHODS  # the arms with an output: a copy their tool aborted is wrong
 CONTROLS = measure.CONTROL_METHODS
 LOADED_BLOCKS = ('busy', 'warm', 'moderate')
 BLOCKS = (*LOADED_BLOCKS, 'calibration')
@@ -630,6 +631,19 @@ class Null:
 
 # --- loading ------------------------------------------------------------------------
 
+def aborted_copy(record):
+    """A run of an arm with an output whose own tool aborted it (failure_kind 'tool': a timed command exited non-zero
+    or timed out). Its copy doesn't exist, so it doesn't start: the pre-registration's "wrong", which R3 and L5 read.
+    The harness writes it as status 'fail' (run_exp04's tool_aborted); records written before that say 'error'."""
+    return record.get('failure_kind') == 'tool' and record.get('method') in OUTPUT_ARMS
+
+
+def harness_error(r):
+    """An error of the harness around an arm with an output (SSH, a timeout of a check, a missing binary): its output
+    is unverified, not wrong (What a result means)."""
+    return r['status'] == 'error' and r['failure_kind'] != 'tool' and r['method'] in OUTPUT_ARMS
+
+
 def make_run(sweep, index, record):
     """One run of the session from its record: what the analysis reads, keyed for the cells."""
     window = record.get('window') or {}
@@ -645,10 +659,13 @@ def make_run(sweep, index, record):
         return None if value is None or offset is None else value + offset
     totals = record.get('totals') or {}
     method = record.get('method')
+    status, aborted = record.get('status'), aborted_copy(record)
+    if aborted:
+        status = 'fail'  # a copy its own tool aborted doesn't start: wrong (as tool_aborted writes it since)
     return {'sweep': sweep, 'index': index, 'record': record, 'trial_id': record.get('trial_id'),
             'block': record.get('block'), 'repeat': record.get('repeat'), 'block_repeat': record.get('block_repeat'),
             'control_slot': record.get('control_slot'), 'speed': (record.get('speed') or {}).get('label'),
-            'method': method, 'status': record.get('status'), 'void': bool(record.get('void')),
+            'method': method, 'status': status, 'aborted': aborted, 'void': bool(record.get('void')),
             'error': record.get('error'), 'failure_kind': record.get('failure_kind'), 'rate': record.get('load_rate'),
             'load_run': record.get('load_run'), 'offset': offset, 't0': t0, 't1': t1,
             'settle_span': (source(settle.get('started_utc')), source(settle.get('ended_utc'))),
@@ -844,7 +861,7 @@ class Session:
         """(failures, unchecked): check (a) where the arm writes on dest (unless the negative control voided it), check
         (b) for full copies and staged pgdelta's new O (measure.DISK_WRITE_CHECK_METHODS)."""
         method = r['method']
-        if method in measure.NON_DURABLE_METHODS or r['status'] == 'error':
+        if method in measure.NON_DURABLE_METHODS or r['status'] == 'error' or r['aborted']:
             return [], []
         durability = r['record'].get('durability') or {}
         checks = {}
@@ -862,6 +879,8 @@ class Session:
             return 'status error'
         if r['void']:
             return 'void: ' + (r['record'].get('void_reason') or 'the load died')
+        if r['aborted']:
+            return 'wrong: its copy aborted by its tool'
         if r['status'] != 'pass':
             return {'fail': 'wrong', 'unverified': 'unverified'}.get(r['status'], f'status {r["status"]}')
         if r['durability_failures']:
@@ -1847,10 +1866,11 @@ def a4_state(S):
         for r in S.runs:
             if r['method'] != method or r['block'] not in blocks:
                 continue
+            if r['aborted']:  # wrong too (R3): A4's exclusion is a second consequence
+                fails.append(f'r{r["repeat"]} {r["speed"]}: its copy aborted by the tool')
+                continue
             if r['status'] == 'error':
-                if r['failure_kind'] == 'tool':
-                    fails.append(f'r{r["repeat"]} {r["speed"]}: its copy aborted by the tool')
-                elif r['failure_kind'] is None:
+                if r['failure_kind'] is None:
                     unknown.append(f'r{r["repeat"]} {r["speed"]}: an error of unknown kind')
                 continue
             held = get(r['record'], 'proxy', 'backup', 'held')
@@ -1931,7 +1951,9 @@ def counts_lines(S):
     left = Counter(r['left_out'].split(':')[0] for r in S.runs if r['left_out'])
     lines.append('- left out of every median: ' + (', '.join(f'{k} {n}' for k, n in sorted(left.items())) or 'none'))
     for r in S.runs:
-        if r['status'] == 'error':
+        if r['aborted']:
+            lines.append(f'  - wrong (its copy aborted by its tool): {run_name(r)}: {r["error"] or ""}')
+        elif r['status'] == 'error':
             kind = {'tool': 'the tool', 'harness': 'the harness'}.get(r['failure_kind'], 'cause not recorded')
             lines.append(f'  - error ({kind}): {run_name(r)}: {r["error"] or ""}')
         elif r['void']:
@@ -2032,18 +2054,18 @@ def g4_lines(S, ctx):
                              f'{count["unverified"]} / {count["pending"]} / {count["error"]} |')
     wrong = ctx['r3_runs']
     lines.append(f'- **R3** ("Any wrong output stops speed work": one wrong output of pgdelta, v1proxy, v1proxy_s1 or '
-                 f'v1 itself): {"FIRES" if wrong else "does not fire"}'
-                 + (': ' + '; '.join(f'{run_name(r)} ({r["error"]})' for r in wrong) if wrong else ''))
-    aborted = [r for r in S.runs if r['method'] in ('pgdelta', PROXY, PROXY_S1, V1) and r['status'] == 'error'
-               and r['failure_kind'] == 'tool']
-    if aborted:
-        lines.append('  - beside it, copies the tool itself aborted (no output to be wrong): '
-                     + '; '.join(run_name(r) for r in aborted))
-    unverified = Counter((r['block'], cell_speed(r), r['method']) for r in S.runs if r['status'] == 'unverified')
+                 f'v1 itself, a copy its own tool aborted included, since it doesn\'t start): '
+                 f'{"FIRES" if wrong else "does not fire"}'
+                 + (': ' + '; '.join(f'{run_name(r)} ({"aborted by its tool: " if r["aborted"] else ""}{r["error"]})'
+                                     for r in wrong) if wrong else ''))
+    # Unverified: a check couldn't run for the harness's reason, and an error of the harness around an output.
+    unverified_runs = [r for r in S.runs if r['status'] == 'unverified' or harness_error(r)]
+    unverified = Counter((r['block'], cell_speed(r), r['method']) for r in unverified_runs)
     flagged = [key for key, count in unverified.items() if count > 1]
-    lines.append('- unverified runs: ' + (', '.join(f'{run_name(r)}' for r in S.runs if r['status'] == 'unverified')
-                                          or 'none') + ('; more than 1 in a cell flags it: ' + ', '.join(
-        f'{b} {speed_name(s)} {m}' for b, s, m in flagged) if flagged else ''))
+    lines.append('- unverified runs (a harness error around an output included): '
+                 + (', '.join(run_name(r) + (' (error)' if r['status'] == 'error' else '') for r in unverified_runs)
+                    or 'none') + ('; more than 1 in a cell flags it: ' + ', '.join(
+                        f'{b} {speed_name(s)} {m}' for b, s, m in flagged) if flagged else ''))
     return lines
 
 
@@ -2295,9 +2317,9 @@ def ledger_lines(S, cells, ctx, d1):
             for s in REGISTERED))
     say(f'- **L3** ("its total throughput loss is 2-4 times the full copy\'s at 2 Gbit/s"): {l3(cells, ctx)["text"]}')
     say(f'- **L4** ("and still higher at 0.5 Gbit/s"): {l4(cells, ctx)["text"]}')
-    live = [r for r in S.runs if r['status'] != 'error']
-    wrong = [r for r in live if r['status'] == 'fail']
-    unknown = [r for r in live if r['status'] in ('unverified', 'pending')]
+    live = [r for r in S.runs if r['status'] != 'error' or harness_error(r)]
+    wrong = [r for r in live if r['status'] == 'fail']  # a copy its own tool aborted included (aborted_copy)
+    unknown = [r for r in live if r['status'] in ('unverified', 'pending') or harness_error(r)]
     l5 = False if wrong else (None if unknown else True)
     say(f'- **L5** ("Every output is correct": every run of every arm verified, none wrong; G4\'s checks for full and '
         f'pgdelta): ' + ('failed: ' + '; '.join(run_name(r) for r in wrong) if wrong else

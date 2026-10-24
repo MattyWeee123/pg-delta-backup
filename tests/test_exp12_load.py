@@ -1013,6 +1013,47 @@ class WholeTrial(Stubbed):
         self.assertIn('atomic', second['error'])
         self.assertEqual(trial['status'], 'fail')
 
+    def test_a_copy_its_tool_aborted_is_wrong_and_a_failed_ssh_is_the_harnesss(self):
+        class Aborting(LoadStub):
+            aborted = ssh = bracket = 0
+
+            def pgdelta_transfer(self, method, paths, receiver, launched_in):
+                commands = super().pgdelta_transfer(method, paths, receiver, launched_in)
+                if method == 'pgdelta' and not self.aborted:  # the receiver finds a bad page and exits 3
+                    self.aborted += 1
+                    commands[0] = {**commands[0], 'exit_code': 3}
+                return commands
+
+            def stop_backup_hold(self, hold):
+                command = super().stop_backup_hold(hold)
+                if not self.ssh:  # ssh itself failed under backup-hold
+                    self.ssh += 1
+                    command.update(exit_code=run_exp04.SSH_FAILED, over_ssh=True)
+                return command
+
+            def remote_command(self, argv, log_name, *, cwd=None):
+                result = super().remote_command(argv, log_name, cwd=cwd)
+                if Path(str(argv[0])).name == 'psql' and log_name.startswith('bracket') and not self.bracket:
+                    self.bracket += 1
+                    result['exit_code'] = 3  # backup mode refused, on an arm with no output
+                return result
+
+        orchestrator, trial = self.trial(cls=Aborting)
+        records = orchestrator.records
+        aborted = next(r for r in records if r['method'] == 'pgdelta' and r['failure_kind'] == 'tool')
+        # Wrong, and still wrong after its source half (S removed) ran before the next settle.
+        self.assertEqual(aborted['status'], 'fail')
+        self.assertIn('the copy itself failed', aborted['error'])
+        self.assertNotIn('verification', aborted)
+        self.assertIn('tail', aborted)  # the quiet tail still waited out
+        self.assertEqual(next(r['status'] for r in trial['runs'] if (r['repeat'], r['method']) == (
+            aborted['repeat'], 'pgdelta') and r['speed'] == aborted['speed']['label']), 'fail')
+        ssh = next(r for r in records if r['method'] in measure.V1PROXY_METHODS and r['status'] == 'error')
+        self.assertEqual(ssh['failure_kind'], 'harness')
+        bracket = next(r for r in records if r['method'] == 'bracket' and r['status'] != 'pass')
+        self.assertEqual((bracket['status'], bracket['failure_kind']), ('error', 'tool'))
+        self.assertEqual(trial['status'], 'fail')
+
     def test_without_the_sampler(self):
         orchestrator, trial = self.trial(['--sampler-interval-s', '0'])
         self.assertEqual(trial['status'], 'pass')

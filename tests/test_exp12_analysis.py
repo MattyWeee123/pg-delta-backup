@@ -704,6 +704,24 @@ class Context(unittest.TestCase):
         state, why, _ = self.proxies({(PROXY, 'busy'): {'backup': {'held': True}, 'hashed': None}})
         self.assertEqual(state[PROXY], 'undecided')
 
+    def test_a_proxy_its_tool_aborted_is_wrong_and_fails_a4(self):
+        # Wrong first (R3: the copy doesn't exist, so it doesn't start); A4's exclusion is a second consequence.
+        for status in ('error', 'fail'):
+            S = session([record(PROXY, status=status, failure_kind='tool', error='source: python3 exited 1'),
+                         record(PROXY, repeat=1, proxy={'backup': {'held': True}, 'hashed': {'all_hashed': True}})])
+            self.assertEqual(S.runs[0]['status'], 'fail')
+            self.assertTrue(S.runs[0]['aborted'])
+            self.assertEqual(S.runs[0]['left_out'], 'wrong: its copy aborted by its tool')
+            ctx = exp12.context(S)
+            self.assertTrue(ctx['r3'])
+            self.assertEqual(ctx['a4'][PROXY], 'fail')
+            self.assertIn('its copy aborted by the tool', ctx['a4_why'][PROXY][0])
+        # A tool's failure on an arm with no output (bracket) stays an error, and is neither wrong nor unverified.
+        S = session([record('bracket', status='error', failure_kind='tool', error='source: psql exited 3')])
+        self.assertEqual((S.runs[0]['status'], S.runs[0]['aborted'], exp12.harness_error(S.runs[0])),
+                         ('error', False, False))
+        self.assertFalse(exp12.context(S)['r3'])
+
     def test_a13_and_r3(self):
         failing = {'a_ok': False, 'b_ok': True, 'a_required': True}
         records = [record('full', repeat=i, durability=failing) for i in range(2)]
@@ -893,6 +911,39 @@ class DryRun(unittest.TestCase):
         self.assertIn('FIRES', text)
         self.assertIn('**L5** ("Every output is correct"', text)
         self.assertIn('failed: 00-hot-f0.01-s70 r3 busy', text)
+
+    def test_a_copy_its_tool_aborted_is_wrong_and_stops_speed_work(self):
+        # pgdelta's receiver finds a bad page and exits 3 in 3 of the 5 busy 2 Gbit/s runs: as the harness wrote it
+        # before (status error, failure_kind tool) and as it writes it now (status fail). Either way the copy doesn't
+        # exist, so it doesn't start: wrong. R3 fires, decision 1 stops, L5 fails.
+        for status in ('error', 'fail'):
+            def aborted(item, status=status):
+                if item['method'] == 'pgdelta' and item['block'] == 'busy' and item['speed']['label'] == '2g' \
+                        and item['block_repeat'] < 3:
+                    item.update(status=status, failure_kind='tool', verification=None,
+                                error='dest: pgdelta exited 3')
+            with tempfile.TemporaryDirectory() as tmp:
+                text = self.run_script(tmp, [exp12_smoke_data.write_session(Path(tmp) / 'results', adjust=aborted)])
+            self.assertIn('**Decision 1: 1. Stop.**', text)
+            self.assertIn('FIRES: 00-hot-f0.01-s70 r', text)
+            self.assertIn('busy 2g pgdelta (aborted by its tool: dest: pgdelta exited 3)', text)
+            self.assertIn('**L5** ("Every output is correct"', text)
+            self.assertRegex(text, r'\*\*L5\*\*[^\n]*: failed: ')
+            self.assertIn('left out of every median: wrong 3', text)
+
+    def test_a_harness_error_around_an_output_is_unverified(self):
+        def ssh(item):
+            if item['method'] == 'full' and item['block'] == 'busy' and item['speed']['label'] == '2g' \
+                    and item['block_repeat'] < 2:
+                item.update(status='error', failure_kind='harness', verification=None,
+                            error='CommandError: source agent run failed (255): ssh: connect')
+        with tempfile.TemporaryDirectory() as tmp:
+            text = self.run_script(tmp, [exp12_smoke_data.write_session(Path(tmp) / 'results', adjust=ssh)])
+        self.assertIn('- **R3** ("Any wrong output stops speed work"', text)
+        self.assertNotIn('FIRES', text)
+        self.assertRegex(text, r'unverified runs \(a harness error around an output included\): [^\n]*busy 2g full '
+                               r'\(error\)[^\n]*; more than 1 in a cell flags it: busy 2 Gbit/s full')
+        self.assertRegex(text, r'\*\*L5\*\*[^\n]*: not shown: 2 run\(s\) unverified or pending')
 
     def test_unsettled_settles_leave_the_null_and_come_back_in_its_view(self):
         unsettled = [('busy', 0, 'full'), ('busy', 1, 'full'), ('busy', 0, 'none')]

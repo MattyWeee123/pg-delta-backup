@@ -134,6 +134,11 @@ DISK_WRITE_CHECK_METHODS = (*FULL_COPY_METHODS, 'pgdelta')
 # EXP-12: the live outputs the load's oracle checks (G4): started, recovering from their backup_label, then
 # checked for the invariant, the consistent cut, coverage, the row counts, amcheck and the schema.
 G4_METHODS = ('full', 'pgdelta')
+# EXP-12: the arms with an output whose own tool aborting it (its timed command exiting non-zero or timing out) makes
+# the run wrong, not unverified: the copy doesn't exist, so it doesn't start ("Wrong: ... or the output doesn't
+# start"), and R3 and L5 read it. The live outputs, the capture's S (which pg_verifybackup would fail), the proxies'
+# B and v1 itself's. Only the harness's own failures (SSH, a timed-out check, a missing binary) are unverified.
+TOOL_ABORT_WRONG_METHODS = (*G4_METHODS, 'capture', *V1PROXY_METHODS, 'pgdelta_direct_inplace')
 # EXP-12: arms that write nothing on dest, so durability check (a) says nothing about them.
 NO_DEST_WRITE_METHODS = ('none', 'capture', 'bracket', *CONTROL_METHODS)
 # Methods that move their bytes over several TCP streams: their time above link time is taken
