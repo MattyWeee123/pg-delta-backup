@@ -289,33 +289,40 @@ def blast_recv_streams(listener, streams: int, args) -> dict:
 
     Each is read on its own thread from when it is accepted. The rate is all streams' bytes over
     the span from the first byte of any stream to the last byte of any; steady_gbit leaves out
-    the first warmup seconds after that first byte, as for one stream.
+    the first warmup seconds after that first byte, as for one stream. A stream that fails is
+    closed at once, so its sender isn't left waiting, and fails the test: no rate is given from
+    the streams that remained.
     """
     lock = threading.Lock()
     first_byte: list = []  # the first byte of any stream, set once
     results: list = [None] * streams
+    errors: list = []
 
     def receive(index, conn, peer):
-        conn.settimeout(args.timeout)
-        view = memoryview(bytearray(BLAST_CHUNK * 4))
-        received, first, last, warm_bytes = 0, None, None, None
-        while True:
-            count = conn.recv_into(view)
-            now = time.monotonic()
-            if not count:
-                break
-            with lock:
-                if not first_byte:
-                    first_byte.append(now)
-            if first is None:
-                first = now
-            if warm_bytes is None and now - first_byte[0] >= args.warmup:
-                warm_bytes = received
-            received += count
-            last = now
-        conn.close()
-        results[index] = {'bytes': received, 'first': first, 'last': last, 'warm_bytes': warm_bytes,
-                          'peer': peer[0]}
+        try:
+            conn.settimeout(args.timeout)
+            view = memoryview(bytearray(BLAST_CHUNK * 4))
+            received, first, last, warm_bytes = 0, None, None, None
+            while True:
+                count = conn.recv_into(view)
+                now = time.monotonic()
+                if not count:
+                    break
+                with lock:
+                    if not first_byte:
+                        first_byte.append(now)
+                if first is None:
+                    first = now
+                if warm_bytes is None and now - first_byte[0] >= args.warmup:
+                    warm_bytes = received
+                received += count
+                last = now
+            results[index] = {'bytes': received, 'first': first, 'last': last, 'warm_bytes': warm_bytes,
+                              'peer': peer[0]}
+        except Exception as exc:
+            errors.append(f'stream {index + 1} from {peer[0]}: {type(exc).__name__}: {exc}')
+        finally:
+            conn.close()
 
     threads = []
     try:
@@ -328,6 +335,8 @@ def blast_recv_streams(listener, streams: int, args) -> dict:
         listener.close()
     for thread in threads:
         thread.join()
+    if errors:
+        raise SystemExit(f'the {streams}-stream link test failed: ' + '; '.join(errors))
     done = [result for result in results if result and result['first'] is not None]
     received = sum(result['bytes'] for result in results if result)
     start = min((result['first'] for result in done), default=None)

@@ -887,22 +887,28 @@ class Orchestrator:
 
         Run at the speed's first visit in the trial (each trial's first repeat; the extension's and
         the warm-source block's unthrottled visits reuse it); later visits carry that measurement,
-        so each record's link time can use it. One tbf caps the sum of all streams.
+        so each record's link time can use it. One tbf caps the sum of all streams. Like the trial's
+        other probes, a test that fails is recorded ({'error': ...}, and None for its rates, so those
+        records have no 8-stream link time) and the trial goes on; it isn't tried again at that speed.
         """
         label = speed['label']
         measured = label not in self.multi_stream_links
         if measured:
-            test = self.blast('source_to_dest', streams=LINK_TEST_STREAMS)
+            test = self.probe(f'the {LINK_TEST_STREAMS}-stream link test at {label}',
+                              lambda: self.blast('source_to_dest', streams=LINK_TEST_STREAMS))
+            receiver = test.get('receiver') or {}
             self.multi_stream_links[label] = {
                 'streams': LINK_TEST_STREAMS, 'utc': utc_now(), 'test': test,
-                'source_to_dest_8streams_gbit': test['receiver']['gbit'],
-                'source_to_dest_8streams_steady_gbit': test['receiver'].get('steady_gbit')}
-            log(f'link {label}: {LINK_TEST_STREAMS} streams {test["receiver"]["gbit"]} Gbit/s source->dest')
+                'source_to_dest_8streams_gbit': receiver.get('gbit'),
+                'source_to_dest_8streams_steady_gbit': receiver.get('steady_gbit')}
+            if 'error' not in test:
+                log(f'link {label}: {LINK_TEST_STREAMS} streams {receiver.get("gbit")} Gbit/s source->dest')
         multi = self.multi_stream_links[label]
         result = {key: multi[key] for key in ('source_to_dest_8streams_gbit',
                                               'source_to_dest_8streams_steady_gbit')}
         result['multi_stream'] = {'streams': multi['streams'], 'utc': multi['utc'], 'measured_here': measured,
-                                  **({'test': multi['test']} if measured else {})}
+                                  **({'test': multi['test']} if measured else {}),
+                                  **({'error': multi['test']['error']} if 'error' in multi['test'] else {})}
         return result
 
     def qdisc_stats(self) -> dict:

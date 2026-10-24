@@ -1263,6 +1263,36 @@ class LinkTests(Clocked):
         orchestrator.set_speed(UNTHROTTLED)
         self.assertEqual([event[2] for event in orchestrator.events if event[0] == 'blast'], [1, 1])
 
+    def test_a_failed_8_stream_test_is_recorded_and_the_trial_goes_on(self):
+        class Failing(T2Stub):
+            def throttle(self, rate):
+                return {}
+
+            def blast(self, direction, streams=1):
+                self.events.append(('blast', direction, streams))
+                if streams > 1:
+                    raise run_exp04.CommandError('link test receiver failed: the 8-stream link test failed: stream 3 '
+                                                 'from 10.0.0.12: TimeoutError: timed out')
+                return {'sender': {}, 'receiver': {'gbit': 14.9, 'steady_gbit': 14.9}}
+
+        orchestrator = self.orchestrator(Failing)
+        orchestrator.methods = ['full', 'parcopy8']
+        first = orchestrator.set_speed(UNTHROTTLED)  # no exception: the trial would go on
+        again = orchestrator.set_speed(UNTHROTTLED)
+        self.assertEqual(first['source_to_dest_gbit'], 14.9)
+        for link in (first, again):
+            self.assertIsNone(link['source_to_dest_8streams_gbit'])
+            self.assertIn('stream 3 from 10.0.0.12', link['multi_stream']['error'])
+        self.assertTrue(first['multi_stream']['measured_here'])
+        self.assertFalse(again['multi_stream']['measured_here'])
+        # Not tried again at that speed in the trial.
+        self.assertEqual([event[2] for event in orchestrator.events if event[0] == 'blast'], [1, 1, 8, 1, 1])
+        # A multi-stream arm's records there have no link time; the analysis leaves those cells without one.
+        record = {'method': 'parcopy8', 'link': {key: value for key, value in again.items() if key.endswith('gbit')},
+                  'totals': {'wire_bytes_source_to_dest': 2_110_000_000}}
+        self.assertIsNone(measure.link_seconds(record))
+        self.assertIsNone(measure.summary_row(record)['measured_s2d_gbit_8streams'])
+
     def test_blast_passes_the_streams_to_both_ends(self):
         orchestrator = self.orchestrator()
         receiver = mock.Mock()
@@ -1320,6 +1350,43 @@ class HostProbes(unittest.TestCase):
         self.assertEqual(received['bytes'], sent['bytes'])
         self.assertEqual(sum(sent['per_stream_bytes']), sent['bytes'])
         self.assertGreater(received['gbit'], 0)
+
+    def test_a_stream_that_fails_is_closed_and_fails_the_multi_stream_test(self):
+        probe = socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        results = {}
+
+        def receive():
+            try:
+                with redirect_stdout(io.StringIO()):
+                    agent.cmd_blast_recv(Namespace(listen=f'127.0.0.1:{port}', timeout=0.5, warmup=0.1, streams=2))
+            except SystemExit as exc:
+                results['error'] = str(exc)
+
+        thread = threading.Thread(target=receive)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                done = socket.create_connection(('127.0.0.1', port), timeout=0.2)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.02)
+        # One stream sends and ends; the other goes silent, so its read times out on the receiver.
+        stalled = socket.create_connection(('127.0.0.1', port), timeout=10)
+        done.sendall(b'x' * 1000)
+        done.shutdown(socket.SHUT_WR)
+        started = time.monotonic()
+        self.assertEqual(stalled.recv(1), b'')  # closed by the receiver, so its sender doesn't wait on
+        self.assertLess(time.monotonic() - started, 5)
+        thread.join(30)
+        done.close()
+        stalled.close()
+        self.assertIn('the 2-stream link test failed: stream 2 from 127.0.0.1', results['error'])
 
     def test_the_durable_write_test(self):
         target = self.root / 'floor'
