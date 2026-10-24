@@ -3,6 +3,14 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24 (later): EXP-11 rechecked; corrections applied
+
+An independent recheck read EXP-11's write-up and its summaries (the ledger, the README, the experiments index and this log) against the raw data: 33 findings, 12 major. Each was checked against the data, and all held, some in part: 25 distinct corrections, listed in [EXP-11](experiments/EXP-11-full-copy-baseline.md#corrections-after-the-recheck-october-24-2026). No registered verdict changes, and the pre-registered sections are untouched. The main ones:
+- **The analysis's audit table counted example paths** (33 for `full_nosync`, 3 for `pg_probackup`'s own flush) instead of the audit's counts (992 of 992 files and 1,021 of 1,021 directory changes; 3 files and 2 directory changes). Fixed in `durability_audit.arm_results` and the analysis, with a test (commit d5a2fe6). The registered analysis was rerun as before: only its audit table changed, and the curated CSVs and figures are byte-identical.
+- **`pg_probackup`'s slowness** was given a cause the timers don't support; its copy phase alone outlasts one stream's whole stream, for reasons not timed (SSH or its protocol).
+- **T5 and T13:** the registered 4-job cut is now stated with the 8-job reading (in the band where they rank equal) and with the session shift it rests on; the ledger no longer says they can't change the HA verdict, and their place in the queue depends on the worker count (D50, T10b).
+- **The released-copier claims** now name Debian's default write-back on dest, since one stream with write-back at 64 MiB beat v1; **the crossovers** name their 0.1 ms round-trip time; **D03** stays at B instead of moving to A.
+
 ## 2026-10-24 (06:27–09:34 UTC): EXP-11 ran; T2 done; VMs deleted
 
 **Ran** on two new `n2-standard-8` VMs in `us-central1-a`, created at 06:27 UTC and deleted at 09:34 UTC:
@@ -21,11 +29,11 @@ Every run of the sweep was verified, and every durable run passed the durability
 
 Also from the smoke run: the idle noise of dirty memory was 0.44 MiB, so check (a)'s limit stayed at 4 MiB; and the projection put the session at the 3.5-hour line, so cut 1 applied (`pg_probackup`'s byte diagnostic only in each trial's first repeat).
 
-**Result** (details in [EXP-11](experiments/EXP-11-full-copy-baseline.md), summary in [What T2 settled](DECISIONS.md#what-t2-settled-october-24-2026)):
-- **The fastest durable full copy** was the parallel copier built as a bound: 1.88 s unthrottled. One `pg_basebackup` stream took 3.8–4.1 s (fsync or syncfs alike), and `pg_probackup catchup -j 4/8`, the only released parallel tool found, 5.8–6.1 s.
-- **EXP-09's HA verdict reverses: out on fast links.** v1's path (stopped source, 4 jobs) takes 1.64–1.65 times as long as the bound for local changes, with no robustness flag. It is faster than the released copiers tested (0.77–0.78 of one stream with syncfs). The cut it would need, 1.40–1.42 s, is more than T5 and T13 can give together, so the queue is re-ranked: T12 (DR's links) up to second, T5 and T13 down.
-- **Crossovers:** v1's path beats the bound below 6.5 Gbit/s for local changes and 5.0 for scattered ones, and every released copier at every speed measured.
-- **The session is shifted against EXP-09:** v1 took 14–18% longer and one stream 22–30% longer unthrottled, so every ratio is within the session.
+**Result** (details in [EXP-11](experiments/EXP-11-full-copy-baseline.md), summary in [What T2 settled](DECISIONS.md#what-t2-settled-october-24-2026)). It holds on one VM pair with local NVMe, for 2.1 GB in RAM, on an idle source, at 0.1 ms round-trip time, with v1 and the bound reading a stopped source:
+- **The fastest durable full copy** was the parallel copier built as a bound: 1.88 s unthrottled. One `pg_basebackup` stream took 3.8–4.1 s (fsync or syncfs alike), and `pg_probackup catchup -j 4/8` over SSH, the only released parallel tool found, 5.8–6.1 s.
+- **EXP-09's HA verdict reverses: out on fast links.** v1's path (stopped source, 4 jobs) takes 1.64–1.65 times as long as the bound for local changes, with no robustness flag. With dest at Debian's default write-back, it is faster than the released copiers tested (0.77–0.78 of one stream with syncfs, 0.79–0.81 of one with fsync, against EXP-09's 0.86). The cut it would need with v1 at 4 jobs, 1.40–1.42 s, is more than T5 and T13 can give together by the registered rule (at 8 jobs it is 1.05–1.07 s, where the rule ranks them equal), so the queue is re-ranked: T12 (DR's links) up to second, T5 and T13 down while the default stays at 4 jobs.
+- **Crossovers, at 0.1 ms round-trip time:** v1's path beats the bound below 6.5 Gbit/s for local changes and 5.0 for scattered ones, and, with dest at Debian's default write-back, every released copier at every speed measured. DR's latency is T12's.
+- **The session is shifted against EXP-09:** v1 took 14–18% longer for local changes (8–17% for uniform) and one `pg_basebackup` copy 22–30% longer unthrottled (its single TCP stream measured 4–11% slower), so every ratio is within the session.
 
 **Found while writing it up,** and stated in EXP-11 beside the analysis's verdicts, which are unchanged:
 - **The start and end reference digests differed in every trial,** in `template1`'s and `postgres`'s statistics catalogs and the commit log (most likely autovacuum; not confirmed), smoke trials included. Smoke item 12 had recorded them as matching. So a `pg_probackup` logical difference would have counted as void, not failed; none occurred.
