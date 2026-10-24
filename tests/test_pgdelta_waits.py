@@ -14,8 +14,10 @@ import tarfile
 import tempfile
 import unittest
 
-from pgdelta_frames import build, session_fingerprint
-from pgdelta_support import REPO_ROOT
+from pgdelta import cli, protocol, sender
+
+from pgdelta_frames import NODE_BLOCKS, build, record, session_fingerprint
+from pgdelta_support import REPO_ROOT, python_command, snapshot, subprocess_env
 
 # pgdelta_frames' session as the code before EXP-13 sent it (commit BASE_COMMIT, recorded with
 # `python tests/pgdelta_frames.py [WINDOW]`). The window orders the source-to-dest stream; nothing else.
@@ -48,6 +50,11 @@ BEFORE = {
 
 def before(window=None):
     return dict(BEFORE, source_to_dest=BEFORE_SOURCE_TO_DEST[window])
+
+
+def run(*args, timeout=120):
+    return subprocess.run(python_command(*args), capture_output=True, text=True, cwd=REPO_ROOT,
+                          env=subprocess_env(), timeout=timeout)
 
 
 class TreeTestCase(unittest.TestCase):
@@ -92,6 +99,62 @@ class WireTests(TreeTestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(json.loads(result.stdout), session_fingerprint(window=window))
                 self.assertEqual(json.loads(result.stdout), before(window))
+
+
+class WindowSwitchTests(TreeTestCase):
+    """--window N on send and local: today's 4 by default; it reorders the frames and changes nothing sent."""
+
+    def test_send_and_local_default_to_todays_window(self):
+        parser = cli.build_parser()
+        send = parser.parse_args(['send', '--source', 'S', '--connect', 'h:1'])
+        local = parser.parse_args(['local', '--source', 'S', '--basis', 'B', '--output', 'O'])
+        self.assertEqual((sender.DEFAULT_WINDOW, send.window, local.window), (4, 4, 4))
+        self.assertEqual(cli._sender_kwargs(send, None)['window'], 4)
+        self.assertEqual(cli._sender_kwargs(parser.parse_args(['send', '--source', 'S', '--connect', 'h:1',
+                                                               '--window', '16']), None)['window'], 16)
+        for command in ('send', 'local'):
+            self.assertIn('--window', run(command, '--help').stdout)
+
+    def test_window_must_be_a_positive_whole_number(self):
+        for value in ('0', '-1', 'four', '1.5'):
+            with self.subTest(value=value):
+                result = run('local', '--source', self.source, '--basis', self.basis, '--output', self.root / 'O',
+                             '--window', value)
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn('--window', result.stderr)
+        self.assertFalse((self.root / 'O').exists())
+
+    def test_window_reaches_the_sender_with_identical_output_for_1_4_and_16(self):
+        results = {}
+        for window in (1, 4, 16):
+            with self.subTest(window=window):
+                output, stats_path = self.root / f'O{window}', self.root / f'stats{window}.json'
+                result = run('local', '--source', self.source, '--basis', self.basis, '--output', output,
+                             '--reuse-any-basis', '--node-blocks', NODE_BLOCKS, '--jobs', 1, '--window', window,
+                             '--stats-json', stats_path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(snapshot(output), snapshot(self.source))
+                stats = json.loads(stats_path.read_text())
+                self.assertEqual(stats['window'], window)
+                results[window] = (stats['files'], stats['pages'], stats['nodes'],
+                                   stats['bytes_source_to_dest'], stats['bytes_dest_to_source']['leaf_digests'],
+                                   stats['bytes_dest_to_source']['node_digests'])
+        self.assertEqual(results[1], results[4])
+        self.assertEqual(results[16], results[4])
+        self.assertGreater(results[4][1]['sent'], 0)
+
+    def test_the_window_reorders_the_frames_and_changes_none_of_them(self):
+        frames = {}
+        for window in (1, 4, 16):
+            _, _, channel = record(self.source, self.basis, self.root / f'O{window}', window=window)
+            frames[window] = channel.frames_sent
+        self.assertNotEqual(frames[1], frames[4])
+        self.assertNotEqual(frames[16], frames[4])
+        for window in (1, 16):
+            self.assertEqual(sorted(frames[window]), sorted(frames[4]))
+            # Each type's frames keep their order: only how LEAF_REQUESTs interleave with the rest moves.
+            for code in protocol.MESSAGES:
+                self.assertEqual([f for f in frames[window] if f[0] == code], [f for f in frames[4] if f[0] == code])
 
 
 if __name__ == '__main__':

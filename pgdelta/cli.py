@@ -221,6 +221,11 @@ def _sender_options(parser):
     parser.add_argument('--high-churn-node-fraction', type=_fraction, metavar='F',
                         help='send a file\'s mismatched nodes whole, without leaf digests, '
                              'when more than this fraction of its nodes differ')
+    # Experiment switch (EXP-13, D29): the request window.
+    parser.add_argument('--window', type=_positive_int, default=sender.DEFAULT_WINDOW, metavar='N',
+                        help='hash up to N files ahead of the one being sent, so their leaf-digest round '
+                             'trips overlap hashing. It changes the order of the frames on the wire, not '
+                             'what is sent (default: %(default)s)')
 
 
 def _reuse_any_basis_option(parser):
@@ -369,7 +374,7 @@ def _identity(source, pg_controldata):
 
 def _sender_kwargs(args, identity):
     return {'identity': identity, 'block': args.block, 'node_blocks': args.node_blocks,
-            'high_churn_node_fraction': args.high_churn_node_fraction, 'jobs': args.jobs,
+            'high_churn_node_fraction': args.high_churn_node_fraction, 'window': args.window, 'jobs': args.jobs,
             'hash_backend': args.hash_backend, 'source_kind': args.source_kind,
             'pg_controldata': args.pg_controldata}
 
