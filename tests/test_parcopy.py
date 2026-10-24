@@ -168,6 +168,7 @@ class Plan(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = T2Stub(tmp, FakeClock())
             self.addCleanup(orchestrator.pool.shutdown)
+            address = f'{orchestrator.dest_ip}:{run_exp04.PARCOPY_PORT}'
             for method in measure.PARCOPY_METHODS:
                 with self.subTest(method=method):
                     paths = orchestrator.method_paths(method)
@@ -178,13 +179,13 @@ class Plan(unittest.TestCase):
                     streams = measure.PARCOPY_VARIANTS[method]['streams']
                     self.assertEqual((args.func, args.output, args.listen, args.stats_json, args.streams,
                                       args.writeback_bytes),
-                                     (parcopy.cmd_receive, orchestrator.outputs / method, '10.0.0.13:7200',
+                                     (parcopy.cmd_receive, orchestrator.outputs / method, address,
                                       orchestrator.work / 'stats' / f'{method}-receive.json', streams, 8 * MIB))
                     args = parcopy.build_parser().parse_args(send[3:])
                     self.assertEqual((args.func, args.source, args.pg_controldata, args.connect, args.stats_json,
                                       args.streams, args.chunk_bytes),
                                      (parcopy.cmd_send, Path(orchestrator.source_data),
-                                      str(orchestrator.bin / 'pg_controldata'), '10.0.0.13:7200',
+                                      str(orchestrator.bin / 'pg_controldata'), address,
                                       Path(paths['stats']), streams, 64 * MIB))
 
 
