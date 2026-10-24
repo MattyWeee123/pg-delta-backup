@@ -730,6 +730,7 @@ class Session:
         self._cells: dict = {}
         self._unsettled: dict = {}
         self.busy_cpu_given = busy_cpu
+        self.sampler_off_p99: list = []  # smoke item 11: the busy warm-ups' p99 of --sampler-off sweeps (main)
         # The smoke run's sweep (its oracle controls ran): its own settles give the busy CPU smoke item 2 records.
         self.smoke = any(get(trial, 'oracle_controls', 'controls') for trial in self.trials.values())
         self.read_logs()
@@ -1062,6 +1063,17 @@ class Session:
             return self.busy_cpu_given
         value = median(get(r['record'], 'settle', 'busy_rate_no_steal') for r in self.runs if r['block'] == block)
         return None if value is None else value / self.cpus()
+
+    def warmup_p99s(self, sampler):
+        """The busy load's warm-ups' p99 over their last minute (the null pool's part), from the trials that ran the
+        sampler (or, with sampler False, those run with --sampler-interval-s 0): smoke item 11."""
+        out = []
+        for key, warmups in self.warmups.items():
+            if bool(get(self.trials.get(key) or {}, 'load', 'sampler')) != sampler:
+                continue
+            out += [w['pool']['p99_ms'] for w in warmups if w['run_id'] == 'busy' and w['pool']
+                    and w['pool'].get('p99_ms') is not None]
+        return out
 
     def high_cpu(self):
         """Which of E4's and E7's ranges apply: the busy CPU at R_busy above 50%. On the main sweep only the value smoke
@@ -2884,6 +2896,22 @@ def order_lines(S, cells):
     return lines
 
 
+SAMPLER_P99_SHARE, SAMPLER_CORE_SHARE = 0.10, 0.01  # smoke item 11: p99 within 10%, the sampler under 1% of a core
+
+
+def sampler_cost(with_p99s, without_p99s, finals) -> dict:
+    """Smoke item 11 from the records: the busy warm-up's p99 over its last minute with the sampler and without it
+    (medians over the trials), within 10% of each other, and the sampler's own CPU under 1% of a core in every trial
+    that ran it. `ok` needs both; None where either can't be judged."""
+    with_ms, without_ms = median(with_p99s), median(without_p99s)
+    p99_ok = (None if with_ms is None or not without_ms
+              else abs(with_ms / without_ms - 1) <= SAMPLER_P99_SHARE + 1e-12)
+    cpu_ok = every(None if not f.get('seconds') or f.get('cpu_seconds') is None
+                   else f['cpu_seconds'] / f['seconds'] < SAMPLER_CORE_SHARE for f in finals)
+    return {'with_ms': with_ms, 'without_ms': without_ms, 'p99_ok': p99_ok, 'cpu_ok': cpu_ok,
+            'ok': None if p99_ok is None or cpu_ok is None else p99_ok and cpu_ok}
+
+
 def smoke_lines(S, cells, ctx):
     """The smoke run's sixteen items, each printed from the records (EXP-11's lesson)."""
     lines = ['## Smoke items, from the records']
@@ -2968,12 +2996,16 @@ def smoke_lines(S, cells, ctx):
     finals = [get(trial, 'load', 'end', 'sampler', 'final') or (S.samplers.get(key) and getattr(S.samplers[key], 'final', None))
               for key, trial in S.trials.items()]
     finals = [f for f in finals if f]
+    cost = sampler_cost(S.warmup_p99s(True), S.warmup_p99s(False) + list(S.sampler_off_p99), finals)
     say('11. **The sampler\'s cost**: ' + ('; '.join(f'{f.get("cpu_seconds")} CPU-s over {f.get("seconds")} s '
                                                   f'({fmt(ratio(f.get("cpu_seconds"), f.get("seconds")), 4)} of a core, '
                                                   f'under 1% {word(None if not f.get("seconds") else f["cpu_seconds"] / f["seconds"] < 0.01)}), '
                                                   f'{f.get("ticks")} ticks at {f.get("interval_s")} s, {f.get("late_ticks")} late'
                                                   for f in finals) or 'no sampler data')
-        + '; p99 with and without it: compare the warm-ups of a sweep run with --sampler-interval-s 0')
+        + f'; the busy warm-up\'s p99 over its last minute with the sampler {fmt(cost["with_ms"], 3)} ms, without it '
+        f'{fmt(cost["without_ms"], 3)} ms (a sweep run with --sampler-interval-s 0, given to --sampler-off), within 10% '
+        f'{word(cost["p99_ok"])}: **{word(cost["ok"])}**; if either part fails, the 0.1-s reads go to 0.5 s, then to '
+        '1 s, and the item repeats')
     pauses = [item for item in ctx['a2'] if item['block'] == 'busy']
     checks = [e3_check(item, late=False) for item in pauses]
     say(f'12. **pause2** at R_busy: {len(pauses)} runs; W 1.6-2.0 s and D at least 0.95 (E3\'s ranges), the gap '
@@ -3001,11 +3033,25 @@ def smoke_lines(S, cells, ctx):
         f'{sum(bool((r.get("sampler") or {}).get("autovacuum_loaddb")) for r in S.runs)} windows; the benchmark '
         f'database\'s logical digest at the end equal to the start\'s {word(every(logical))}')
     projection = time_projection(S.runs)
+    budget = budget_projection(projection)
+    if budget['total'] is None:
+        decision = 'no run times, so no decision on the cuts'
+    else:
+        decision = (f'with the budget\'s fixed {fmt(budget["fixed"], 1)} minutes ('
+                    + '; '.join(f'{name}: {minutes:g}' for name, minutes in BUDGET_FIXED_MIN)
+                    + f') and {PLANNED_VISITS} speed visits of 8 s, the pair\'s time is '
+                    + ('at least ' if budget['lower_bound'] else '') + f'{fmt(budget["total"] / 60, 2)} h against the '
+                    f'{CUT_LINE_MIN / 60:g}-h cut line: '
+                    + ('no cut' if not budget['cuts'] else 'cut ' + '; '.join(
+                        f'{name} ({fmt(minutes / 60, 2)} h after it)' for name, minutes in budget['steps'][1:]))
+                    + ('; still over after every cut: the session runs anyway and the overrun is recorded'
+                       if budget['over'] else '')
+                    + (' (a kind without a time here: a lower bound, so only an overrun decides)'
+                       if budget['lower_bound'] else ''))
     say(f'15. **The time projection**: the registered {projection["planned"]} runs at this session\'s median run times '
         f'(each run from its start to its record): {fmt(projection["minutes"], 1)} minutes for the '
         f'{projection["runs"]} runs whose kind ran here, {projection["borrowed"]} of them warm or moderate runs at the '
-        f'busy block\'s median for their arm (the smoke run\'s pass is busy only); set-up and the trial\'s end not '
-        f'included')
+        f'busy block\'s median for their arm (the smoke run\'s pass is busy only); {decision}')
     say('16. **analysis/exp12.py** ran end to end on these records: this output')
     return lines
 
@@ -3018,25 +3064,61 @@ PLANNED_RUNS = {('busy', 'full'): 15, ('busy', 'pgdelta'): 15, ('busy', PROXY): 
                 **{('calibration', arm): 2 for arm in CALIBRATION_ARMS}}
 
 
+# Smoke item 15's budget (Run plan and budget): the pair's fixed minutes besides the sweep's runs, each speed's visit
+# with its link test (busy 5 x 3, warm 5 x 1, moderate 3 x 2, calibration 2 x 1 visits), the cut line, and the cuts
+# in their order, each as the runs (and visits) it removes.
+BUDGET_FIXED_MIN = (('create the VMs, provision, deploy, SSH set-up', 20.0), ('the smoke run', 60.0),
+                    ("the trial's set-up, to the end of the warm-up", 8.0), ("the trial's end", 4.5),
+                    ('compress and fetch the logs, then teardown', 15.0))
+VISIT_MIN, PLANNED_VISITS = 8 / 60, 15 + 5 + 6 + 2
+CUT_LINE_MIN = 3.5 * 60
+CUTS = (('1. pgdelta unthrottled in the busy block', {('busy', 'pgdelta'): 5}, 0),
+        ('2. bracket', {('busy', 'bracket'): 5}, 0),
+        ('3. the moderate block at 2 repeats', {('moderate', 'full'): 2, ('moderate', PROXY): 2,
+                                                ('moderate', 'none'): 1, ('moderate', PROXY_S1): 1}, 2))
+
+
 def time_projection(runs, plan=PLANNED_RUNS) -> dict:
     """Smoke item 15: the registered runs at this session's median run times (each run from its start to its record),
     by (block, arm). The smoke run makes one busy pass and one calibration pass, so a warm or moderate kind that
-    didn't run here takes the busy block's median for its arm (`borrowed`); a kind with neither is left out."""
+    didn't run here takes the busy block's median for its arm (`borrowed`); a kind with neither is left out
+    (`each` holds each kind's minutes, None where unknown)."""
     durations = {}
     for r in runs:
         if r['started_utc'] is not None and r['finished_utc'] is not None:
             durations.setdefault((r['block'], r['method']), []).append(r['finished_utc'] - r['started_utc'])
-    known, counted, borrowed = 0.0, 0, 0
+    known, counted, borrowed, each = 0.0, 0, 0, {}
     for (block, arm), count in plan.items():
         value = median(durations.get((block, arm), []))
         if value is None and block in ('warm', 'moderate'):
             value = median(durations.get(('busy', arm), []))
             borrowed += count if value is not None else 0
+        each[(block, arm)] = None if value is None else value / 60
         if value is not None:
             known += count * value
             counted += count
     return {'planned': sum(plan.values()), 'runs': counted, 'borrowed': borrowed,
-            'minutes': known / 60 if counted else None}
+            'minutes': known / 60 if counted else None, 'each': each}
+
+
+def budget_projection(projection) -> dict:
+    """Smoke item 15's decision: the pair's whole time, the sweep's runs as projected plus the budget's fixed parts
+    and each speed's visit, against the 3.5-hour cut line, with the cuts applied in their order until it fits. A kind
+    without a time leaves the total a lower bound (`lower_bound`), which only an overrun can decide."""
+    if projection['minutes'] is None:
+        return {'total': None, 'steps': [], 'cuts': [], 'over': None}
+    fixed = sum(minutes for _, minutes in BUDGET_FIXED_MIN)
+    total = fixed + projection['minutes'] + PLANNED_VISITS * VISIT_MIN
+    steps, cuts = [('as planned', total)], []
+    for name, removed, visits in CUTS:
+        if total <= CUT_LINE_MIN:
+            break
+        total -= sum(count * (projection['each'].get(kind) or 0) for kind, count in removed.items())
+        total -= visits * VISIT_MIN
+        steps.append((name, total))
+        cuts.append(name)
+    return {'total': steps[0][1], 'fixed': fixed, 'steps': steps, 'cuts': cuts, 'final': total,
+            'over': total > CUT_LINE_MIN, 'lower_bound': projection['runs'] < projection['planned']}
 
 
 def verdicts(S):
@@ -3253,6 +3335,9 @@ def build_parser():
                              'the main sweep, no range)')
     parser.add_argument('--idle-noise-bytes', type=int, metavar='BYTES',
                         help='check (a) judged again against max(4 MiB, this), the smoke run\'s idle noise')
+    parser.add_argument('--sampler-off', nargs='+', default=[], metavar='DIR',
+                        help='sweeps run with --sampler-interval-s 0: their busy warm-ups\' p99 against the sampled '
+                             'ones, smoke item 11 (read for nothing else)')
     parser.add_argument('--datadir', default=str(DATA))
     parser.add_argument('--figdir', help='write figures here instead of docs/figures')
     parser.add_argument('--tag', default='', help='suffix for data and figure names (e.g. -smoke)')
@@ -3288,6 +3373,11 @@ def main(argv=None):
     S = Session(runs, trials, metas, sweeps=sweeps, late_limit_ms=args.late_limit_ms, resamples=args.null_resamples,
                 seed=args.null_seed, client_wait_share=args.client_wait_share, idle_noise=args.idle_noise_bytes,
                 busy_cpu=args.busy_cpu, capacity_tps=args.capacity_tps)
+    for sweep in args.sampler_off:
+        r, t, meta = load(sweep)
+        off = Session(r, t, [meta], sweeps=[Path(sweep)], late_limit_ms=args.late_limit_ms, resamples=100,
+                      seed=args.null_seed)
+        S.sampler_off_p99 += off.warmup_p99s(False)
     lines, _ = verdicts(S)
     print(f'{len(runs)} runs from {", ".join(str(s) for s in sweeps)}; L = {args.late_limit_ms:g} ms; the null: '
           f'{args.null_resamples} resamples from seed {args.null_seed}')

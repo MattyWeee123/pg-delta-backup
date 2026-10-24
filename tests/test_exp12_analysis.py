@@ -15,6 +15,7 @@ They need the analysis venv's numpy and matplotlib and are skipped without them.
 
 import csv
 import io
+import json
 import re
 import shlex
 import shutil
@@ -1003,6 +1004,28 @@ class DryRun(unittest.TestCase):
         self.assertIn('the busy CPU at R_busy is above 50%', given)
         self.assertIn("**A12** (capacity drift against the smoke run's C, --capacity-tps): **flagged**", given)
 
+    def test_smoke_item_11_compares_the_p99_with_and_without_the_sampler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            sweep = exp12_smoke_data.write_session(Path(tmp) / 'results', smoke=True)
+            off = exp12_smoke_data.write_session(Path(tmp) / 'results', smoke=True, name='exp12-nosampler')
+            path = off / 'trials' / f'{exp12_smoke_data.TRIAL}.json'
+            trial = json.loads(path.read_text())
+            trial['load']['sampler'] = None  # run with --sampler-interval-s 0
+            path.write_text(json.dumps(trial))
+            alone = self.run_script(tmp, [sweep], '--tag=-smoke')
+            both = self.run_script(tmp, [sweep], '--tag=-smoke', '--sampler-off', str(off))
+        line = next(text for text in both.splitlines() if text.startswith('11. '))
+        self.assertIn('within 10% held: **held**', line)
+        line = next(text for text in alone.splitlines() if text.startswith('11. '))
+        self.assertIn('without it – ms', line)
+        self.assertIn(': **no data**', line)
+        # The verdict needs both parts: p99 within 10%, and the sampler under 1% of a core.
+        final = {'cpu_seconds': 0.5, 'seconds': 100}
+        self.assertIs(exp12.sampler_cost([1.0], [0.95], [final])['ok'], True)
+        self.assertIs(exp12.sampler_cost([1.2], [1.0], [final])['ok'], False)  # p99 up by 20%
+        self.assertIs(exp12.sampler_cost([1.0], [1.0], [{'cpu_seconds': 2.0, 'seconds': 100}])['ok'], False)
+        self.assertIsNone(exp12.sampler_cost([1.0], [], [final])['ok'])
+
     def test_the_paired_view_pairs_only_an_arm_with_its_repeats_full_run(self):
         # Row 7b compares warm v1proxy with its own cold cell: two blocks, and no full run between them. The paired view
         # leaves that to the main view instead of pairing warm repeat k with busy repeat k.
@@ -1195,7 +1218,34 @@ class TimeProjection(unittest.TestCase):
         self.assertEqual(found['runs'], 15 + 15 + 5 + 22 + 3 + 2)
         self.assertAlmostEqual(found['minutes'] * 60, 15 * 70 + 15 * 30 + 5 * 90 + 5 * 70 + 5 * 30 + 6 * 70 + 6 * 30
                                + 3 * 120 + 2 * 20)
-        self.assertEqual(exp12.time_projection([]), {'planned': 117, 'runs': 0, 'borrowed': 0, 'minutes': None})
+        empty = exp12.time_projection([])
+        self.assertEqual({key: empty[key] for key in ('planned', 'runs', 'borrowed', 'minutes')},
+                         {'planned': 117, 'runs': 0, 'borrowed': 0, 'minutes': None})
+        self.assertEqual(exp12.budget_projection(empty)['total'], None)
+
+    def test_the_pairs_time_against_the_cut_line_with_the_cuts_in_order(self):
+        def projection(minutes_each):
+            each = {kind: minutes_each for kind in exp12.PLANNED_RUNS}
+            return {'planned': 117, 'runs': 117, 'borrowed': 0, 'each': each, 'minutes': 117 * minutes_each}
+        fixed = 20 + 60 + 8 + 4.5 + 15
+        visits = 28 * 8 / 60
+        # 0.8 min per run: 93.6 + 107.5 + 3.7 = 204.8 min, within 3.5 h: no cut.
+        found = exp12.budget_projection(projection(0.8))
+        self.assertAlmostEqual(found['total'], 117 * 0.8 + fixed + visits)
+        self.assertEqual((found['cuts'], found['over']), ([], False))
+        # 0.9 min per run: 216.5 min; cut 1 (5 runs) leaves 212.0, cut 2 (5 runs) 207.5: within.
+        found = exp12.budget_projection(projection(0.9))
+        self.assertEqual(found['cuts'], ['1. pgdelta unthrottled in the busy block', '2. bracket'])
+        self.assertAlmostEqual(found['final'], 117 * 0.9 + fixed + visits - 10 * 0.9)
+        self.assertFalse(found['over'])
+        # 1.2 min per run: every cut (16 runs, 2 visits) and still over: the session runs anyway.
+        found = exp12.budget_projection(projection(1.2))
+        self.assertEqual(len(found['cuts']), 3)
+        self.assertAlmostEqual(found['final'], 117 * 1.2 + fixed + visits - 16 * 1.2 - 2 * 8 / 60)
+        self.assertTrue(found['over'])
+        # A kind without a time: the total is a lower bound.
+        partial = {**projection(0.8), 'runs': 100}
+        self.assertTrue(exp12.budget_projection(partial)['lower_bound'])
 
 
 @needs_venv
