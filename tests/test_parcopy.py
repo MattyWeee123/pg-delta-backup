@@ -3,7 +3,9 @@
 No VM is needed. The plan runs on synthetic sizes shaped like scale 70. The copies run over loopback in
 this process, from a synthetic stopped data directory read with a stub pg_controldata
 (test_pgdelta_datadir's), with os.fsync counted through a patch; with PostgreSQL 17's binaries
-(PGDELTA_TEST_PG_BIN) a real stopped cluster is copied and started, and skipped without them.
+(PGDELTA_TEST_PG_BIN) a real stopped cluster is copied and started, and skipped without them. The
+orchestrator's run, its preflight and A5's fsync count run with test_exp04_network's and
+test_exp11_core's stubs.
 """
 from __future__ import annotations
 
@@ -30,7 +32,7 @@ from pgdelta.inventory import FileEntry, Inventory
 
 from pgdelta_cluster import CONTROLDATA, SKIP_REASON, Servers, available, initdb
 from pgdelta_support import REPO_ROOT, subprocess_env
-from test_exp04_network import FakeClock
+from test_exp04_network import FakeChild, FakeClock, LINK, SPEED, TRIAL
 from test_exp11_core import T2Stub
 from test_pgdelta_datadir import REDO, RESET, build_datadir, stub_controldata
 from test_pgdelta_identity import SAMPLE
@@ -363,6 +365,13 @@ class Copies(unittest.TestCase):
         self.assertIn(('check_output', False), orchestrator.events)  # started without recovery
         return result
 
+    def test_verify_direct_counts_the_fsyncs_the_output_needs(self):
+        output, calls, _, _, outcome = self.copy(4)
+        result = self.verify_direct(output)
+        self.assertTrue(result['verified'], result)
+        self.assertEqual(result['fsync_expected_from_output'], len(calls))
+        self.assertEqual(result['fsync_expected_from_output'], outcome['receiver']['fsync_expected'])
+
     def test_a_running_cluster_is_refused(self):
         stubs = {'postmaster.pid': (lambda: (self.datadir / 'postmaster.pid').write_text('1\n'), self.stub),
                  "'in production', not 'shut down'": (lambda: None, stub_controldata(
@@ -499,6 +508,262 @@ class RealCluster(unittest.TestCase):
         log = (self.servers.logs / f'{output.name}.log').read_text()
         self.assertIn('database system was shut down at', log)
         self.assertNotIn('redo starts', log)
+
+
+# --- the orchestrator: run_parcopy, check_parcopy and A5 ---------------------------------------
+
+RECEIVE_STATS = {'streams': [{'bytes': 1_100_000_000, 'first_byte_s': 0.11, 'last_byte_s': 1.62, 'write_s': 0.9},
+                             {'bytes': 1_090_000_000, 'first_byte_s': 0.12, 'last_byte_s': 1.6, 'write_s': 0.8}],
+                 'fsync_s': 0.24, 'fsync_calls': 1310, 'fsync_expected': 1310}
+
+
+class Parcopying(T2Stub):
+    """T2Stub whose parcopy receiver leaves its stats, as the real one does; snapshots, the receiver's
+    listening and each remote command's working directory are recorded."""
+
+    receive_stats = RECEIVE_STATS
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.remote_cwds = []
+
+    def snapshot_source(self):
+        self.events.append('snapshot')
+        return super().snapshot_source()
+
+    def snapshot_dest(self):
+        self.events.append('snapshot')
+        return super().snapshot_dest()
+
+    def start_receiver(self, method, paths, holder):
+        commands = super().start_receiver(method, paths, holder)
+        self.events.append('listening')
+        return commands
+
+    def remote_command(self, argv, log_name, *, cwd=None):
+        self.remote_cwds.append(cwd)
+        return super().remote_command(argv, log_name, cwd=cwd)
+
+    def run_parcopy(self, method, paths):
+        phases = super().run_parcopy(method, paths)
+        parcopy.write_json(paths['receive_stats'], self.receive_stats)
+        return phases
+
+    def tool_reported(self, method, paths, phases):
+        if method in measure.PARCOPY_METHODS:
+            return run_exp04.Orchestrator.tool_reported(self, method, paths, phases)
+        return super().tool_reported(method, paths, phases)
+
+
+class OrchestratorRuns(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.clock = FakeClock()
+        for patcher in (mock.patch.object(run_exp04.time, 'perf_counter', self.clock),
+                        mock.patch.object(run_exp04, 'log')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        FakeChild.started.clear()
+
+    def orchestrator(self, cls=Parcopying):
+        orchestrator = cls(self.tmp.name, self.clock)
+        self.addCleanup(orchestrator.pool.shutdown)
+        orchestrator.window_writes = 2_200_000_000  # check (b): the output on the md array in the window
+        return orchestrator
+
+    def run_method(self, orchestrator, method, child=FakeChild):
+        with mock.patch.object(run_exp04, 'Child', child):
+            return orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), method, 0, [method])
+
+    @staticmethod
+    def kinds(orchestrator):
+        kinds = []
+        for event in orchestrator.events:
+            if isinstance(event, str):
+                kinds.append(event)
+            elif event[0] in ('dest', 'source'):
+                kinds.append((event[0], Path(event[1][0]).name, *event[1][1:4]))
+            else:
+                kinds.append((event[0], event[1][0] if isinstance(event[1], tuple) else event[1]))
+        return kinds
+
+    def test_a_parcopy_run_is_one_window_in_pgdelta_directs_frame(self):
+        for method in measure.PARCOPY_METHODS:
+            with self.subTest(method=method):
+                FakeChild.started.clear()
+                orchestrator = self.orchestrator()
+                record = self.run_method(orchestrator, method)
+                self.assertEqual(record['status'], 'pass', record.get('traceback'))
+                self.assertEqual(list(record['phases']), ['receiver_transfer'])
+                phase = record['phases']['receiver_transfer']
+                self.assertEqual(list(phase['steps']), ['receiver_start', 'transfer'])
+                streams = str(measure.PARCOPY_VARIANTS[method]['streams'])
+                [receiver] = FakeChild.started
+                self.assertEqual(receiver.argv[1:4], ['-m', 'experiments.network.parcopy', 'receive'])
+                self.assertEqual(receiver.argv[receiver.argv.index('--streams') + 1], streams)
+                self.assertEqual(phase['receiver']['argv'], receiver.argv)
+                send = [event[1] for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'source']
+                self.assertEqual(len(send), 1)
+                self.assertEqual(send[0][1:4], ['-m', 'experiments.network.parcopy', 'send'])
+                self.assertEqual(send[0][send[0].index('--source') + 1], orchestrator.source_data)
+                self.assertEqual(orchestrator.remote_cwds, [orchestrator.remote_repo])
+                kinds = self.kinds(orchestrator)
+                # Stopped before the cache drop, restarted after the verification; one counter window, and no
+                # counter read between the receiver listening and the sender's start.
+                scripts = [kind for kind in kinds if kind[0] == 'source_script']
+                self.assertEqual(scripts, [('source_script', 'stop-clean'), ('source_script', 'start')])
+                self.assertLess(kinds.index(('source_script', 'stop-clean')), kinds.index('drop_caches'))
+                self.assertLess(kinds.index('verify'), kinds.index(('source_script', 'start')))
+                listening = kinds.index('listening')
+                self.assertEqual(kinds[listening + 1][:4], ('source', Path(send[0][0]).name, '-m',
+                                                            'experiments.network.parcopy'))
+                self.assertEqual(kinds.count('snapshot'), 4)
+                row = measure.summary_row(record)
+                self.assertEqual(row['counter_windows'], 1)
+                self.assertEqual(row['total_s'], round(row['receiver_start_s'] + row['transfer_s'], 3))
+                self.assertEqual((row['parcopy_streams'], row['parcopy_fsync_calls'], row['parcopy_fsync_expected']),
+                                 (2, 1310, 1310))
+                self.assertEqual(row['tool_s2d_bytes'], 2_190_000_000)
+                self.assertEqual(row['tier'], 'bound')
+                self.assertEqual(record['durability']['fsync_count'],
+                                 {'calls': 1310, 'expected': 1310, 'expected_from_output': None, 'ok': True})
+                self.assertEqual((row['durable'], row['durability_ok']), (True, True))
+
+    def test_a_wrong_fsync_count_fails_check_a_but_not_the_run(self):
+        class Short(Parcopying):
+            receive_stats = {**RECEIVE_STATS, 'fsync_calls': 1309}
+
+        record = self.run_method(self.orchestrator(Short), 'parcopy8')
+        self.assertEqual(record['status'], 'pass')  # its status is its verification's (A5 is the analysis's)
+        self.assertEqual(record['durability']['dirty_writeback_increase_bytes'], 0)
+        self.assertEqual((record['durability']['a_ok'], record['durability']['ok']), (False, False))
+        self.assertFalse(measure.summary_row(record)['durability_ok'])
+
+    def test_a_receiver_that_never_listens_fails_without_a_transfer(self):
+        class Silent(FakeChild):
+            LOG = ''
+            EXIT = 2
+
+        orchestrator = self.orchestrator()
+        record = self.run_method(orchestrator, 'parcopy4', Silent)
+        self.assertEqual(record['status'], 'error')
+        self.assertEqual(list(record['phases']['receiver_transfer']['steps']), ['receiver_start'])
+        self.assertNotIn('source', [kind[0] for kind in self.kinds(orchestrator) if isinstance(kind, tuple)])
+        self.assertIn(('source_script', 'start'), self.kinds(orchestrator))
+
+    def test_a_failed_sender_stops_the_receiver_and_the_source_restarts(self):
+        class Refused(Parcopying):
+            def remote_command(self, argv, log_name, *, cwd=None):
+                result = super().remote_command(argv, log_name, cwd=cwd)
+                return {**result, 'exit_code': 2}
+
+        orchestrator = self.orchestrator(Refused)
+        record = self.run_method(orchestrator, 'parcopy8')
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('source: python3 exited 2', record['error'])
+        [receiver] = FakeChild.started
+        self.assertEqual(len(receiver.signals), 1)
+        self.assertIn(('source_script', 'start'), self.kinds(orchestrator))
+
+
+class Preflight(unittest.TestCase):
+    CAPABLE = {'sendfile': True, 'writeback': True}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def check(self, *, dest=CAPABLE, source=CAPABLE, send_help=None):
+        """check_parcopy with each VM's --help from this repository's parcopy, and the capabilities given."""
+        orchestrator = T2Stub(self.tmp.name, FakeClock())
+        self.addCleanup(orchestrator.pool.shutdown)
+        orchestrator.methods = ['full', 'parcopy4', 'parcopy8']
+        real = subprocess.run
+        calls = []
+
+        def local(argv, **kwargs):
+            calls.append(('dest', argv))
+            if '--help' in argv:
+                return real(argv, **kwargs)
+            return mock.Mock(stdout=f'{json.dumps(dest)}\n', returncode=0)
+
+        def source_agent(*args, timeout=600):
+            argv = list(args[args.index('--') + 1:])
+            calls.append(('source', argv))
+            if '--help' in argv:
+                text = real([sys.executable, *argv[1:]], cwd=REPO_ROOT, capture_output=True, text=True,
+                            env=subprocess_env()).stdout if send_help is None else send_help
+                return {'exit_code': 0, 'log_tail': text}
+            return {'exit_code': 0, 'log_tail': f'noise\n{json.dumps(source)}\n'}
+
+        orchestrator.source.agent = source_agent
+        with mock.patch.object(run_exp04.subprocess, 'run', local):
+            return orchestrator.check_parcopy(), calls
+
+    def test_both_ends_have_what_parcopy_needs(self):
+        result, calls = self.check()
+        self.assertEqual(result['options']['receive'], ['--output', '--listen', '--stats-json', '--streams',
+                                                        '--writeback-bytes'])
+        self.assertEqual(result['options']['send'], ['--source', '--pg-controldata', '--connect', '--stats-json',
+                                                     '--streams', '--chunk-bytes'])
+        self.assertEqual((result['dest']['options'], result['source']['options']), (True, True))
+        self.assertEqual(result['source']['capabilities'], self.CAPABLE)
+        self.assertIn(('dest', [sys.executable, '-m', 'experiments.network.parcopy', 'receive', '--help']), calls)
+        self.assertIn(('source', ['python3', '-m', 'experiments.network.parcopy', 'send', '--help']), calls)
+        self.assertIn(('source', ['python3', '-c', run_exp04.PARCOPY_CAPABILITIES]), calls)
+        # The real capabilities() answers every key the check reads.
+        self.assertTrue({'sendfile', 'writeback'} <= set(parcopy.capabilities()))
+
+    def test_it_refuses_without_write_back_sendfile_or_an_option(self):
+        cases = {"dest can't start write-back": {'dest': {'sendfile': True, 'writeback': False}},
+                 'the source has no os.sendfile': {'source': {'sendfile': False, 'writeback': True}},
+                 'parcopy send on source lacks': {'send_help': 'usage: parcopy send --source --connect'}}
+        for message, change in cases.items():
+            with self.subTest(message=message):
+                with self.assertRaises(SystemExit) as refused:
+                    self.check(**change)
+                self.assertIn(message, str(refused.exception))
+
+
+class FsyncCount(unittest.TestCase):
+    @staticmethod
+    def record(method='parcopy8', calls=12, expected=12, held=None, increase=0):
+        record = {'method': method, 'phases': {'receiver_transfer': {
+            'memory': {'dest': {'dirty_writeback_bytes_before': MIB, 'dirty_writeback_bytes_after': MIB + increase}},
+            'disk': {'dest': {'md127': {'write_bytes': 3_000_000_000}}}}},
+            'tool_reported': {'parcopy_summary': measure.parcopy_summary(
+                {'streams': [{'bytes': 1}], 'fsync_calls': calls, 'fsync_expected': expected})},
+            'verification': {} if held is None else {'fsync_expected_from_output': held}}
+        return record
+
+    def test_a5_a_parcopy_run_must_fsync_what_its_inventory_holds(self):
+        output = 2_100_000_000
+        passed = measure.durability_check(self.record(held=12), output)
+        self.assertEqual((passed['a_ok'], passed['ok']), (True, True))
+        self.assertEqual(passed['fsync_count'], {'calls': 12, 'expected': 12, 'expected_from_output': 12, 'ok': True})
+        for label, record in (('one short', self.record(calls=11)),
+                              ('against the output', self.record(held=13)),
+                              ('one too many', self.record(calls=13))):
+            with self.subTest(label=label):
+                failed = measure.durability_check(record, output)
+                self.assertEqual((failed['a_ok'], failed['ok'], failed['fsync_count']['ok']), (False, False, False))
+        # Without the receiver's counts, check (a) can't pass; a dirty increase over the limit still fails it.
+        unknown = measure.durability_check(self.record(calls=None), output)
+        self.assertEqual((unknown['a_ok'], unknown['ok']), (None, None))
+        dirty = measure.durability_check(self.record(calls=None, increase=16 * MIB), output)
+        self.assertEqual(dirty['a_ok'], False)
+        # Other arms have no fsync count.
+        self.assertNotIn('fsync_count', measure.durability_check(self.record(method='full'), output))
+
+    def test_the_fsyncs_a_tree_needs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'a' / 'b').mkdir(parents=True)
+            (root / 'empty').mkdir()
+            for path in ('PG_VERSION', 'a/1', 'a/b/2'):
+                (root / path).write_bytes(b'x')
+            self.assertEqual(measure.fsyncs_expected(measure.tree_digest(root)), 3 + 3 + 1)
 
 
 if __name__ == '__main__':

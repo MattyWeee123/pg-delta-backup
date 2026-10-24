@@ -365,8 +365,9 @@ for _method in PROBACKUP_METHODS:
 for _method in PARCOPY_METHODS:
     _streams = PARCOPY_VARIANTS[_method]['streams']
     PROC_SCOPE[_method] = ('source: parcopy send, reading the stopped data directory (no capture, no '
-                           f'walsender); dest: parcopy receive. Each end runs {_streams} streams, as threads or '
-                           'as children it reaps, so CPU includes them. Peak RSS: largest single process')
+                           f'walsender); dest: parcopy receive. Each end runs its {_streams} streams as threads '
+                           'of one process (the receiver its fsync threads too), so CPU includes them. Peak RSS: '
+                           'largest single process (one per end)')
 del _method, _jobs, _streams
 # rsync's copy of B0 (prep, on dest) and its capture of S (on source) touch
 # different machines and the link is idle during both, so they run at the same
@@ -1446,6 +1447,26 @@ def parcopy_summary(stats) -> dict:
             'fsync_ok': None if calls is None or expected is None else calls == expected}
 
 
+def fsyncs_expected(digest: dict) -> int:
+    """The fsyncs a durable copy owes for a tree_digest of it: its files, its directories, and its top one."""
+    kinds = [entry[0] for entry in digest['entries'].values()]
+    return kinds.count('file') + kinds.count('dir') + 1
+
+
+def parcopy_fsync_count(record: dict) -> dict:
+    """EXP-11's A5 for a parcopy* run: its receiver's fsync calls against what they must be.
+
+    Its inventory's files plus directories plus one for the output's top directory, as the receiver
+    counted them (fsync_expected), and as the output holds them (verify_direct's
+    fsync_expected_from_output, when there). ok is None while the receiver's counts are missing.
+    """
+    summary = _get(record, 'tool_reported', 'parcopy_summary') or {}
+    calls, expected = summary.get('fsync_calls'), summary.get('fsync_expected')
+    held = _get(record, 'verification', 'fsync_expected_from_output')
+    ok = None if calls is None or expected is None else calls == expected and (held is None or calls == held)
+    return {'calls': calls, 'expected': expected, 'expected_from_output': held, 'ok': ok}
+
+
 # --- T2 (EXP-11): durability, reference digests and probes ---------------------------
 
 # Check (a): Dirty + Writeback on dest may grow by at most this over the run, or by the idle noise
@@ -1484,6 +1505,7 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
     bytes dest's md array wrote in the window are at least DISK_WRITE_FRACTION of output_bytes. `ok`
     is whether both hold (b only where it applies); None while a needed counter is missing.
     `durable` says whether the arm is meant to be durable (full_nosync is not: it is the control).
+    A parcopy* run whose fsync count is not its inventory's (A5, parcopy_fsync_count) fails (a).
     """
     method = record.get('method')
     phases = list((record.get('phases') or {}).values())
@@ -1492,6 +1514,12 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
     increase = None if before is None or after is None else after - before
     limit = max(DIRTY_LIMIT_BYTES, int(idle_noise or 0))
     a_ok = None if increase is None else increase <= limit
+    fsync_count = parcopy_fsync_count(record) if method in PARCOPY_METHODS else None
+    if fsync_count is not None:
+        if fsync_count['ok'] is False:
+            a_ok = False
+        elif fsync_count['ok'] is None and a_ok:
+            a_ok = None
     written = phase_disk_bytes(record, 'dest', 'write_bytes')
     b_required = method in FULL_COPY_METHODS
     needed = None if not b_required or output_bytes is None else math.ceil(DISK_WRITE_FRACTION * output_bytes)
@@ -1507,7 +1535,8 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
             'dirty_writeback_increase_bytes': increase, 'limit_bytes': limit,
             'idle_noise_bytes': None if idle_noise is None else int(idle_noise), 'a_ok': a_ok,
             'disk_write_bytes': written, 'output_bytes': output_bytes, 'b_required': b_required,
-            'b_min_bytes': needed, 'b_ok': b_ok}
+            'b_min_bytes': needed, 'b_ok': b_ok,
+            **({'fsync_count': fsync_count} if fsync_count is not None else {})}
 
 
 # What every clean stop of the source rewrites, left out of the reference digests (EXP-11's steps 2

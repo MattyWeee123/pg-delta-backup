@@ -144,6 +144,9 @@ OUTPUT_QUERY = 'SELECT count(*) FROM pgbench_branches;'
 PGDELTA_PORT = 7000
 BLAST_PORT = 7100
 PARCOPY_PORT = 7200
+# check_parcopy: what each VM's Python offers parcopy (sendfile, early write-back), printed as JSON.
+PARCOPY_CAPABILITIES = (f'import json; from {measure.PARCOPY_MODULE} import capabilities; '
+                        'print(json.dumps(capabilities()))')
 RSYNC_PORT = 8730
 RSYNC_MODULE = 'exp04'
 AGENT = 'experiments/network/agent.py'
@@ -195,8 +198,9 @@ DURABILITY_POLICY = (
     '(/proc/meminfo), read just before the clock starts and first after it stops, grows by at most '
     '4 MiB or the idle noise (run.json dirty_idle_noise, --dirty-noise-mib), whichever is larger; '
     "(b) for a full copy, dest's md array writes (/proc/diskstats) in the window are at least 0.98 x "
-    "the output's bytes. full_nosync is the negative control. A run's status is its verification's; "
-    'durability_ok is apart')
+    "the output's bytes. full_nosync is the negative control. parcopy* (A5): its receiver's fsync calls must "
+    "equal its inventory's files plus directories plus one, and what its output holds, or (a) fails. A run's "
+    "status is its verification's; durability_ok is apart")
 os.environ['PATH'] = os.environ.get('PATH', '/usr/bin:/bin') + ':/usr/sbin:/sbin'
 
 
@@ -220,6 +224,15 @@ def agent_result(stdout: str) -> dict:
         if line.startswith(RESULT_PREFIX):
             return json.loads(line[len(RESULT_PREFIX):])
     raise ValueError('no result line in agent output')
+
+
+def last_json(text: str):
+    """The JSON value a command printed on its last non-empty line, or None."""
+    lines = [line for line in (text or '').splitlines() if line.strip()]
+    try:
+        return json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return None
 
 
 class CommandError(RuntimeError):
@@ -954,13 +967,51 @@ class Orchestrator:
                 '--stats-json', paths['stats'], *measure.parcopy_args(method)['send']]
 
     def run_parcopy(self, method, paths) -> dict:
-        """parcopy*: one timed phase in pgdelta_direct*'s frame (measure.PARCOPY_PHASE, steps receiver_start
-        and transfer), from parcopy_receive_argv and parcopy_send_argv. Built on build/exp11-parcopy."""
-        raise NotImplementedError('built on build/exp11-parcopy')
+        """parcopy*: one timed phase in pgdelta_direct*'s frame (measure.PARCOPY_PHASE), one counter window.
+
+        The source was stopped cleanly before the cache drop (prepare). Its steps: receiver_start, from
+        launching parcopy's receiver on dest (parcopy_receive_argv) until it listens, then transfer, its
+        sender on the source over the harness's SSH (parcopy_send_argv), until both ends have exited. The
+        receiver's fsync tail is inside: it exits after its last fsync.
+        """
+        return self.receiver_transfer(method, paths)
 
     def check_parcopy(self) -> dict:
-        """execute()'s preflight for parcopy*. Built on build/exp11-parcopy."""
-        raise NotImplementedError('built on build/exp11-parcopy')
+        """execute()'s preflight for parcopy*: its command line, sendfile on the source and write-back on dest.
+
+        `python -m experiments.network.parcopy receive --help` on dest and `send --help` on the source must
+        list every option parcopy_receive_argv and parcopy_send_argv pass. The source's Python must have
+        os.sendfile, and dest's must be able to start write-back (pgdelta.flush, sync_file_range), or the
+        bound would run without its early write-back. SystemExit if not.
+        """
+        method = next(method for method in self.methods if method in measure.PARCOPY_METHODS)
+        paths = self.method_paths(method)
+        options = {'receive': [str(part) for part in self.parcopy_receive_argv(method, paths)
+                               if str(part).startswith('--')],
+                   'send': [str(part) for part in self.parcopy_send_argv(method, paths) if str(part).startswith('--')]}
+        local = subprocess.run([sys.executable, '-m', measure.PARCOPY_MODULE, 'receive', '--help'], cwd=self.repo,
+                               capture_output=True, text=True, timeout=120)
+        local_capabilities = subprocess.run([sys.executable, '-c', PARCOPY_CAPABILITIES], cwd=self.repo,
+                                            capture_output=True, text=True, timeout=120)
+        remote = self.source.agent('run', '--log', f'{self.work}/logs/parcopy-send-help.log', '--cwd',
+                                   self.remote_repo, '--', self.source.python, '-m', measure.PARCOPY_MODULE, 'send',
+                                   '--help')
+        remote_capabilities = self.source.agent('run', '--log', f'{self.work}/logs/parcopy-capabilities.log',
+                                                '--cwd', self.remote_repo, '--', self.source.python, '-c',
+                                                PARCOPY_CAPABILITIES)
+        found = {'dest': {'options': pgdelta_supports(local.stdout, options['receive']),
+                          'capabilities': last_json(local_capabilities.stdout)},
+                 'source': {'options': pgdelta_supports(remote.get('log_tail', ''), options['send']),
+                            'capabilities': last_json(remote_capabilities.get('log_tail', ''))}}
+        problems = [f'parcopy {command} on {host} lacks {" ".join(options[command])}'
+                    for host, command in (('dest', 'receive'), ('source', 'send')) if not found[host]['options']]
+        if not (found['dest']['capabilities'] or {}).get('writeback'):
+            problems.append("dest can't start write-back (pgdelta.flush.start_writeback)")
+        if not (found['source']['capabilities'] or {}).get('sendfile'):
+            problems.append('the source has no os.sendfile')
+        if problems:
+            raise SystemExit(f'parcopy cannot run: {"; ".join(problems)} ({found})')
+        return {'options': options, **found}
 
     def run_incremental(self, method, paths) -> dict:
         phases = {}
@@ -999,8 +1050,20 @@ class Orchestrator:
                 '--pg-controldata', self.bin / 'pg_controldata', '--stats-json', paths['stats'],
                 *measure.PGDELTA_ARGS[method]['send']]
 
+    def receive_argv(self, method, paths) -> list:
+        """The receiver a method launches on dest: parcopy's for parcopy*, pgdelta's otherwise."""
+        if method in measure.PARCOPY_METHODS:
+            return self.parcopy_receive_argv(method, paths)
+        return self.pgdelta_receive_argv(method, paths)
+
+    def send_argv(self, method, paths) -> list:
+        """The sender a method runs on the source: parcopy's for parcopy*, pgdelta's otherwise."""
+        if method in measure.PARCOPY_METHODS:
+            return self.parcopy_send_argv(method, paths)
+        return self.pgdelta_send_argv(method, paths)
+
     def start_receiver(self, method, paths, holder: dict) -> list[dict]:
-        """pgdelta's receiver part: launch `pgdelta receive --listen` and wait until it listens.
+        """pgdelta's (or parcopy's) receiver part: launch it with --listen and wait until it listens.
 
         The receiver keeps running after this part, reading B0 into the page
         cache (--prefetch-basis on) until the sender connects in the transfer
@@ -1008,7 +1071,7 @@ class Orchestrator:
         it listens (its record, with its rusage, goes into the transfer phase
         once it exits), or its final record if it exited or never listened.
         """
-        receiver = Child(self.pgdelta_receive_argv(method, paths),
+        receiver = Child(self.receive_argv(method, paths),
                          self.dest_log(f'{method}-receive.log'), cwd=self.repo,
                          gnu_time=self.gnu_time)
         holder['receiver'] = receiver
@@ -1052,8 +1115,8 @@ class Orchestrator:
             raise
 
     def pgdelta_transfer(self, method, paths, receiver: Child, launched_in: str) -> list[dict]:
-        """pgdelta's transfer: the sender on the source, until both ends have exited."""
-        sender = self.remote_command(self.pgdelta_send_argv(method, paths),
+        """pgdelta's (or parcopy's) transfer: the sender on the source, until both ends have exited."""
+        sender = self.remote_command(self.send_argv(method, paths),
                                      f'{method}-send.log', cwd=self.remote_repo)
         if sender['exit_code'] != 0:
             receiver.signal()
@@ -1070,6 +1133,12 @@ class Orchestrator:
         sender starts as soon as the receiver listens, with no untimed gap in which the receiver
         would prefetch B0 off the clock. Each step's wall and start offset are in `steps`.
         """
+        return self.receiver_transfer(method, paths)
+
+    def receiver_transfer(self, method, paths) -> dict:
+        """pgdelta_direct*'s and parcopy*'s frame: one timed phase (measure.DIRECT_PHASE), one counter
+        window, whose steps follow each other at once: receiver_start (the receiver's launch until it
+        listens, start_receiver), then transfer (the sender, until both ends exit, pgdelta_transfer)."""
         holder: dict = {}
         steps: dict = {}
 
@@ -1420,6 +1489,9 @@ class Orchestrator:
                   'wal': measure.wal_summary(measure.wal_files_from_digest(digest), None)}
         if method in measure.IN_PLACE_METHODS:
             result['in_place_leftovers'] = measure.in_place_leftovers(digest)
+        if method in measure.PARCOPY_METHODS:
+            # A5: the fsyncs parcopy owes for what O holds, counted apart from its own report.
+            result['fsync_expected_from_output'] = measure.fsyncs_expected(digest)
         result['shared_extents'] = measure.shared_extents(output)
         # Only now, with the files compared: starting the output changes it.
         result['output_start'] = self.check_output(method, output, recovery=False)

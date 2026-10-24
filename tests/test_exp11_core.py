@@ -798,16 +798,13 @@ class Runs(Clocked):
         self.assertEqual(row['dirty_increase_mb'], round(1_700_000 * 1024 / 1e6, 3))
         self.assertEqual(row['disk_write_dest_bytes'], 2_200_000_000 // 512 * 512)
 
-    def test_probackup_and_parcopy_are_dispatched_to_their_blocks(self):
+    def test_probackup_is_dispatched_to_its_block(self):
+        # parcopy's runs are in tests/test_parcopy.py.
         orchestrator = self.orchestrator()
-        for method, branch in (('probackup8', 'build/exp11-probackup'), ('parcopy4', 'build/exp11-parcopy')):
-            with self.subTest(method=method):
-                record = self.run_method(orchestrator, method)
-                self.assertEqual(record['status'], 'error')
-                self.assertIn(f'NotImplementedError: built on {branch}', record['error'])
-        # parcopy stops the source first and restarts it, as v1 does.
-        scripts = [kind[1] for kind in self.kinds(orchestrator) if kind[0] == 'source_script']
-        self.assertEqual(scripts, ['stop-clean', 'start'])
+        record = self.run_method(orchestrator, 'probackup8')
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('NotImplementedError: built on build/exp11-probackup', record['error'])
+        self.assertNotIn('source_script', [kind[0] for kind in self.kinds(orchestrator)])
 
     def test_a_probackup_run_is_one_window_with_its_sync_f_inside(self):
         clock = self.clock
