@@ -1,5 +1,7 @@
 # Decision ledger
 
+*Update, October 24, 2026: tests T3, T8a and T11 ran ([EXP-08](experiments/EXP-08-incumbent-tools.md), [EXP-09](experiments/EXP-09-direct-read.md), [EXP-10](experiments/EXP-10-write-path.md)); see [What T3, T8a and T11 settled](#what-t3-t8a-and-t11-settled-october-24-2026). Rows they change are marked in italics with the date.*
+
 *Update, night of October 23, 2026: the sponsor questions (T1) are closed by the owner's decisions, recorded in [Decisions of October 23](#decisions-of-october-23-2026-t1-closed). Rows they change are marked.*
 
 *A review of pgdelta v0 and the proposed v1, 23 October 2026. Nothing was re-run for this review. It reads the committed experiments and rechecks their numbers from the CSV files in `docs/experiments/data/`. It also reads pgdelta's own phase timers from the cloud runs, now committed as [exp04-pgdelta-timers.csv](experiments/data/exp04-pgdelta-timers.csv) (see "Where pgdelta's time goes").*
@@ -184,6 +186,37 @@ Matt, the project owner, settled the open sponsor questions on October 23, worki
 
 **What changes in the queue:** T1 is done. T11, T8a and T3 run next, in that order. T3 (e) tests in-place patching with a startup block instead of an undo journal.
 
+## What T3, T8a and T11 settled (October 24, 2026)
+
+Three experiments ran on two new `n2-standard-8` VMs in `us-central1-a`: 552 timed runs and 48 correctness runs, all verified. Each write-up was rechecked independently, and the rechecks' corrections are in them.
+
+| Test | Experiment | What it settled |
+|---|---|---|
+| T8a (and v1's path) | [EXP-09](experiments/EXP-09-direct-read.md) | **Reading the source's files directly removes v0's local backup almost for free** (+0.14–0.25 s, on a stopped source). With in-place patching, **v1's path takes 2.7 s against a single-stream full copy's 3.1 s** for local changes on the fastest link (ratio 0.86, which meets the HA rule against today's copy). The registered expectation for T2's parallel copy (2.0–3.0 s) would reverse that. **The bottleneck is now the destination's two passes over B,** fingerprinting it and re-reading it to verify. |
+| T3 | [EXP-10](experiments/EXP-10-write-path.md) | **In place wins:** 1.6 s faster than v0's new copy, 0.6–0.9 s faster than a new copy with the fsync on a thread. **For copies that must survive,** the new-copy mode moves its fsync to a background thread and uses clones where the filesystem has reflinks (on XFS a new copy is within 0.19 s of in place). Copy-then-patch and pipelined verification stay. |
+| T11 | [EXP-08](experiments/EXP-08-incumbent-tools.md) | **`pg_probackup catchup` silently returned wrong data** on two diverged copies that pgdelta handled correctly. **WAL-G's checked catch-up refuses** any copy on another timeline. **`pg_rewind` repairs every diverged copy when B kept its WAL.** **pgBackRest with a current backup** sends fewer bytes for scattered changes (so the pitch is "no repository needed"); with block incremental it ties pgdelta's v1 path for local changes on restore time, though each restore then needed 2 s or more of recovery. |
+
+![Evidence behind the performance decisions](figures/decisions-scorecard.svg)
+
+**Rows updated:**
+- D38p and D40p, v0's write path, are now contradicted (X), and superseded by D85 (in place by default) and D86 (the new-copy mode's fsync thread and clones).
+- D53 and D54 are now strong (A).
+- D58 and D87, direct reads, are moderate (B): measured on a stopped source only.
+- D57, D61 and D27 are moot.
+- D01 is now moderate (B), with the measured positioning against each incumbent.
+
+**The queue, re-ranked by what each test now decides:**
+
+| Priority | Test | Why now |
+|---|---|---|
+| 1 | T2 Fastest durable full copy | EXP-09's HA verdict depends on it: against a parallel copy of 2.0–3.0 s the ratio would be 0.90–1.35 |
+| 2 | T10a Source slowdown | the owner's bar is `pg_basebackup`'s slowdown; v1 uses 5.3–6.0 source CPU-s against the full copy's 1.6–1.9 |
+| 3 | T8 Backup-mode reads on a live source | v1's design rests on it: correctness under writes, WAL streaming, real speed |
+| 4 | T13 Verification by fault class, and T5 a faster hash | the new bottleneck is fingerprinting B and re-reading it to verify |
+| 5 | T9 Beyond RAM, and a run on persistent disks | the verification re-read becomes a disk pass; GKE's default disk may cap both methods |
+| 6 | T11b pgBackRest from a realistically old backup, with its WAL replay, against pgdelta from the live server | EXP-08 gave pgBackRest a backup taken just before each restore |
+| 7 | T12 Latency and TLS | the DR case's links |
+
 ## Where pgdelta stands today
 
 The conditions behind every number in this section: one VM pair, 2.1 GB, 1% of rows changed, idle source, CRC32C manifests (EXP-04b), and no added latency. "Uniform" means changes scattered over the whole table; "local" means hot-spot and append changes.
@@ -234,6 +267,8 @@ These timers come from uncommitted files; T0 commits them.
 
 ## Scorecard
 
+*The counts in this section are as of October 23. The figure also shows the October 24 counts, read from the rows as they stand now.*
+
 ![Evidence behind the performance decisions](figures/decisions-scorecard.svg)
 
 Counts by kind of decision. v1 proposals are counted under their kind. Five rows were added by this review: D10p, D38p, D40p, D41p, D69b.
@@ -254,9 +289,9 @@ The tests T0 to T14 are described in the queue further down.
 
 | ID | Decision | Grade | Evidence | Gray area | Test |
 |---|---|---|---|---|---|
-| D01 | Niche: refresh a lineage-free old copy from the live server, with no repository, verifying every reused page | C | No tool found that does this. The sponsor said most real backups aren't taken with pg_basebackup. A timeline-blind LSN shortcut keeps wrong pages, but real catch-up tools would refuse the failover case, so pgdelta's measured edge there is reuse (48% sent), not correctness. Same bytes as rsync; faster only for scattered changes at about 0.3-2 Gbit/s. | How common such copies are; whether a pgBackRest repository already exists (Omni recommends pgBackRest); whether gated LSN tools are ever wrong (S2b). *October 23: the target is Omni's HA rebuild and DR re-seed (O1, O2).* | T11 |
-| D02 | Hand off to native incremental or pg_rewind where they apply (not built yet) | A | Incremental was the fastest delta method in all 42 cells (for example hot at 2 Gbit/s: 4.05 s vs pgdelta 8.33 s), even reading B0 cold. | Selector rules untested; pg_rewind never benchmarked. | T11 |
-| D03 | Don't claim to beat a parallel full copy on fast LANs; report the crossover | B | No staged method beat a full copy unthrottled. Crossovers 1.97-2.47 Gbit/s; even a zero-overhead copy would lower them only about 20%. | v1's standing: its transfer alone crosses 5.0-9.9 Gbit/s against today's copy but 3.2-3.8 against a zero-overhead one. | T2 |
+| D01 | Niche: refresh a lineage-free old copy from the live server, with no repository, verifying every reused page | B | No tool found that does this. The sponsor said most real backups aren't taken with pg_basebackup. A timeline-blind LSN shortcut keeps wrong pages, but real catch-up tools would refuse the failover case, so pgdelta's measured edge there is reuse (48% sent), not correctness. Same bytes as rsync; faster only for scattered changes at about 0.3-2 Gbit/s. *October 24 (EXP-08): against `pg_probackup catchup`, pgdelta has a correctness edge (it returned 928 + 167 missing rows on S2b and S2c, where pgdelta was correct); against WAL-G's checked catch-up, the edge is reuse (it refuses any copy on another timeline); against `pg_rewind`, pgdelta is the fallback when B lacks its WAL; against pgBackRest, the byte rule fired: "no repository needed".* | How old real repository backups are, and the WAL replay that adds; live-source refresh (T8). | T8, T2 |
+| D02 | Hand off to native incremental or pg_rewind where they apply (not built yet) | A | Incremental was the fastest delta method in all 42 cells (for example hot at 2 Gbit/s: 4.05 s vs pgdelta 8.33 s), even reading B0 cold. *October 24: incremental with `pg_combinebackup --copy-file-range` on XFS took 1.2-1.4 s for local changes (EXP-10); `pg_rewind` repaired every diverged copy when B kept its WAL back to the fork (EXP-08).* | Selector rules untested. | none |
+| D03 | Don't claim to beat a parallel full copy on fast LANs; report the crossover | B | No staged method beat a full copy unthrottled. Crossovers 1.97-2.47 Gbit/s; even a zero-overhead copy would lower them only about 20%. *October 24 (EXP-09): v1's path takes 0.86 of a single-stream copy unthrottled for local changes; against T2's registered 2.0-3.0 s parallel copy it would be 0.90-1.35.* | v1's standing: its transfer alone crosses 5.0-9.9 Gbit/s against today's copy but 3.2-3.8 against a zero-overhead one. | T2 |
 | D04 | A program on each host; only digests and differing pages cross the link | B | Wire bytes 27.6-29.2 MB (local) and 610 MB (uniform), vs 2,102-2,112 MB. The transfer phase costs 4.9-6.4 source CPU-s, twice a whole full copy. | ~~Sponsor permission~~ allowed (O3). Slowdown never measured; its bar is now pg_basebackup's (O4). | T10a |
 | D05 | Standalone tool, no PostgreSQL patch | C | Scope reasons; raw reads outside the server ran at 2.87 GB/s. | None for performance. | none |
 | D06 | Build our own engine instead of using rsync | C | Same bytes. Single process vs single process, about even for scattered changes (23.13 vs 23.29 s at 0.5 Gbit/s). rsync's local-change lead comes mostly from writing its copy during the capture. The plan's rsync gate fired and was never closed. *Closed October 23 by O7: rsync is GPL, so it can't be the engine.* | Speed at equal parallelism and equal write strategy (now a baseline question only). | T6 |
@@ -272,7 +307,7 @@ The tests T0 to T14 are described in the queue further down.
 |---|---|---|---|---|---|
 | D09 | Milestone: O byte-identical to S | A | 10/10 (EXP-03), 288/288 (EXP-04), 330 runs (EXP-06). | v1 has no S; it needs a manifest, recovery and a logical comparison. | T8 |
 | D10 | Staged v0 as a correctness scaffold | A | Correct in every run (432/432 EXP-04, 324/324 EXP-04b). | Only as a scaffold; see D10p. | none |
-| D11 | Hashes alone decide reuse | A | Correct 10/10. The bare LSN shortcut: 1 stale-data case, 1 invalid-checksum case, 2 harmless hint-bit cases. Cost with checksums off: 1,428 vs 617 MB (one trial). | Whether hashing is necessary or only sufficient: a gated LSN filter was never tested. | T11, T4 |
+| D11 | Hashes alone decide reuse | A | Correct 10/10. The bare LSN shortcut: 1 stale-data case, 1 invalid-checksum case, 2 harmless hint-bit cases. Cost with checksums off: 1,428 vs 617 MB (one trial). *October 24 (EXP-08): a real gated LSN tool, `pg_probackup catchup` (DELTA), accepted two diverged copies and returned wrong data; WAL-G's checked mode refused them.* | Settled for the tools tested: gated LSN tools can still be wrong. | none |
 | D14 | Keyed 128-bit hash, fresh key per run | A | False "unchanged" about 4e-30 over 10 TiB; a real CRC false-match incident elsewhere. | Key in clear on TCP. | T12 |
 | D16 | Separate hash personalisation per level | B | Standard practice; tests. | None. | none |
 | D25 | No timeline-history check | B | The failover case gave a correct O. | None for correctness. | none |
@@ -294,10 +329,10 @@ The tests T0 to T14 are described in the queue further down.
 
 | ID | Decision | Grade | Evidence | Gray area | Test |
 |---|---|---|---|---|---|
-| D10p | (added) Keep the staged capture as the performance path | **X** | The capture (median 3.98-4.04 s) alone equals a full copy (3.96-4.13 s). It costs more source CPU than the whole full copy, and adds 16.8 MB of WAL padding. | Untested use: shipping an existing nightly backup. | T1 |
-| D38p | (added) Build a complete new O rather than patch in place, clone or copy ahead | D | Never varied. Costs 3.3-3.5 s of the 4.3-5.0 s transfer. | Savings of each alternative. In place is allowed (O5). | T3 (d)(e) |
-| D40p | (added) fsync each file serially in the main loop | D | Never varied. 1.66-1.72 s, the largest single phase; one 5.87 s outlier. | Early write-back or flushing on a worker; tail frequency. | T3 (b) |
-| D41p | (added) Separate re-read verification rather than fused or O_DIRECT | D | Never compared. 1.40-1.52 s of verifier time, mostly hidden; 4.0 s sequential. | Cost beyond RAM; what fused would miss. | T13, T9 |
+| D10p | (added) Keep the staged capture as the performance path | **X** | The capture (median 3.98-4.04 s) alone equals a full copy (3.96-4.13 s). It costs more source CPU than the whole full copy, and adds 16.8 MB of WAL padding. *October 24 (EXP-09): reading the stopped source's files directly instead costs only 0.14-0.25 s more than the warm staged transfer.* | Untested use: shipping an existing nightly backup. | T1 |
+| D38p | (added) Build a complete new O rather than patch in place, clone or copy ahead | **X** | Never varied. Costs 3.3-3.5 s of the 4.3-5.0 s transfer. *October 24 (EXP-10): in place is 1.56-1.58 s faster than this new copy on ext4 (0.6-0.9 s faster than a new copy with the fsync on a thread); on XFS, clones make a new copy within 0.19 s of in place. Superseded by D85 and D86.* | Settled. | done |
+| D40p | (added) fsync each file serially in the main loop | **X** | Never varied. 1.66-1.72 s, the largest single phase; one 5.87 s outlier. *October 24 (EXP-10): an fsync thread saves 0.69-1.04 s; fixed early write-back 0.43-0.98 s. Superseded by D86.* | Settled. | done |
+| D41p | (added) Separate re-read verification rather than fused or O_DIRECT | D | Never compared. 1.40-1.52 s of verifier time, mostly hidden; 4.0 s sequential. *October 24 (EXP-09): with the writing gone, this is v1's bottleneck: 1.75 s busy, the main loop waiting 0.62 s for it at the end, the re-read served from the page cache.* | Cost beyond RAM; what fused would miss. | T13, T9 |
 | D07 | Python, standard library only | C | Threads fail; 4 processes hash 3.88 times faster. Hashing is most of the source CPU. No compiled build compared. | Source CPU; v1's floor. | T5 |
 | D12 | No LSN or summary hints, even for ordering | D | No reason given. Summaries never missed a changed page (36/36). v0 is the pure-hash half of the research's hybrid. | Ordering's value in v1. | T8 |
 | D13 | No cached hash tree of B | D | Not motivated. It is the one scan-reducing lever compatible with the niche. | How often B is unchanged; storing a keyed tree. | T1 |
@@ -310,7 +345,7 @@ The tests T0 to T14 are described in the queue further down.
 | D22 | High-churn fallback off, threshold unmeasured | D | Never run. | High latency with 5-10% changes. | T12 |
 | D23 | Send everything when the gate says no | C | Rationale rests on an artifact; across pg_upgrade, comparing sent 47.1% instead of 100%. | Cost of comparing when nothing matches. | T7 |
 | D24 | Identity gate as an efficiency policy; conservative default | C | Safety side solid; efficiency unmeasured. | The default. | T7, T1 |
-| D27 | Prefetch B while waiting | C | Read all of B0 in 144/144 runs; benefit measured only at small scale. | Benefit at scale; moot in v1. | T3 (g) |
+| D27 | Prefetch B while waiting | – | Read all of B0 in 144/144 runs; benefit measured only at small scale. *Moot in v1: the direct read has no wait to prefetch during (EXP-09).* | Benefit at scale; moot in v1. | T3 (g) |
 | D28 | Hash only the B files S lists | D | Logically entailed. | None. | none |
 | D29 | Hash 4 files ahead | D | Never varied; latency never added. | 20-120 ms round trips, the niche. | T12 |
 | D30 | All page-digest requests for a file at once | D | Never varied. | Latency only. | T12 |
@@ -321,17 +356,20 @@ The tests T0 to T14 are described in the queue further down.
 | D48 | Hash on worker processes | A | Threads at most 1.23 times faster; 4 processes 3.88 times at 1.06 times the CPU. | A native hash on threads instead? | T5 |
 | D50 | Default of 4 workers | B | 8 hashes 16% faster on Linux for 65-72% more CPU; the 1.3 times CPU budget has no basis. | Never compared end to end on Linux; the budget should come from measured slowdown. | T10b |
 | D52 | Task sizes and queue depth | C | Not tuned; near-linear scaling. | Low stakes. | T14 |
-| D53 | Copy-then-patch as default | C | Big gain on the Mac. On Linux, no gain in confounded timers; its copy is 0.1-0.3 s slower even at equal bytes. | Isolated Linux effect. | T3 (a) |
-| D54 | Pipelined verification as default | B | 3-7% faster on the Mac (p = 0.048-0.076); about 1.4 s hidden on Linux (confounded). | Not isolated on Linux. | T3 (c) |
+| D53 | Copy-then-patch as default | A | Big gain on the Mac. On Linux, no gain in confounded timers; its copy is 0.1-0.3 s slower even at equal bytes. *October 24 (EXP-10 (a)): copy-then-patch and gap-fill tie on Linux (within 0.04 s, 5 runs each); copy-then-patch turns into clones on XFS (write phase 0.25-1.18 s).* | Settled. | done |
+| D54 | Pipelined verification as default | A | 3-7% faster on the Mac (p = 0.048-0.076); about 1.4 s hidden on Linux (confounded). *October 24 (EXP-10 (c)): on Linux, sequential verification is 0.65-0.77 s slower in every workload.* | Settled. | done |
 
 ### Performance: the v1 proposals
 
 | ID | Decision | Grade | Evidence | Gray area | Test |
 |---|---|---|---|---|---|
-| D57 | (1) Start the session before the capture | C | Saving inferred: a few tenths of a second today, perhaps 0.5-1 s once the write path is fixed. | Size; only with a capture. | T3 (f) |
-| D58 | (2) Read the source's files directly in backup mode | C | Removes a measured 4.0 s. Speed inferred from raw reads without hashing, checkpoint or WAL. At 5 Gbit/s only a 0.06 s margin for uniform changes. Correctness under writes untested. | Cold-read speed; correctness under load. | T8a, T8 |
+| D57 | (1) Start the session before the capture | – | Saving inferred: a few tenths of a second today, perhaps 0.5-1 s once the write path is fixed. *Dropped October 23 (O9): only meaningful while a capture exists.* | Moot. | none |
+| D58 | (2) Read the source's files directly in backup mode | B | Removes a measured 4.0 s. Speed inferred from raw reads without hashing, checkpoint or WAL. At 5 Gbit/s only a 0.06 s margin for uniform changes. Correctness under writes untested. *October 24 (EXP-09, stopped source): direct reads cost 0.14-0.25 s more than the warm staged transfer and cut source CPU by about a third (5.3-6.0 against 8.2-8.9 CPU-s); with in-place patching the path takes 2.7 s against the full copy's 3.1 s.* | Backup mode on a live, busy source (correctness and speed). | T8 |
 | D60 | Stream only the WAL written | A | 16.8 MB of padding per run; incremental sent 15.7-17.4 MB vs 27.6-29.2. | Small effect on time. | T8 |
-| D61 | (3) Prepare O during the capture | C | Targets the measured 3.3 s; the saving itself was never measured. rsync's copy fit under the capture in every run. | Size (predicted 2.0-2.8 s transfer alone). It needs a capture window; in v1 the equivalents are reflinks, in-place patching or early write-back. | T3 (f) |
+| D61 | (3) Prepare O during the capture | – | Targets the measured 3.3 s; the saving itself was never measured. rsync's copy fit under the capture in every run. *Dropped October 23 (O9); its v1 equivalents were measured instead: in place (D85) and clones (D86).* | Moot. | none |
+| D85 | (added October 24) v1 patches B in place behind a startup block by default | A | EXP-10 (e), Linux, pre-registered, 5 runs per workload: transfer 2.36-2.85 s against 3.94-4.44 s for v0's new copy; 0.6-0.9 s faster than a new copy with the fsync on a thread. Allowed by O5; the startup block and rerun are covered by tests (a killed receiver leaves B unstartable; a rerun completes it). | Crash-injection at scale; beyond RAM. | T13, T9 |
+| D86 | (added October 24) The new-copy mode, kept for copies that must survive: fsync on a background thread, and clones where the filesystem has reflinks | B | EXP-10 (b), (d): the thread saves 0.69-1.04 s; the fixed early write-back 0.43-0.98 s, so the thread wins every workload but by only 0.05-0.26 s; on XFS, clones bring the write phase to 0.25-1.18 s. | Thread against write-back is a small margin on one VM pair. | T9 |
+| D87 | (added October 24) v1 reads the source's data files directly | B | EXP-09 (T8a): on a stopped source, direct reads plus in place take 2.70-2.71 s for local changes at every speed, against the full copy's 3.13-3.14 s unthrottled. | Backup mode, WAL and a busy source: correctness and speed. | T8 |
 
 ### Measurement and harness
 
@@ -350,7 +388,7 @@ The tests T0 to T14 are described in the queue further down.
 | D69b | (added) Mac runs without the capture used as pgdelta's fixed cost for crossovers | **X** | Measured crossovers 2.6-5.3 times lower. | Settled; fix EXP-06's conclusion text. | none |
 | D70 | EXP-02 on one Mac, untimed clone, on-disk incremental size | **X** | Withdrawn after EXP-04. | Settled. | none |
 | D71 | LSN oracle uses the old copy's redo point | B | Exact comparisons, but timeline-blind. | Gated tools. | T11 |
-| D72 | Two n2 VMs, ext4, no added latency | B | Good for relative comparisons. | Filesystems, latency. | T3, T12 |
+| D72 | Two n2 VMs, ext4, no added latency | B | Good for relative comparisons. *October 24: EXP-10 added XFS with reflinks on the destination.* | Latency; persistent disks. | T12, T9 |
 | D73 | Randomised order, cache drops, 3 repeats | B | Medians robust, ranges not: 40 of 108 cells above 2%, worst 49.5% (an fsync outlier). | Tails hidden by medians. | report max |
 | D74 | rsync's copy overlapped with the capture | B | Mirrors a real refresh, but explains rsync's local-change lead. | Comparisons must say so. | T6 |
 | D75 | pgdelta's receiver started beside the capture | A | Prefetch never ran untimed. | None. | none |
@@ -373,10 +411,10 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 | (do first) | T0 Commit the Linux phase timers | makes the phase table checkable | 1 hour, no cloud |
 | done | T1 Sponsor questions | closed October 23 by the owner's decisions O1-O9 | none |
 | 2 | T10a Source slowdown, minimal, plus G4 correctness | the sponsor's degradation metric; urgency of T5 | 1 day, about 3 VM hours |
-| 3 | T11 Incumbents where pgdelta claims its edge | the correctness claim; the pgBackRest comparison | 1 day on the Mac plus 1-2 days, about 3 VM hours |
-| 4 | T8a Cold direct read without a capture | whether v1's reads widen the niche | half a day, about 2 VM hours |
+| done | T11 Incumbents where pgdelta claims its edge | done October 24 ([EXP-08](experiments/EXP-08-incumbent-tools.md)) | about 2 VM hours |
+| done | T8a Cold direct read without a capture | done October 23 ([EXP-09](experiments/EXP-09-direct-read.md)) | shared with T3 |
 | 5 | T2 Fastest durable full copy (v1's baseline) | what v1 must beat | 1 day, about 2 VM hours |
-| 6 | T3 Destination write path on Linux | the largest pgdelta cost; proposals 1 and 3 | 2-3 days, about 4 VM hours |
+| done | T3 Destination write path on Linux | done October 24 ([EXP-10](experiments/EXP-10-write-path.md)) | about 2 VM hours |
 | 7 | T6 rsync like for like, and in parallel | whether v1 keeps the custom engine | 1 day, about 2 VM hours |
 | 8 | T12 Latency and transport | the WAN niche; small settings | half a day, about 2 VM hours |
 | 9 | T8 v1 prototype: correctness under load, then speed | v1 itself | 1-2 weeks, about 4 VM hours |

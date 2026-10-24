@@ -3,6 +3,33 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24: EXP-08, EXP-09 and EXP-10 done; VMs deleted
+
+**Ran** on two `n2-standard-8` VMs in `us-central1-a`, created about 21:00 UTC on October 23 and deleted at 00:45 UTC on October 24 (about 3.75 hours each):
+
+| Sweep | Runs | For |
+|---|---:|---|
+| `exp09-10-ext4` | 255 | EXP-09, and EXP-10's ext4 arms |
+| `exp08-pgbackrest` | 162 | EXP-08 part B |
+| T11 correctness, two WAL arms | 48 | EXP-08 part A |
+| `exp10-xfs` | 75 | EXP-10 (d) |
+| `exp10-ext4b` | 60 | EXP-10's drift check and the write-back rerun |
+
+Plus two smoke runs. Every output was verified.
+
+**Results:** summarised in [What T3, T8a and T11 settled](DECISIONS.md#what-t3-t8a-and-t11-settled-october-24-2026); details in each write-up.
+
+**Independent rechecks** found 19 problems in EXP-09/10 (9 major) and 18 in EXP-08 (11 major). All were corrected before this entry. They included:
+- my wrong explanation of a flagged `pg_statistic` page;
+- pgBackRest's recovery time, missing from its totals;
+- a bug in the early write-back arm, fixed with a test and rerun as registered.
+
+**Infrastructure:**
+- `pg_probackup` had to be built from source: Postgres Pro's repository didn't answer from Google Cloud, and PGDG ships PostgreSQL 18's libpq headers.
+- `reformat_dest_ext4.sh` returns the destination to ext4 without recreating the VM.
+
+**Commit history:** at Matt's request, `main`'s history was rewritten on October 23 to drop an attribution line, and force-pushed (see the entry below).
+
 ## 2026-10-23 (late night): the code for EXP-08/09/10 built, reviewed and merged; first sweep running
 
 **Built** (each by one agent in its own worktree, then two adversarial reviewers, then fixes with regression tests):

@@ -16,7 +16,11 @@ A CMU student project with Google's AlloyDB team: a tool that brings an older ph
     - A full copy wins on faster links.
   - **Why staged pgdelta can't win on fast links:** the local backup it starts from costs as much as a full copy ([EXP-07](docs/experiments/EXP-07-capture-speed.md)), and its own transfer is about as long again.
 - **Target and decisions (October 23):** AlloyDB Omni's HA standby rebuild and DR re-seed. The old copy may be patched in place, TLS on the wire, no GPL code ([decisions](docs/DECISIONS.md#decisions-of-october-23-2026-t1-closed), [what Omni does today](docs/research/notes/alloydb-omni.md)). No sponsor questions are blocking.
-- **Next:** compare against the incumbent tools (T11), read the source's files directly instead of taking a backup first (T8a), and fix the destination write path (T3). Each has its predictions recorded before it runs.
+- **New results (October 24)** ([EXP-08](docs/experiments/EXP-08-incumbent-tools.md), [EXP-09](docs/experiments/EXP-09-direct-read.md), [EXP-10](docs/experiments/EXP-10-write-path.md)), all pre-registered and independently rechecked:
+  - **v1's path:** reading the source's files directly and patching the old copy in place takes 2.7 s for local changes, against 3.1 s for a single-stream full copy on the fastest link. That is provisional until a parallel full copy is measured (T2).
+  - **Incumbent tools:** `pg_probackup catchup` silently returned wrong data on two diverged old copies that pgdelta handled correctly. WAL-G's checked catch-up refuses them, and `pg_rewind` repairs them when the old copy kept its WAL.
+  - **pgBackRest:** with a current backup in its repository, it sends fewer bytes for scattered changes, so the pitch is "no repository needed".
+- **Next:** the fastest durable full copy (T2), the slowdown of a live source (T10a), and backup-mode reads on a live source (T8). See the [re-ranked queue](docs/DECISIONS.md#what-t3-t8a-and-t11-settled-october-24-2026).
 - **Measurement harness: built.** Backup and restore checks, resource sampling, the HammerDB slowdown driver, and a two-VM network benchmark ([experiments/network/](experiments/network/README.md)).
 - **Research: done.** [What already exists and where the gap is](docs/research/state-of-the-art.md).
 

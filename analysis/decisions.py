@@ -49,22 +49,50 @@ def fig_transfer():
     return plotting.save(fig, 'decisions-transfer')
 
 
+LEDGER = ROOT / 'docs' / 'DECISIONS.md'
+PERFORMANCE_SECTIONS = ('### Performance: the v0 engine', '### Performance: the v1 proposals')
+
+
+def ledger_grades():
+    """Grade counts of the rows in the ledger's two performance sections as the file stands now.
+
+    A grade of '–' marks a decision made moot by a later one; those are counted apart."""
+    counts, moot, section = {}, 0, None
+    for line in LEDGER.read_text().splitlines():
+        if line.startswith('### '):
+            section = line.strip() if line.strip() in PERFORMANCE_SECTIONS else None
+        elif section and line.startswith('| D'):
+            grade = line.split(' | ')[2].strip().strip('*')
+            if grade == '–':
+                moot += 1
+            else:
+                counts[grade] = counts.get(grade, 0) + 1
+    return counts, moot
+
+
 def fig_scorecard():
-    fig, ax = plt.subplots(figsize=(8.5, 2.4))
-    left = 0
-    for label, n, c in SCORECARD:
-        ax.barh(0, n, left=left, color=c)
-        ax.text(left + n / 2, 0, f'{n}', ha='center', va='center', fontsize=10, color='white' if c != COLORS['yellow'] else 'black')
-        left += n
-    ax.set_xlim(0, left)
-    ax.set_yticks([])
+    now, moot = ledger_grades()
+    rows = [('October 23, 2026', {label[0]: n for label, n, _ in SCORECARD}),
+            (f'October 24, 2026 (after T3, T8a, T11; {moot} now moot)', now)]
+    fig, ax = plt.subplots(figsize=(8.5, 3.0))
+    for y, (name, counts) in enumerate(rows):
+        left = 0
+        for label, _, c in SCORECARD:
+            n = counts.get(label[0], 0)
+            if n:
+                ax.barh(y, n, left=left, color=c)
+                ax.text(left + n / 2, y, f'{n}', ha='center', va='center', fontsize=10,
+                        color='white' if c != COLORS['yellow'] else 'black')
+            left += n
+    ax.set_yticks(range(len(rows)), [name for name, _ in rows], fontsize=9)
+    ax.invert_yaxis()
     ax.set_xlabel('Number of performance-driven design decisions')
     from matplotlib.patches import Patch
     ax.legend([Patch(color=c) for _, _, c in SCORECARD], [f'{l}' for l, _, _ in SCORECARD], ncol=5, fontsize=8,
-              loc='upper center', bbox_to_anchor=(0.5, -0.55))
-    fig.subplots_adjust(left=0.03, right=0.97, top=0.8, bottom=0.45)
+              loc='upper center', bbox_to_anchor=(0.5, -0.35))
+    fig.subplots_adjust(left=0.33, right=0.97, top=0.85, bottom=0.35)
     fig._layout_done = True
-    ax.set_title('Evidence behind the 33 performance-driven decisions (DECISIONS.md, October 23, 2026)', fontsize=10.5)
+    ax.set_title('Evidence behind the performance-driven decisions (DECISIONS.md)', fontsize=10.5)
     ax.grid(False)
     return plotting.save(fig, 'decisions-scorecard')
 
