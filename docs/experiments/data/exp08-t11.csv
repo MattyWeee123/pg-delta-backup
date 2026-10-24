@@ -1,0 +1,49 @@
+arm,scenario,tool,outcome,refusal_class,verdict,logical_match,amcheck_ok,diverged_pages_left,diverged_before_recovery,seconds,outcome_reason
+default,S1,pg_rewind,accepted,,correct,True,True,,,0.01,exit status 0
+default,S1,pg_probackup,accepted,,correct,True,True,,,10.28,exit status 0
+default,S1,walg,accepted,,correct,True,True,,,0.87,exit status 0
+default,S1,walg_send,accepted,,correct,True,True,,,0.78,exit status 0
+default,S1,pgdelta,accepted,,correct,True,True,,,0.87,exit status 0
+default,S1,lsn_skip,accepted,,correct,True,True,,,0.39,exit status 0
+default,S2,pg_rewind,refused,other,refused,,,,,0.01,exit status 1 before the copy was modified: pg_rewind: error: could not find previous WAL record at 0/8D100C8
+default,S2,pg_probackup,refused,identity_or_history,refused,,,,,0.01,exit status 1: ERROR: Destination is not in source timeline history
+default,S2,walg,accepted,,wrong_data,True,True,1,0,0.83,exit status 0
+default,S2,walg_send,refused,identity_or_history,refused,,,,,0.63,"exit status 1: ERROR: 2026/10/24 00:02:08.493853 Destination is on timeline 1, but we are on 2"
+default,S2,pgdelta,accepted,,correct,True,True,0,0,0.88,exit status 0
+default,S2,lsn_skip,accepted,,wrong_data,False,False,1686,1685,0.35,exit status 0
+default,S2b,pg_rewind,failed,,failed,,,,,0.06,exit status 1 after the copy was modified: pg_rewind: error: could not find previous WAL record at 0/8D12518
+default,S2b,pg_probackup,accepted,,wrong_data,False,False,1443,1443,10.28,exit status 0
+default,S2b,walg,accepted,,correct,True,True,0,0,0.84,exit status 0
+default,S2b,walg_send,refused,identity_or_history,refused,,,,,0.63,"exit status 1: ERROR: 2026/10/24 00:02:42.117310 Destination is on timeline 1, but we are on 2"
+default,S2b,pgdelta,accepted,,correct,True,True,0,0,0.88,exit status 0
+default,S2b,lsn_skip,accepted,,wrong_data,False,False,1447,1447,0.35,exit status 0
+default,S2c,pg_rewind,accepted,,wrong_data,True,True,1,0,0.9,exit status 0
+default,S2c,pg_probackup,accepted,,wrong_data,False,False,1444,1443,10.28,exit status 0
+default,S2c,walg,accepted,,wrong_data,True,True,1,0,0.83,exit status 0
+default,S2c,walg_send,refused,identity_or_history,refused,,,,,0.63,"exit status 1: ERROR: 2026/10/24 00:03:20.750187 Destination is on timeline 1, but we are on 2"
+default,S2c,pgdelta,accepted,,correct,True,True,0,0,0.89,exit status 0
+default,S2c,lsn_skip,accepted,,wrong_data,False,False,1448,1447,0.36,exit status 0
+retained,S1,pg_rewind,accepted,,correct,True,True,,,0.01,exit status 0
+retained,S1,pg_probackup,accepted,,correct,True,True,,,10.27,exit status 0
+retained,S1,walg,accepted,,correct,True,True,,,0.83,exit status 0
+retained,S1,walg_send,accepted,,correct,True,True,,,0.78,exit status 0
+retained,S1,pgdelta,accepted,,correct,True,True,,,0.86,exit status 0
+retained,S1,lsn_skip,accepted,,correct,True,True,,,0.39,exit status 0
+retained,S2,pg_rewind,accepted,,wrong_data,True,True,1,0,0.45,exit status 0
+retained,S2,pg_probackup,refused,identity_or_history,refused,,,,,0.01,exit status 1: ERROR: Destination is not in source timeline history
+retained,S2,walg,accepted,,wrong_data,True,True,1,0,0.82,exit status 0
+retained,S2,walg_send,refused,identity_or_history,refused,,,,,0.63,"exit status 1: ERROR: 2026/10/24 00:04:15.634369 Destination is on timeline 1, but we are on 2"
+retained,S2,pgdelta,accepted,,correct,True,True,0,0,0.87,exit status 0
+retained,S2,lsn_skip,accepted,,wrong_data,False,False,1686,1685,0.35,exit status 0
+retained,S2b,pg_rewind,accepted,,correct,True,True,0,0,0.5,exit status 0
+retained,S2b,pg_probackup,accepted,,wrong_data,False,False,1443,1443,10.27,exit status 0
+retained,S2b,walg,accepted,,correct,True,True,0,0,0.81,exit status 0
+retained,S2b,walg_send,refused,identity_or_history,refused,,,,,0.63,"exit status 1: ERROR: 2026/10/24 00:04:52.850802 Destination is on timeline 1, but we are on 2"
+retained,S2b,pgdelta,accepted,,correct,True,True,0,0,0.87,exit status 0
+retained,S2b,lsn_skip,accepted,,wrong_data,False,False,1447,1447,0.36,exit status 0
+retained,S2c,pg_rewind,accepted,,wrong_data,True,True,1,0,0.5,exit status 0
+retained,S2c,pg_probackup,accepted,,wrong_data,False,False,1444,1443,10.27,exit status 0
+retained,S2c,walg,accepted,,wrong_data,True,True,1,0,0.84,exit status 0
+retained,S2c,walg_send,refused,identity_or_history,refused,,,,,0.63,"exit status 1: ERROR: 2026/10/24 00:05:31.292996 Destination is on timeline 1, but we are on 2"
+retained,S2c,pgdelta,accepted,,correct,True,True,0,0,0.86,exit status 0
+retained,S2c,lsn_skip,accepted,,wrong_data,False,False,1448,1447,0.36,exit status 0

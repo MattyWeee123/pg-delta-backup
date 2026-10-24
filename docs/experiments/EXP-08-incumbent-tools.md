@@ -1,6 +1,6 @@
 # EXP-08: How do the incumbent refresh tools compare where pgdelta claims its edge?
 
-Status: **part B done** (results below, October 23–24, 2026); part A running. Pre-registered October 23, 2026, before the tooling for it ran. It was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026), and the first version is in git (commit 4cda743). This is test T11 of the [decision ledger](../DECISIONS.md#t11-incumbent-tools-where-pgdelta-claims-its-edge), whose registered predictions are marked "ledger" below.
+Status: **done** (results below, October 23–24, 2026). Pre-registered October 23, 2026, before the tooling for it ran. It was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026), and the first version is in git (commit 4cda743). This is test T11 of the [decision ledger](../DECISIONS.md#t11-incumbent-tools-where-pgdelta-claims-its-edge), whose registered predictions are marked "ledger" below.
 
 ## Question
 
@@ -126,6 +126,62 @@ An independent reviewer checked the first version against the ledger and EXP-04b
 - **The repository sits on the source's local NVMe.** Omni's repositories can be a local disk, Cloud Storage or S3.
 - **SSH encrypts pgBackRest's traffic; pgdelta's is unencrypted,** although owner decision O6 requires TLS. The cipher's cost counts against pgBackRest. It could matter for the "clear edge" rule's 20% margin.
 - **pgbench's padded rows compress unrealistically,** which helps the zstd variants (I8b).
+
+## Results, part A: correctness on tricky old copies
+
+**Run:** October 24, 2026, 00:00–00:05 UTC, on `pgd-dest` (Debian 12, PostgreSQL 17.11 from PGDG), both WAL arms, one run per (scenario, tool), 200,000 rows.
+
+**Tools:**
+- `pg_rewind` 17.11;
+- `pg_probackup` 2.5.16, built from its official source tag because Postgres Pro's repository didn't answer from Google Cloud;
+- WAL-G 3.0.9, the official release, SHA-256 checked;
+- pgdelta 0.1.0.
+
+**Data:** [exp08-t11.csv](data/exp08-t11.csv). The raw `result.json` and `scenario.json` files are under `results/t11/` (git-ignored).
+
+**Every scenario built as designed.** For S2b and S2c, B's REDO point lies before the fork, and B's diverged pages are on disk:
+
+| Scenario | B's pages changed after the fork | Exposed (a tool that trusts page LSNs would keep them) |
+|---|---:|---:|
+| S2 | 1,699 | 1,686 |
+| S2b | 1,871 | 1,447 |
+| S2c | 1,872 | 1,448 |
+
+**Outcomes** ("correct" means all three checks passed; the stale-page count is after recovery):
+
+| Tool | Arm | S1 | S2 | S2b | S2c |
+|---|---|---|---|---|---|
+| `pg_probackup catchup` (DELTA) | both | correct | **refused:** "Destination is not in source timeline history" (identity/history) | **accepted, wrong data:** 1,443 stale pages; `accounts` 199,072 of 200,000 rows, `tags` 19,833 of 20,000; amcheck fails | **accepted, wrong data:** 1,444 stale pages, same row losses, amcheck fails |
+| WAL-G `catchup-send` | both | correct | **refused:** "Destination is on timeline 1, but we are on 2" (identity/history) | refused, same | refused, same |
+| `pg_rewind` | default | correct ("no rewind required", then replay) | refused before touching the copy: "could not find previous WAL record" (other) | **failed after modifying the copy**, same error, so the copy is left unusable | correct by rows and amcheck; 1 page flagged (see below) |
+| `pg_rewind` | retained | correct | correct by rows and amcheck; 1 page flagged | correct | correct by rows and amcheck; 1 page flagged |
+| pgdelta | both | correct | correct | correct | correct |
+| WAL-G `catchup-push`/`fetch` with a user-supplied LSN (not counted) | both | correct | 1 page flagged | correct | 1 page flagged |
+| LSN-skip control | both | correct | wrong data, 1,686 stale pages | wrong data, 1,447 | wrong data, 1,448 |
+
+**The "1 page flagged" cases are an artifact of the third check, not stale data.** All seven are the same page: block 2 of `base/5/2840`, which is `pg_toast_2619`, the TOAST table of `pg_statistic` (checked on a fresh PostgreSQL 17 cluster). In every one of them:
+- the tool's output had **zero** stale pages before recovery;
+- rows matched and amcheck passed.
+
+The page matched B's old version only after the copy was promoted and started, when PostgreSQL's background statistics work wrote the same statistics B had computed after the fork. By the registered rule these runs are "wrong data". On the evidence, the tools' output was correct.
+
+### Verdict on each prediction
+
+| ID | Prediction | Result |
+|---|---|---|
+| I1 | The catch-up tools accept S1 and the copy is correct | **Held** for `pg_probackup` and WAL-G (both modes) |
+| I2 | The catch-up tools refuse S2, for identity or history | **Held** for `pg_probackup` and WAL-G `catchup-send` |
+| I3 | The catch-up tools accept S2b (or S2c) and keep stale pages | **Held for `pg_probackup`:** it accepts both S2b and S2c and returns copies missing 928 `accounts` rows and 167 `tags` rows. **Failed for WAL-G `catchup-send`:** it refuses both, from the timeline. |
+| I4 | `pg_rewind` repairs S2 and S2b (retained arm) | **S2b: held. S2: held on rows, amcheck and zero stale pages before recovery; strictly failed** by the post-promotion statistics page described above. Without retained WAL, `pg_rewind` refuses S2 and fails on S2b after modifying the copy |
+| I5 | `pg_rewind` on S1 reports no rewind is needed, then catches up by replay | **Held:** "source and target cluster are on the same timeline … no rewind required"; correct after replay |
+| I6 | pgdelta is correct on S2b and S2c | **Held**, in both arms, with zero stale pages before and after recovery |
+
+### What the registered rules say
+
+- **On correctness against the catch-up tools, the edge is real for one of them and absent for the other:**
+  - **`pg_probackup`:** pgdelta has a measured correctness edge. `pg_probackup` silently returns a copy with lost rows whenever B's REDO point is older than its diverged pages (S2b: a crashed ex-primary; S2c: a cleanly stopped standby of one).
+  - **WAL-G's checked mode:** no correctness edge. It refuses every diverged copy. Against it, pgdelta's edge is reuse: WAL-G sends everything again, while pgdelta sends only the changed pages.
+- **`pg_rewind` repairs every diverged copy when B still has its WAL back to the fork.** So for Omni's DR path, which tries a rewind first, pgdelta's role is the fallback when rewind can't run: missing WAL (here S2, refused) or a crash (here S2b, where `pg_rewind` failed and left the copy unusable). pgdelta needs no WAL from B and repaired every case.
 
 ## Results, part B: pgBackRest delta restore
 
