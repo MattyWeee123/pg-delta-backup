@@ -783,6 +783,24 @@ class SamplerAndGate(unittest.TestCase):
         # Another load run's pgbench: no threads, no client readings.
         self.assertNotIn('client_wait_s', sampler.view(self.run_of(), {'load': {'runs': [{'run_id': 'busy', 'pid': 9}]}}))
 
+    def test_under_load_cpu_is_the_windows_as_registered(self):
+        # VM-wide busy CPU: 2 CPU-s per s at rest; 3 more per s in the arm's phase [t0, t0 + 4], and the load's
+        # catch-up after it, 1 more per s in [t0 + 4, t0 + 8]. The window runs to t1 + 10 s.
+        ticks = sampler_ticks()
+        busy = 0.0
+        for index, tick in enumerate(ticks):
+            if index:
+                t = tick['t']
+                busy += (2 + (3 if T0 < t <= T0 + 4 else 0) + (1 if T0 + 4 < t <= T0 + 8 else 0)) * 0.1 * exp12.USER_HZ
+            tick['cpu'] = [int(round(busy)), 0, 0, 0, 0, 0, 0, tick['cpu'][7]]
+        sampler = exp12.Sampler(ticks, [])
+        run = {**self.run_of(), 't1': T0 + 4, 'stats': {'T': 14, 'worst_bucket': 3}}
+        view = sampler.view(run, {'load': {'runs': [{'run_id': 'busy', 'pid': 7}]}})
+        # 3 x 4 in the phase and 1 x 4 after it: 16 CPU-s over the settle's 2 per s; the phases alone would say 12.
+        self.assertAlmostEqual(view['cpu_excess_s'], 16.0, places=1)
+        # Steal is left out, as in every CPU-s here.
+        self.assertGreater(sampler.steal[-1], 0)
+
     def test_the_client_wait_flags_need_a_measurable_cell(self):
         S = session([record('v1proxy', repeat=i) for i in range(3)])
         for r in S.runs:

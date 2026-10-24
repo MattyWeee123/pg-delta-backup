@@ -2501,7 +2501,9 @@ def calibrated_cpu(record: dict):
 
 
 def excess_cpu(record: dict):
-    """Under load, a view: the timed phases' busy CPU (steal left out) minus the settle's rate times their wall."""
+    """Under load: the timed phases' busy CPU (steal left out) minus the settle's rate times their wall. The timed
+    phases only: EXP-12's registered view, over the window [t0, t1 + 10 s], is analysis/exp12.py's, from the
+    sampler's ticks (it fills the curated CSV's cpu_source_excess_s with it)."""
     busy = phases_cpu(record)
     rate = _get(record, 'settle', 'busy_rate_no_steal')
     wall = (record.get('totals') or {}).get('wall_seconds')

@@ -677,7 +677,8 @@ def make_run(sweep, index, record):
             'settle_span': (source(settle.get('started_utc')), source(settle.get('ended_utc'))),
             'tail_end': source(get(record, 'tail', 'ended_utc')), 'total_s': totals.get('wall_seconds'),
             'cpu_calibrated': measure.calibrated_cpu(record) if record.get('block') == 'calibration' else None,
-            'cpu_excess': measure.excess_cpu(record) if record.get('load_rate') else None,
+            # Under load (a view): the window's, from the sampler (run_numbers); the timed phases' alone beside.
+            'cpu_excess': None, 'cpu_excess_phases': measure.excess_cpu(record) if record.get('load_rate') else None,
             'cpu_busy': measure.phases_cpu(record), 'wire_s2d': totals.get('wire_bytes_source_to_dest'),
             'started_utc': utc(record.get('started_utc')), 'finished_utc': utc(record.get('finished_utc')),
             'stats': None, 'settle': None, 'flags': {}, 'sampler': {}}
@@ -832,6 +833,7 @@ class Session:
                     run['stats']['backlog_area_s'] = round(float(np.maximum(0, above).sum()) / 1e6, 4)
             if sampler is not None and run['stats'] is not None:
                 run['sampler'] = sampler.view(run, trial)
+                run['cpu_excess'] = run['sampler'].get('cpu_excess_s')
 
     @staticmethod
     def rate_of(trial, run_id):
@@ -1090,6 +1092,8 @@ class Sampler:
         self.t = np.array([tick['t'] for tick in ticks], float)
         cpu = np.array([tick.get('cpu') or [0] * 8 for tick in ticks], float).reshape(-1, 8)
         self.steal = cpu[:, 7] if len(cpu) else np.zeros(0)
+        # VM-wide busy CPU, steal left out: user, nice, system, irq, softirq (measure.CPU_BUSY_NO_STEAL).
+        self.busy = cpu[:, [0, 1, 2, 5, 6]].sum(axis=1) if len(cpu) else np.zeros(0)
         self.groups = {group: np.cumsum([(tick.get('g') or {}).get(group, 0) for tick in ticks]) for group in GROUPS}
         self.pgbench = [tick.get('pgbench') for tick in ticks]
         self.threads: dict = {}
@@ -1177,6 +1181,15 @@ class Sampler:
         out['steal_rate'] = None if steal is None else steal / USER_HZ / T
         out['steal'] = None if steal is None else out['steal_rate'] > STEAL_RATE
         settle_start, settle_end = run['settle_span']
+        # Source CPU under load, as registered (a view): the window's [t0, t1 + 10 s] VM-wide busy CPU minus the
+        # settle's rate times the window's length, both from these ticks, so the load's own extra CPU after the arm
+        # (a catch-up, the full-page images after its checkpoint) counts too.
+        window_end = run['t1'] + TAIL_S if run.get('t1') is not None else end
+        busy = self.increase(self.busy, t0, window_end)
+        before = (None if settle_start is None or settle_end is None or settle_end <= settle_start
+                  else self.increase(self.busy, settle_start, settle_end))
+        if busy is not None and before is not None:
+            out['cpu_excess_s'] = (busy - before / (settle_end - settle_start) * (window_end - t0)) / USER_HZ
         load_run = next((item for item in get(trial, 'load', 'runs') or [] if item.get('run_id') == run['load_run']),
                         {})
         pid = load_run.get('pid')
@@ -1351,6 +1364,7 @@ class Cells(CellsBase):
             cell[f'lat_{name}'] = median(r['stats']['latency'].get(name) for r in runs)
         cell['p99_worst5s_ms'] = median(r['stats'].get('p99_worst5s_ms') for r in runs)
         cell['cpu_excess_s'] = median(r['cpu_excess'] for r in runs)
+        cell['cpu_excess_phases_s'] = median(r['cpu_excess_phases'] for r in runs)
         return cell
 
     def spread(self, a, b, role):
@@ -2783,13 +2797,14 @@ def time_lines(S, cells):
 
 
 def cpu_lines(S, ctx, cells):
-    lines = ['## Source CPU (calibrated CPU-s without load; under load, the timed phases\' excess over the settle\'s rate)',
+    lines = ['## Source CPU (calibrated CPU-s without load; under load, a view: the window\'s [t0, t1 + 10 s] VM-wide busy '
+             'CPU over the settle\'s rate, from the sampler, with the timed phases\' alone in parentheses)',
              '| Arm | calibrated CPU-s (runs) | idle time s | ' + ' | '.join(f'under load {speed_name(s)}' for s in SPEEDS)
              + ' |', '|---|---|---:|' + '---:|' * len(SPEEDS)]
     for arm in CALIBRATION_ARMS:
         runs = [r for r in S.runs if r['block'] == 'calibration' and r['method'] == arm]
-        under = [fmt((cells.cell('busy', None if arm in CONTROLS else s, arm) or {}).get('cpu_excess_s'))
-                 for s in SPEEDS]
+        found = [cells.cell('busy', None if arm in CONTROLS else s, arm) or {} for s in SPEEDS]
+        under = [f'{fmt(cell.get("cpu_excess_s"))} ({fmt(cell.get("cpu_excess_phases_s"))})' for cell in found]
         lines.append(f'| {arm} | {fmt(ctx["cpu"].get(arm))} ({len(runs)}) | {fmt(S.idle_time(arm))} | '
                      + ' | '.join(under) + ' |')
     return lines
@@ -3077,7 +3092,8 @@ def run_row(S, r):
                backlog_area_s=stats.get('backlog_area_s'), lat_over_10ms=lat.get('over_10ms'),
                lat_over_50ms=lat.get('over_50ms'), lat_over_100ms=lat.get('over_100ms'),
                settle_log_ok=S.gate_log_ok(r), settle_p50_ms=settle.get('p50_ms'), settle_p99_ms=settle.get('p99_ms'),
-               flag_unsettled=r['flags'].get('unsettled'), wire_s2d_bytes=r['wire_s2d'], total_s=r['total_s'])
+               flag_unsettled=r['flags'].get('unsettled'), wire_s2d_bytes=r['wire_s2d'], total_s=r['total_s'],
+               cpu_source_excess_s=None if r['cpu_excess'] is None else round(r['cpu_excess'], 3))
     return {key: row.get(key) for key in KEEP}
 
 
