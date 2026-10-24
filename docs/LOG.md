@@ -3,6 +3,27 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24 (16:51–20:10 UTC): EXP-12 ran; T10a done; VMs deleted
+
+**Ran** on two new `n2-standard-8` VMs in `us-central1-a`, created at 16:51 UTC and deleted at 20:10 UTC:
+- **The smoke run,** 16:57–18:18: five invocations, 38 runs. Its sixteen items were recorded in [EXP-12](experiments/EXP-12-source-slowdown.md), dated, before the sweep. Two settings changed as registered: chrony installed on both VMs (Debian's image runs `systemd-timesyncd`), and the sampler's reads at 0.5 s instead of 0.1. One registered action wasn't taken: loaddb grew, and its fillfactor wasn't changed, under rule 8.
+- **The registered sweep,** `exp12-hot`, 18:23–20:08: one trial, 117 runs, with the smoke run's values in the run line (busy load 18,100 transactions per second, moderate 9,000).
+- The results were fetched and checked equal to the VMs' copies (file counts and bytes, all six result sets) before the VMs were deleted. Nothing was rerun.
+
+**Result** (the registered analysis, run as registered):
+- **Every output was correct under load (G4).** 41 outputs of `pg_basebackup` and staged pgdelta taken under the load, and 4 from the idle source, passed `pg_verifybackup`, recovery, the load's balance invariant and consistent cut, coverage, row counts, schema and `pg_amcheck`. The load's sums held: Σabalance = Σn = 88,291,983 logged commits.
+- **One `pg_basebackup` stream cost the busy load nothing measurable** at 0.5 or 2 Gbit/s or unthrottled.
+- **Staged pgdelta missed the owner's bar (O4) at every speed:** 1.25–1.35 s of the load's work, and a near-total stall of one second during its capture's flush. The registered rule R1 fires, so T5 moves ahead of T8. Most of the loss is the capture, which v1 removes.
+- **v1's source side, by proxy, missed the bar at 4 workers and met it at 1** (0.05–0.07 s of work and a p95 of 69–132 ms during the copy, against nothing measurable). So v1 needs a source worker cap on busy primaries, and T10b moves ahead of T8 as "source workers by load". At the moderate load, 4 workers met the bar. The HA caveat fires: v1 "slows a busy primary more than `pg_basebackup` does".
+- **Fragile:** the load's client ran on the source, and every deciding cell is flagged *client wait*; leaving flagged runs out leaves nothing to judge. The rows stand, as registered.
+- **A verdict whose wording its numbers don't support:** A6 reads "CPU-seconds is an adequate unit at this load", while one source worker lost about 1/60 to 1/70 as much per CPU-second as four. The write-up states both.
+
+**Drift and the owner's decision.** loaddb grew to 11.6 times its size (`load_progress` from 32 to 44,775 pages), against smoke item 14's 5%, as it had in the smoke run. Before the fetch, the owner decided in chat: "Don't rerun now. Apply the committed drift check after the fetch, and propose a rerun with a load_progress fix only if it shows drift." The drift check, committed at 19:46 UTC during the sweep and before its logs were fetched, found none: the busy load's settles' median p50 went from 0.667 to 0.650 ms and p99 from 1.327 to 1.222; the moderate load's from 0.581 to 0.573 and 0.861 to 0.845. So no rerun is proposed. The growth did make the full copies larger (up to 0.3 GB over the busy block), which is why A10 marks the session shifted against EXP-11 on `full`'s idle time; per MB, `full` took about the same time as in EXP-11.
+
+**In the ledger** ([What T10a settled](DECISIONS.md#what-t10a-settled-october-24-2026)): D50 (4 workers) moves from B to C and D68 (an idle source) from D to C, both by "contradicted in part"; O4, D03, D04, D10p, D58 and D81 get dated notes. The queue is now T12, T5, T10b, T8, by T10a's registered consequences.
+
+**Cost:** about 3.3 hours of the pair, about 3.3 USD, against the budget of about 3.4 hours. The VMs are deleted. The write-up hasn't been rechecked independently yet.
+
 ## 2026-10-24 (afternoon, later): EXP-12's harness built and reviewed
 
 **Built** on local branches, as EXP-11's was: one agent for the load, the arms, the proxy for v1's source side and the correctness checks; one for `analysis/exp12.py`; then a merge with every test run. New: the fixed-rate load and its counters, loaddb, the source-side sampler and clock probe, the eviction that makes reads cold, the snapshot the proxy reads, and the seven negative controls of the correctness check, each failing through its own check on a local PostgreSQL 17.
