@@ -27,9 +27,11 @@ that doesn't favour v1):
 - A run counts if it passed its verification (v1_tls: stunnel's log shows TLS 1.3 and its suite), every durability
   check that applies (check (a) unless A14 voids it; (b) for full copies; parcopy's fsync count), isn't void, and
   passed the network checks (A11 (ii)). A run whose network checks couldn't all be made (`network_ok` empty) is left
-  out as "network unchecked", as EXP-11 left out a run whose durability went unchecked; it is not an A11 exclusion.
-- A cell is "not measured" (A11 (ii)) when more than one of its runs was excluded by the network checks: v1's arms in
-  their trial, a baseline over its pooled runs; a cell with no counting run is not measured either.
+  out as "network unchecked", as EXP-11 left out a run whose durability went unchecked, and reported apart from A11's
+  exclusions.
+- A cell is "not measured" (A11 (ii)) when more than one of its runs was left out for a network reason, an A11
+  exclusion or a run whose checks couldn't be made: v1's arms in their trial, a baseline over its pooled runs; a cell
+  with no counting run is not measured either.
 - B_fast is "not measured" at a condition when its chosen arm's cell is, or when a candidate that ran there is not
   measured and either has no counting run or its counting median isn't more than 0.05 s slower than the chosen arm's:
   "the faster of" can't be known without it.
@@ -40,10 +42,19 @@ that doesn't favour v1):
   apply to `full` or to v1's arms, whose failed runs (a timeout among them) are only left out.
 - `full` at 1 Gbit/s, where it didn't run (A16), stands in with its pooled runs at 2 Gbit/s, the same r and host
   setting, labelled inferred, in B_fast, B_rel and F0 alike.
-- Δ at 1 Gbit/s isn't reported: no anchor runs at 1 Gbit/s. `parcopy8`'s tuned Δ uses the default anchor, labelled.
-- R1 is judged on every cell with counting runs, a not-measured cell included (flagged): a rule must be able to fire.
-  A4, A5 and A6 read no cell A11 leaves "not measured" (A11 (ii)'s consequence): such a cell leaves A4 or A5 not
-  judged, and A6 judged on its other cells.
+- Δ at 1 Gbit/s isn't reported: no anchor runs at 1 Gbit/s. `parcopy8`'s tuned Δ uses the default anchor, labelled,
+  in the table of Δs. R1, L1, L2, A3 and E6 read each Δ from the anchor of its own host setting or not at all: a tuned
+  cell whose tuned anchor has no counting run has no Δ there.
+- R1 is judged on every cell with counting runs, a not-measured cell included (flagged): a rule must be able to fire
+  (a rule 8 change, recorded in the pre-registration's analysis readings). L1, L2, A8 and the qualifier read no
+  cell A11 leaves "not measured", at r or at the anchor: such a cell is reported as not measured, a workload whose cell
+  isn't measured leaves L1 or L2 not judged unless another workload already fails it, and A8 states no claim there.
+  A4, A5 and A6 read no such cell either: it leaves A4 or A5 not judged, and A6 judged on its other cells.
+- A8's claim at r (uniform 10% under 0.90) is made only with v1 durable (A13), and is provisional where R1 fired or
+  the bound there is suspect, window-limited, not durable or excluded (A9, A13, A15), as rows 1 and 2 are.
+- The default host setting must be Debian's: every invocation's t12_preflight.tcp_defaults and every default run's
+  tcp_rmem and tcp_wmem maxima against measure.DEBIAN_TCP_MEM, and each invocation's teardown; any difference flags
+  the session.
 - A9's "2.12 GB" is the parcopy arm's own source-to-dest wire bytes there (what "a full copy moves"; 2.12 GB without
   them), at its stream count's steady rate; any parcopy arm run at a 2 Gbit/s condition that fails the gate makes rows
   1 and 2 at that r provisional ("bound suspect"), as A9 says "a parcopy arm"; the window-limited flag reads B_fast's
@@ -413,6 +424,7 @@ class Session:
         self.found = found if found is not None else set()  # the smoke table's paths found in the records
         self._baselines, self._cells = {}, {}
         self.assess()
+        self.tcp_default_problems = tcp_default_problems(rows, self.meta)
         self.workloads = [w for w in WORKLOADS if any(r['workload'] == w for r in rows)] + sorted(
             {r['workload'] for r in rows} - set(WORKLOADS))
         self.labels = sorted({r['speed'] for r in rows if r['speed'] and r['speed'].count(':') == 2}, key=label_key)
@@ -463,6 +475,8 @@ class Session:
         for r in rows:
             r['usable'] = self.counts(r)
             r['left_out'] = '' if r['usable'] else self.why(r)
+            # Left out only because a network reading is missing: it counts toward A11 (ii)'s "more than 1".
+            r['network_unchecked'] = r['left_out'] == 'network unchecked'
 
     def counts(self, r) -> bool:
         if r['void'] or r['status'] != 'pass' or not r['verified'] or r['total_s'] is None:
@@ -499,16 +513,19 @@ class Session:
 
     def cell(self, method, label, workload=None) -> dict:
         """One arm's cell at a condition: in its workload's trial (v1's arms), pooled over the trials (a baseline:
-        workload None). Its counting runs, median and maximum, how many of its runs A11 (ii) excluded, and whether
-        it is measured (at most one such run, and at least one counting run)."""
+        workload None). Its counting runs, median and maximum, how many of its runs A11 (ii) excluded and how many
+        were left out with a network reading missing (unchecked), and whether it is measured (at most one run left
+        out for either reason, and at least one counting run)."""
         key = (method, label, workload)
         if key not in self._cells:
             every_run = self.runs(method, workload, label, counting=False)
             counting = [r for r in every_run if r['usable']]
             a11 = sum(r['a11'] for r in every_run)
+            unchecked = sum(bool(r.get('network_unchecked')) for r in every_run)
             times = [r['total_s'] for r in counting]
             self._cells[key] = {'runs': counting, 'all': every_run, 'n': len(counting), 'a11': a11,
-                                'ran': bool(every_run), 'measured': bool(counting) and a11 <= 1,
+                                'unchecked': unchecked, 'ran': bool(every_run),
+                                'measured': bool(counting) and a11 + unchecked <= 1,
                                 'median': median(times), 'max': mx(times)}
         return self._cells[key]
 
@@ -613,15 +630,25 @@ class Session:
 
     # Added by latency.
 
-    def delta(self, method, label, workload=None, anchor=None):
+    def delta(self, method, label, workload=None, anchor=None, strict=False, measured=False):
         """(Δ, the anchor it is from): an arm's median at a condition less its median at the anchor of the same host
-        setting (pooled for a baseline); where the arm didn't run at that anchor, the default one."""
+        setting (pooled for a baseline). Where the arm has no counting run at that anchor, the default one (the table
+        of Δs, labelled), or with strict none: R1, L1, L2, A3 and E6 read the anchor of the same host setting or
+        nothing. With measured, None where A11 leaves the cell at r or at the anchor "not measured"."""
         c = condition(label)
         anchor = anchor or ANCHOR.get(c['host'], ANCHOR['default'])
-        if not self.arm_cell(method, anchor, workload)['runs']:
+        if not self.arm_cell(method, anchor, workload)['runs'] and not strict:
             anchor = ANCHOR['default']
-        here, base = self.arm_cell(method, label, workload)['median'], self.arm_cell(method, anchor, workload)['median']
+        here, base = self.arm_cell(method, label, workload), self.arm_cell(method, anchor, workload)
+        if measured and not (here['measured'] and base['measured']):
+            return None, anchor
+        here, base = here['median'], base['median']
         return (None if here is None or base is None else here - base), anchor
+
+    def delta_measured(self, method, label, workload=None) -> bool:
+        """Whether an arm's cells at a condition and at its host setting's anchor are both measured (A11)."""
+        anchor = ANCHOR.get(condition(label)['host'], ANCHOR['default'])
+        return self.arm_cell(method, label, workload)['measured'] and self.arm_cell(method, anchor, workload)['measured']
 
     # The v1_tls reading (A6).
 
@@ -791,18 +818,19 @@ def near_line(values, design, margin=NEAR):
 
 def r1_reading(S) -> dict:
     """R1 (the ledger's rule, change 4): Δ_v1 > Δ_full at any r of 20, 60 and 120 ms at 2 Gbit/s, on either host
-    setting, in any workload, each Δ from its own host setting's anchor. Every cell with counting runs is judged; a
-    not-measured cell is flagged."""
+    setting, in any workload, each Δ from its own host setting's anchor (none where that anchor has no counting run).
+    Every cell with counting runs is judged; one whose cells at r or at the anchor A11 leaves "not measured" is flagged
+    (a rule 8 change: a rule must be able to fire)."""
     cells = []
     for host in ('default', 'tuned'):
         for rtt in RTTS:
             label = label_of(2, rtt, host)
-            full, full_anchor = S.delta('full', label)
+            full, full_anchor = S.delta('full', label, strict=True)
             for workload in S.workloads:
-                v1, v1_anchor = S.delta(V1, label, workload)
+                v1, v1_anchor = S.delta(V1, label, workload, strict=True)
                 if v1 is None or full is None:
                     continue
-                measured = S.cell(V1, label, workload)['measured'] and S.cell('full', label)['measured']
+                measured = S.delta_measured(V1, label, workload) and S.delta_measured('full', label)
                 cells.append({'label': label, 'workload': workload, 'v1': v1, 'full': full, 'fires': v1 > full,
                               'measured': measured, 'anchors': (v1_anchor, full_anchor)})
     return {'fires': any(c['fires'] for c in cells), 'cells': cells,
@@ -860,12 +888,18 @@ def dr_verdict(S, rtt, r1=None, gates=None, a12=None, a17=None) -> dict:
     flags['unstable'] = [item for item in a17 if item['label'] in labels and item['unstable']]
     if a12 is not None and computed not in (ROWS[1], ROWS[2], ROWS[3]):
         flags['emulator_limited'] = [item for item in a12 if item['label'] in labels and item['limited']]
-    f0 = {w: (S.ratios(w, label_of(2, rtt, 'default')).get('F0') or {}).get('median') for w in DECIDING}
+    # The qualifier reads only measured cells (v1's and F0's, A11): a ratio from a cell not measured is None.
+    f0 = {}
+    for w in DECIDING:
+        r = S.ratios(w, label_of(2, rtt, 'default')).get('F0') or {}
+        f0[w] = r.get('median') if r.get('measured') else None
     qualifier = all(v is not None and v <= HOLD for v in f0.values())
     probackup = None
     if rtt == 60:
-        values_p = {w: ratio(S.cell(V1, label_of(2, rtt, 'default'), w)['median'],
-                             S.cell('probackup8', label_of(2, rtt, 'default'))['median']) for w in DECIDING}
+        here = label_of(2, rtt, 'default')
+        base = S.cell('probackup8', here)
+        values_p = {w: ratio(S.cell(V1, here, w)['median'], base['median'])
+                    if S.cell(V1, here, w)['measured'] and base['measured'] else None for w in DECIDING}
         probackup = all(v is not None and v <= HOLD for v in values_p.values()) and 'probackup8' not in S.excluded
     return {'rtt': rtt, 'row': row, 'computed': computed, 'values': values, 'provisional': provisional,
             'flags': flags, 'qualifier': qualifier, 'f0': f0, 'probackup': probackup, 'bound': bound}
@@ -876,7 +910,7 @@ def dr_verdict(S, rtt, r1=None, gates=None, a12=None, a17=None) -> dict:
 def a3_parts(S, workload, label) -> dict | None:
     """A3 in one cell: v1's Δ split into idle waits, fixed round trips and sending (each its median at r less its
     median at the anchor of the same host setting) and the residual; the largest part names the fix."""
-    delta, anchor = S.delta(V1, label, workload)
+    delta, anchor = S.delta(V1, label, workload, strict=True)
     if delta is None:
         return None
     parts = {}
@@ -1133,15 +1167,47 @@ def network_run_lines(S):
             if S.pooled(arm):
                 cell = S.cell(arm, label)
                 if cell['ran'] and not cell['measured']:
-                    missing.append(f'{arm} at {label} (pooled; {cell["a11"]} excluded, {cell["n"]} counting)')
+                    missing.append(f'{arm} at {label} (pooled; {cell["a11"]} excluded, {cell["unchecked"]} unchecked, '
+                                   f'{cell["n"]} counting)')
             else:
                 for w in S.workloads:
                     cell = S.cell(arm, label, w)
                     if cell['ran'] and not cell['measured']:
-                        missing.append(f'{arm} {w} at {label} ({cell["a11"]} excluded, {cell["n"]} counting)')
-    lines.append('- cells "not measured" (more than one run excluded by A11, or none counting): '
-                 + ('; '.join(missing) or 'none'))
+                        missing.append(f'{arm} {w} at {label} ({cell["a11"]} excluded, {cell["unchecked"]} unchecked, '
+                                       f'{cell["n"]} counting)')
+    lines.append('- cells "not measured" (more than one run left out for a network reason, excluded by A11 or '
+                 'unchecked, or none counting): ' + ('; '.join(missing) or 'none'))
+    lines.append("- the default host setting, Debian's TCP settings on both VMs (each invocation's "
+                 "t12_preflight.tcp_defaults and teardown, every default run's tcp_rmem and tcp_wmem maxima): "
+                 + ('**differs: the session is flagged** (' + '; '.join(S.tcp_default_problems[:10])
+                    + (f'; and {len(S.tcp_default_problems) - 10} more' if len(S.tcp_default_problems) > 10 else '')
+                    + ')' if S.tcp_default_problems else 'held'))
     return lines
+
+
+def tcp_default_problems(rows, meta) -> list[str]:
+    """Where the session's default host setting wasn't Debian's (measure.DEBIAN_TCP_MEM): each invocation's
+    t12_preflight.tcp_defaults on both VMs, its teardown (measure.teardown_ok), and every default run's recorded
+    tcp_rmem and tcp_wmem maxima on both VMs."""
+    problems = []
+    for run in meta:
+        name = run.get('name') or 'an invocation'
+        defaults = (run.get('t12_preflight') or {}).get('tcp_defaults') or {}
+        for vm, values in sorted(defaults.items()):
+            problems += [f'{name} {vm}: {problem}' for problem in measure.tcp_defaults_problems(values)]
+        if run.get('t12_preflight') and 'teardown' in run and not measure.teardown_ok(run['teardown']):
+            problems.append(f'{name}: its teardown did not leave both VMs reset ({run["teardown"]})')
+    wanted = {'rmem': measure.DEBIAN_TCP_MEM['net.ipv4.tcp_rmem'][2],
+              'wmem': measure.DEBIAN_TCP_MEM['net.ipv4.tcp_wmem'][2]}
+    for r in rows:
+        if r.get('host_tcp') != 'default':
+            continue
+        found = [f'tcp_{kind}_max_{vm} {r.get(f"tcp_{kind}_max_{vm}"):.0f}' for kind, value in wanted.items()
+                 for vm in ('source', 'dest')
+                 if r.get(f'tcp_{kind}_max_{vm}') is not None and r[f'tcp_{kind}_max_{vm}'] != value]
+        if found:
+            problems.append(f'{r["trial_id"]} r{r["repeat"]} {r["speed"]} {r["method"]}: ' + ', '.join(found))
+    return problems
 
 
 def visit_lines(S):
@@ -1298,21 +1364,30 @@ def ledger_lines(S, r1):
     lines = ["## The ledger's prediction and rule (registered; medians, with the maximum beside)"]
     say = lines.append
     label, tuned = '2:60:default', '2:60:tuned'
-    l1 = {w: S.delta(V1, label, w)[0] for w in S.workloads}
-    l1_tuned = {w: S.delta(V1, tuned, w)[0] for w in S.workloads}
-    l1_max = {w: S.top(V1, label, w) for w in S.workloads}
+    # Every workload v1 ran at 60 ms default; a cell (at r or at the anchor) A11 leaves not measured gives None.
+    ran = [w for w in S.workloads if S.cell(V1, label, w)['ran']]
+    ran_tuned = [w for w in S.workloads if S.cell(V1, tuned, w)['ran']]
+    l1 = {w: S.delta(V1, label, w, strict=True, measured=True)[0] for w in ran}
+    l1_tuned = {w: S.delta(V1, tuned, w, strict=True, measured=True)[0] for w in ran_tuned}
+    l1_max = {w: S.top(V1, label, w) for w in ran}
+
+    def shown(values, unit=''):
+        return ', '.join(f'{w} {fmt(v)}{unit}' if v is not None else f'{w} not measured' for w, v in values.items())
     say(f'- **L1** ("with a window of 4, pgdelta adds 2 s or less per 2.1 GB at 60 ms": Δ_v1 at 60 ms, 2 Gbit/s, '
-        f'default hosts, at most {L1_LIMIT_S} s in every workload run there): '
-        f'{word(every(None if v is None else v <= L1_LIMIT_S + 1e-9 for v in l1.values()))} ('
-        + ', '.join(f'{w} {fmt(v)} s (max {fmt(l1_max[w])} s at r)' for w, v in l1.items() if v is not None)
-        + '); tuned, from the tuned anchor, not judged: '
-        + (', '.join(f'{w} {fmt(v)} s' for w, v in l1_tuned.items() if v is not None) or 'no data'))
-    full, full_tuned = S.delta('full', label)[0], S.delta('full', tuned)[0]
+        f'default hosts, at most {L1_LIMIT_S} s in every workload run there; a workload not measured leaves it not '
+        f'judged unless another fails it): '
+        f'{word(all_judged({w: None if v is None else v <= L1_LIMIT_S + 1e-9 for w, v in l1.items()}))} ('
+        + ', '.join(f'{w} {fmt(v)} s (max {fmt(l1_max[w])} s at r)' if v is not None else f'{w} not measured'
+                    for w, v in l1.items())
+        + '); tuned, from the tuned anchor, not judged: ' + (shown(l1_tuned, ' s') or 'no data'))
+    full = S.delta('full', label, strict=True, measured=True)[0]
+    full_tuned = S.delta('full', tuned, strict=True, measured=True)[0]
     l2 = {w: None if v is None or full is None else full > v for w, v in l1.items()}
     say(f'- **L2** ("A single-stream full copy slows down more": Δ_full > Δ_v1 at 60 ms, 2 Gbit/s, default hosts, '
-        f'every workload): {word(every(l2.values()))} (Δ_full {fmt(full)} s pooled; Δ_v1 '
-        + ', '.join(f'{w} {fmt(v)}' for w, v in l1.items() if v is not None) + f'); tuned beside: Δ_full {fmt(full_tuned)} '
-        's, Δ_v1 ' + (', '.join(f'{w} {fmt(v)}' for w, v in l1_tuned.items() if v is not None) or '–'))
+        f'every workload): {word(all_judged(l2))} (Δ_full '
+        + (f'{fmt(full)} s pooled' if full is not None else 'not measured') + '; Δ_v1 ' + (shown(l1) or '–')
+        + '); tuned beside: Δ_full ' + (f'{fmt(full_tuned)} s' if full_tuned is not None else 'not measured')
+        + ', Δ_v1 ' + (shown(l1_tuned) or '–'))
     fired = [c for c in r1['cells'] if c['fires']]
     say(f'- **R1** ("if pgdelta slows down more than the full copy, the protocol needs deeper pipelining before any WAN '
         f'claim": Δ_v1 > Δ_full at any r of 20, 60 and 120 ms, 2 Gbit/s, either host setting, any workload, each from '
@@ -1333,8 +1408,18 @@ def ledger_lines(S, r1):
         w16 = {w: (S.med(W16, SIDE_CELL, w), S.med(V1, SIDE_CELL, w)) for w in DECIDING}
         say("  - beside it (lifts nothing): v1_w16 at 120 ms tuned "
             + ', '.join(f'{w} {fmt(a)} s against v1\'s {fmt(b)} s' for w, (a, b) in w16.items()))
-    return lines, {'l1': every(None if v is None else v <= L1_LIMIT_S + 1e-9 for v in l1.values()),
-                   'l2': every(l2.values())}
+    return lines, {'l1': all_judged({w: None if v is None else v <= L1_LIMIT_S + 1e-9 for w, v in l1.items()}),
+                   'l2': all_judged(l2)}
+
+
+def all_judged(oks: dict):
+    """A prediction over every workload run (workload -> True, False, or None where its cell isn't measured): False
+    once one fails; else None if one isn't measured, or none ran; else True."""
+    if any(ok is False for ok in oks.values()):
+        return False
+    if not oks or any(ok is None for ok in oks.values()):
+        return None
+    return True
 
 
 def verdict_text(v) -> str:
@@ -1358,6 +1443,9 @@ def verdict_lines(S, r1, gates, a12, a17):
     if V1 in S.not_durable:
         lines.append(f'- **v1 is not durable for the session** (A13: {"; ".join(S.not_durable[V1])}): every r reads '
                      '"v1 not durable"; the rows below are still computed and reported')
+    if S.tcp_default_problems:
+        lines.append("- **The default host setting wasn't Debian's everywhere** (see the network validity of the runs): "
+                     'every reading on default hosts is flagged')
     verdicts = {}
     for rtt in RTTS:
         v = dr_verdict(S, rtt, r1, {label: gates[label] for label in gates}, a12, a17)
@@ -1394,7 +1482,8 @@ def verdict_lines(S, r1, gates, a12, a17):
         qualifier = ('v1 is faster than one `pg_basebackup` stream, the copy Omni documents for a DR re-seed, at '
                      f'{rtt} ms and 2 Gbit/s on these VMs' + ('; and than `probackup8`' if v['probackup'] else ''))
         lines.append('- *Qualifier* (R_F0 ≤ 0.90 on default hosts for hot and uniform 1%: '
-                     + ', '.join(f'{w} {fmt(x)}' for w, x in v['f0'].items()) + '): '
+                     + ', '.join(f'{w} {fmt(x) if x is not None else "not measured"}' for w, x in v['f0'].items())
+                     + '): '
                      + (f'"{qualifier}"' + (' (provisional: R1 fired)' if r1['fires'] else '') if v['qualifier']
                         else 'does not apply'))
     lines.append('### At 1 Gbit/s (uniform 1%, default hosts; reported, not a row)')
@@ -1556,12 +1645,27 @@ def a_lines(S, r1, ledger, verdicts, gates, a10, a12, a17, a16):
     items = []
     for label in S.labels:
         c = condition(label)
-        r = (S.ratios('uniform10', label).get('B_fast') or {}).get('median') if 'uniform10' in S.workloads else None
+        fast = (S.ratios('uniform10', label).get('B_fast') or {}) if 'uniform10' in S.workloads else {}
+        r = fast.get('median')
         if r is None or c['rtt_ms'] == 0:
             continue
-        reading = ("v1's DR claim covers 10% scattered changes there" + (' (provisional: R1 fired)' if r1['fires'] else '')
-                   if r <= HOLD else 'a case for a full copy at that r, rate and host setting; pgdelta\'s documented '
-                   'fallback behaviour (O2) says so' if r >= OUT else 'reported')
+        if not fast.get('measured'):
+            # A11: v1's cell or B_fast's isn't measured there: no reading, no claim.
+            items.append(f'{label} R_fast {fmt(r)}: not measured (A11), not read')
+            continue
+        if r <= HOLD:
+            if V1 in S.not_durable:
+                reading = 'v1 not durable (A13): no claim for v1'
+            else:
+                provisional = (['R1 fired'] if r1['fires'] else []) + list(
+                    (gates.get(label) or bound_gate(S, label))['reasons'])
+                reading = ("v1's DR claim covers 10% scattered changes there"
+                           + (f' (provisional: {"; ".join(provisional)})' if provisional else ''))
+        elif r >= OUT:
+            reading = ('a case for a full copy at that r, rate and host setting; pgdelta\'s documented fallback '
+                       'behaviour (O2) says so')
+        else:
+            reading = 'reported'
         items.append(f'{label} R_fast {fmt(r)}: {reading}')
     say('- **A8** (uniform 10% at each r and host setting run): ' + ('; '.join(items) or 'no data'))
     lines += gate_lines(gates)
@@ -1707,7 +1811,7 @@ class Predictions:
         p8, p16 = S.med('parcopy8', '2:120:default'), S.med('parcopy16', '2:120:default')
         self.lines.append(f'  - parcopy16 faster than parcopy8 at 120 ms default: '
                           f'{word(None if p8 is None or p16 is None else p16 < p8)} ({fmt(p16)} against {fmt(p8)} s)')
-        self.judge_written('E6', {key: S.delta(V1, key[1], 'hot')[0] for key in model.WRITTEN['E6']},
+        self.judge_written('E6', {key: S.delta(V1, key[1], 'hot', strict=True)[0] for key in model.WRITTEN['E6']},
                            'v1 hot, added by latency (tuned from the tuned anchor)')
         self.judge_written('E7', {key: S.med(V1, key[1], 'uniform1') for key in model.WRITTEN['E7']}, 'v1 uniform 1%')
         self.judge_written('E8', {key: S.med(V1, key[1], 'uniform10') for key in model.WRITTEN['E8']},

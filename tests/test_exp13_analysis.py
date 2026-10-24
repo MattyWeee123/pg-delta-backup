@@ -301,10 +301,27 @@ class Baselines(unittest.TestCase):
         self.assertEqual(S.rows[-1]['left_out'], "A11: netem's own drops on source: 3")
         S = session(runs(V1, [4.0] * 3, label) + runs(V1, [4.0] * 2, label, first=3, **bad))
         self.assertFalse(S.cell(V1, label, 'hot')['measured'])
-        # A run whose checks couldn't be made is left out, unchecked, but isn't an A11 exclusion.
+        # A run whose checks couldn't be made is left out, unchecked: no A11 exclusion, reported apart, but it counts
+        # toward A11's "more than 1", so a cell can't decide a row on 3 of v1's 5 runs.
         S = session(runs(V1, [4.0] * 3, label) + runs(V1, [4.0] * 2, label, first=3, network_ok=None))
-        self.assertEqual((S.cell(V1, label, 'hot')['a11'], S.cell(V1, label, 'hot')['n']), (0, 3))
+        cell = S.cell(V1, label, 'hot')
+        self.assertEqual((cell['a11'], cell['unchecked'], cell['n'], cell['measured']), (0, 2, 3, False))
         self.assertEqual(S.rows[-1]['left_out'], 'network unchecked')
+        self.assertIn('pgdelta_direct_inplace hot at 2:60:default (0 excluded, 2 unchecked, 3 counting)',
+                      '\n'.join(exp13.network_run_lines(S)))
+        S = session(runs(V1, [4.0] * 4, label) + runs(V1, [4.0], label, first=4, network_ok=None))
+        self.assertTrue(S.cell(V1, label, 'hot')['measured'])  # one is allowed
+        S = session(runs(V1, [4.0] * 3, label) + runs(V1, [4.0], label, first=3, network_ok=None)
+                    + runs(V1, [4.0], label, first=4, **bad))
+        self.assertFalse(S.cell(V1, label, 'hot')['measured'])  # one unchecked and one excluded: two
+        # A run left out for something else (an error) with no network reading isn't counted as unchecked.
+        S = session(runs(V1, [4.0] * 4, label) + runs(V1, [4.0], label, first=4, network_ok=None, status='error')
+                    + runs(V1, [4.0], label, first=5, network_ok=None))
+        cell = S.cell(V1, label, 'hot')
+        self.assertEqual((cell['unchecked'], cell['measured']), (1, True))
+        # The same for a baseline's pooled runs.
+        rows = runs('parcopy8', [9.0] * 2, label) + runs('parcopy8', [9.0] * 2, label, first=2, network_ok=None)
+        self.assertFalse(session(rows).cell('parcopy8', label)['measured'])
         # B_fast: a candidate not measured and not clearly slower makes it not measured; a much slower one doesn't.
         rows = runs('full', [40.0] * 4, label) + runs('parcopy8', [9.0] * 2, label) + runs('parcopy8', [9.0] * 2, label,
                                                                                          first=2, **bad)
@@ -459,6 +476,49 @@ class LedgerRules(unittest.TestCase):
         self.assertEqual((state['l1'], state['l2']), (True, True))
         self.assertFalse(exp13.r1_reading(S)['fires'])
 
+    def test_l1_and_l2_read_no_cell_that_is_not_measured(self):
+        bad = dict(network_ok=False, network_problems=['minrtt'])
+        # Uniform 1%'s cell at 60 ms default lost 2 of its 5 runs to A11: its 3 counting runs would give Δ 1.0 s.
+        rows = (anchors() + runs(V1, [4.5] * 5, '2:60:default', 'hot') + runs(V1, [6.0] * 3, '2:60:default', 'uniform1')
+                + runs(V1, [6.0] * 2, '2:60:default', 'uniform1', first=3, **bad)
+                + runs('full', [40.0] * 4, '2:60:default'))
+        S = session(rows)
+        lines, state = exp13.ledger_lines(S, exp13.r1_reading(S))
+        text = '\n'.join(lines)
+        self.assertIsNone(state['l1'])  # hot holds, uniform 1% isn't measured: not judged
+        self.assertIsNone(state['l2'])
+        self.assertIn('uniform1 not measured', text)
+        self.assertIn('- **L1**', text)
+        # A workload that fails L1 decides it, measured or not elsewhere.
+        for r in rows:
+            if r['method'] == V1 and r['speed'] == '2:60:default' and r['workload'] == 'hot':
+                r['total_s'] = 6.0  # Δ 3 s
+        S = session(rows)
+        self.assertIs(exp13.ledger_lines(S, exp13.r1_reading(S))[1]['l1'], False)
+        # A not-measured anchor leaves the Δ not measured too.
+        rows = anchors() + runs(V1, [4.5] * 5, '2:60:default', 'hot') + runs('full', [40.0] * 4, '2:60:default')
+        for r in [r for r in rows if r['method'] == V1 and r['speed'] == '2:0:default' and r['workload'] == 'hot'][:2]:
+            r.update(bad)
+        S = session(rows)
+        self.assertEqual(S.delta(V1, '2:60:default', 'hot', strict=True, measured=True), (None, '2:0:default'))
+        self.assertIsNone(exp13.ledger_lines(S, exp13.r1_reading(S))[1]['l1'])
+
+    def test_tuned_deltas_without_a_tuned_anchor_are_not_taken_from_the_default_one(self):
+        # R1, L1, L2, A3 and E6 read the anchor of the same host setting: none at all where it has no counting run.
+        rows = [r for r in anchors() if not (r['method'] == 'full' and r['speed'] == '2:0:tuned')]
+        rows += cell(60, 'tuned', 0.4, 0.7, full=10.2)
+        S = session(rows)
+        self.assertEqual(S.delta('full', '2:60:tuned', strict=True), (None, '2:0:tuned'))
+        delta, anchor = S.delta('full', '2:60:tuned')  # the table of Δs falls back to the default anchor, labelled
+        self.assertEqual(anchor, '2:0:default')
+        self.assertAlmostEqual(delta, 0.2)
+        r1 = exp13.r1_reading(S)
+        self.assertEqual([c for c in r1['cells'] if c['label'] == '2:60:tuned'], [])
+        self.assertEqual(exp13.a3_parts(S, 'hot', '2:60:tuned')['anchor'], '2:0:tuned')  # v1 has its tuned anchor
+        rows = [r for r in anchors() if not (r['method'] == V1 and r['speed'] == '2:0:tuned')]
+        rows += cell(60, 'tuned', 0.4, 0.7, full=10.2)
+        self.assertIsNone(exp13.a3_parts(session(rows), 'hot', '2:60:tuned'))
+
     def test_r1_judges_a_not_measured_cell_and_flags_it(self):
         rows = anchors() + cell(60, 'tuned', 0.4, 0.7, full=10.2)
         for r in [r for r in rows if r['method'] == V1 and r['speed'] == '2:60:tuned' and r['workload'] == 'hot'][:2]:
@@ -466,6 +526,13 @@ class LedgerRules(unittest.TestCase):
         r1 = exp13.r1_reading(session(rows))
         hot = next(c for c in r1['cells'] if c['workload'] == 'hot')
         self.assertEqual((hot['fires'], hot['measured']), (True, False))
+        # The flag covers the anchor's cells too.
+        rows = anchors() + cell(60, 'tuned', 0.4, 0.7, full=10.2)
+        for r in [r for r in rows if r['method'] == 'full' and r['speed'] == '2:0:tuned'][:2]:
+            r.update(network_ok=False, network_problems=['minrtt'])
+        r1 = exp13.r1_reading(session(rows))
+        self.assertTrue(r1['cells'])
+        self.assertTrue(all(c['measured'] is False for c in r1['cells'] if c['label'] == '2:60:tuned'))
 
 
 @needs_venv
@@ -667,6 +734,40 @@ class Reports(unittest.TestCase):
         self.assertIn('2:60:tuned R_fast 0.95: reported', line)
         self.assertIn('2:120:tuned R_fast 1.20: a case for a full copy', line)
 
+    def test_a8_states_no_claim_from_a_cell_not_measured(self):
+        bad = dict(network_ok=False, network_problems=['minrtt'])
+        rows = (anchors() + runs(V1, [8.0] * 3, '2:20:default', 'uniform10')
+                + runs(V1, [8.0] * 2, '2:20:default', 'uniform10', first=3, **bad)
+                + runs('parcopy8', [10.0] * 6, '2:20:default'))
+        line = next(line for line in self.a_lines(session(rows)).splitlines() if line.startswith('- **A8**'))
+        self.assertIn('2:20:default R_fast 0.80: not measured (A11), not read', line)
+        self.assertNotIn('covers', line)
+        # A bound that fails A9 makes the claim provisional, as rows 1 and 2.
+        rows = anchors() + runs(V1, [8.0] * 5, '2:20:default', 'uniform10') + runs('parcopy8', [10.0] * 6,
+                                                                                   '2:20:default', parcopy_balance=1.3)
+        line = next(line for line in self.a_lines(session(rows)).splitlines() if line.startswith('- **A8**'))
+        self.assertIn("covers 10% scattered changes there (provisional: bound suspect)", line)
+        # v1 not durable: no claim.
+        for r in [r for r in rows if r['method'] == V1 and r['speed'] == '2:20:default'][:2]:
+            r['a_ok'] = False
+        line = next(line for line in self.a_lines(session(rows)).splitlines() if line.startswith('- **A8**'))
+        self.assertIn('v1 not durable (A13): no claim for v1', line)
+
+    def test_the_qualifier_reads_only_measured_cells(self):
+        rows = anchors() + cell(60, 'default', 0.4, 0.8, full=40.0)
+        self.assertTrue(exp13.dr_verdict(session(rows), 60)['qualifier'])
+        for r in [r for r in rows if r['method'] == 'full' and r['speed'] == '2:60:default'][:2]:
+            r.update(network_ok=False, network_problems=['minrtt'])
+        v = exp13.dr_verdict(session(rows), 60)
+        self.assertEqual((v['qualifier'], v['f0']), (False, {'hot': None, 'uniform1': None}))
+        lines, _ = exp13.verdict_lines(session(rows), exp13.r1_reading(session(rows)), {}, [], [])
+        self.assertIn('hot not measured, uniform1 not measured): does not apply', '\n'.join(lines))
+        # probackup8 is named only from measured cells.
+        rows = (anchors() + cell(60, 'default', 0.4, 0.8, full=40.0)
+                + runs('probackup8', [30.0], '2:60:default', 'uniform1')
+                + runs('probackup8', [30.0] * 2, '2:60:default', 'uniform1', first=1, network_ok=None))
+        self.assertIs(exp13.dr_verdict(session(rows), 60)['probackup'], False)
+
     def test_a11_visits_a13_and_a15_file_classes(self):
         retry = {'condition': '2:60:default', 'repeat': 1, 'ok': True, 'attempts': [
             {'checks': {'problems': {'pings': ['the ping minimum 62.4 ms is outside [60, 61] ms'], 'tree': []}}},
@@ -709,6 +810,39 @@ class Reports(unittest.TestCase):
         lines = exp13.Predictions(session(anchors(), trials)).all({'cells': []}, {}, {})
         e3 = next(line for line in lines if line.startswith('- **E3**'))
         self.assertIn('stunnel / direct at 2:60:default 0.950 (written 0.90–1.10) held', e3)
+
+
+@needs_venv
+class DefaultHostSetting(unittest.TestCase):
+    """The default host setting is Debian's: an invocation that recorded other defaults, or a default run with other
+    maxima, flags the session."""
+
+    def test_tuned_defaults_flag_the_session(self):
+        debian = {'net.ipv4.tcp_rmem': '4096\t131072\t6291456', 'net.ipv4.tcp_wmem': '4096\t16384\t4194304'}
+        ok_run = {'name': 'exp13-hot', 't12_preflight': {'tcp_defaults': {'source': debian, 'dest': debian}},
+                  'teardown': {'source': {'tree_is_wan': False}, 'dest': {'tree_is_wan': False}, 'tcp': {'ok': True}}}
+        rows = anchors()
+        for r in rows:
+            r.update(tcp_rmem_max_source=6291456.0, tcp_rmem_max_dest=6291456.0, tcp_wmem_max_source=4194304.0,
+                     tcp_wmem_max_dest=4194304.0)
+        S = exp13.Session(rows, {}, [ok_run])
+        self.assertEqual(S.tcp_default_problems, [])
+        self.assertIn('Debian\'s TCP settings on both VMs', '\n'.join(exp13.network_run_lines(S)))
+        tuned = dict(debian, **{'net.ipv4.tcp_rmem': '4096\t131072\t134217728'})
+        bad_run = {**ok_run, 'name': 'exp13-uniform1',
+                   't12_preflight': {'tcp_defaults': {'source': tuned, 'dest': debian}},
+                   'teardown': {'error': 'CommandError: ssh died'}}
+        bad_rows = anchors()
+        bad_rows[0].update(tcp_rmem_max_dest=134217728.0)
+        S = exp13.Session(bad_rows, {}, [ok_run, bad_run])
+        problems = S.tcp_default_problems
+        self.assertEqual(len(problems), 3)
+        self.assertIn('exp13-uniform1 source: net.ipv4.tcp_rmem', problems[0])
+        self.assertIn('its teardown did not leave both VMs reset', problems[1])
+        self.assertIn('tcp_rmem_max_dest 134217728', problems[2])
+        self.assertIn('**differs: the session is flagged**', '\n'.join(exp13.network_run_lines(S)))
+        lines, _ = exp13.verdict_lines(S, exp13.r1_reading(S), {}, [], [])
+        self.assertIn("**The default host setting wasn't Debian's everywhere**", '\n'.join(lines))
 
 
 @needs_venv
@@ -827,7 +961,7 @@ class DryRun(unittest.TestCase):
             # Two of hot's v1 runs at 60 ms default and two of uniform 1%'s.
             self.assertIn('4 run(s) excluded by the network checks', text)
             self.assertIn("netem's own drops on source: 5", text)
-            self.assertIn('pgdelta_direct_inplace hot at 2:60:default (2 excluded, 3 counting)', text)
+            self.assertIn('pgdelta_direct_inplace hot at 2:60:default (2 excluded, 0 unchecked, 3 counting)', text)
             self.assertIn('**60 ms: Not judged.**', text)
             self.assertIn('**20 ms: 1. Holds as shipped.**', text)
 
