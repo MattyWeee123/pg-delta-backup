@@ -39,22 +39,28 @@ that doesn't favour v1):
   baseline, three trials' for v1. A15's tool failures (a parcopy run that failed verify_direct or didn't start, a
   probackup8 run that didn't start or differed logically while the user tables matched, either's copy its tool aborted
   or stopped at A15's bound, failure_reason 'timeout') exclude the arm from every baseline, as EXP-11's A4; they don't
-  apply to `full` or to v1's arms, whose failed runs (a timeout among them) are only left out.
+  apply to `full` or to v1's arms, whose failed runs (a timeout among them) are only left out. A deciding cell (v1's in
+  hot or uniform 1%, or B_fast's arm's) that lost a run to the bound is flagged on its row, "Timed out" (a rule 8
+  change after the recheck: the runs left can't show the stall).
 - `full` at 1 Gbit/s, where it didn't run (A16), stands in with its pooled runs at 2 Gbit/s, the same r and host
   setting, labelled inferred, in B_fast, B_rel and F0 alike.
 - Δ at 1 Gbit/s isn't reported: no anchor runs at 1 Gbit/s. `parcopy8`'s tuned Δ uses the default anchor, labelled,
   in the table of Δs. R1, L1, L2, A3 and E6 read each Δ from the anchor of its own host setting or not at all: a tuned
   cell whose tuned anchor has no counting run has no Δ there.
 - R1 is judged on every cell with counting runs, a not-measured cell included (flagged): a rule must be able to fire
-  (a rule 8 change, recorded in the pre-registration's analysis readings). L1, L2, A8 and the qualifier read no
+  (a rule 8 change, recorded in the pre-registration's analysis readings). A cell v1 ran at whose Δ can't be formed
+  (no counting run for v1 or `full` at r, or at the anchor of its host setting) is reported as not judged, and rows
+  1-3, A8's claim and the qualifier carry "R1 not judged at ..." at every r, as they carry "R1 fired" (a rule 8 change
+  after the recheck). L1, L2, A8 and the qualifier read no
   cell A11 leaves "not measured", at r or at the anchor: such a cell is reported as not measured, a workload whose cell
   isn't measured leaves L1 or L2 not judged unless another workload already fails it, and A8 states no claim there.
   A4, A5 and A6 read no such cell either: it leaves A4 or A5 not judged, and A6 judged on its other cells.
 - A8's claim at r (uniform 10% under 0.90) is made only with v1 durable (A13), and is provisional where R1 fired or
-  the bound there is suspect, window-limited, not durable or excluded (A9, A13, A15), as rows 1 and 2 are.
+  the bound there is suspect, window-limited, not durable or excluded (A9, A13, A15), as rows 1 and 2 are. The
+  qualifier, too, applies only with v1 durable.
 - The default host setting must be Debian's: every invocation's t12_preflight.tcp_defaults and every default run's
   tcp_rmem and tcp_wmem maxima against measure.DEBIAN_TCP_MEM, and each invocation's teardown; any difference flags
-  the session.
+  the session, as does an EXP-13 invocation with no teardown recorded (unchecked).
 - A9's "2.12 GB" is the parcopy arm's own source-to-dest wire bytes there (what "a full copy moves"; 2.12 GB without
   them), at its stream count's steady rate; any parcopy arm run at a 2 Gbit/s condition that fails the gate makes rows
   1 and 2 at that r provisional ("bound suspect"), as A9 says "a parcopy arm"; the window-limited flag reads B_fast's
@@ -820,21 +826,71 @@ def r1_reading(S) -> dict:
     """R1 (the ledger's rule, change 4): Δ_v1 > Δ_full at any r of 20, 60 and 120 ms at 2 Gbit/s, on either host
     setting, in any workload, each Δ from its own host setting's anchor (none where that anchor has no counting run).
     Every cell with counting runs is judged; one whose cells at r or at the anchor A11 leaves "not measured" is flagged
-    (a rule 8 change: a rule must be able to fire)."""
-    cells = []
+    (a rule 8 change: a rule must be able to fire). A cell v1 ran at whose Δ_v1 or Δ_full can't be formed (v1 or `full`
+    has no counting run at r, or at the anchor of the same host setting) is listed as not judged (unjudged, with what
+    is missing), and rows 1-3 carry it as they carry R1 firing (r1_provisional; a rule 8 change after the recheck:
+    dropping such a cell silently made R1 less likely to fire, in v1's favour)."""
+    cells, unjudged = [], []
     for host in ('default', 'tuned'):
         for rtt in RTTS:
             label = label_of(2, rtt, host)
+            anchor = ANCHOR[host]
             full, full_anchor = S.delta('full', label, strict=True)
             for workload in S.workloads:
+                if not S.cell(V1, label, workload)['ran']:
+                    continue
                 v1, v1_anchor = S.delta(V1, label, workload, strict=True)
                 if v1 is None or full is None:
+                    missing = [f'{name} at {where}' for name, arm in (('v1', V1), ('full', 'full'))
+                               for where in (label, anchor) if not S.arm_cell(arm, where, workload)['runs']]
+                    unjudged.append({'label': label, 'workload': workload, 'missing': missing or ['a Δ']})
                     continue
                 measured = S.delta_measured(V1, label, workload) and S.delta_measured('full', label)
                 cells.append({'label': label, 'workload': workload, 'v1': v1, 'full': full, 'fires': v1 > full,
                               'measured': measured, 'anchors': (v1_anchor, full_anchor)})
-    return {'fires': any(c['fires'] for c in cells), 'cells': cells,
+    return {'fires': any(c['fires'] for c in cells), 'cells': cells, 'unjudged': unjudged,
             'judged': bool(cells)}
+
+
+def r1_provisional(r1) -> list[str]:
+    """What R1 makes rows 1-3, A8's claim and the qualifier carry at every r: 'R1 fired'; or, where it didn't fire at
+    the cells judged but some couldn't be judged, 'R1 not judged at <cells>' (it might have fired there)."""
+    if r1.get('fires'):
+        return ['R1 fired']
+    if r1.get('unjudged'):
+        return ['R1 not judged at ' + ', '.join(f'{c["workload"]} {c["label"]}' for c in r1['unjudged'])]
+    return []
+
+
+def stopped_at_bound(runs) -> list:
+    """The runs A15's bound stopped (failure_reason 'timeout')."""
+    return [r for r in runs if r.get('failure_reason') == 'timeout']
+
+
+def bounds_text(runs) -> str:
+    limits = sorted({r.get('run_limit_s') for r in runs if r.get('run_limit_s') is not None})
+    return ', '.join(f'{limit:g} s' for limit in limits) or 'its bound unrecorded'
+
+
+def timed_out_cells(S, labels) -> list[str]:
+    """The deciding cells at these conditions (v1's in hot and uniform 1%, and B_fast's arm's, pooled) that lost a run
+    to A15's bound. Such a run is only left out (v1's arms and `full`; a `parcopy` arm or `probackup8` is excluded
+    instead), so the cell's median and maximum come from the faster runs left: the flag puts the stall on the row (a
+    rule 8 change after the recheck)."""
+    found = []
+    for label in labels:
+        for w in DECIDING:
+            stopped = stopped_at_bound(S.cell(V1, label, w)['all'])
+            if stopped:
+                found.append(f'v1 {w} at {label}: {len(stopped)} of its runs stopped at its bound '
+                             f'({bounds_text(stopped)}), left out')
+        fast = S.baseline('B_fast', label)
+        if fast:
+            stopped = stopped_at_bound(S.cell(fast['arm'], fast['where'])['all'])
+            if stopped:
+                found.append(f'{fast["arm"]} (B_fast) at {fast["where"]}: {len(stopped)} of its runs stopped at its '
+                             f'bound ({bounds_text(stopped)}), left out')
+    return found
 
 
 def dr_values(S, rtt, view='median', tls=False):
@@ -865,15 +921,15 @@ def dr_verdict(S, rtt, r1=None, gates=None, a12=None, a17=None) -> dict:
     computed, notes = dr_row(values, design)
     row = ROWS[0] if V1 in S.not_durable else computed
     provisional = []
-    if r1['fires'] and computed in CLAIM_ROWS:
-        provisional.append('R1 fired')
+    if computed in CLAIM_ROWS:
+        provisional += r1_provisional(r1)
     labels = [label_of(2, rtt, host) for host in design]
     gates = gates or {label: bound_gate(S, label) for label in labels}
     bound = sorted({reason for label in labels for reason in (gates.get(label) or {}).get('reasons', ())})
     if computed in BOUND_ROWS:
         provisional += bound
     flags = {'near': near_line(values, design), 'fragile': [], 'unread': [], 'tls_sensitive': None, 'notes': notes,
-             'unstable': [], 'emulator_limited': []}
+             'unstable': [], 'emulator_limited': [], 'timed_out': timed_out_cells(S, labels)}
     for view, name in (('max', 'R_max'), ('trial', 'R_trial'), ('trig', 'R_trig')):
         seen = dr_values(S, rtt, view)
         if any((seen[h][w] is None) != (values[h][w] is None) for h in design for w in DECIDING):
@@ -888,19 +944,22 @@ def dr_verdict(S, rtt, r1=None, gates=None, a12=None, a17=None) -> dict:
     flags['unstable'] = [item for item in a17 if item['label'] in labels and item['unstable']]
     if a12 is not None and computed not in (ROWS[1], ROWS[2], ROWS[3]):
         flags['emulator_limited'] = [item for item in a12 if item['label'] in labels and item['limited']]
-    # The qualifier reads only measured cells (v1's and F0's, A11): a ratio from a cell not measured is None.
+    # The qualifier reads only measured cells (v1's and F0's, A11): a ratio from a cell not measured is None. With v1
+    # not durable (A13) it doesn't apply, as A8's claim and "D36 stands" don't: every r reads "no claim for v1".
     f0 = {}
     for w in DECIDING:
         r = S.ratios(w, label_of(2, rtt, 'default')).get('F0') or {}
         f0[w] = r.get('median') if r.get('measured') else None
-    qualifier = all(v is not None and v <= HOLD for v in f0.values())
+    durable = V1 not in S.not_durable
+    qualifier = durable and all(v is not None and v <= HOLD for v in f0.values())
     probackup = None
     if rtt == 60:
         here = label_of(2, rtt, 'default')
         base = S.cell('probackup8', here)
         values_p = {w: ratio(S.cell(V1, here, w)['median'], base['median'])
                     if S.cell(V1, here, w)['measured'] and base['measured'] else None for w in DECIDING}
-        probackup = all(v is not None and v <= HOLD for v in values_p.values()) and 'probackup8' not in S.excluded
+        probackup = (durable and all(v is not None and v <= HOLD for v in values_p.values())
+                     and 'probackup8' not in S.excluded)
     return {'rtt': rtt, 'row': row, 'computed': computed, 'values': values, 'provisional': provisional,
             'flags': flags, 'qualifier': qualifier, 'f0': f0, 'probackup': probackup, 'bound': bound}
 
@@ -1179,23 +1238,39 @@ def network_run_lines(S):
                  'unchecked, or none counting): ' + ('; '.join(missing) or 'none'))
     lines.append("- the default host setting, Debian's TCP settings on both VMs (each invocation's "
                  "t12_preflight.tcp_defaults and teardown, every default run's tcp_rmem and tcp_wmem maxima): "
-                 + ('**differs: the session is flagged** (' + '; '.join(S.tcp_default_problems[:10])
+                 + (f'**{tcp_default_word(S.tcp_default_problems, "network")}: the session is flagged** ('
+                    + '; '.join(S.tcp_default_problems[:10])
                     + (f'; and {len(S.tcp_default_problems) - 10} more' if len(S.tcp_default_problems) > 10 else '')
                     + ')' if S.tcp_default_problems else 'held'))
     return lines
 
 
+NO_TEARDOWN = 'no teardown recorded'
+
+
+def tcp_default_word(problems, where) -> str:
+    """How the default host setting's check reads: 'differs' where something differed, 'unchecked' where only an
+    invocation's teardown is missing (the network line); the verdict's banner words it as what wasn't so."""
+    differs = any(NO_TEARDOWN not in problem for problem in problems)
+    if where == 'network':
+        return 'differs' if differs else 'unchecked'
+    return "Debian's everywhere" if differs else "shown to be Debian's everywhere"
+
+
 def tcp_default_problems(rows, meta) -> list[str]:
     """Where the session's default host setting wasn't Debian's (measure.DEBIAN_TCP_MEM): each invocation's
-    t12_preflight.tcp_defaults on both VMs, its teardown (measure.teardown_ok), and every default run's recorded
-    tcp_rmem and tcp_wmem maxima on both VMs."""
+    t12_preflight.tcp_defaults on both VMs, its teardown (measure.teardown_ok; an EXP-13 invocation with none recorded,
+    killed before its `finally`, is flagged as unchecked), and every default run's recorded tcp_rmem and tcp_wmem maxima
+    on both VMs."""
     problems = []
     for run in meta:
         name = run.get('name') or 'an invocation'
         defaults = (run.get('t12_preflight') or {}).get('tcp_defaults') or {}
         for vm, values in sorted(defaults.items()):
             problems += [f'{name} {vm}: {problem}' for problem in measure.tcp_defaults_problems(values)]
-        if run.get('t12_preflight') and 'teardown' in run and not measure.teardown_ok(run['teardown']):
+        if run.get('t12_preflight') and 'teardown' not in run:
+            problems.append(f'{name}: {NO_TEARDOWN} (the invocation did not finish), so its reset is unchecked')
+        elif run.get('t12_preflight') and not measure.teardown_ok(run['teardown']):
             problems.append(f'{name}: its teardown did not leave both VMs reset ({run["teardown"]})')
     wanted = {'rmem': measure.DEBIAN_TCP_MEM['net.ipv4.tcp_rmem'][2],
               'wmem': measure.DEBIAN_TCP_MEM['net.ipv4.tcp_wmem'][2]}
@@ -1389,17 +1464,29 @@ def ledger_lines(S, r1):
         + '); tuned beside: Δ_full ' + (f'{fmt(full_tuned)} s' if full_tuned is not None else 'not measured')
         + ', Δ_v1 ' + (shown(l1_tuned) or '–'))
     fired = [c for c in r1['cells'] if c['fires']]
+    unjudged = r1.get('unjudged') or []
+    missing = list(dict.fromkeys(item for c in unjudged for item in c['missing']))
     say(f'- **R1** ("if pgdelta slows down more than the full copy, the protocol needs deeper pipelining before any WAN '
         f'claim": Δ_v1 > Δ_full at any r of 20, 60 and 120 ms, 2 Gbit/s, either host setting, any workload, each from '
-        f'its own anchor): ' + ('**fires**' if r1['fires'] else 'does not fire' if r1['judged'] else 'not judged (no data)')
+        f'its own anchor): ' + ('**fires**' if r1['fires'] else
+                                ('does not fire at the cells judged' if r1['judged'] else 'no cell judged') if unjudged
+                                else 'does not fire' if r1['judged'] else 'not judged (no data)')
         + (' at ' + ', '.join(f'{c["workload"]} {c["label"]} (Δ_v1 {fmt(c["v1"])} > Δ_full {fmt(c["full"])}'
                               + ('' if c['measured'] else '; a cell not measured, flagged') + ')' for c in fired)
-           if fired else ''))
+           if fired else '')
+        + ('; **not judged** at ' + ', '.join(f'{c["workload"]} {c["label"]}' for c in unjudged)
+           + f' (no counting run: {", ".join(missing)})' if unjudged else ''))
     lines.append('| workload | condition | Δ_v1 | Δ_full | fires |')
     lines.append('|---|---|---:|---:|---|')
     for c in r1['cells']:
         lines.append(f'| {c["workload"]} | {c["label"]} | {fmt(c["v1"])} | {fmt(c["full"])} | '
                      f'{"yes" if c["fires"] else "no"}{"" if c["measured"] else " (not measured)"} |')
+    for c in unjudged:
+        lines.append(f'| {c["workload"]} | {c["label"]} | – | – | not judged (no counting run: '
+                     f'{", ".join(c["missing"])}) |')
+    if unjudged and not r1['fires']:
+        say('  - consequence (a rule 8 reading): R1 might have fired where it could not be judged, so rows 1, 2 and 3 '
+            'of the DR verdict carry "provisional: R1 not judged at …" at every r, as they would carry "R1 fired"')
     if r1['fires']:
         say("  - consequence, as registered: deeper pipelining before any WAN claim. Rows 1, 2 and 3 of the DR verdict "
             'carry "provisional: R1 fired" at every r, and this session makes no DR claim for v1. It is lifted only by '
@@ -1440,12 +1527,16 @@ def verdict_lines(S, r1, gates, a12, a17):
     if r1['fires']:
         lines.append('- **R1 fired**: rows 1, 2 and 3 at every r are provisional, and no DR claim for v1 is made from '
                      'them')
+    elif r1.get('unjudged'):
+        lines.append('- **R1 not judged at every cell** (' + ', '.join(f'{c["workload"]} {c["label"]}'
+                                                                       for c in r1['unjudged'])
+                     + '): it might have fired there, so rows 1, 2 and 3 at every r are provisional')
     if V1 in S.not_durable:
         lines.append(f'- **v1 is not durable for the session** (A13: {"; ".join(S.not_durable[V1])}): every r reads '
                      '"v1 not durable"; the rows below are still computed and reported')
     if S.tcp_default_problems:
-        lines.append("- **The default host setting wasn't Debian's everywhere** (see the network validity of the runs): "
-                     'every reading on default hosts is flagged')
+        lines.append(f"- **The default host setting wasn't {tcp_default_word(S.tcp_default_problems, 'verdict')}** "
+                     '(see the network validity of the runs): every reading on default hosts is flagged')
     verdicts = {}
     for rtt in RTTS:
         v = dr_verdict(S, rtt, r1, {label: gates[label] for label in gates}, a12, a17)
@@ -1479,13 +1570,17 @@ def verdict_lines(S, r1, gates, a12, a17):
         if flags['emulator_limited']:
             lines.append('- *Emulator-limited* (A12): row 2 failed where one tuned stream reached under 0.9 of the '
                          'anchor: ' + ', '.join(f'{e["trial"]} {e["label"]}' for e in flags['emulator_limited']))
+        lines.append("- *Timed out* (A15's bound; a deciding cell's run left out of its median and maximum): "
+                     + ('; '.join(flags['timed_out']) if flags['timed_out'] else 'no'))
         qualifier = ('v1 is faster than one `pg_basebackup` stream, the copy Omni documents for a DR re-seed, at '
                      f'{rtt} ms and 2 Gbit/s on these VMs' + ('; and than `probackup8`' if v['probackup'] else ''))
+        r1_flags = r1_provisional(r1)
         lines.append('- *Qualifier* (R_F0 ≤ 0.90 on default hosts for hot and uniform 1%: '
                      + ', '.join(f'{w} {fmt(x) if x is not None else "not measured"}' for w, x in v['f0'].items())
                      + '): '
-                     + (f'"{qualifier}"' + (' (provisional: R1 fired)' if r1['fires'] else '') if v['qualifier']
-                        else 'does not apply'))
+                     + (f'"{qualifier}"' + (f' (provisional: {"; ".join(r1_flags)})' if r1_flags else '')
+                        if v['qualifier'] else
+                        'does not apply (v1 not durable, A13)' if V1 in S.not_durable else 'does not apply'))
     lines.append('### At 1 Gbit/s (uniform 1%, default hosts; reported, not a row)')
     for label in ('1:60:default', '1:120:default'):
         r = S.ratios('uniform1', label).get('B_fast') or {}
@@ -1657,8 +1752,7 @@ def a_lines(S, r1, ledger, verdicts, gates, a10, a12, a17, a16):
             if V1 in S.not_durable:
                 reading = 'v1 not durable (A13): no claim for v1'
             else:
-                provisional = (['R1 fired'] if r1['fires'] else []) + list(
-                    (gates.get(label) or bound_gate(S, label))['reasons'])
+                provisional = r1_provisional(r1) + list((gates.get(label) or bound_gate(S, label))['reasons'])
                 reading = ("v1's DR claim covers 10% scattered changes there"
                            + (f' (provisional: {"; ".join(provisional)})' if provisional else ''))
         elif r >= OUT:
@@ -1707,12 +1801,19 @@ def a_lines(S, r1, ledger, verdicts, gates, a10, a12, a17, a16):
         + ('**fires**: check (a) is void for the session; durability rests on (b)' if S.a_void else
            'does not fire' if control else 'no data'))
     voids = [r for r in S.rows if r['void']]
+    # Runs A15's bound stopped whose arm it doesn't exclude (`full`, v1's arms): only left out, named here too.
+    left_out = [r for r in stopped_at_bound(S.rows) if r['method'] not in S.a15]
     say('- **A15** (verification, as EXP-11\'s A4, void only where a user-table file differs between the reference '
         'digests): ' + ('; '.join(f'fires for {arm}: ' + ', '.join(f'{r["trial_id"]} r{r["repeat"]} {r["speed"]}'
-                                                                  + (' (its tool aborted the copy)'
+                                                                  + (' (stopped at its bound)'
+                                                                     if r.get('failure_reason') == 'timeout' else
+                                                                     ' (its tool aborted the copy)'
                                                                      if r['status'] == 'error' else '')
                                                                   for r in runs) for arm, runs in S.a15.items())
-                         or 'no arm excluded') + f'; void runs (not failures): {len(voids)}')
+                         or 'no arm excluded') + f'; void runs (not failures): {len(voids)}'
+        + ("; stopped at their bound and only left out (`full`, v1's arms): "
+           + ', '.join(f'{r["method"]} {r["trial_id"]} r{r["repeat"]} {r["speed"]} ({bounds_text([r])})'
+                       for r in left_out) if left_out else ''))
     for key, trial in sorted(S.trials.items()):
         classes = trial.get('reference_classes')
         if classes:
@@ -2005,7 +2106,11 @@ class Predictions:
               for rtt in RTTS for w in DECIDING]
         f0_ok = [None if v is None else v <= {'hot': 0.27, 'uniform1': 0.55}[w] for w, _, v in f0]
         qualifier = [v['qualifier'] for v in verdicts.values()]
-        tuned_fires = any(c['fires'] and c['label'].endswith('tuned') for c in r1['cells']) if r1['cells'] else None
+        # A tuned cell R1 couldn't judge leaves "fires on tuned hosts" unknown unless a judged one fired.
+        tuned_fires = (True if any(c['fires'] and c['label'].endswith('tuned') for c in r1['cells'])
+                       else None if not r1['cells'] or any(c['label'].endswith('tuned')
+                                                           for c in r1.get('unjudged') or ())
+                       else False)
         self.lines.append('  - the expected rows (20 ms row 1; 60 ms row 2; 120 ms row 2 or Undecided): '
                           + ', '.join(f'{rtt} ms {row} {word(ok)}' for rtt, row, ok in rows)
                           + f'; the qualifier at every r {word(every(qualifier))}; R_F0 on default hosts at most 0.27 '

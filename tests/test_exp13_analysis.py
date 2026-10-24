@@ -519,6 +519,44 @@ class LedgerRules(unittest.TestCase):
         rows += cell(60, 'tuned', 0.4, 0.7, full=10.2)
         self.assertIsNone(exp13.a3_parts(session(rows), 'hot', '2:60:tuned'))
 
+    def test_r1_says_where_it_could_not_be_judged(self):
+        # The strict Δ reads each cell's own host setting's anchor. Here every `full` run at the tuned anchor lost a
+        # network reading, so the tuned cells at 60 ms can't be judged, though v1 and `full` have counting runs there.
+        # R1 used to read "does not fire", and rows 1-3 lost "provisional: R1 fired", which the default anchor's Δs
+        # would give (Δ_v1 hot 2 s > Δ_full 0.5 s).
+        rows = anchors() + cell(60, 'default', 0.4, 0.8, full=40.0) + cell(60, 'tuned', 0.5, 0.7, full=10.5)
+        for r in rows:
+            if r['method'] == 'full' and r['speed'] == '2:0:tuned':
+                r['network_ok'] = None
+        S = session(rows)
+        r1 = exp13.r1_reading(S)
+        self.assertFalse(r1['fires'])
+        self.assertEqual([c['label'] for c in r1['cells']], ['2:60:default', '2:60:default'])
+        self.assertEqual([(c['workload'], c['label'], c['missing']) for c in r1['unjudged']],
+                         [('uniform1', '2:60:tuned', ['full at 2:0:tuned']),
+                          ('hot', '2:60:tuned', ['full at 2:0:tuned'])])
+        line = next(line for line in exp13.ledger_lines(S, r1)[0] if line.startswith('- **R1**'))
+        self.assertIn('does not fire at the cells judged; **not judged** at uniform1 2:60:tuned, hot 2:60:tuned (no '
+                      'counting run: full at 2:0:tuned)', line)
+        self.assertEqual(exp13.r1_provisional(r1), ['R1 not judged at uniform1 2:60:tuned, hot 2:60:tuned'])
+        lines, verdicts = exp13.verdict_lines(S, r1, {}, [], [])
+        text = '\n'.join(lines)
+        self.assertIn('- **R1 not judged at every cell**', text)
+        self.assertEqual((verdicts[60]['computed'], verdicts[60]['provisional']),
+                         (exp13.ROWS[2], ['R1 not judged at uniform1 2:60:tuned, hot 2:60:tuned']))
+        self.assertIn('(provisional: R1 not judged at uniform1 2:60:tuned, hot 2:60:tuned)', text)  # the qualifier
+        a2 = next(line for line in exp13.a_lines(S, r1, {'l1': True}, verdicts, {}, [], [], [], exp13.a16_reading(S))
+                  if line.startswith('- **A2**'))
+        self.assertNotIn('D36 stands', a2)
+        # A firing cell decides R1 whatever else couldn't be judged: rows 1-3 carry "R1 fired".
+        self.assertEqual(exp13.r1_provisional({'fires': True, 'cells': [], 'unjudged': r1['unjudged']}), ['R1 fired'])
+        # A cell v1 ran at with no counting run at r is not judged either.
+        rows = anchors() + runs(V1, [4.0] * 5, '2:60:default', 'hot', network_ok=None) + runs('full', [40.0] * 4,
+                                                                                            '2:60:default')
+        r1 = exp13.r1_reading(session(rows))
+        self.assertEqual([(c['label'], c['missing']) for c in r1['unjudged']],
+                         [('2:60:default', ['v1 at 2:60:default'])])
+
     def test_r1_judges_a_not_measured_cell_and_flags_it(self):
         rows = anchors() + cell(60, 'tuned', 0.4, 0.7, full=10.2)
         for r in [r for r in rows if r['method'] == V1 and r['speed'] == '2:60:tuned' and r['workload'] == 'hot'][:2]:
@@ -742,9 +780,11 @@ class Reports(unittest.TestCase):
         line = next(line for line in self.a_lines(session(rows)).splitlines() if line.startswith('- **A8**'))
         self.assertIn('2:20:default R_fast 0.80: not measured (A11), not read', line)
         self.assertNotIn('covers', line)
-        # A bound that fails A9 makes the claim provisional, as rows 1 and 2.
+        # A bound that fails A9 makes the claim provisional, as rows 1 and 2. (v1's uniform 10% anchor and `full` at
+        # r are there for R1, which would otherwise not be judged there, and say so.)
         rows = anchors() + runs(V1, [8.0] * 5, '2:20:default', 'uniform10') + runs('parcopy8', [10.0] * 6,
                                                                                    '2:20:default', parcopy_balance=1.3)
+        rows += runs(V1, [7.0] * 5, '2:0:default', 'uniform10') + runs('full', [20.0] * 4, '2:20:default')
         line = next(line for line in self.a_lines(session(rows)).splitlines() if line.startswith('- **A8**'))
         self.assertIn("covers 10% scattered changes there (provisional: bound suspect)", line)
         # v1 not durable: no claim.
@@ -767,6 +807,57 @@ class Reports(unittest.TestCase):
                 + runs('probackup8', [30.0], '2:60:default', 'uniform1')
                 + runs('probackup8', [30.0] * 2, '2:60:default', 'uniform1', first=1, network_ok=None))
         self.assertIs(exp13.dr_verdict(session(rows), 60)['probackup'], False)
+
+    def test_the_qualifier_does_not_apply_with_v1_not_durable(self):
+        # A13: every r reads "v1 not durable: no claim for v1"; the qualifier beside it used to claim v1 faster.
+        rows = (anchors() + cell(60, 'default', 0.4, 0.8, full=40.0)
+                + runs('probackup8', [30.0] * 3, '2:60:default', 'uniform1'))
+        for r in [r for r in rows if r['method'] == V1 and r['speed'] == '2:60:default' and r['workload'] == 'hot'][:2]:
+            r['a_ok'] = False
+        S = session(rows)
+        self.assertIn(V1, S.not_durable)
+        v = exp13.dr_verdict(S, 60)
+        self.assertEqual((v['row'], v['qualifier'], v['probackup']), (exp13.ROWS[0], False, False))
+        text = '\n'.join(exp13.verdict_lines(S, exp13.r1_reading(S), {}, [], [])[0])
+        self.assertIn('(R_F0 ≤ 0.90 on default hosts for hot and uniform 1%: hot 0.10, uniform1 0.20): does not apply '
+                      '(v1 not durable, A13)', text)
+        self.assertNotIn('v1 is faster than one', text)
+
+    def test_a_run_stopped_at_its_bound_is_flagged_on_the_row(self):
+        # A15: v1's arms and `full` only lose a timed-out run, so the cell's median and maximum come from the faster
+        # runs left, and a stall of more than 4 times the expected upper bound couldn't show on the row.
+        rows = anchors() + cell(60, 'default', 0.4, 0.8, full=40.0)
+        hot = [r for r in rows if r['method'] == V1 and r['speed'] == '2:60:default' and r['workload'] == 'hot']
+        hot[0].update(status='error', failure_kind='tool', failure_reason='timeout', run_limit_s=60.0, total_s=None)
+        S = session(rows)
+        self.assertEqual(S.cell(V1, '2:60:default', 'hot')['max'], 4.0)
+        v = exp13.dr_verdict(S, 60)
+        self.assertEqual((v['row'], v['provisional'], v['flags']['fragile']), (exp13.ROWS[2], [], []))
+        self.assertEqual(v['flags']['timed_out'],
+                         ['v1 hot at 2:60:default: 1 of its runs stopped at its bound (60 s), left out'])
+        text = '\n'.join(exp13.verdict_lines(S, exp13.r1_reading(S), {}, [], [])[0])
+        self.assertIn("- *Timed out* (A15's bound; a deciding cell's run left out of its median and maximum): v1 hot "
+                      'at 2:60:default: 1 of its runs stopped at its bound (60 s), left out', text)
+        # B_fast's arm too: here `full`, whose timed-out run is only left out.
+        rows = (anchors() + runs(V1, [4.0] * 5, '2:60:default', 'hot') + runs(V1, [8.0] * 5, '2:60:default', 'uniform1')
+                + runs('full', [10.0] * 4, '2:60:default')
+                + runs('full', [None], '2:60:default', first=4, status='error', failure_kind='tool',
+                       failure_reason='timeout', run_limit_s=208.0))
+        v = exp13.dr_verdict(session(rows), 60)
+        self.assertEqual(v['flags']['timed_out'],
+                         ['full (B_fast) at 2:60:default: 1 of its runs stopped at its bound (208 s), left out'])
+        self.assertEqual(exp13.dr_verdict(session(anchors() + cell(60, 'default', 0.4, 0.8, full=40.0)), 60)
+                         ['flags']['timed_out'], [])
+        # The A15 line names a timeout as such, and the runs only left out beside the arms it excludes.
+        rows = anchors() + cell(60, 'default', 0.4, 0.8, full=40.0)
+        [r for r in rows if r['method'] == 'parcopy8' and r['speed'] == '2:60:default'][0].update(
+            status='error', failure_kind='tool', failure_reason='timeout', run_limit_s=60.0)
+        [r for r in rows if r['method'] == V1 and r['speed'] == '2:60:default'][0].update(
+            status='error', failure_kind='tool', failure_reason='timeout', run_limit_s=74.4)
+        line = next(line for line in self.a_lines(session(rows)).splitlines() if line.startswith('- **A15**'))
+        self.assertIn('fires for parcopy8: 00-hot r0 2:60:default (stopped at its bound)', line)
+        self.assertIn("stopped at their bound and only left out (`full`, v1's arms): pgdelta_direct_inplace 00-hot r0 "
+                      '2:60:default (74.4 s)', line)
 
     def test_a11_visits_a13_and_a15_file_classes(self):
         retry = {'condition': '2:60:default', 'repeat': 1, 'ok': True, 'attempts': [
@@ -843,6 +934,21 @@ class DefaultHostSetting(unittest.TestCase):
         self.assertIn('**differs: the session is flagged**', '\n'.join(exp13.network_run_lines(S)))
         lines, _ = exp13.verdict_lines(S, exp13.r1_reading(S), {}, [], [])
         self.assertIn("**The default host setting wasn't Debian's everywhere**", '\n'.join(lines))
+
+
+    def test_an_invocation_with_no_teardown_flags_the_session(self):
+        # Killed, or out of memory: run.json keeps the preflight's save, with no teardown. It used to pass as "held".
+        debian = {'net.ipv4.tcp_rmem': '4096\t131072\t6291456', 'net.ipv4.tcp_wmem': '4096\t16384\t4194304'}
+        running = {'name': 'exp13-hot', 'status': 'running',
+                   't12_preflight': {'tcp_defaults': {'source': debian, 'dest': debian}}}
+        S = exp13.Session(anchors(), {}, [running])
+        self.assertEqual(S.tcp_default_problems,
+                         ['exp13-hot: no teardown recorded (the invocation did not finish), so its reset is unchecked'])
+        self.assertIn('**unchecked: the session is flagged**', '\n'.join(exp13.network_run_lines(S)))
+        lines, _ = exp13.verdict_lines(S, exp13.r1_reading(S), {}, [], [])
+        self.assertIn("**The default host setting wasn't shown to be Debian's everywhere**", '\n'.join(lines))
+        # Only an EXP-13 invocation (its preflight recorded) has a teardown to check.
+        self.assertEqual(exp13.Session(anchors(), {}, [{'name': 'x', 'status': 'running'}]).tcp_default_problems, [])
 
 
 @needs_venv
