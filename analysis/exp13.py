@@ -174,7 +174,7 @@ KEEP = ['sweep', 'trial_id', 'workload', 'speed', 'method', 'repeat', 'tier', 's
         *(f'{wait}{part}_s' for wait in WAITS for part in ('', '_busy', '_idle')), 'page_send_s', 'hello_wait_s',
         'recv_wait_s', 'publish_s', 'receiver_wall_s', 'drain_s', 'idle_waits_s', 'fixed_rtts_s', 'sending_s',
         'busy_split_valid', 'prefetch_bytes', 'prefetch_s', 'tls_version', 'tls_suite', 'tls_connections',
-        'window_limited_bound', 'error', 'failure_kind']
+        'window_limited_bound', 'parcopy_connect_s', 'run_limit_s', 'error', 'failure_kind', 'failure_reason']
 CELL_COLUMNS = ('total_s', 'trig_s', 'wire_s2d_bytes', 'page_bytes', 'cpu_source_s', 'cpu_dest_s', 'connect_s',
                 *(f'{wait}{part}_s' for wait in WAITS for part in ('', '_busy', '_idle')), 'page_send_s',
                 'publish_s', 'drain_s', 'idle_waits_s', 'fixed_rtts_s', 'sending_s', 'leaf_requests', 'minrtt_ms',
@@ -708,6 +708,7 @@ def bound_gate(S, label) -> dict:
         unbalanced = None if balance is None else balance > A9_BALANCE
         zero = median(r['zero_delay_bound_gbit'] for r in runs)
         arms[arm] = {'median': cell['median'], 'n': cell['n'], 'rate': rate, 'limit': limit, 'balance': balance,
+                     'connect_s': median(r.get('parcopy_connect_s') for r in runs),
                      'slow': slow, 'unbalanced': unbalanced, 'suspect': bool(slow or unbalanced),
                      'excluded': S.excluded.get(arm), 'zero_delay': zero,
                      'window_limited': None if not rate or not zero else rate < A9_WINDOW * zero}
@@ -1432,7 +1433,10 @@ def gate_lines(gates):
         for arm, a in gate['arms'].items():
             lines.append(f'  - {label} {arm}: {fmt(a["median"])} s over {a["n"]} runs against {fmt(a["limit"])} s '
                          f'({fmt(a["rate"])} Gbit/s); balance {fmt(a["balance"], 3)}; zero-delay {fmt(a["zero_delay"])} '
-                         f'Gbit/s → {"suspect" if a["suspect"] else "passes" if a["slow"] is not None else "no data"}'
+                         'Gbit/s'
+                         + (f'; its connection set-up {fmt(a["connect_s"], 3)} s (parcopy_connect_s)'
+                            if condition(label)['rtt_ms'] > 0 else '')
+                         + f' → {"suspect" if a["suspect"] else "passes" if a["slow"] is not None else "no data"}'
                          + ('; window-limited' if a['window_limited'] else '')
                          + (f'; {a["excluded"]}' if a['excluded'] else ''))
         if gate['reasons']:

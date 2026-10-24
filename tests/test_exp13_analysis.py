@@ -597,6 +597,18 @@ class AddedRules(unittest.TestCase):
             r['a_ok'] = False
         self.assertIn('bound not durable', exp13.bound_gate(session(rows), label)['reasons'])
 
+    def test_a9_reports_parcopys_connection_set_up_beside_each_bound_at_latency(self):
+        rows = (anchors() + runs('parcopy8', [10.4] * 4, '2:60:default', s2d_8_steady_gbit=1.9, parcopy_connect_s=0.061)
+                + runs('full', [45.0] * 4, '2:60:default'))
+        S = session(rows)
+        gates = {label: exp13.bound_gate(S, label) for label in ('2:0:default', '2:60:default')}
+        self.assertAlmostEqual(gates['2:60:default']['arms']['parcopy8']['connect_s'], 0.061)
+        text = '\n'.join(exp13.gate_lines(gates))
+        self.assertIn('2:60:default parcopy8: 10.40 s over 4 runs', text)
+        self.assertIn('its connection set-up 0.061 s (parcopy_connect_s)', text)
+        anchor_line = next(line for line in text.splitlines() if '2:0:default parcopy8' in line)
+        self.assertNotIn('connection set-up', anchor_line)
+
     def test_a10_drift_gates(self):
         exp11 = {('hot', 'full'): {'total_s': 10.27, 'wire_s2d_bytes': 2.1e9, 'measured_s2d_gbit': 1.917},
                  ('hot', 'parcopy8'): {'total_s': 9.3, 'measured_s2d_gbit': 1.917},

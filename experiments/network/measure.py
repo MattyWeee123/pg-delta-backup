@@ -3653,14 +3653,16 @@ def t12_columns(record: dict) -> dict:
 
 
 def parcopy_connect_s(send_stats) -> float | None:
-    """parcopy's sender's connection set-up (its stats' connected_s less select_s: the control connection and every
-    data connection opened), or None without them."""
+    """parcopy's sender's connection set-up: its stats' connected_s less connect_start_s (the control connection and
+    every data connection opened at once), or less select_s from a sender that predates connect_start_s (which
+    opened them one after another); None without them."""
     if not isinstance(send_stats, dict):
         return None
-    connected, selected = send_stats.get('connected_s'), send_stats.get('select_s')
-    if not isinstance(connected, (int, float)) or not isinstance(selected, (int, float)):
+    connected = send_stats.get('connected_s')
+    start = send_stats.get('connect_start_s', send_stats.get('select_s'))
+    if not isinstance(connected, (int, float)) or not isinstance(start, (int, float)):
         return None
-    return round(connected - selected, 6)
+    return round(connected - start, 6)
 
 
 def receiver_command(record: dict):

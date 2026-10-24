@@ -19,7 +19,9 @@ reads (pgdelta.datadir.select(), called directly on the source) over N TCP strea
 - One control connection carries the inventory (directories and files with their modes and sizes)
   and, at the end, the receiver's verdict; each of the N data connections carries its stream's
   ranges, a header then the bytes, sent with os.sendfile. No TLS, no checksums: the harness checks
-  byte identity afterwards.
+  byte identity afterwards. The sender opens all N + 1 connections at once (connect_all), so at a
+  round trip r they take about r, not (N + 1) r (EXP-13, October 24, 2026: a rule 8 change to
+  EXP-11's bound, which opened them one after another; at 0.1 ms the two differ by about 1 ms).
 - Before copying, the receiver recreates every directory of the inventory (the empty ones select()
   keeps among them) and creates every file empty, each with its recorded mode; the output's top
   directory gets the data directory's mode. It writes with os.pwrite and starts write-back every
@@ -32,7 +34,8 @@ reads (pgdelta.datadir.select(), called directly on the source) over N TCP strea
 
 Each end's --stats-json holds its timers, in seconds since that end started (after its imports):
 per stream its bytes, first and last byte, and the time in pwrite (receiver) or sendfile (sender);
-the receiver's fsync tail, its fsync calls and the count its inventory expects.
+the receiver's fsync tail, its fsync calls and the count its inventory expects; the sender's
+connect_start_s and connected_s (its connection set-up, between them).
 
 Exit status: 0; 2 for refused input (a running cluster, a non-empty output); 3 for a failed transfer.
 Standard library only, with the repository's pgdelta (standard library only too).
@@ -169,6 +172,31 @@ def connect(host: str, port: int, kind: bytes, stream: int | None = None):
     return sock
 
 
+def connect_all(host: str, port: int, streams: int):
+    """The control connection and every data stream's, opened at once, one thread each: their handshakes take one
+    round trip in all, where one after another they would take streams + 1 (at DR latency, 1 s and more of a copy
+    that should pay 3-6). (control, data sockets in stream order), the data sockets blocking, for os.sendfile. If any
+    fails, every one opened is closed and the first failure raised."""
+    with ThreadPoolExecutor(max_workers=streams + 1, thread_name_prefix='parcopy-connect') as pool:
+        futures = [pool.submit(connect, host, port, CONTROL)]
+        futures += [pool.submit(connect, host, port, DATA, stream) for stream in range(streams)]
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(future.result())
+            except Exception as exc:
+                outcomes.append(exc)
+    failures = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+    if failures:
+        for outcome in outcomes:
+            if not isinstance(outcome, Exception):
+                outcome.close()
+        raise failures[0]
+    for sock in outcomes[1:]:
+        sock.settimeout(None)  # blocking, for os.sendfile
+    return outcomes[0], outcomes[1:]
+
+
 def write_json(path, value) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,18 +239,15 @@ class Sender:
                      bytes=sum(entry.size for entry in inventory.files), plan=plan_summary(lists),
                      excluded=selection.excluded_summary(), redo_wal_file=selection.redo_wal_file)
         paths = [self.source / selection.source_path(entry.path) for entry in inventory.files]
-        control = connect(host, port, CONTROL)
-        sockets = []
+        stats['connect_start_s'] = self.clock()
+        control, sockets = connect_all(host, port, self.streams)
         try:
+            stats['connected_s'] = self.clock()
             send_message(control, {'version': 1, 'streams': self.streams, 'chunk_bytes': self.chunk_bytes,
                                    'root_mode': inventory.root_mode,
                                    'directories': [[entry.path, entry.mode] for entry in inventory.directories],
                                    'files': [[entry.path, entry.size, entry.mode] for entry in inventory.files],
                                    'plan': stats['plan']})
-            for stream in range(self.streams):
-                sockets.append(connect(host, port, DATA, stream))
-                sockets[-1].settimeout(None)  # blocking, for os.sendfile
-            stats['connected_s'] = self.clock()
             results: list = [None] * self.streams
             errors: list = []
 
