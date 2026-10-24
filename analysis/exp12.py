@@ -2568,8 +2568,8 @@ def e_lines(S, cells, ctx, d1, d2, a5v, a6v, moderate, caveats, near):
     high = S.high_cpu()
     share = S.busy_cpu('busy')
     side = (('above 50%' if high else '50% or less') if high is not None
-            else 'not selected (--busy-cpu, smoke item 2\'s value, not given)' if S.busy_cpu_given is None and not S.smoke
-            else 'unknown')
+            else 'not selected (--busy-cpu, smoke item 2\'s value, not given)'
+            if S.busy_cpu_given is None and not S.smoke else 'unknown')
     capacity = S.capacity()
     say(f'- **E1** (C 10,000-40,000; busy CPU at R_busy 40-75%, at R_mod 20-45%): C {word(within(capacity, 1e4, 4e4))} '
         f'({fmt(capacity, 0)}); at R_busy {word(within(share, 0.40, 0.75))} ({fmt(share, 3)}); at R_mod '
@@ -2844,8 +2844,8 @@ def time_lines(S, cells):
 
 
 def cpu_lines(S, ctx, cells):
-    lines = ['## Source CPU (calibrated CPU-s without load; under load, a view: the window\'s [t0, t1 + 10 s] VM-wide busy '
-             'CPU over the settle\'s rate, from the sampler, with the timed phases\' alone in parentheses)',
+    lines = ['## Source CPU (calibrated CPU-s without load; under load, a view: the window\'s [t0, t1 + 10 s] VM-wide '
+             'busy CPU over the settle\'s rate, from the sampler, with the timed phases\' alone in parentheses)',
              '| Arm | calibrated CPU-s (runs) | idle time s | ' + ' | '.join(f'under load {speed_name(s)}' for s in SPEEDS)
              + ' |', '|---|---|---:|' + '---:|' * len(SPEEDS)]
     for arm in CALIBRATION_ARMS:
