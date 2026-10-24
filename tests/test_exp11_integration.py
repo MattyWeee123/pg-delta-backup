@@ -64,7 +64,7 @@ class RunLines(unittest.TestCase):
     def parsed(self):
         lines = spec_run_lines()
         self.assertEqual(sorted(lines), ['exp11-local', 'exp11-uniform'])
-        return {name: run_exp04.parse_args(['--source-ip', '10.0.0.2', '--out', '/nonexistent/exp11', *argv])
+        return {name: run_exp04.parse_args(['--source-ip', '192.0.2.2', '--out', '/nonexistent/exp11', *argv])
                 for name, argv in lines.items()}
 
     def test_they_parse_and_name_only_known_methods(self):
