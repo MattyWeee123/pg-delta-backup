@@ -236,13 +236,15 @@ class Verifying(Probackup):
     verify = run_exp04.Orchestrator.verify
     start = {'ok': True, 'ready_seconds': 2.5}
 
+    server_log = 'LOG:  redo starts at 2/A0000028\nLOG:  consistent recovery state reached\n'
+
     def check_output(self, method, data, *, recovery, query=run_exp04.OUTPUT_QUERY):
         # What the start sees, and what starting the output changes in it.
         self.events.append(('check_output', recovery, query, run_exp04.tree_bytes(data)))
         (Path(data) / 'postmaster.pid').write_text('4242\n' * 20)
         log = self.dest_log(f'{method}-output-server.log')
         log.parent.mkdir(parents=True, exist_ok=True)
-        log.write_text('LOG:  redo starts at 2/A0000028\nLOG:  consistent recovery state reached\n')
+        log.write_text(self.server_log)
         return {**self.start, 'answer': json.dumps(LOGICAL) if self.start['ok'] else None}
 
 
@@ -293,6 +295,17 @@ class Verification(core.Clocked):
         self.assertFalse(record['verification']['verified'])
         self.assertIs(record['verification']['void'], False)
         self.assertNotIn('logical', record['verification'])
+
+    def test_a_copy_that_needed_wal_fetched_after_the_clock_fails(self):
+        class Fetched(Verifying):
+            server_log = ('LOG:  restored log file "000000010000000200000004" from archive\n'
+                          'LOG:  consistent recovery state reached\n')
+
+        orchestrator = self.orchestrator(Fetched)
+        with mock.patch.object(run_exp04.measure, 'tree_stat', return_value={}):
+            record = self.run_method(orchestrator, 'probackup8')
+        self.assertEqual(record['status'], 'fail')
+        self.assertEqual(record['verification']['wal_files_restored'], 1)
 
     def test_bytes_that_differ_are_a_diagnostic_only(self):
         class Changed(Verifying):

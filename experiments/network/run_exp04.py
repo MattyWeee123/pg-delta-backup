@@ -991,7 +991,8 @@ class Orchestrator:
         its WAL, and the byte diagnostic against the trial's start reference digest
         (probackup_byte_diagnostic). Then the output is started on dest as a full copy is, recovering
         from its backup_label with the WAL it streamed: no archive, no standby.signal, no network, so no
-        WAL is fetched after the clock stopped (the server log's restored files are counted). Its
+        WAL is fetched after the clock stopped (the server log's restored files are counted, and any
+        fails it). Its
         per-table digest is taken then, and compared with the source's at the trial's step 8
         (finish_logical_checks, logical_match None until then): an output that doesn't start fails at once.
         """
@@ -1018,7 +1019,8 @@ class Orchestrator:
         result['logical_check'] = ("compared with the source's digest at the trial's step 8, after the end "
                                    'reference digest; void if the source changed during the trial')
         result['basis_changes'] = measure.stat_changes(self.b0_stat, measure.tree_stat(self.b0))
-        result['verified'] = started and not result['basis_changes']
+        # It must reach consistency from what the tool wrote: WAL restored at the start fails it.
+        result['verified'] = started and not result['basis_changes'] and not result['wal_files_restored']
         return result
 
     def probackup_byte_diagnostic(self, method, output: Path) -> dict | None:
