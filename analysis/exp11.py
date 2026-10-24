@@ -1079,6 +1079,31 @@ def drift_lines(gates):
     return lines
 
 
+def code_lines(S):
+    """Beside the drift gates: pgdelta/'s changes since EXP-09's deployed commit, as each sweep's deploy recorded
+    them (remote.py's DEPLOYED.json pgdelta_since_exp09, kept in run.json's environment), since v1 is to run
+    EXP-09's engine (Setup)."""
+    lines = []
+    for run in S.meta:
+        name = run.get('name') or 'a sweep'
+        found = {host: ((((run.get('environment') or {}).get(host) or {}).get('deployed') or {})
+                        .get('pgdelta_since_exp09')) for host in ('dest', 'source')}
+        since = found['dest'] or found['source']
+        if not since:
+            lines.append(f'- pgdelta/ since EXP-09\'s deployed commit ({name}): not recorded (deployed without it)')
+        elif since.get('error'):
+            lines.append(f'- pgdelta/ since EXP-09\'s deployed commit {since["base"][:7]} ({name}): '
+                         f'git diff failed: {since["error"]}')
+        else:
+            files = since.get('files') or []
+            changed = ', '.join(f'{f["path"]} +{"?" if f["added"] is None else f["added"]} '
+                                f'−{"?" if f["removed"] is None else f["removed"]}' for f in files)
+            lines.append(f'- pgdelta/ since EXP-09\'s deployed commit {since["base"][:7]} ({name}): '
+                         + (f'{len(files)} file(s) changed: {changed}; diff SHA-256 {since["diff_sha256"][:12]}'
+                            if files else 'unchanged'))
+    return lines
+
+
 def shifted(gates):
     """A7: the session is shifted if any gate fails, or none could be checked."""
     oks = [g['ok'] for g in gates if g['ok'] is not None]
@@ -1487,7 +1512,7 @@ def verdicts(S, exp09, audit=None):
     v_tuned, rows = ha_lines(ratios, bound, 'against B_tuned', fast='B_tuned')
     lines += rows + ['']
     crossing, found = crossover_lines(S, table, bound)
-    lines += crossing + [''] + drift_lines(gates) + ['']
+    lines += crossing + [''] + drift_lines(gates) + code_lines(S) + ['']
     ledger, required = ledger_lines(S, table, gates)
     lines += ledger + [''] + e_lines(S, found) + [''] + a_lines(S, gates, v_fast, v_tuned) + ['']
     lines += phase_table_lines(S, required) + [''] + above_link_lines(S) + [''] + order_lines(S)

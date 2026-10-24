@@ -478,6 +478,23 @@ class DriftGates(unittest.TestCase):
         failed = {(g['speed'], g['gate']) for g in self.gates(link=1.03) if not g['ok']}
         self.assertEqual(failed, {('2g', 'measured link'), ('5g', 'measured link')})
 
+    def test_pgdelta_since_exp09_beside_the_gates(self):
+        since = {'base': 'b77f33d8cd30b35ba6e9ded9976dc4c7b233c2b5', 'diff_sha256': 'ab' * 32,
+                 'files': [{'path': 'pgdelta/receiver.py', 'added': 19, 'removed': 11},
+                           {'path': 'pgdelta/README.md', 'added': 6, 'removed': 6}]}
+        runs = [{'name': 'exp11-local', 'environment': {'dest': {'deployed': {'pgdelta_since_exp09': since}}}},
+                {'name': 'exp11-uniform', 'environment': {'source': {'deployed': {'pgdelta_since_exp09': {
+                    **since, 'files': []}}}}},
+                {'name': 'older'},
+                {'name': 'shallow', 'environment': {'dest': {'deployed': {'pgdelta_since_exp09': {
+                    'base': since['base'], 'error': 'fatal: bad revision'}}}}}]
+        self.assertEqual(exp11.code_lines(exp11.Session([], runs=runs)), [
+            "- pgdelta/ since EXP-09's deployed commit b77f33d (exp11-local): 2 file(s) changed: pgdelta/receiver.py "
+            '+19 −11, pgdelta/README.md +6 −6; diff SHA-256 abababababab',
+            "- pgdelta/ since EXP-09's deployed commit b77f33d (exp11-uniform): unchanged",
+            "- pgdelta/ since EXP-09's deployed commit (older): not recorded (deployed without it)",
+            "- pgdelta/ since EXP-09's deployed commit b77f33d (shallow): git diff failed: fatal: bad revision"])
+
     def test_no_gate_checked_is_shifted(self):
         gates = exp11.drift_gates(session(runs('full', [3.0], 'append'), ('append',)), self.EXP09)
         self.assertTrue(all(g['ok'] is None for g in gates))
@@ -542,6 +559,7 @@ class DryRun(unittest.TestCase):
             self.assertIn(flag, text)
         self.assertIn('the cut for T5 and T13', text)
         self.assertIn('**A7** (drift gates against EXP-09): every gate holds', text)
+        self.assertIn("- pgdelta/ since EXP-09's deployed commit (exp11-local): not recorded", text)
         self.assertIn('**L3** (', text)
         self.assertNotIn('not judged (A7', text)
         self.assertIn('| probackup8 | yes | 0 | 3 (pg_wal/000000010000000000000003, backup_label, pg_wal) |', text)

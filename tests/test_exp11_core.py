@@ -6,12 +6,15 @@ the host probes run on temporary files, and the link test over loopback.
 """
 
 import csv
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -21,7 +24,7 @@ from contextlib import redirect_stdout
 from unittest import mock
 
 from benchmarks.backup import basebackup_command
-from experiments.network import agent, measure, run_exp04, source_cluster
+from experiments.network import agent, measure, remote, run_exp04, source_cluster
 
 from test_exp04_network import FakeChild, FakeClock, LINK, SPEED, StubOrchestrator, TRIAL, TrialStub, snap
 
@@ -1382,6 +1385,58 @@ class BracketProbe(unittest.TestCase):
                 self.assertRaises(SystemExit) as failed:
             source_cluster.cmd_backup_mode_probe(Namespace(root='/w/src', bin_dir='/b', repeats=2))
         self.assertIn('permission denied', str(failed.exception))
+
+
+class DeployedCode(unittest.TestCase):
+    """remote.py deploy records pgdelta/'s diff since EXP-09's deployed commit in DEPLOYED.json (Setup)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+
+        def git(*args):
+            return subprocess.run(['git', '-C', str(self.repo), '-c', 'user.name=t', '-c', 'user.email=',
+                                   '-c', 'commit.gpgsign=false', *args], capture_output=True, text=True,
+                                  check=True).stdout.strip()
+
+        git('init', '-q', '.')
+        for path, text in (('pgdelta/receiver.py', 'a\nb\n'), ('pgdelta/README.md', 'r\n'), ('other/x.py', '1\n')):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text(text)
+        git('add', '.')
+        git('commit', '-q', '-m', 'the deployed commit')
+        self.base = git('rev-parse', 'HEAD')
+        (self.repo / 'pgdelta/receiver.py').write_text('a\nc\nd\n')  # committed later
+        (self.repo / 'other/x.py').write_text('2\n')  # outside pgdelta/
+        git('commit', '-q', '-am', 'later')
+        (self.repo / 'pgdelta/flush.py').write_text('new\n')  # tracked, not committed: deploy ships it
+        git('add', 'pgdelta/flush.py')
+        self.git = git
+
+    def test_the_diff_of_pgdelta_since_the_commit_up_to_the_deployed_tree(self):
+        with mock.patch.object(remote, 'REPO_ROOT', self.repo):
+            since = remote.pgdelta_since(self.base)
+            diff = self.git('diff', self.base, '--', 'pgdelta/') + '\n'
+        self.assertEqual(since['files'], [{'path': 'pgdelta/flush.py', 'added': 1, 'removed': 0},
+                                          {'path': 'pgdelta/receiver.py', 'added': 2, 'removed': 1}])
+        self.assertEqual((since['base'], since['diff'], since['diff_truncated']), (self.base, diff, False))
+        self.assertEqual(since['diff_sha256'], hashlib.sha256(diff.encode()).hexdigest())
+        self.assertNotIn('other/x.py', since['diff'])
+        with mock.patch.object(remote, 'REPO_ROOT', self.repo):
+            missing = remote.pgdelta_since('0' * 40)
+        self.assertEqual(set(missing), {'base', 'error'})
+
+    def test_deployed_json_carries_it(self):
+        self.assertEqual(remote.EXP09_DEPLOYED_COMMIT[:7], 'b77f33d')  # docs/LOG.md: c48e853 before the rewrite
+        with mock.patch.object(remote, 'REPO_ROOT', self.repo), \
+                mock.patch.object(remote, 'EXP09_DEPLOYED_COMMIT', self.base):
+            data, manifest = remote.build_tarball()
+        with tarfile.open(fileobj=io.BytesIO(data), mode='r:gz') as tar:
+            deployed = json.loads(tar.extractfile('DEPLOYED.json').read())
+        self.assertEqual(deployed['pgdelta_since_exp09'], manifest['pgdelta_since_exp09'])
+        self.assertEqual([f['path'] for f in deployed['pgdelta_since_exp09']['files']],
+                         ['pgdelta/flush.py', 'pgdelta/receiver.py'])
 
 
 class ReferenceView(unittest.TestCase):

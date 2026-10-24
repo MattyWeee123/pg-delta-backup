@@ -16,7 +16,7 @@ On two real machines, at what link speed does pgdelta stop beating a full copy? 
   - `parcopy.py`, EXP-11's bound, runs its receiver on dest and its sender on the source (`python -m experiments.network.parcopy`).
   - `durability_audit.py`, EXP-11's syscall audit, checks `strace` traces of dest's timed commands against the durability definition.
   - `remote.py`, run from the Mac, deploys the code, starts the orchestrator under `nohup` and fetches the results.
-- **Code on the VMs:** a tarball of the working tree's tracked files, unpacked at `~/pgd`, with `DEPLOYED.json` (commit, dirty flag, tree hash). A run refuses to start if the two VMs hold different trees.
+- **Code on the VMs:** a tarball of the working tree's tracked files, unpacked at `~/pgd`, with `DEPLOYED.json` (commit, dirty flag, tree hash, and `pgdelta_since_exp09`: `git diff` of `pgdelta/` from EXP-09's deployed commit `b77f33d` to the deployed tree, its files, line counts, SHA-256 and text, which EXP-11's Setup asks for and `analysis/exp11.py` prints beside the drift gates). A run refuses to start if the two VMs hold different trees.
 
 ## Procedure
 

@@ -47,6 +47,10 @@ DEST_KEY = '~/.ssh/exp04_ed25519'
 # What `provision` runs on each VM, in order, with its timeout in seconds. install_incumbents.sh can
 # build pg_probackup from source when its repository can't be reached.
 PROVISION_SCRIPTS = (('startup.sh', 1800), ('install_incumbents.sh', 3600))
+# The commit deployed for EXP-08, EXP-09 and EXP-10 (c48e853 before the history rewrite; docs/LOG.md).
+# EXP-11 runs v1 on EXP-09's engine, so every deployment records pgdelta/'s changes since it.
+EXP09_DEPLOYED_COMMIT = 'b77f33d8cd30b35ba6e9ded9976dc4c7b233c2b5'
+PGDELTA_DIFF_LIMIT = 200_000  # characters of that diff kept in DEPLOYED.json; its hash covers all of it
 
 
 def load_config(path: Path = CONFIG) -> dict:
@@ -126,6 +130,27 @@ def tree_sha256(root: Path, names) -> str:
     return digest.hexdigest()
 
 
+def pgdelta_since(base: str | None = None) -> dict:
+    """`git diff <base> -- pgdelta/` (default base: EXP09_DEPLOYED_COMMIT), from that commit to the working tree
+    that deploy ships: each file's lines added and removed, the diff's SHA-256, and the diff itself (up to
+    PGDELTA_DIFF_LIMIT characters)."""
+    base = base or EXP09_DEPLOYED_COMMIT
+    try:
+        diff = git('diff', base, '--', 'pgdelta/').decode(errors='replace')
+        numstat = git('diff', '--numstat', base, '--', 'pgdelta/').decode(errors='replace')
+    except subprocess.CalledProcessError as exc:
+        return {'base': base, 'error': (exc.stderr or b'').decode(errors='replace').strip()[-500:]
+                or f'git diff exited {exc.returncode}'}
+    files = []
+    for line in numstat.splitlines():
+        added, removed, path = line.split('\t', 2)
+        files.append({'path': path, 'added': int(added) if added.isdigit() else None,
+                      'removed': int(removed) if removed.isdigit() else None})
+    return {'base': base, 'what': "git diff of pgdelta/ from EXP-09's deployed commit to the deployed tree",
+            'files': files, 'diff_sha256': hashlib.sha256(diff.encode()).hexdigest(),
+            'diff': diff[:PGDELTA_DIFF_LIMIT], 'diff_truncated': len(diff) > PGDELTA_DIFF_LIMIT}
+
+
 def build_tarball() -> tuple[bytes, dict]:
     names = tracked_files()
     status = git('status', '--porcelain=v1').decode().splitlines()
@@ -137,6 +162,8 @@ def build_tarball() -> tuple[bytes, dict]:
         'deployed_utc': datetime.now(timezone.utc).isoformat(),
         'deployed_from': socket.gethostname(),
         'contents': 'git ls-files of the working tree (tracked files, working-tree versions)',
+        # EXP-11: v1 runs EXP-09's engine; what changed in pgdelta/ since (run.json's environment keeps it).
+        'pgdelta_since_exp09': pgdelta_since(),
     }
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode='w:gz') as tar:
