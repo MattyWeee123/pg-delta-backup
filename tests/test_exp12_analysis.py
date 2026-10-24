@@ -15,8 +15,8 @@ They need the analysis venv's numpy and matplotlib and are skipped without them.
 
 import csv
 import io
-import json
-import math
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -210,6 +210,33 @@ class Null(unittest.TestCase):
         # Seeded: the same key draws the same windows, another key others.
         self.assertTrue(np.array_equal(null.windows('run-1', 15, 20)['W'], windows['W']))
         self.assertFalse(np.array_equal(null.windows('run-2', 15, 20)['W'], windows['W']))
+
+    def test_a_known_spread_from_a_log(self):
+        # The same pool from pgbench's lines: 100 per second, and in every 10th second the transactions scheduled in
+        # it complete together at its end plus 0.2 s, so that bucket loses 1 s of work and the next catches up.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'busy.1'
+            lines, number = [], 0
+            for index in range(100 * 200):
+                scheduled = T0 + index / 100
+                stalled = int(index // 100) % 10 == 0
+                end = (T0 + index // 100 + 1.2) if stalled else scheduled + 0.001
+                number += 1
+                lines.append((end, line(index % 4, number, end, end - scheduled)))
+            path.write_text(''.join(text for _, text in sorted(lines)))
+            span = exp12.Span('settle', 'busy', T0, T0 + 200, [10_000, 20_000])
+            exp12.stream_run([path], [span])
+            span.finish()
+        series = exp12.pool_series(span, 100)
+        self.assertEqual(len(series['W']), 200)
+        self.assertEqual(list(series['W'][:11]), [1.0] + [0.0] * 9 + [1.0])
+        null = exp12.Null('busy', [series], 4000, 121)
+        windows = null.windows('run-1', 15, 20)
+        self.assertTrue(np.all(windows['W15'] == 2.0))
+        self.assertTrue(0.45 <= float(np.mean(windows['W'] == 2.0)) <= 0.55)
+        self.assertTrue(np.all(windows['D'] == 1.0))
+        # The late count: the stalled bucket's 100 transactions, each at least 0.2 s late.
+        self.assertTrue(np.all(windows['late_L'] >= 1.0))
 
     def test_measurable_net_and_the_bound(self):
         null = np.linspace(0.0, 0.1, 1001)  # median 0.05, 95th percentile 0.095
@@ -690,6 +717,91 @@ class Context(unittest.TestCase):
         self.assertTrue(exp12.context(S)['r3'])
 
 
+def sampler_ticks(pid=7):
+    """0.1-s ticks from t0 - 30 to t0 + 30: steal 0.05 CPU-s per s inside [t0, t0 + 10], none outside; two pgbench
+    threads each running 0.95 s per s and waiting 0.01 s per s, 0.1 more in the window, 0.4 more in [t0 + 3, t0 + 4]."""
+    ticks, steal, run, wait = [], 0.0, 0.0, 0.0
+    for index in range(601):
+        t = T0 - 30 + index / 10
+        if index:
+            inside = T0 < t <= T0 + 10
+            steal += 0.05 * 0.1 * exp12.USER_HZ if inside else 0
+            run += 0.95e8
+            wait += (0.01 + (0.1 if inside else 0) + (0.4 if T0 + 3 < t <= T0 + 4 else 0)) * 1e8
+        ticks.append({'t': t, 'cpu': [0, 0, 0, 0, 0, 0, 0, int(round(steal))], 'g': {}, 'pgbench': pid,
+                      'th': {'7': [run, wait], '8': [run, wait]}})
+    return ticks
+
+
+@needs_venv
+class SamplerAndGate(unittest.TestCase):
+    def run_of(self, method='full'):
+        return {'t0': T0, 'stats': {'T': 10, 'worst_bucket': 3}, 'settle_span': (T0 - 20, T0 - 5), 'tail_end': T0 + 25,
+                'load_run': 'busy', 'method': method}
+
+    def test_the_samplers_view_of_a_run(self):
+        sql = [{'t': T0 - 30 + i, 'wal': {'wal_sync_time': i * 0.5},
+                'checkpointer': {'num_timed': 0, 'num_requested': (T0 - 30 + i > T0 + 0.5) + (T0 - 30 + i > T0 + 5)},
+                'autovacuum': [{'pid': 1, 'datname': 'loaddb'}] if i == 32 else []} for i in range(61)]
+        sampler = exp12.Sampler(sampler_ticks(), sql)
+        trial = {'load': {'runs': [{'run_id': 'busy', 'pid': 7}]}}
+        view = sampler.view(self.run_of(), trial)
+        self.assertAlmostEqual(view['steal_rate'], 0.05, places=3)
+        self.assertTrue(view['steal'])  # above 0.02 CPU-s per s
+        self.assertAlmostEqual(view['client_core_max'], 0.95, places=3)
+        self.assertTrue(view['client'])  # a pgbench thread above 90% of a core in the settle
+        # The threads' added wait: 0.1 x 10 + 0.4 in the window; 0.1 + 0.4 in the worst bucket (t0 + 3).
+        self.assertAlmostEqual(view['client_wait_s'], 1.4, places=3)
+        self.assertAlmostEqual(view['client_wait_worst_bucket_s'], 0.5, places=3)
+        # Two checkpoints requested between the settle's start and the tail's end: full asked for one.
+        self.assertEqual(view['checkpoints'], {'timed': 0, 'requested': 2, 'own': 1})
+        self.assertTrue(view['checkpoint'])
+        self.assertTrue(view['checkpoint'] and sampler.view(self.run_of('none'), trial)['checkpoint'])
+        self.assertTrue(view['autovacuum'] and view['autovacuum_loaddb'])
+        # Another load run's pgbench: no threads, no client readings.
+        self.assertNotIn('client_wait_s', sampler.view(self.run_of(), {'load': {'runs': [{'run_id': 'busy', 'pid': 9}]}}))
+
+    def test_the_client_wait_flags_need_a_measurable_cell(self):
+        S = session([record('v1proxy', repeat=i) for i in range(3)])
+        for r in S.runs:
+            r['stats'] = {'W': 0.4, 'worst_bucket_lost_s': 0.2}
+            r['sampler'] = {'client_wait_s': 0.1, 'client_wait_worst_bucket_s': 0.04}
+        measurable = {'W_measurable': True, 'D_measurable': True}
+        with mock.patch.object(exp12.Cells, 'cell', return_value=measurable):
+            S.client_wait_flags()
+        self.assertEqual({(r['flags']['client_wait_w'], r['flags']['client_wait_d']) for r in S.runs}, {(True, False)})
+        with mock.patch.object(exp12.Cells, 'cell', return_value={'W_measurable': False, 'D_measurable': True}):
+            S.client_wait_flags()
+        self.assertEqual({r['flags']['client_wait_w'] for r in S.runs}, {None})
+
+    def test_the_settle_gates_log_part(self):
+        gate = {'passed': True, 'unsettled': False}
+        S = session([record('full', settle={'gate': gate, 'unsettled': False})])
+        r = S.runs[0]
+        r['settle'] = {'p99_ms': 3.0, 'late_share': 0.0005, 'warmup': {'pool': {'p99_ms': 2.0}}}
+        self.assertTrue(S.gate_log_ok(r) and S.settled(r))
+        r['settle']['p99_ms'] = 4.5  # more than twice the warm-up's
+        self.assertFalse(S.settled(r))
+        r['settle'].update(p99_ms=3.0, late_share=0.002)  # more than 0.1% later than L
+        self.assertFalse(S.settled(r))
+        r['settle']['warmup'] = None  # its p99 part can't be judged; the late part still can
+        self.assertFalse(S.gate_log_ok(r))
+        r['settle']['late_share'] = 0.0
+        self.assertTrue(S.settled(r))
+        r['record']['settle']['gate'] = {'passed': False}  # the live part, capped at 60 s
+        self.assertFalse(S.settled(r))
+
+    def test_the_clock_mapping(self):
+        # Dest's settle and tail are mapped to the source's clock with the run's offset (source minus dest); a window
+        # without its source times is mapped the same way.
+        item = record('full', clock_offset_s=-0.25, settle={'started_utc': T0 - 20, 'ended_utc': T0 - 5},
+                      tail={'ended_utc': T0 + 20}, window={'t0_utc': T0, 't1_utc': T0 + 3, 'clock_offset_s': -0.25})
+        run = exp12.make_run('s', 0, item)
+        self.assertEqual((run['t0'], run['t1']), (T0 - 0.25, T0 + 2.75))
+        self.assertEqual(run['settle_span'], (T0 - 20.25, T0 - 5.25))
+        self.assertEqual(run['tail_end'], T0 + 19.75)
+
+
 # --- dry runs -----------------------------------------------------------------------------------------
 
 @needs_venv
@@ -830,6 +942,24 @@ class DryRun(unittest.TestCase):
         self.assertTrue(moderate)
         self.assertTrue(all(r['stats'] is None and r['left_out'].startswith('no numbers from the logs')
                             for r in moderate))
+
+    def test_the_specifications_run_line(self):
+        # EXP-12's "Run lines" block, split as a POSIX shell splits it (comments included), its variables substituted:
+        # the analysis's line parses with every option it names.
+        text = (Path(__file__).resolve().parents[1] / 'docs' / 'experiments' / 'EXP-12-source-slowdown.md').read_text()
+        block = re.search(r'\*\*Run lines\*\*.*?```sh\n(.*?)```', text, re.S).group(1)
+        variables, found = {}, None
+        for row in block.replace('\\\n', ' ').splitlines():
+            words = shlex.split(row, comments=True)
+            if words and all(re.match(r'^\w+=', word) for word in words):
+                variables.update(word.rstrip(';').split('=', 1) for word in words)
+                continue
+            words = shlex.split(re.sub(r'\$(\w+)', lambda m: variables[m.group(1)], row), comments=True)
+            if words[:2] == ['.venv/bin/python', 'analysis/exp12.py']:
+                found = exp12.build_parser().parse_args(words[2:])
+        self.assertIsNotNone(found)
+        self.assertEqual((found.sweeps, found.late_limit_ms, found.null_resamples, found.null_seed,
+                          found.client_wait_share), (['results/exp04/exp12-hot'], 10.0, 10_000, 121, 0.25))
 
     def test_the_csv_columns_are_the_harness_columns(self):
         added = {'sweep', 'counts', 'left_out', 'late_count_2l_s', 'worst_drop_05s', 'worst_drop_2s',

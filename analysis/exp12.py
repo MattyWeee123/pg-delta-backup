@@ -181,14 +181,6 @@ CHECKPOINT_ARMS = ('full', 'capture', 'pgdelta', 'bracket', PROXY, PROXY_S1)
 
 # --- small helpers ------------------------------------------------------------------
 
-def number(value):
-    try:
-        value = float(value)
-    except (TypeError, ValueError):
-        return None
-    return value if math.isfinite(value) else None
-
-
 def median(values):
     values = [v for v in values if v is not None]
     return statistics.median(values) if values else None
@@ -1314,7 +1306,7 @@ class Cells(CellsBase):
                 continue
             null = reduce(np.stack([item[stat] for item in nulls], axis=1).astype(float), axis=1)
             cell.update({f'{role}_{key}': value for key, value in null_summary(observed, null).items()})
-        for name in ('p50_ms', 'p95_ms', 'p99_ms', 'max_ms'):
+        for name in ('p50_ms', 'p95_ms', 'p99_ms', 'max_ms', 'over_50ms', 'over_100ms'):
             cell[f'lat_{name}'] = median(r['stats']['latency'].get(name) for r in runs)
         cell['p99_worst5s_ms'] = median(r['stats'].get('p99_worst5s_ms') for r in runs)
         cell['cpu_excess_s'] = median(r['cpu_excess'] for r in runs)
@@ -2431,11 +2423,14 @@ def flag_lines(S, cells, ctx, d1, d2, base):
         for speed in SPEEDS:
             for arm in ('pgdelta', PROXY, PROXY_S1, 'capture', 'bracket'):
                 if cells.meets((block, speed, arm)) is True:
-                    mine = (cells.cell(block, speed, arm) or {}).get('p99_worst5s_ms')
-                    full = (cells.cell(block, speed, 'full') or {}).get('p99_worst5s_ms')
+                    cell, full_cell = cells.cell(block, speed, arm) or {}, cells.cell(block, speed, 'full') or {}
+                    mine, full = cell.get('p99_worst5s_ms'), full_cell.get('p99_worst5s_ms')
                     if mine is not None and full is not None and mine > 2 * full:
                         caveats.append(f'{block} {speed_name(speed)} {arm}: {fmt(mine, 2)} ms against full\'s '
-                                       f'{fmt(full, 2)} ms')
+                                       f'{fmt(full, 2)} ms (above 50 and 100 ms: {fmt(cell.get("lat_over_50ms"), 0)} '
+                                       f'and {fmt(cell.get("lat_over_100ms"), 0)} transactions against '
+                                       f'{fmt(full_cell.get("lat_over_50ms"), 0)} and '
+                                       f'{fmt(full_cell.get("lat_over_100ms"), 0)})')
     cells.consulted = []
     lines.append('- *Latency caveat* (an arm meets O4 but the p99 of its worst 5-s span is more than twice full\'s): '
                  + ('; '.join(caveats) if caveats else 'none'))
@@ -3076,8 +3071,8 @@ def fig_timeseries(S, tag):
         top.set_title(f'busy block, {speed_name(speed) if speed else "the controls"}', fontsize=10.5)
         bottom.set_xlabel('Seconds from t0 (the first timed phase\'s start)')
         bottom.set_yscale('log')
-    axes[0][0].set_ylabel('Completed over scheduled, per second')
-    axes[1][0].set_ylabel('p99 latency per second (ms, log)')
+    axes[0][0].set_ylabel('Completed / scheduled, per s')
+    axes[1][0].set_ylabel('p99 per s (ms, log)')
     handles, labels = [], []
     for ax in axes[0]:
         for handle, label in zip(*ax.get_legend_handles_labels()):
@@ -3108,7 +3103,7 @@ def fig_loss(S, tag):
                 found = cells.compare(('busy', speed, arm)) if arm != 'full' else None
                 if found:
                     ax.plot([x - 0.35, x + 0.35], [found[role]['b_net'] + found[role]['delta']] * 2,
-                            color=COLORS['red'], lw=1.4, label='full\'s net value plus δ' if not any(
+                            color=COLORS['black'], lw=1.4, label='full\'s net value plus δ' if not any(
                                 'plus δ' in text for text in ax.get_legend_handles_labels()[1]) else None)
                 ticks.append(x)
                 labels.append(f'{arm}\n{speed_name(speed)}')
@@ -3123,7 +3118,7 @@ def fig_loss(S, tag):
     return plotting.save(fig, f'exp12-loss{tag}')
 
 
-def main(argv=None):
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--sweeps', nargs='+', default=[str(p) for p in SWEEPS],
                         help='results directories from remote.py fetch (default: exp12-hot)')
@@ -3142,6 +3137,11 @@ def main(argv=None):
     parser.add_argument('--datadir', default=str(DATA))
     parser.add_argument('--figdir', help='write figures here instead of docs/figures')
     parser.add_argument('--tag', default='', help='suffix for data and figure names (e.g. -smoke)')
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
     args = parser.parse_args(argv)
     if args.null_resamples < 100:
         parser.error('--null-resamples must be at least 100')
