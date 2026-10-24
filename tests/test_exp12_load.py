@@ -594,6 +594,8 @@ class LoadStub(T2Stub):
                                'n': n})
         if sql == measure.row_counts_sql():
             return json.dumps({table: value['rows'] for table, value in LOGICAL.items()})
+        if sql == source_cluster.LOAD_RELATIONS_SQL:
+            return json.dumps({'pgbench_accounts': {'pages': 3637}, 'load_progress': {'pages': 2}})
         return '1'
 
     def schema_hashes(self, host, port, label):
@@ -804,6 +806,7 @@ class WholeTrial(Stubbed):
         rates = {record['block']: record['load_rate'] for record in orchestrator.records}
         self.assertEqual(rates, {'busy': 6000, 'warm': 6000, 'moderate': 3000, 'calibration': None})
         self.assertTrue(trial['references']['end']['logical_match'])
+        self.assertEqual(trial['references']['end']['loaddb_growth'], 0.0)
         self.assertTrue(trial['snapshot']['end_match'])
         self.assertEqual(trial['load_checks']['statuses'], {'pass': 10})
 
@@ -964,6 +967,58 @@ class WholeTrial(Stubbed):
         row = measure.summary_row(record)
         self.assertEqual((row['block'], row['load_rate'], row['window_buckets']), ('busy', 6000, None))
 
+    def test_an_eviction_that_leaves_more_than_1_percent_runs_again_after_a_sync(self):
+        class Sticky(LoadStub):
+            readings = 0
+
+            def _source_agent(self, *args, timeout=600):
+                if args[0] == 'fincore' and len(args) > 2:  # a run's reading, not step 6's probe
+                    self.readings += 1
+                    share = 0.03 if self.readings == 1 else 0.0
+                    self.at('source', 'agent fincore')
+                    return {'paths': {path: {'resident_share': 1.0 if '16384' in path else share} for path in args[1:]}}
+                return super()._source_agent(*args, timeout=timeout)
+
+        orchestrator, _ = self.trial(cls=Sticky)
+        cache = orchestrator.records[0]['source_untimed']['cache']
+        self.assertTrue(measure.cache_flag(cache['first_fincore'], warm=False))
+        self.assertIn('evicted_again', cache)
+        self.assertFalse(cache['cache_flag'])
+        self.assertNotIn('evicted_again', orchestrator.records[1]['source_untimed']['cache'])
+        events = [what for kind, what, _ in orchestrator.timeline if what in ('agent evict', 'agent fincore')]
+        first = events.index('agent evict')  # after step 6's probe
+        self.assertEqual(events[first:first + 5], ['agent evict', 'agent fincore', 'agent evict', 'agent fincore',
+                                                   'agent evict'])
+
+    def test_a_check_that_times_out_leaves_the_output_unverified_and_an_error_from_the_copy_makes_it_wrong(self):
+        class Flaky(LoadStub):
+            calls = 0
+
+            def query(self, sql, *, host, port, log_name, timeout=7200, database='postgres'):
+                if sql == measure.load_oracle_sql() and host != self.source.ip:
+                    self.calls += 1
+                    if self.calls == 1:
+                        raise subprocess.TimeoutExpired(['psql'], 7200)
+                    if self.calls == 2:
+                        raise run_exp04.CommandError('psql failed (1): ERROR:  invalid page in block 7')
+                return super().query(sql, host=host, port=port, log_name=log_name, timeout=timeout,
+                                     database=database)
+
+        orchestrator, trial = self.trial(cls=Flaky)
+        live = [record for record in orchestrator.records if 'oracle' in (record.get('verification') or {})]
+        first, second = live[0], live[1]
+        self.assertEqual(first['verification']['oracle']['atomic'], 'unverified')
+        self.assertEqual((first['verification']['oracle']['cut'], first['status']), ('unverified', 'unverified'))
+        self.assertEqual((second['verification']['oracle']['atomic'], second['status']), ('wrong', 'fail'))
+        self.assertIn('atomic', second['error'])
+        self.assertEqual(trial['status'], 'fail')
+
+    def test_without_the_sampler(self):
+        orchestrator, trial = self.trial(['--sampler-interval-s', '0'])
+        self.assertEqual(trial['status'], 'pass')
+        self.assertIsNone(trial['load']['sampler'])
+        self.assertNotIn('agent sampler', [what for _, what, _ in orchestrator.timeline])
+
     def test_an_unsettled_settle_is_flagged_and_the_window_still_starts(self):
         class Slow(LoadStub):
             def __init__(self, *args):
@@ -1024,6 +1079,107 @@ class CommandLines(Stubbed):
         send = orchestrator.pgdelta_send_argv('pgdelta_direct_inplace',
                                               orchestrator.method_paths('pgdelta_direct_inplace'))
         self.assertEqual(send[send.index('--source') + 1], orchestrator.source_data)
+
+    def test_the_window_mapped_to_the_sources_clock_with_a_known_offset(self):
+        orchestrator = self.orchestrator()
+        orchestrator.clock_offset_s = -0.0035  # the source's clock 3.5 ms behind dest's
+        phases = {'receiver_capture': {'started_utc': EPOCH + 10.0, 'ended_utc': EPOCH + 14.0},
+                  'transfer': {'started_utc': EPOCH + 14.12, 'ended_utc': EPOCH + 20.0}}
+        window = orchestrator.window(phases)
+        self.assertEqual((window['t0_utc'], window['t1_utc']), (EPOCH + 10.0, EPOCH + 20.0))
+        self.assertAlmostEqual(window['t0_source_utc'], EPOCH + 9.9965, places=6)
+        self.assertAlmostEqual(window['t1_source_utc'], EPOCH + 19.9965, places=6)
+        self.assertEqual(window['tail_s'], 10.0)
+        # Staged pgdelta's coverage window is its capture's; full's its phase's.
+        record = {'phases': {'receiver_capture': {'parts': {'capture': {'started_utc': EPOCH + 10.0,
+                                                                         'wall_seconds': 4.0}}}}}
+        self.assertEqual(orchestrator.coverage_window('pgdelta', record), [EPOCH + 10.0, EPOCH + 14.0])
+        self.assertEqual(orchestrator.coverage_window('full', {'phases': {'transfer': phases['transfer']}}),
+                         [EPOCH + 14.12, EPOCH + 20.0])
+
+    def test_execute_writes_the_pins_and_refuses_what_exp12_cannot_run(self):
+        class Executing(LoadStub):
+            versions = {'postgres': 'postgres (PostgreSQL) 17.11', 'pg_dump': 'pg_dump (PostgreSQL) 17.11',
+                        'pgbench': 'pgbench (PostgreSQL) 17.11', 'pg_amcheck': 'pg_amcheck (PostgreSQL) 17.11'}
+            dest_versions = versions
+
+            def _source_agent(self, *args, timeout=600):
+                if args[0] == 'iface':
+                    return {'iface': 'ens4'}
+                return super()._source_agent(*args, timeout=timeout)
+
+            def environment(self):
+                common = {'deployed': {'tree_sha256': 'x'}, 'strace': 'strace -- version 6.1',
+                          'data_mount': '/dev/md127 ext4 rw,noatime 1.5T', 'pg_basebackup_sync_method': True}
+                return {'source': {**common, 'postgresql': self.versions, 'zstd': 'zstd v1.5.4',
+                                   'fincore': 'fincore from util-linux 2.38.1', 'chrony': 'Reference ID ...'},
+                        'dest': {**common, 'postgresql': self.dest_versions}}
+
+            def check_pgdelta_jobs(self):
+                return {}
+
+            def run_trial(self, index, pattern, fraction):
+                return {'trial_id': f'{index:02d}-{pattern}', 'status': 'pass'}
+
+        def execute(cls, extra=()):
+            with tempfile.TemporaryDirectory() as tmp:
+                orchestrator = cls(tmp, self.clock, ['--patterns', 'hot', '--disk-test-mib', '0', '--idle-seconds', '0',
+                                                     '--phase-floor-repeats', '0', *extra])
+                self.addCleanup(orchestrator.pool.shutdown)
+                route = mock.Mock(stdout='10.0.0.12 dev ens4 src 10.0.0.13 uid 1000\n', returncode=0)
+                with mock.patch.object(run_exp04.subprocess, 'run', return_value=route), \
+                        mock.patch.object(orchestrator.source, 'open'), mock.patch.object(orchestrator.source, 'close'):
+                    code = orchestrator.execute()
+                return code, json.loads((orchestrator.out / 'run.json').read_text())
+
+        code, run = execute(Executing, ['--calibration-repeats', '2', '--calibration-methods',
+                                        'full,pgdelta_direct_inplace,burn4'])
+        self.assertEqual(code, 0)
+        self.assertEqual(set(run['method_flags']), {'none', 'capture', 'bracket', 'full', 'pgdelta', 'v1proxy',
+                                                    'v1proxy_s1', 'pgdelta_direct_inplace', 'burn4', 'pause2'})
+        self.assertEqual(run['method_flags']['v1proxy_s1']['send'], ['--jobs', '1', '--source-kind', 'datadir'])
+        self.assertEqual(run['t10a']['rates']['busy'], 6000)
+        self.assertEqual(run['t10a']['controls'], ['pause2', 'burn4'])
+        self.assertIn('settle', run['t10a']['timeline'])
+        self.assertEqual(run['t10a_preflight']['versions']['source']['pg_dump'], 'pg_dump (PostgreSQL) 17.11')
+        self.assertEqual(run['t2_preflight']['writeback_defaults']['vm.dirty_background_bytes'], 0)
+        self.assertEqual(run['idle_noise_bytes'], 0)
+
+        class Older(Executing):
+            dest_versions = {**Executing.versions, 'pg_dump': 'pg_dump (PostgreSQL) 17.10'}
+
+        with self.assertRaises(SystemExit) as refused:
+            execute(Older)
+        self.assertIn('one minor version', str(refused.exception))
+
+        class NoZstd(Executing):
+            def environment(self):
+                env = super().environment()
+                env['source']['zstd'] = None
+                return env
+
+        with self.assertRaises(SystemExit) as refused:
+            execute(NoZstd)
+        self.assertIn('zstd', str(refused.exception))
+        with self.assertRaises(SystemExit) as refused:
+            execute(Executing, ['--load-rate', '0'])
+        self.assertIn('R_busy', str(refused.exception))
+
+    def test_the_controls_record_the_agents_signal_times(self):
+        orchestrator = self.orchestrator()
+        orchestrator.load_current, orchestrator.load_rate = {'run_id': 'busy'}, 6000
+        orchestrator.database_oids = {'postgres': 5, 'loaddb': 16384}
+        orchestrator.current_trial = {'runs': [], 'load': {'restarts': [], 'warmups': []}}
+        orchestrator.b0_digest, orchestrator.b0_stat = fake_digest(orchestrator.b0), {}
+        link = {'block': 'busy', 'source_cache': 'cold', 'control_slot': 'busy_start'}
+        record = orchestrator.run_method({'pattern': 'hot', 'fraction': 0.01, 'scale': 70}, 0,
+                                         measure.parse_speed('unthrottled'), link, 'pause2', 0, ['pause2'])
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        phase = record['phases'][measure.CONTROL_PHASE]
+        self.assertEqual(set(phase['control']), {'sigstop_utc', 'sigcont_utc'})
+        self.assertEqual(record['tool_reported']['control'], phase['control'])
+        self.assertEqual(phase['commands'][0]['argv'][1:3], ['load-pause', '2.0'])
+        self.assertEqual(record['control_slot'], 'busy_start')
 
     def test_run_json_holds_the_load_and_its_blocks(self):
         orchestrator = self.orchestrator(extra_args=['--moderate-rate', '3000', '--moderate-repeats', '3',
@@ -1147,6 +1303,478 @@ class redirect_stderr_quiet:
     def __exit__(self, *exc):
         self.patch.stop()
         return False
+
+
+# --- the agent's commands ----------------------------------------------------------------------
+
+def agent_call(*argv) -> dict:
+    """agent.py's command in this process, its result line parsed."""
+    out = io.StringIO()
+    with redirect_stdout(out):
+        agent.main(list(argv))
+    return run_exp04.agent_result(out.getvalue())
+
+
+class AgentCommands(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def tree(self):
+        for name, size in (('base/5/1', 8192), ('base/5/2', 100), ('base/5/pg_internal.init', 10), ('PG_VERSION', 3)):
+            path = self.root / 'data' / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b'x' * size)
+        return self.root / 'data'
+
+    def test_evict_advises_every_file_but_the_excluded(self):
+        data = self.tree()
+        advised = []
+        with mock.patch.object(agent.os, 'posix_fadvise', create=True,
+                               side_effect=lambda fd, offset, length, advice: advised.append((offset, length, advice))), \
+                mock.patch.object(agent.os, 'POSIX_FADV_DONTNEED', 4, create=True):
+            result = agent_call('evict', str(data / 'base'), '--exclude', 'pg_internal.init')
+        self.assertEqual((result['files'], result['bytes']), (2, 8292))
+        self.assertEqual(advised, [(0, 0, 4), (0, 0, 4)])
+        with mock.patch.object(agent, 'os', mock.Mock(spec=['path'])), self.assertRaises(SystemExit):
+            agent.cmd_evict(Namespace(paths=[str(data)], exclude=[], sync=False))
+
+    def test_fincore_per_path_through_util_linuxs_fincore(self):
+        data = self.tree()
+        stub = self.root / 'bin' / 'fincore'
+        stub.parent.mkdir()
+        # util-linux 2.38's fincore --json --bytes: each file resident in full but PG_VERSION.
+        stub.write_text('#!/bin/sh\nshift 2\nprintf \'{"fincore": [\'\nsep=""\nfor f in "$@"; do\n'
+                        '  size=$(wc -c < "$f" | tr -d " ")\n'
+                        '  res=$size; case "$f" in *PG_VERSION) res=0;; esac\n'
+                        '  printf \'%s{"res": %s, "pages": 1, "size": %s, "file": "%s"}\' "$sep" "$res" "$size" "$f"\n'
+                        '  sep=", "\ndone\nprintf \']}\\n\'\n')
+        stub.chmod(0o755)
+        with mock.patch.dict(os.environ, {'PATH': f'{stub.parent}:{os.environ["PATH"]}'}), \
+                mock.patch.object(agent, 'FINCORE_BATCH', 2):
+            result = agent_call('fincore', str(data), str(data / 'base'))
+        self.assertEqual(result['paths'][str(data)], {'files': 4, 'bytes': 8305, 'resident_bytes': 8302,
+                                                      'resident_share': round(8302 / 8305, 6)})
+        self.assertEqual(result['paths'][str(data / 'base')]['resident_share'], 1.0)
+
+    def test_burn_runs_busy_processes_for_its_seconds(self):
+        result = agent_call('burn', '--procs', '2', '--seconds', '0.3')
+        self.assertEqual((result['procs'], result['nice']), (2, 0))
+        self.assertGreater(result['cpu_seconds'], 0.3)
+        self.assertGreaterEqual(result['ended_utc'] - result['started_utc'], 0.3)
+
+    def registry(self, pid, run_id='busy'):
+        load = self.root / 'shm'
+        measure.write_load_state(load, {'runs': [{'run_id': run_id, 'pid': pid, 'threads': 1}], 'current': run_id})
+        return load
+
+    def test_load_pause_stops_and_continues_the_loads_pgbench(self):
+        process = subprocess.Popen([sys.executable, '-c', 'import time\nwhile True: time.sleep(0.01)'])
+        self.addCleanup(process.kill)
+        load = self.registry(process.pid)
+        result = agent_call('load-pause', '0.3', '--load-dir', str(load))
+        self.assertEqual((result['pid'], result['run_id']), (process.pid, 'busy'))
+        self.assertGreaterEqual(result['sigcont_utc'][0] - result['sigstop_utc'][1], 0.29)
+        self.assertLessEqual(result['sigstop_utc'][0], result['sigstop_utc'][1])
+        self.assertIsNone(process.poll())  # running again
+        stopped = []
+        with mock.patch.object(agent.os, 'kill', side_effect=lambda pid, sig: stopped.append(sig)), \
+                mock.patch.object(agent.time, 'sleep', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                agent.cmd_load_pause(Namespace(load_dir=str(load), seconds=2.0))
+        self.assertEqual(stopped, [signal.SIGSTOP, signal.SIGCONT])  # SIGCONT whatever happens
+
+    def test_the_settle_gate_on_the_loads_progress_lines(self):
+        load = self.registry(1)
+        now = time.time()
+        lines = ''.join(f'progress: {now - index:.3f} s, {tps} tps, lat 1.000 ms stddev 0.500, 0 failed, lag 0.300 ms\n'
+                        for index, tps in enumerate([6000] * 11))
+        measure.progress_path(load, 'busy').write_text('pgbench: setting random seed to 1\n' + lines)
+        result = agent_call('settle-gate', '--rate', '6000', '--load-dir', str(load), '--min-s', '0', '--max-s', '5')
+        self.assertTrue(result['passed'])
+        self.assertFalse(result['unsettled'])
+        self.assertEqual(result['lines'], 10)
+        slow = lines.replace(' 6000 tps', ' 5000 tps', 1)
+        measure.progress_path(load, 'busy').write_text(slow)
+        result = agent_call('settle-gate', '--rate', '6000', '--load-dir', str(load), '--min-s', '0', '--max-s', '0')
+        self.assertTrue(result['unsettled'])
+        self.assertEqual(result['checks'], 1)
+
+    def test_the_clock_probe_over_loopback(self):
+        port = free_port()
+        listener = {}
+        thread = threading.Thread(target=lambda: listener.update(result=agent_call(
+            'clock-probe', '--listen', f'127.0.0.1:{port}', '--timeout', '20')))
+        with redirect_stdout(io.StringIO()):
+            thread.start()
+            for _ in range(200):
+                try:
+                    result = agent_call('clock-probe', '--connect', f'127.0.0.1:{port}', '--samples', '20')
+                    break
+                except ConnectionRefusedError:
+                    time.sleep(0.02)
+            thread.join(20)
+        self.assertLess(abs(result['offset_s']), 0.01)
+        self.assertLess(result['rtt_s'], 0.05)
+        self.assertEqual((result['samples'], listener['result']['answered']), (20, 20))
+
+    def test_compress_leaves_the_registry(self):
+        if not shutil.which('zstd'):
+            self.skipTest('no zstd here')
+        load = self.registry(1)
+        (load / 'busy.1').write_text(PGBENCH_LOG * 100)
+        (load / 'sampler').mkdir()
+        (load / 'sampler' / 'sampler.jsonl').write_text('{}\n' * 100)
+        result = agent_call('compress', str(load), '--keep', measure.LOAD_STATE)
+        self.assertEqual(result['files'], 2)
+        self.assertTrue((load / 'busy.1.zst').exists() and (load / measure.LOAD_STATE).exists())
+        self.assertFalse((load / 'busy.1').exists())
+        self.assertEqual(measure.count_commits([measure.existing_log(load, 'busy.1')]), {0: 200, 1: 100})
+
+    def test_run_tee_copies_the_output_as_it_comes_and_exits_with_the_commands_code(self):
+        log = self.root / 'tee.log'
+        result = subprocess.run([sys.executable, str(Path(agent.__file__)), 'run', '--tee', '--log', str(log), '--',
+                                 'sh', '-c', 'echo first; echo second; exit 3'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 3)
+        lines = result.stdout.splitlines()
+        self.assertEqual(lines[:2], ['first', 'second'])
+        self.assertEqual(run_exp04.agent_result(result.stdout)['exit_code'], 3)
+        self.assertEqual(log.read_text(), 'first\nsecond\n')
+
+    def test_env_records_the_clocks_and_the_new_tools(self):
+        for tool in ('pgbench', 'pg_amcheck', 'pg_dump', 'pg_test_fsync'):
+            self.assertIn(tool, agent.PG_TOOLS)
+        with mock.patch.object(agent, 'metadata', return_value=None), \
+                mock.patch.object(agent, 'text_of', side_effect=lambda argv, **kwargs: ' '.join(argv)):
+            env = agent.cmd_env(Namespace(iface='lo', bin_dir='/b', pg_probackup='/p'))
+        self.assertEqual(env['chrony'], 'chronyc tracking')
+        self.assertEqual((env['zstd'], env['fincore']), ('zstd --version', 'fincore --version'))
+        self.assertEqual(env['postgresql']['pg_amcheck'], '/b/pg_amcheck --version')
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        return probe.getsockname()[1]
+
+
+class FakeProc:
+    """A /proc tree with what the sampler reads: the aggregate CPU line and run queue, the disks, and processes."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        root.mkdir(parents=True, exist_ok=True)
+        self.set_stat(1000, 3)
+        (root / 'diskstats').write_text(' 9 127 md127 16000 0 4096000 0 32000 0 16384000 0 0 0 0\n'
+                                        ' 7 0 loop0 52 0 2214 13 0 0 0 0 0 36 13\n')
+
+    def set_stat(self, user, running):
+        (self.root / 'stat').write_text(f'cpu  {user} 0 300 50000 40 0 60 7 0 0\nprocs_running {running}\n')
+
+    def process(self, pid, comm, cmdline, ticks, ppid=1, threads=None):
+        directory = self.root / str(pid)
+        directory.mkdir(exist_ok=True)
+        fields = ['S', str(ppid)] + ['0'] * 9 + [str(ticks), '0'] + ['0'] * 10
+        (directory / 'stat').write_text(f'{pid} ({comm}) {" ".join(fields)}\n')
+        (directory / 'cmdline').write_text(cmdline.replace(' ', '\0') + '\0')
+        for tid, (run, wait) in (threads or {}).items():
+            (directory / 'task' / str(tid)).mkdir(parents=True, exist_ok=True)
+            (directory / 'task' / str(tid) / 'schedstat').write_text(f'{run} {wait} 10\n')
+
+
+class SamplerTicks(unittest.TestCase):
+    def test_groups_threads_and_disks_from_proc(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc = FakeProc(Path(tmp) / 'proc')
+            load = Path(tmp) / 'shm'
+            measure.write_load_state(load, {'runs': [{'run_id': 'busy', 'pid': 100, 'threads': 1}],
+                                            'current': 'busy'})
+            proc.process(100, 'pgbench', 'pgbench -n -M prepared', 50, threads={100: (5, 1), 101: (900, 40)})
+            proc.process(200, 'postgres', 'postgres: checkpointer', 10)
+            proc.process(201, 'postgres', 'postgres: study loaddb [local] UPDATE', 70)
+            proc.process(300, 'sshd', 'sshd: bench', 5)
+            sampler = agent.Sampler(Path(tmp), load, proc=proc.root)
+            first = sampler.sample()
+            self.assertEqual(first['g'], {})  # the processes already there count from now on
+            self.assertEqual(first['run'], 3)
+            self.assertEqual(first['th'], {'100': [5, 1], '101': [900, 40]})
+            self.assertEqual(first['d'], {'md127': [16000, 4096000, 32000, 16384000]})
+            # A tick later: pgbench used 4 ticks, a backend 6; a pgdelta sender and its spawned worker appear.
+            proc.process(100, 'pgbench', 'pgbench -n -M prepared', 54, threads={100: (5, 1), 101: (950, 70)})
+            proc.process(201, 'postgres', 'postgres: study loaddb [local] UPDATE', 76)
+            proc.process(400, 'python3', 'python3 -m pgdelta send --source /w/snap', 30)
+            proc.process(401, 'python3', 'python3 -c from multiprocessing.spawn import spawn_main', 12, ppid=400)
+            proc.set_stat(1100, 7)
+            sampler.rescanned -= agent.SAMPLER_RESCAN  # its next tick rescans
+            second = sampler.sample()
+            self.assertEqual(second['g'], {'pgbench': 4, 'backend': 6, 'pgdelta': 42})
+            self.assertEqual(second['th']['101'], [950, 70])
+            self.assertEqual(second['cpu'][0], 1100)
+            self.assertEqual(second['pgbench'], 100)
+            self.assertNotIn(300, sampler.groups)  # sshd isn't followed
+
+
+# --- on a real PostgreSQL 17 ---------------------------------------------------------------------
+
+try:
+    from pgdelta_cluster import PG_BIN
+except ImportError:  # pragma: no cover
+    PG_BIN = Path('/opt/homebrew/opt/postgresql@17/bin')
+LOAD_TOOLS = ('initdb', 'pg_ctl', 'psql', 'pgbench', 'pg_basebackup', 'pg_amcheck', 'pg_dump', 'pg_verifybackup',
+              'pg_controldata')
+needs_pg = unittest.skipUnless(all((PG_BIN / tool).exists() for tool in LOAD_TOOLS),
+                               f'PostgreSQL 17 binaries ({", ".join(LOAD_TOOLS)}) not found in {PG_BIN}')
+ENV = dict(os.environ, LC_ALL='C', LANG='C')
+
+
+def cluster_call(*argv) -> dict:
+    """source_cluster.py's command in this process, its result line parsed."""
+    out = io.StringIO()
+    with redirect_stdout(out):
+        source_cluster.main([str(part) for part in argv])
+    return run_exp04.agent_result(out.getvalue())
+
+
+class LocalSource:
+    """A source cluster as source_cluster.py keeps one: ROOT/data, its socket in ROOT/s (port 5432, socket only), user
+    study, data checksums, wal_level replica; the benchmark's pgbench tables and an events table in postgres, and
+    loaddb with 4 clients' rows. Under /tmp: a socket path must stay under 104 bytes."""
+
+    CLIENTS = 4
+
+    def __init__(self):
+        self.root = Path(tempfile.mkdtemp(prefix='x12', dir='/tmp'))
+        self.load_dir = self.root / 'shm'
+        subprocess.run([str(PG_BIN / 'initdb'), '-D', str(self.root / 'data'), '-U', 'study', '--auth-local=trust',
+                        '--data-checksums', '-E', 'UTF8', '--locale=C', '--no-sync'], check=True, capture_output=True,
+                       env=ENV, timeout=120)
+        with open(self.root / 'data' / 'postgresql.conf', 'a') as stream:
+            stream.write("listen_addresses = ''\nwal_level = replica\nmax_wal_senders = 10\nfsync = off\n")
+        self.common = ['--root', str(self.root), '--bin-dir', str(PG_BIN)]
+        cluster_call('start', *self.common, '--log-dir', self.root / 'logs')
+        self.sql('postgres', 'SELECT 1')
+        subprocess.run([str(PG_BIN / 'pgbench'), '-i', '-q', '-s', '1', '-h', str(self.root / 's'), '-U', 'study',
+                        'postgres'], check=True, capture_output=True, env=ENV, timeout=300)
+        self.sql('postgres', 'CREATE TABLE events (id bigint PRIMARY KEY, payload text); INSERT INTO events '
+                             "SELECT g, md5(g::text) FROM generate_series(1, 1000) g;")
+        self.setup = cluster_call('loaddb-setup', *self.common, '--log-dir', self.root / 'logs', '--load-dir',
+                                  self.load_dir, '--clients', self.CLIENTS)
+
+    def sql(self, database, statement):
+        return subprocess.run([str(PG_BIN / 'psql'), '-X', '-A', '-t', '-q', '-v', 'ON_ERROR_STOP=1', '-h',
+                               str(self.root / 's'), '-U', 'study', '-d', database, '-c', statement], check=True,
+                              capture_output=True, text=True, env=ENV, timeout=120).stdout.strip()
+
+    def load(self, *argv):
+        return cluster_call(*argv[:1], *self.common, '--load-dir', self.load_dir, *argv[1:])
+
+    def pgbench(self):
+        return ['--clients', str(self.CLIENTS), '--threads', '2', '--seed', '7']
+
+    def close(self):
+        state = measure.read_load_state(self.load_dir)
+        current = measure.load_run(state)
+        if current is not None and source_cluster.process_alive(current['pid']):
+            os.kill(current['pid'], signal.SIGKILL)
+        subprocess.run([str(PG_BIN / 'pg_ctl'), '-D', str(self.root / 'data'), '-m', 'immediate', '-w', 'stop'],
+                       capture_output=True, env=ENV, timeout=60)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+@needs_pg
+class TheLoadOnARealCluster(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source = LocalSource()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.source.close()
+
+    def test_1_loaddb(self):
+        setup = self.source.setup
+        self.assertEqual(setup['settings'], measure.LOAD_SERVER_CONFIG)
+        relations = setup['relations']
+        self.assertEqual(relations['load_progress']['pages'], LocalSource.CLIENTS)  # one row per page
+        self.assertEqual(relations['pgbench_accounts']['options'], ['fillfactor=90', 'autovacuum_enabled=false'])
+        self.assertEqual(relations['load_progress']['options'], ['fillfactor=10', 'autovacuum_enabled=false'])
+        # And off on every TOAST table they have (load_progress's 900-byte filler gives it one).
+        tables = ', '.join(f"'{table}'" for table in measure.LOAD_TABLES)
+        self.assertEqual(self.source.sql('loaddb', "SELECT count(*), count(*) FILTER (WHERE 'autovacuum_enabled=false' "
+                                                   "= ANY(t.reloptions)) FROM pg_class c JOIN pg_class t ON t.oid = "
+                                                   f"c.reltoastrelid WHERE c.relname IN ({tables})"), '1|1')
+        self.assertEqual(setup['counters']['n'], {str(client): 0 for client in range(LocalSource.CLIENTS)})
+        self.assertEqual((setup['counters']['sum_n'], setup['counters']['sum_abalance']), (0, 0))
+        self.assertIn('loaddb', setup['databases'])
+        self.assertEqual(self.source.sql('loaddb', "SELECT extname FROM pg_extension WHERE extname = 'amcheck'"),
+                         'amcheck')
+
+    def test_2_the_scripts_invariant_under_concurrent_clients(self):
+        source = self.source
+        capacity = source.load('load-capacity', *source.pgbench(), '--run-id', 'capacity', '--warmup-s', '1',
+                               '--seconds', '2', '--runs', '1')
+        self.assertTrue(capacity['all_complete'])
+        self.assertGreater(capacity['capacity_tps'], 0)
+        run = source.load('load-start', *source.pgbench(), '--run-id', 'busy', '--rate', '400', '--duration-s', '600')
+        self.assertEqual(run['start']['n'], capacity['runs'][-1]['stop']['n'])  # the offset: where the last stopped
+        time.sleep(1.5)
+        paused = agent_call('load-pause', '0.5', '--load-dir', str(source.load_dir))
+        self.assertEqual(paused['pid'], run['pid'])
+        time.sleep(1.0)
+        status = cluster_call('load-status', '--load-dir', source.load_dir)
+        self.assertTrue(status['running'])
+        stopped = source.load('load-stop')
+        self.assertEqual(stopped['how'], 'SIGALRM')
+        self.assertTrue(stopped['complete'], stopped['mismatched'])  # SIGALRM leaves a complete log
+        self.assertGreater(stopped['commits_total'], 400)
+        self.assertFalse(stopped['aborted'])
+        check = source.load('load-check')
+        self.assertTrue(check['ok'], check)
+        self.assertEqual(check['sum_abalance'], check['sum_n'])
+        self.assertEqual(check['expected_commits'], sum(r['commits_total'] for r in measure.read_load_state(
+            source.load_dir)['runs']))
+        # Rolled-back transactions ran, and none leaked: the oracle's invariant holds on the live source.
+        logs = [source.load_dir / name for name in stopped['log_files']]
+        scripts = [measure.parse_pgbench_line(line)[3] for path in logs for line in path.read_text().splitlines()]
+        self.assertIn(measure.ABORT_SCRIPT, scripts)
+        answer = json.loads(source.sql('loaddb', measure.load_oracle_sql()))
+        self.assertTrue(measure.atomicity(answer)['ok'], answer)
+        # pause2's gap is in the log: no completion while pgbench was stopped.
+        ends = sorted(measure.transaction_times(measure.parse_pgbench_line(line))[2] / 1e6
+                      for path in logs for line in path.read_text().splitlines())
+        stop, cont = paused['sigstop_utc'][1], paused['sigcont_utc'][0]
+        self.assertFalse([end for end in ends if stop + 0.005 < end < cont])
+        # A second start while one runs is refused.
+        source.load('load-start', *source.pgbench(), '--run-id', 'again', '--rate', '100', '--duration-s', '600')
+        with self.assertRaises(SystemExit):
+            source.load('load-start', *source.pgbench(), '--run-id', 'again2', '--rate', '100')
+        source.load('load-stop')
+
+    def test_3_backup_hold_closes_on_stdin(self):
+        script = Path(source_cluster.__file__)
+        for close in ('line', 'end of stdin'):
+            with self.subTest(close=close):
+                hold = subprocess.Popen([sys.executable, str(script), 'backup-hold', *self.source.common, '--label',
+                                         't10a'], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=ENV)
+                line = hold.stdout.readline()
+                self.assertTrue(line.startswith(source_cluster.BACKUP_STARTED), line)
+                start = json.loads(line[len(source_cluster.BACKUP_STARTED):])
+                # Backup mode is held: its session shows in pg_stat_activity until the stop.
+                self.assertEqual(self.source.sql('postgres', "SELECT count(*) FROM pg_stat_activity WHERE query "
+                                                             "LIKE 'SELECT pg_backup_start%'"), '1')
+                if close == 'line':
+                    hold.stdin.write('stop\n')
+                hold.stdin.close()
+                result = run_exp04.agent_result(hold.stdout.read())
+                self.assertEqual(hold.wait(30), 0)
+                self.assertEqual(result['stop']['by'], close)
+                self.assertEqual(result['start']['lsn'], start['lsn'])
+                self.assertGreaterEqual(measure.parse_lsn(result['stop']['lsn']), measure.parse_lsn(start['lsn']))
+                self.assertTrue(result['one_session'])
+
+    def test_4_two_schema_dumps_of_one_state_hash_equal(self):
+        def dump(*extra):
+            return subprocess.run([str(PG_BIN / 'pg_dump'), '--schema-only', *extra, '-h', str(self.source.root / 's'),
+                                   '-U', 'study', '-d', 'loaddb'], check=True, capture_output=True, text=True,
+                                  env=ENV).stdout
+
+        key = measure.schema_dump_argv('pg_dump', host='h', port=1, user='u', database='d')[2]
+        first, second = dump(key), dump(key)
+        self.assertEqual(first, second)
+        self.assertIn(r'\restrict exp12', first)
+        if r'\restrict' in dump():  # PostgreSQL 17.6 and later: a random key without --restrict-key
+            self.assertNotEqual(dump(), dump())
+
+    def test_5_the_snapshot(self):
+        snapshot = self.source.root / 'snap'
+        copy = ('cp', '-a') if sys.platform == 'darwin' else source_cluster.SNAPSHOT_COPY  # BSD cp has no --reflink
+        with mock.patch.object(source_cluster, 'SNAPSHOT_COPY', copy):
+            result = cluster_call('snapshot', *self.source.common, '--log-dir', self.source.root / 'logs',
+                                  '--snapshot', snapshot)
+        self.assertEqual(result['stop']['state'], 'shut down')
+        self.assertTrue(result['restart']['started'])
+        self.assertFalse((snapshot / 'postmaster.pid').exists())
+        digest = result['digest']['digest']
+        self.assertIn('global/pg_control', digest['entries'])
+        self.assertEqual(digest['files'], len(result['digest']['selected']))
+        self.assertEqual(self.source.sql('postgres', 'SELECT 1'), '1')  # running again
+
+
+@needs_pg
+class TheOracleOnRealCopies(unittest.TestCase):
+    """A good full copy taken under the load passes every check; each of the seven negative controls fails through
+    its own check (smoke item 5), with the cut and coverage judged from the load's logs."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.source = source = LocalSource()
+        cls.work = Path(tempfile.mkdtemp(prefix='x12w', dir='/tmp'))
+        args = run_exp04.parse_args([
+            '--source-ip', str(source.root / 's'), '--out', str(cls.work / 'out'), '--work-dir', str(cls.work / 'w'),
+            '--bin-dir', str(PG_BIN), '--gnu-time', 'none', '--load', 'bank', '--load-rate', '300',
+            '--manifest-checksums', 'CRC32C', '--methods', 'full'])
+        cls.orchestrator = orchestrator = run_exp04.Orchestrator(args)
+        orchestrator.work.mkdir(parents=True)
+        orchestrator.outputs.mkdir(parents=True)
+        orchestrator.trial_id = 'local'
+        with mock.patch.object(run_exp04, 'log'):
+            orchestrator.take_references('start')
+            source.load('load-capacity', *source.pgbench(), '--run-id', 'capacity', '--warmup-s', '0',
+                        '--seconds', '1', '--runs', '1')
+            source.load('load-start', *source.pgbench(), '--run-id', 'busy', '--rate', '300', '--duration-s', '600')
+            time.sleep(1.0)
+            cls.result = orchestrator.run_oracle_controls()
+            time.sleep(0.5)
+            source.load('load-stop')
+            orchestrator.load_runs = measure.read_load_state(source.load_dir)['runs']
+            orchestrator.load_logs.mkdir(parents=True)
+            for run in orchestrator.load_runs:
+                for name in run['log_files']:
+                    shutil.copy(source.load_dir / name, orchestrator.load_logs / name)
+            cls.trial = {'oracle_controls': cls.result}
+            cls.finish = orchestrator.finish_load_checks(cls.trial)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.orchestrator.pool.shutdown()
+        cls.source.close()
+        shutil.rmtree(cls.work, ignore_errors=True)
+
+    def controls(self):
+        return {control['name']: control for control in self.result['controls']}
+
+    def test_the_good_copy_passes_every_check(self):
+        good = self.controls()['good']
+        self.assertTrue(good['verdict']['ok'], good['oracle'])
+        self.assertTrue(good['oracle']['static_digest'])
+        self.assertGreater(good['oracle']['amcheck_relations'], 10)
+        self.assertEqual(good['oracle']['cut'], 'ok')
+        self.assertEqual(good['oracle']['coverage'], 'ok', good['oracle'].get('coverage_detail'))
+        # The good copy's cut lies inside the logged busy run.
+        detail = good['oracle']['cut_detail']
+        self.assertIsNotNone(detail['lo_us'])
+        self.assertIsNotNone(detail['hi_us'])
+
+    def test_each_negative_control_fails_through_its_own_check(self):
+        controls = self.controls()
+        self.assertEqual(set(controls) - {'good'}, set(measure.ORACLE_CONTROLS))
+        for name, target in measure.ORACLE_CONTROLS.items():
+            with self.subTest(control=name):
+                control = controls[name]
+                self.assertTrue(control['verdict']['ok'], (control['verdict'], control['oracle'],
+                                                           control['output_start'].get('error')))
+                self.assertEqual(control['oracle'][target], 'wrong')
+
+    def test_what_each_control_shows(self):
+        controls = self.controls()
+        self.assertEqual(controls['no_wal']['oracle']['start'], 'wrong')
+        self.assertEqual(controls['n_raised']['output_start']['checks']['invariant']['difference'], -1)
+        for name in ('cut_extended', 'cut_back'):
+            self.assertEqual(controls[name]['oracle']['atomic'], 'ok')  # the balance moved with n
+        self.assertIn('invalid page', controls['heap_page']['output_start']['checks']['invariant']['error'])
+        self.assertEqual(controls['index_page']['oracle']['atomic'], 'ok')
+        self.assertEqual(controls['schema']['output_start']['checks']['schema']['differ'], ['loaddb'])
 
 
 if __name__ == '__main__':
