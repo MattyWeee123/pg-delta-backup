@@ -53,6 +53,14 @@ if ! command -v fincore >/dev/null; then
   "${APT[@]}" update
   "${APT[@]}" install --no-install-recommends util-linux-extra
 fi
+# EXP-12's smoke item 4 reads both clocks' offsets with chronyc, and steps them with it. Debian's GCE
+# image keeps time with systemd-timesyncd instead, so chrony replaces it, on Google's metadata server.
+if ! command -v chronyc >/dev/null; then
+  "${APT[@]}" update
+  "${APT[@]}" install --no-install-recommends chrony
+  echo 'server metadata.google.internal prefer iburst' > /etc/chrony/sources.d/gce.sources
+  systemctl restart chrony
+fi
 # VMs provisioned before pgbackrest and xfsprogs were (PGDG is configured above by then).
 if [ ! -x /usr/bin/pgbackrest ] || [ ! -x /usr/sbin/mkfs.xfs ]; then
   "${APT[@]}" update
