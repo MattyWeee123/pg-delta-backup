@@ -1901,7 +1901,8 @@ class ReportTotals(unittest.TestCase):
 
 # --- T3, T8a and T11: the optional methods decided on October 23, 2026 ------------
 
-NEW_METHODS = (*measure.T3_METHODS, *measure.PGDELTA_DIRECT_METHODS, *measure.PGBACKREST_METHODS)
+# T8a's are pgdelta_direct and pgdelta_direct_inplace; T2's pgdelta_direct_inplace_j8 is tested with T2's arms.
+NEW_METHODS = (*measure.T3_METHODS, 'pgdelta_direct', 'pgdelta_direct_inplace', *measure.PGBACKREST_METHODS)
 JOBS = ('--jobs', '4')
 # A per-table digest as logical_digest_sql prints it.
 LOGICAL = {'pgbench_accounts': {'rows': 500000, 'md5': 'a' * 32},
@@ -1950,7 +1951,8 @@ class NewMethodFlags(unittest.TestCase):
         self.assertEqual(set(measure.PGDELTA_METHODS),
                          {'pgdelta', 'pgdelta_1thread', *measure.T3_METHODS, *measure.PGDELTA_DIRECT_METHODS})
         self.assertEqual(set(measure.BASIS_COPY_METHODS),
-                         {'pgdelta_inplace', 'pgdelta_direct_inplace', *measure.PGBACKREST_METHODS})
+                         {'pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
+                          *measure.PGBACKREST_METHODS})
 
     def test_each_new_pgdelta_method_pins_its_flags(self):
         def receive(*middle, fsync='main', in_place=False):
@@ -2854,7 +2856,8 @@ class OutputVerification(unittest.TestCase):
         self.assertEqual([command['argv'][4] for command in record['output_stuck']['stops']], ['fast', 'immediate'])
         # No later method may start an output or reuse that path; the others run.
         drops = orchestrator.events.count('drop_caches')
-        for method in ('pgbackrest_zst', 'pgbackrest_none', 'pgdelta_direct'):
+        # Since T2 (EXP-11) the full copy's output is started too.
+        for method in ('pgbackrest_zst', 'pgbackrest_none', 'pgdelta_direct', 'full'):
             with self.subTest(method=method), mock.patch.object(run_exp04, 'Child', FakeChild):
                 later = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), method, 0, [method])
                 self.assertEqual(later['status'], 'error')
@@ -2863,8 +2866,8 @@ class OutputVerification(unittest.TestCase):
         self.assertNotIn(('source_script', ('stop-clean',)), [event[:2] for event in orchestrator.events
                                                               if isinstance(event, tuple)])
         with mock.patch.object(run_exp04, 'Child', FakeChild):
-            full = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), 'full', 0, ['full'])
-        self.assertEqual(full['status'], 'pass')
+            incremental = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), 'incremental', 0, ['incremental'])
+        self.assertEqual(incremental['status'], 'pass')
         self.assertTrue((b / 'postmaster.pid').exists())
         result = orchestrator.check_output('pgdelta_direct', orchestrator.outputs / 'other', recovery=False)
         self.assertFalse(result['ok'])

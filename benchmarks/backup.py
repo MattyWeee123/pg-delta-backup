@@ -199,7 +199,9 @@ basis_verification.
 
 
 def basebackup_command(tool, output, *, host, port, user, checksum='SHA256',
-                       checkpoint='fast', basis=None, progress=False):
+                       checkpoint='fast', basis=None, progress=False, extra=()):
+    """pg_basebackup into a plain directory, streaming WAL; `extra` options go last
+    (EXP-11's full-copy variants: --verbose, --no-sync, --sync-method=syncfs)."""
     command = [str(tool), '--pgdata', str(output), '--format', 'plain',
                '--wal-method', 'stream', '--manifest-checksums', checksum,
                '--checkpoint', checkpoint, '--host', str(host), '--port', str(port),
@@ -208,7 +210,7 @@ def basebackup_command(tool, output, *, host, port, user, checksum='SHA256',
         command += ['--incremental', str(Path(basis) / 'backup_manifest')]
     if progress:
         command.append('--progress')
-    return command
+    return command + [str(option) for option in extra]
 
 
 def verify_command(tool, output, manifest=None):

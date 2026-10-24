@@ -25,23 +25,73 @@ CPU_FIELDS = ('user', 'nice', 'system', 'idle', 'iowait', 'irq', 'softirq', 'ste
               'guest', 'guest_nice')
 # guest and guest_nice are already included in user and nice (proc(5)).
 CPU_BUSY_FIELDS = ('user', 'nice', 'system', 'irq', 'softirq', 'steal')
+# /proc/meminfo's fields kept in each snapshot (kB): what is dirty or under write-back now (EXP-11's
+# durability check (a)), and the page cache (the warm-source block).
+MEMINFO_FIELDS = ('Dirty', 'Writeback', 'Cached')
+# /proc/diskstats: the first 11 counters after major, minor and name (Documentation/admin-guide/
+# iostats.rst). Sectors are always 512 bytes there, whatever the device's own sector size.
+DISKSTATS_FIELDS = ('reads', 'reads_merged', 'sectors_read', 'read_ms', 'writes', 'writes_merged',
+                    'sectors_written', 'write_ms', 'in_flight', 'io_ms', 'weighted_io_ms')
+DISK_COUNTERS = ('reads', 'sectors_read', 'writes', 'sectors_written')
+DISK_SECTOR_BYTES = 512
+# Whole disks and md arrays, not partitions or loop devices. /data is the md array of the local
+# SSDs (infra/gcp/startup.sh): EXP-11's check (b) reads its writes.
+DISK_DEVICE = re.compile(r'^(md\d+|nvme\d+n\d+|sd[a-z]+|vd[a-z]+)$')
+DATA_ARRAY = re.compile(r'^md\d+$')
 UNTHROTTLED = 'unthrottled'
 # The default sweep.
 METHODS = ('full', 'incremental', 'pgdelta', 'rsync_8k', 'rsync_default')
 # T3 (the destination's write path): staged like pgdelta, each with one switch changed.
 T3_METHODS = ('pgdelta_gapfill_seq', 'pgdelta_seq', 'pgdelta_fsync_wb', 'pgdelta_fsync_worker',
               'pgdelta_inplace')
-# T8a: the sender reads the cleanly stopped source's data directory; no capture.
-PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace')
+# T8a: the sender reads the cleanly stopped source's data directory; no capture. T2 (EXP-11) adds
+# v1's path at 8 jobs on each end, pgdelta_direct_inplace_j8.
+PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8')
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
 PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
 # T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On
 # dest's XFS that clones B0's unchanged blocks (EXP-10); on ext4 it copies in the kernel.
 INCREMENTAL_METHODS = ('incremental', 'incremental_cfr')
 COMBINE_MODES = {'incremental': '--copy', 'incremental_cfr': '--copy-file-range'}
+# T2 (EXP-11), the fastest durable full copy. pg_basebackup's arms, each the full copy with these
+# options after the common ones (benchmarks.backup.basebackup_command's extra). Every one runs with
+# --verbose, whose stderr lines the orchestrator timestamps as they arrive (basebackup_phases),
+# never with --progress, which adds a sizing pass. full's own command line gains --verbose too.
+BASEBACKUP_VERBOSE = ('--verbose',)
+FULL_VARIANTS = {
+    'full': BASEBACKUP_VERBOSE,
+    # Not durable: a diagnostic, never a baseline, and the durability checks' negative control.
+    'full_nosync': (*BASEBACKUP_VERBOSE, '--no-sync'),
+    # PostgreSQL 17: one syncfs(2) of dest's /data instead of an fsync per file and directory.
+    'full_syncfs': (*BASEBACKUP_VERBOSE, '--sync-method=syncfs'),
+    # full on a host-tuned dest (HOST_TUNED_METHODS).
+    'full_wb': BASEBACKUP_VERBOSE,
+}
+# Arms that change kernel settings on dest for their run: set before the cache drop, reset in
+# run_method's finally. full_wb has the kernel write back while the stream arrives. Linux refuses
+# 0 written to vm.dirty_background_bytes, so the reset writes vm.dirty_background_ratio back to its
+# recorded default, which returns the bytes setting to 0.
+DIRTY_BACKGROUND_RATIO = 'vm.dirty_background_ratio'
+DIRTY_BACKGROUND_BYTES = 'vm.dirty_background_bytes'
+HOST_TUNED_METHODS = {'full_wb': {DIRTY_BACKGROUND_BYTES: 64 << 20}}
+# Not durable when the clock stops.
+NON_DURABLE_METHODS = ('full_nosync',)
+# The released parallel copy: pg_probackup catchup -b FULL from the live source over SSH, on dest,
+# then a timed sync -f of the output in the same phase (its own flush is incomplete).
+PROBACKUP_VARIANTS = {'probackup8': {'jobs': 8}, 'probackup4': {'jobs': 4}}
+PROBACKUP_METHODS = tuple(PROBACKUP_VARIANTS)
+# The bound: a range-parallel copier built in the harness (experiments/network/parcopy.py), reading
+# the cleanly stopped source as v1 does, over 8 or 4 TCP streams.
+PARCOPY_VARIANTS = {'parcopy8': {'streams': 8}, 'parcopy4': {'streams': 4}}
+PARCOPY_METHODS = tuple(PARCOPY_VARIANTS)
+# The arms EXP-11 adds. Selecting any of them makes a run T2's: it needs CRC32C manifests, and each
+# trial takes the reference digests and runs the probes (run_exp04.Orchestrator.run_trial).
+T2_METHODS = ('full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS, *PARCOPY_METHODS,
+              'pgdelta_direct_inplace_j8')
 # Variants run only when named in --methods.
 OPTIONAL_METHODS = ('pgdelta_1thread', *T3_METHODS, 'incremental_cfr', *PGDELTA_DIRECT_METHODS,
-                    *PGBACKREST_METHODS)
+                    *PGBACKREST_METHODS, 'full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS,
+                    *PARCOPY_METHODS)
 ALL_METHODS = METHODS + OPTIONAL_METHODS
 # pgdelta methods that capture S on the source first, with the receiver started beside the capture.
 PGDELTA_STAGED_METHODS = ('pgdelta', 'pgdelta_1thread', *T3_METHODS)
@@ -49,12 +99,30 @@ PGDELTA_METHODS = PGDELTA_STAGED_METHODS + PGDELTA_DIRECT_METHODS
 RSYNC_METHODS = ('rsync_8k', 'rsync_default')
 STAGED_METHODS = PGDELTA_STAGED_METHODS + RSYNC_METHODS
 # pgdelta refreshing B itself (--in-place) rather than writing a new copy O.
-IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace')
+IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8')
 # Methods that patch B, a copy of B0 made before the cache drop and not timed: in a real
 # refresh B already exists. The copy keeps B0 itself unchanged for the next method.
 BASIS_COPY_METHODS = IN_PLACE_METHODS + PGBACKREST_METHODS
-# Methods whose verification starts the output on dest (on run_exp04.OUTPUT_PG_PORT).
-OUTPUT_START_METHODS = PGDELTA_DIRECT_METHODS + PGBACKREST_METHODS
+# Methods that read the source cluster stopped cleanly before the cache drop (untimed), and
+# restart it afterwards, whatever happened.
+SOURCE_STOP_METHODS = PGDELTA_DIRECT_METHODS + PARCOPY_METHODS
+# Methods that write a whole new copy: durability check (b) applies to them.
+FULL_COPY_METHODS = (*FULL_VARIANTS, *PROBACKUP_METHODS, *PARCOPY_METHODS)
+# Methods that move their bytes over several TCP streams: their time above link time is taken
+# against the 8-stream link test, the others' against the single stream's.
+MULTI_STREAM_METHODS = PROBACKUP_METHODS + PARCOPY_METHODS
+# Methods whose verification starts the output on dest (on run_exp04.OUTPUT_PG_PORT). Every
+# pg_basebackup arm of T2 is started too, recovering from its backup_label.
+OUTPUT_START_METHODS = (PGDELTA_DIRECT_METHODS + PGBACKREST_METHODS + tuple(FULL_VARIANTS)
+                        + PROBACKUP_METHODS + PARCOPY_METHODS)
+# EXP-11's tiers (its Arms table). released: an operator can adopt it today through a released
+# tool's documented options; host_tuned: a released arm with one kernel setting changed on dest;
+# bound: built here from standard primitives. B_rel takes omni_today and released arms, B_fast adds
+# bound, B_tuned adds host_tuned; diagnostic arms are never a baseline.
+TIERS = {'full': 'omni_today', 'full_nosync': 'diagnostic', 'full_syncfs': 'released',
+         'full_wb': 'host_tuned', 'probackup8': 'released', 'probackup4': 'released',
+         'parcopy8': 'bound', 'parcopy4': 'bound', 'pgdelta_direct_inplace': 'v1',
+         'pgdelta_direct_inplace_j8': 'v1_8_jobs'}
 # The engine each pgdelta method runs, named by its flags, so that no change of pgdelta's
 # defaults can change what a method measures (as compare_methods pins EXP-02's):
 # - pgdelta: EXP-06's choice, which is also the command line's default on these 8-vCPU
@@ -100,6 +168,9 @@ PGDELTA_ENGINES = {
                        'fsync': 'main', 'source_kind': 'datadir'},
     'pgdelta_direct_inplace': {'jobs': 4, 'rebuild': None, 'verify': 'pipelined', 'prefetch_basis': 'on',
                                'fsync': 'main', 'in_place': True, 'source_kind': 'datadir'},
+    # T2 (EXP-11): v1's path with 8 jobs on each end, the rest as pgdelta_direct_inplace.
+    'pgdelta_direct_inplace_j8': {'jobs': 8, 'rebuild': None, 'verify': 'pipelined', 'prefetch_basis': 'on',
+                                  'fsync': 'main', 'in_place': True, 'source_kind': 'datadir'},
 }
 
 
@@ -271,17 +342,32 @@ PROC_SCOPE['incremental_cfr'] = PROC_SCOPE['incremental']
 for _method in T3_METHODS:
     PROC_SCOPE[_method] = PROC_SCOPE['pgdelta']
 for _method in PGDELTA_DIRECT_METHODS:
+    _jobs = PGDELTA_ENGINES[_method]['jobs']
     PROC_SCOPE[_method] = ('source: pgdelta send, reading the stopped data directory (no capture, no '
-                           'walsender); dest: pgdelta receive. At --jobs 4 each starts 4 worker processes '
-                           'with spawn, as its own children, so CPU includes them. Peak RSS: largest single '
-                           'process (pgdelta and its 4 workers not summed)')
+                           f'walsender); dest: pgdelta receive. At --jobs {_jobs} each starts {_jobs} worker '
+                           'processes with spawn, as its own children, so CPU includes them. Peak RSS: largest '
+                           f'single process (pgdelta and its {_jobs} workers not summed)')
 for _method in PGBACKREST_METHODS:
     PROC_SCOPE[_method] = ('dest: pgbackrest restore, with its 4 local processes and their SSH clients '
                            '(its children, reaped, so CPU includes them); source: none (no walsender '
                            'serves a restore, and the remote pgbackrest processes SSH starts there to read '
                            'the repository are not our children; VM-wide CPU covers them). Peak RSS: '
                            'largest single process (pgbackrest and its local processes not summed)')
-del _method
+for _method in FULL_VARIANTS:
+    PROC_SCOPE[_method] = PROC_SCOPE['full']
+for _method in PROBACKUP_METHODS:
+    _jobs = PROBACKUP_VARIANTS[_method]['jobs']
+    PROC_SCOPE[_method] = (f'dest: pg_probackup catchup with its {_jobs} threads and the SSH clients it '
+                           'starts (its children, reaped, so CPU includes them), then sync -f; source: none '
+                           '(the walsender that streams its WAL and the remote pg_probackup agents SSH starts '
+                           'there are not our children; VM-wide CPU covers them). Peak RSS: largest single '
+                           'process (pg_probackup and its SSH clients not summed)')
+for _method in PARCOPY_METHODS:
+    _streams = PARCOPY_VARIANTS[_method]['streams']
+    PROC_SCOPE[_method] = ('source: parcopy send, reading the stopped data directory (no capture, no '
+                           f'walsender); dest: parcopy receive. Each end runs {_streams} streams, as threads or '
+                           'as children it reaps, so CPU includes them. Peak RSS: largest single process')
+del _method, _jobs, _streams
 # rsync's copy of B0 (prep, on dest) and its capture of S (on source) touch
 # different machines and the link is idle during both, so they run at the same
 # time in one timed phase, as a real cp-then-rsync refresh would.
@@ -297,6 +383,14 @@ DIRECT_PHASE = 'receiver_transfer'
 DIRECT_RECEIVER_STEP = 'receiver_start'
 # pgbackrest_*: the one timed phase, on dest.
 RESTORE_PHASE = 'restore'
+# T2's arms are one timed phase each, one counter window, so no write-back can happen off the
+# clock between two phases. The pg_basebackup arms: 'transfer', as full always was. probackup*:
+# catchup_sync, whose steps are pg_probackup catchup and then sync -f of the output. parcopy*:
+# pgdelta_direct*'s frame, receiver_start and then transfer.
+FULL_PHASE = 'transfer'
+PROBACKUP_PHASE = 'catchup_sync'
+PROBACKUP_STEPS = ('catchup', 'sync')
+PARCOPY_PHASE = DIRECT_PHASE
 SPEED_ORDERS = ('shuffle', 'alternate', 'ascending')
 DIGEST_CHUNK = 1 << 20
 DEFAULT_WAL_SEGMENT = 16 << 20
@@ -342,6 +436,33 @@ def parse_proc_stat(text: str) -> dict[str, int]:
     raise ValueError("no aggregate 'cpu ' line in /proc/stat text")
 
 
+def parse_meminfo(text: str) -> dict[str, int]:
+    """Field -> value from /proc/meminfo, in kB (KiB) as the kernel prints them (counts stay counts)."""
+    values = {}
+    for line in text.splitlines():
+        name, colon, rest = line.partition(':')
+        words = rest.split()
+        if colon and words and words[0].isdigit():
+            values[name.strip()] = int(words[0])
+    if not values:
+        raise ValueError('no fields in /proc/meminfo text')
+    return values
+
+
+def parse_diskstats(text: str) -> dict[str, dict[str, int]]:
+    """Device -> its first 11 counters from /proc/diskstats (major, minor, name, then the counters)."""
+    devices = {}
+    for line in text.splitlines():
+        fields = line.split()
+        if len(fields) < 3 + len(DISKSTATS_FIELDS):
+            continue
+        devices[fields[2]] = {field: int(value)
+                              for field, value in zip(DISKSTATS_FIELDS, fields[3:3 + len(DISKSTATS_FIELDS)])}
+    if not devices:
+        raise ValueError('no devices in /proc/diskstats text')
+    return devices
+
+
 def counter_delta(before: dict, after: dict, fields) -> dict[str, int]:
     delta = {}
     for field in fields:
@@ -352,8 +473,33 @@ def counter_delta(before: dict, after: dict, fields) -> dict[str, int]:
     return delta
 
 
+def memory_delta(before: dict, after: dict) -> dict:
+    """Dirty and Writeback (dirty_writeback_bytes: their sum) at each end of a window, in bytes."""
+    def total(values):
+        return (values['Dirty'] + values['Writeback']) * 1024
+    return {'dirty_bytes_before': before['Dirty'] * 1024, 'writeback_bytes_before': before['Writeback'] * 1024,
+            'dirty_bytes_after': after['Dirty'] * 1024, 'writeback_bytes_after': after['Writeback'] * 1024,
+            'dirty_writeback_bytes_before': total(before), 'dirty_writeback_bytes_after': total(after),
+            'dirty_writeback_increase_bytes': total(after) - total(before)}
+
+
+def disk_delta(before: dict, after: dict) -> dict[str, dict[str, int]]:
+    """Bytes read and written, and requests, per device present in both snapshots."""
+    delta = {}
+    for device in sorted(before.keys() & after.keys()):
+        counts = counter_delta(before[device], after[device], DISK_COUNTERS)
+        delta[device] = {'read_bytes': counts['sectors_read'] * DISK_SECTOR_BYTES,
+                         'write_bytes': counts['sectors_written'] * DISK_SECTOR_BYTES,
+                         'reads': counts['reads'], 'writes': counts['writes']}
+    return delta
+
+
 def snapshot_delta(before: dict, after: dict) -> dict:
-    """Net bytes and packets and CPU seconds between two snapshot() results of one host."""
+    """Net bytes and packets and CPU seconds between two snapshot() results of one host.
+
+    With meminfo and diskstats in both (snapshots from before EXP-11 have neither), also the
+    window's Dirty and Writeback at each end (`memory`) and each disk's bytes (`disk`).
+    """
     if before['iface'] != after['iface']:
         raise ValueError('snapshots are of different interfaces')
     net = counter_delta(before['net'], after['net'],
@@ -362,20 +508,46 @@ def snapshot_delta(before: dict, after: dict) -> dict:
     hz = after['clk_tck']
     cpu = {f'{field}_seconds': round(value / hz, 3) for field, value in ticks.items()}
     cpu['busy_seconds'] = round(sum(ticks[field] for field in CPU_BUSY_FIELDS) / hz, 3)
-    return {'net': net, 'cpu': cpu,
-            'interval_seconds': round(after['monotonic'] - before['monotonic'], 6)}
+    delta = {'net': net, 'cpu': cpu,
+             'interval_seconds': round(after['monotonic'] - before['monotonic'], 6)}
+    if before.get('meminfo') and after.get('meminfo'):
+        delta['memory'] = memory_delta(before['meminfo'], after['meminfo'])
+    if before.get('disks') is not None and after.get('disks') is not None:
+        delta['disk'] = disk_delta(before['disks'], after['disks'])
+    return delta
+
+
+def _read_proc(path: Path) -> str | None:
+    try:
+        return path.read_text()
+    except OSError:
+        return None
 
 
 def snapshot(iface: str, proc: Path = Path('/proc')) -> dict:
-    """Counters of one interface and the aggregate CPU line, with clocks."""
+    """Counters of one interface and the aggregate CPU line, with clocks.
+
+    Also, where /proc has them: meminfo's Dirty, Writeback and Cached (kB), and the counters of
+    every whole disk and md array (DISK_DEVICE) from diskstats.
+    """
     import time
     netdev = parse_netdev((proc / 'net' / 'dev').read_text())
     if iface not in netdev:
         raise ValueError(f'interface {iface} not in /proc/net/dev ({", ".join(netdev)})')
-    return {'iface': iface, 'net': netdev[iface],
-            'cpu_ticks': parse_proc_stat((proc / 'stat').read_text()),
-            'clk_tck': os.sysconf('SC_CLK_TCK'), 'monotonic': time.monotonic(),
-            'utc': time.time()}
+    result = {'iface': iface, 'net': netdev[iface],
+              'cpu_ticks': parse_proc_stat((proc / 'stat').read_text()),
+              'clk_tck': os.sysconf('SC_CLK_TCK'), 'monotonic': time.monotonic(),
+              'utc': time.time()}
+    meminfo = _read_proc(proc / 'meminfo')
+    if meminfo:
+        values = parse_meminfo(meminfo)
+        result['meminfo'] = {field: values[field] for field in MEMINFO_FIELDS if field in values}
+    diskstats = _read_proc(proc / 'diskstats')
+    if diskstats:
+        result['disks'] = {device: {field: counters[field] for field in DISK_COUNTERS}
+                           for device, counters in parse_diskstats(diskstats).items()
+                           if DISK_DEVICE.match(device)}
+    return result
 
 
 # --- link speeds ------------------------------------------------------------
@@ -1072,6 +1244,312 @@ def with_recovery_bytes(totals: dict, recovery: dict) -> dict:
     return result
 
 
+# --- T2 (EXP-11): phase timers from timestamped output lines ------------------------
+
+# Child(stamp_lines=True) copies a command's output to its log line by line, as each arrives, each
+# prefixed with the seconds since the command's launch on the orchestrator's clock: "[+1.234567] ".
+STAMPED_LINE = re.compile(r'^\[\+(\d+(?:\.\d+)?)\] ?(.*)$')
+
+
+def stamp_line(seconds: float, line: bytes) -> bytes:
+    """One output line as Child(stamp_lines=True) logs it."""
+    return f'[+{seconds:.6f}] '.encode() + line.rstrip(b'\r\n') + b'\n'
+
+
+def parse_stamped_lines(text: str) -> list[tuple[float, str]]:
+    """(seconds since launch, text) of every stamped line of a log, in order; others are skipped."""
+    lines = []
+    for line in text.splitlines():
+        found = STAMPED_LINE.match(line)
+        if found:
+            lines.append((float(found.group(1)), found.group(2)))
+    return lines
+
+
+def _first_marks(lines, markers) -> dict[str, float]:
+    """name -> the time of the first line containing that marker's text (case-insensitive)."""
+    marks = {}
+    for seconds, text in lines:
+        lowered = text.lower()
+        for name, needle in markers:
+            if name not in marks and needle in lowered:
+                marks[name] = seconds
+    return marks
+
+
+def _interval(marks: dict, start: str, *ends):
+    """Seconds from mark `start` to the first of `ends` that is marked; None if either is missing."""
+    end = next((marks[name] for name in ends if name in marks), None)
+    if start not in marks or end is None:
+        return None
+    return round(end - marks[start], 6)
+
+
+# pg_basebackup --verbose's progress messages (PostgreSQL 17, pg_log_info: "pg_basebackup: ..."),
+# in the order it prints them. With --no-sync there is no 'sync' line; with no manifest no
+# 'manifest' line.
+BASEBACKUP_MARKERS = (
+    ('initiating', 'initiating base backup, waiting for checkpoint to complete'),
+    ('checkpoint_completed', 'checkpoint completed'),
+    ('wal_start', 'write-ahead log start point:'),
+    ('wal_receiver', 'starting background wal receiver'),
+    ('wal_end', 'write-ahead log end point:'),
+    ('waiting_for_streamer', 'waiting for background process to finish streaming'),
+    ('sync', 'syncing data to disk'),
+    ('manifest', 'renaming backup_manifest.tmp to backup_manifest'),
+    ('completed', 'base backup completed'),
+)
+
+
+def basebackup_phases(lines, wall_seconds: float | None = None) -> dict:
+    """Where a pg_basebackup --verbose run's time went, from its timestamped lines.
+
+    - start: launch until it asks for the backup (connection);
+    - checkpoint: from "initiating base backup, waiting for checkpoint" to "checkpoint completed";
+    - stream: from there to "write-ahead log end point" (the files, and pg_backup_stop);
+    - wal_end: from the end point until the next step starts: "syncing data to disk", or with
+      --no-sync the manifest's rename or the end (the WAL streamer's finish);
+    - sync: "syncing data to disk" until the manifest's rename (or the end): the flush;
+    - manifest: the durable rename of backup_manifest.tmp until "base backup completed";
+    - exit: "base backup completed" until the process ended (with wall_seconds).
+
+    backup_mode_adder is checkpoint + wal_end: what a stopped-source copy leaves out of a live
+    one (EXP-11's R_adj). A missing line leaves its intervals None.
+    """
+    marks = _first_marks(lines, BASEBACKUP_MARKERS)
+    phases = {
+        'start_s': round(marks['initiating'], 6) if 'initiating' in marks else None,
+        'checkpoint_s': _interval(marks, 'initiating', 'checkpoint_completed'),
+        'stream_s': _interval(marks, 'checkpoint_completed', 'wal_end'),
+        'wal_end_s': _interval(marks, 'wal_end', 'sync', 'manifest', 'completed'),
+        'sync_s': _interval(marks, 'sync', 'manifest', 'completed'),
+        'manifest_s': _interval(marks, 'manifest', 'completed'),
+        'exit_s': (round(wall_seconds - marks['completed'], 6)
+                   if wall_seconds is not None and 'completed' in marks else None),
+    }
+    adder = (None if phases['checkpoint_s'] is None or phases['wal_end_s'] is None
+             else round(phases['checkpoint_s'] + phases['wal_end_s'], 6))
+    return {**phases, 'backup_mode_adder_s': adder, 'synced': 'sync' in marks,
+            'complete': all(name in marks for name in ('initiating', 'checkpoint_completed', 'wal_end',
+                                                       'completed')),
+            'marks': marks}
+
+
+# pg_probackup catchup's INFO lines on its console (stderr), matched as lowercase text. The smoke
+# run settles the exact wording (EXP-11's item 1); a line not found leaves its intervals None.
+PROBACKUP_MARKERS = (
+    ('started', 'catchup start'),
+    ('copy', 'start transferring data files'),
+    ('copied', 'data files are transferred'),
+    ('stop_backup', 'wait for pg_stop_backup'),
+    ('sync', 'syncing copied files to disk'),
+    ('synced', 'files are synced'),
+)
+
+
+def probackup_phases(lines, wall_seconds: float | None = None) -> dict:
+    """Where a pg_probackup catchup run's time went, from its timestamped console lines.
+
+    - start: launch until "Start transferring data files" (SSH, the backup's start, file lists);
+    - copy: until "Data files are transferred" (its threads, file by file);
+    - stop: until "Syncing copied files to disk" (pg_backup_stop, the WAL stream's end, backup_label);
+    - files_sync: until "Files are synced" (its own per-file fsyncs);
+    - exit: from there until the process ended (with wall_seconds).
+
+    The timed sync -f of the output that follows is a step of its own (probackup_sync_s).
+    """
+    marks = _first_marks(lines, PROBACKUP_MARKERS)
+    return {'start_s': round(marks['copy'], 6) if 'copy' in marks else None,
+            'copy_s': _interval(marks, 'copy', 'copied'),
+            'stop_s': _interval(marks, 'copied', 'sync'),
+            'files_sync_s': _interval(marks, 'sync', 'synced'),
+            'exit_s': (round(wall_seconds - marks['synced'], 6)
+                       if wall_seconds is not None and 'synced' in marks else None),
+            'complete': all(name in marks for name in ('copy', 'copied', 'sync', 'synced')),
+            'marks': marks}
+
+
+# --- T2 (EXP-11): pg_probackup's and parcopy's command lines --------------------------
+
+PROBACKUP_EXE = '/usr/local/bin/pg_probackup-17'  # install_incumbents.sh's link, on both VMs
+# How pg_probackup on dest reaches the source: the harness's key with IdentitiesOnly, BatchMode, no
+# connection sharing, and the fastest cipher with AES-NI, a documented setting an operator would pick.
+PROBACKUP_SSH_OPTIONS = (('IdentitiesOnly', 'yes'), ('BatchMode', 'yes'), ('ControlMaster', 'no'),
+                         ('ControlPath', 'none'), ('Ciphers', 'aes128-gcm@openssh.com'),
+                         ('StrictHostKeyChecking', 'accept-new'), ('ServerAliveInterval', '15'))
+
+
+def probackup_paths(work) -> dict:
+    """Where pg_probackup's own files go on dest: its SSH configuration and its file logs."""
+    root = f'{work}/probackup'
+    return {'root': root, 'ssh_config': f'{root}/ssh_config', 'log_dir': f'{root}/log'}
+
+
+def probackup_ssh_config(source_ip: str, user: str, key: str) -> str:
+    """The SSH configuration pg_probackup on dest uses for the source (--ssh-options '-F ...')."""
+    return '\n'.join(['# EXP-11 (T2): how pg_probackup on pgd-dest reaches pgd-source.',
+                      f'Host {source_ip}', f'    User {user}', f'    IdentityFile {key}',
+                      *(f'    {option} {value}' for option, value in PROBACKUP_SSH_OPTIONS), ''])
+
+
+def probackup_args(method: str) -> tuple:
+    """The catchup flags a probackup* method pins: a full copy, WAL streamed over a temporary slot."""
+    return ('-b', 'FULL', '--stream', '--temp-slot', '-j', str(PROBACKUP_VARIANTS[method]['jobs']))
+
+
+def probackup_catchup_argv(exe: str, method: str, *, source_pgdata, dest_pgdata, source_ip: str, port: int,
+                           user: str, database: str, ssh_user: str, ssh_config) -> list[str]:
+    """pg_probackup catchup on dest, from the live source over SSH (remote mode) into an empty O."""
+    return [str(exe), 'catchup', *probackup_args(method), f'--source-pgdata={source_pgdata}',
+            f'--destination-pgdata={dest_pgdata}', f'--pghost={source_ip}', f'--pgport={port}',
+            f'--pguser={user}', f'--pgdatabase={database}', '--remote-proto=ssh', f'--remote-host={source_ip}',
+            f'--remote-user={ssh_user}', f'--remote-path={Path(str(exe)).parent}',
+            f'--ssh-options=-F {ssh_config}', '--log-level-console=INFO']
+
+
+# parcopy (experiments/network/parcopy.py, run as a module from the repository on both VMs).
+PARCOPY_MODULE = 'experiments.network.parcopy'
+PARCOPY_CHUNK_BYTES = 64 << 20  # ranges of at most this, assigned largest first to the lightest stream
+PARCOPY_WRITEBACK_BYTES = 8 << 20  # EXP-10's fixed write-back (pgdelta.flush.start_writeback)
+
+
+def parcopy_args(method: str) -> dict:
+    """{'send': argv, 'receive': argv}: the flags a parcopy* method pins on each end."""
+    streams = ('--streams', str(PARCOPY_VARIANTS[method]['streams']))
+    return {'send': (*streams, '--chunk-bytes', str(PARCOPY_CHUNK_BYTES)),
+            'receive': (*streams, '--writeback-bytes', str(PARCOPY_WRITEBACK_BYTES))}
+
+
+def parcopy_summary(stats) -> dict:
+    """The CSV's parcopy_* columns from the receiver's --stats-json.
+
+    Expected shape: {'streams': [{'bytes', 'first_byte_s', 'last_byte_s', 'write_s'}, ...],
+    'fsync_s' (the fsync tail), 'fsync_calls', 'fsync_expected'}; missing keys leave columns None.
+    balance is the busiest stream's bytes over the mean (EXP-11's A3: at most 1.1).
+    """
+    stats = stats if isinstance(stats, dict) else {}
+    streams = [stream for stream in stats.get('streams') or () if isinstance(stream, dict)]
+    sizes = [stream['bytes'] for stream in streams if isinstance(stream.get('bytes'), int)]
+    mean = sum(sizes) / len(sizes) if sizes else None
+
+    def extreme(key, pick):
+        values = [stream[key] for stream in streams if isinstance(stream.get(key), (int, float))]
+        return round(pick(values), 6) if values else None
+
+    calls, expected = stats.get('fsync_calls'), stats.get('fsync_expected')
+    return {'streams': len(streams) or None, 'bytes': sum(sizes) if sizes else None,
+            'max_stream_bytes': max(sizes) if sizes else None,
+            'balance': round(max(sizes) / mean, 4) if sizes and mean else None,
+            'first_byte_s': extreme('first_byte_s', min), 'last_byte_s': extreme('last_byte_s', max),
+            'write_s': extreme('write_s', max), 'fsync_s': stats.get('fsync_s'),
+            'fsync_calls': calls, 'fsync_expected': expected,
+            'fsync_ok': None if calls is None or expected is None else calls == expected}
+
+
+# --- T2 (EXP-11): durability, reference digests and probes ---------------------------
+
+# Check (a): Dirty + Writeback on dest may grow by at most this over the run, or by the idle noise
+# the smoke run measures, whichever is larger. One unflushed 16 MiB WAL segment fails it.
+DIRTY_LIMIT_BYTES = 4 << 20
+# Check (b): a full copy's bytes written to dest's md array in the window, at least this share of
+# the output's bytes.
+DISK_WRITE_FRACTION = 0.98
+
+
+def phase_disk_bytes(record: dict, host: str, key: str):
+    """Bytes read or written (`key`) by the data arrays (DATA_ARRAY) of one VM over the timed phases.
+
+    None if a phase has no disk counters or the VM has no md array.
+    """
+    phases = list((record.get('phases') or {}).values())
+    if not phases:
+        return None
+    total = 0
+    for phase in phases:
+        disks = _get(phase, 'disk', host)
+        if not isinstance(disks, dict):
+            return None
+        arrays = [counters[key] for device, counters in disks.items() if DATA_ARRAY.match(device)]
+        if not arrays:
+            return None
+        total += sum(arrays)
+    return total
+
+
+def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
+    """EXP-11's checks (a) and (b) on one run's timed phases (one counter window each).
+
+    (a) dest's Dirty + Writeback, read just before the clock starts and first after it stops, may
+    grow by at most max(DIRTY_LIMIT_BYTES, idle_noise). (b) for a full copy (FULL_COPY_METHODS), the
+    bytes dest's md array wrote in the window are at least DISK_WRITE_FRACTION of output_bytes. `ok`
+    is whether both hold (b only where it applies); None while a needed counter is missing.
+    `durable` says whether the arm is meant to be durable (full_nosync is not: it is the control).
+    """
+    method = record.get('method')
+    phases = list((record.get('phases') or {}).values())
+    before = _get(phases[0], 'memory', 'dest', 'dirty_writeback_bytes_before') if phases else None
+    after = _get(phases[-1], 'memory', 'dest', 'dirty_writeback_bytes_after') if phases else None
+    increase = None if before is None or after is None else after - before
+    limit = max(DIRTY_LIMIT_BYTES, int(idle_noise or 0))
+    a_ok = None if increase is None else increase <= limit
+    written = phase_disk_bytes(record, 'dest', 'write_bytes')
+    b_required = method in FULL_COPY_METHODS
+    needed = None if not b_required or output_bytes is None else math.ceil(DISK_WRITE_FRACTION * output_bytes)
+    b_ok = None if needed is None or written is None else written >= needed
+    if a_ok is False or b_ok is False:
+        ok = False
+    elif a_ok is None or (b_required and b_ok is None):
+        ok = None
+    else:
+        ok = True
+    return {'durable': method not in NON_DURABLE_METHODS, 'ok': ok,
+            'dirty_writeback_before_bytes': before, 'dirty_writeback_after_bytes': after,
+            'dirty_writeback_increase_bytes': increase, 'limit_bytes': limit,
+            'idle_noise_bytes': None if idle_noise is None else int(idle_noise), 'a_ok': a_ok,
+            'disk_write_bytes': written, 'output_bytes': output_bytes, 'b_required': b_required,
+            'b_min_bytes': needed, 'b_ok': b_ok}
+
+
+# What every clean stop of the source rewrites, left out of the reference digests (EXP-11's steps 2
+# and 7): pg_control, the WAL, and (since PostgreSQL 15) the cumulative statistics in pg_stat/.
+REFERENCE_EXCLUDED_FILES = ('global/pg_control',)
+REFERENCE_EXCLUDED_DIRECTORIES = ('pg_wal', 'pg_stat')
+
+
+def reference_excluded(path: str) -> bool:
+    return path in REFERENCE_EXCLUDED_FILES or path.split('/', 1)[0] in REFERENCE_EXCLUDED_DIRECTORIES
+
+
+def reference_view(digest: dict) -> dict:
+    """A files_digest of the stopped source without what a clean stop rewrites (REFERENCE_EXCLUDED_*)."""
+    entries = {path: entry for path, entry in digest['entries'].items() if not reference_excluded(path)}
+    return {**digest, 'entries': entries, 'files': len(entries),
+            'bytes': sum(entry[1] for entry in entries.values()),
+            'excluded': sorted(path for path in digest['entries'] if reference_excluded(path)),
+            'missing': [path for path in digest.get('missing', ()) if not reference_excluded(path)]}
+
+
+def split_files(files, parts: int) -> list[list]:
+    """(size, path) pairs in lists of about equal bytes: largest first, each to the lightest list.
+
+    EXP-07's C4 split its 4 readers' files this way; the read probes do too.
+    """
+    lists, loads = [[] for _ in range(parts)], [0] * parts
+    for size, path in sorted(files, key=lambda item: (-item[0], str(item[1]))):
+        lightest = loads.index(min(loads))
+        lists[lightest].append((size, path))
+        loads[lightest] += size
+    return lists
+
+
+PSQL_TIMING = re.compile(r'^Time: (\d+(?:\.\d+)?) ms', re.MULTILINE)
+
+
+def psql_timings(text: str) -> list[float]:
+    """Seconds of each statement psql's \\timing printed ("Time: 12.345 ms"), in order."""
+    return [round(float(value) / 1000, 6) for value in PSQL_TIMING.findall(text)]
+
+
 def digest_summary(digest: dict) -> dict:
     """A short, comparable form of a tree digest for the result records."""
     listing = hashlib.sha256()
@@ -1102,6 +1580,15 @@ CSV_FIELDS = (
     'counter_windows',
     'proc_cpu_source_s', 'proc_cpu_dest_s', 'peak_rss_source_kb', 'peak_rss_dest_kb',
     'proc_scope',
+    # T2 (EXP-11)
+    'tier', 'block', 'source_cache', 'durable', 'durability_ok', 'dirty_increase_mb',
+    'disk_write_dest_bytes', 'disk_read_dest_bytes',
+    'pbb_checkpoint_s', 'pbb_stream_s', 'pbb_wal_end_s', 'pbb_sync_s', 'pbb_manifest_s', 'backup_mode_adder_s',
+    'probackup_sync_s', 'probackup_copy_s', 'probackup_stop_s', 'probackup_files_sync_s',
+    'parcopy_streams', 'parcopy_max_stream_bytes', 'parcopy_balance', 'parcopy_first_byte_s',
+    'parcopy_last_byte_s', 'parcopy_write_s', 'parcopy_fsync_s', 'parcopy_fsync_calls', 'parcopy_fsync_expected',
+    'usable_s', 'void', 'bytes_identical', 'measured_s2d_gbit_8streams', 'link_time_s', 'above_link_s',
+    'sysctl_dirty_background_bytes', 'sysctl_dirty_background_ratio',
     'verified', 'identical_to_s', 'logical_match', 'output_start_s', 'caches_dropped', 'error',
 )
 
@@ -1127,6 +1614,22 @@ def phase_seconds(record: dict, name: str):
     return None
 
 
+def link_seconds(record: dict):
+    """The run's source-to-dest wire bytes at the link test's measured rate: its link time.
+
+    Multi-stream arms (MULTI_STREAM_METHODS) take the 8-stream rate, the others the single stream's.
+    None without the bytes or the rate.
+    """
+    link = record.get('link') or {}
+    key = ('source_to_dest_8streams_gbit' if record.get('method') in MULTI_STREAM_METHODS
+           else 'source_to_dest_gbit')
+    rate = link.get(key)
+    wire = (record.get('totals') or {}).get('wire_bytes_source_to_dest')
+    if not rate or wire is None:
+        return None
+    return round(wire * 8 / (rate * 1e9), 3)
+
+
 def summary_row(record: dict) -> dict:
     """One CSV row for one (trial, repeat, speed, method) record."""
     totals = record.get('totals') or {}
@@ -1138,6 +1641,16 @@ def summary_row(record: dict) -> dict:
     wal = record.get('wal') or {}
     prefetch = _get(record, 'tool_reported', 'prefetch') or {}
     untimed = record.get('prefetch_untimed') or {}
+    method = record.get('method')
+    durability = record.get('durability') or {}
+    increase = durability.get('dirty_writeback_increase_bytes')
+    basebackup = _get(record, 'tool_reported', 'basebackup_phases') or {}
+    probackup = _get(record, 'tool_reported', 'probackup_phases') or {}
+    parcopy = _get(record, 'tool_reported', 'parcopy_summary') or {}
+    sysctl = record.get('sysctl') or {}
+    in_effect = sysctl.get('during') or sysctl.get('before') or {}
+    ready = _get(verification, 'output_start', 'ready_seconds')
+    link_time = link_seconds(record)
     return {
         'run_name': record.get('run_name'),
         'trial_id': record.get('trial_id'),
@@ -1247,6 +1760,57 @@ def summary_row(record: dict) -> dict:
         'peak_rss_source_kb': totals.get('peak_rss_kb_source'),
         'peak_rss_dest_kb': totals.get('peak_rss_kb_dest'),
         'proc_scope': PROC_SCOPE.get(record.get('method')),
+        # T2 (EXP-11). The arm's tier (TIERS), which block of the trial ran it (main, extension,
+        # warm_source) and whether the source's cache was dropped (cold) or read first (warm).
+        'tier': TIERS.get(method),
+        'block': record.get('block'),
+        'source_cache': record.get('source_cache'),
+        # Durability (durability_check): whether the arm is meant to be durable, whether checks (a)
+        # and (b) passed, dest's Dirty + Writeback increase over the run (MB, 10^6 bytes), and dest's
+        # md array's bytes written and read in the timed phases.
+        'durable': durability.get('durable'),
+        'durability_ok': durability.get('ok'),
+        'dirty_increase_mb': None if increase is None else round(increase / 1e6, 3),
+        'disk_write_dest_bytes': phase_disk_bytes(record, 'dest', 'write_bytes'),
+        'disk_read_dest_bytes': phase_disk_bytes(record, 'dest', 'read_bytes'),
+        # pg_basebackup arms: their --verbose lines' phases (basebackup_phases), and the backup-mode
+        # adder, checkpoint + wal_end (R_adj).
+        'pbb_checkpoint_s': basebackup.get('checkpoint_s'),
+        'pbb_stream_s': basebackup.get('stream_s'),
+        'pbb_wal_end_s': basebackup.get('wal_end_s'),
+        'pbb_sync_s': basebackup.get('sync_s'),
+        'pbb_manifest_s': basebackup.get('manifest_s'),
+        'backup_mode_adder_s': basebackup.get('backup_mode_adder_s'),
+        # probackup*: the timed sync -f of the output (its phase's step), and its own lines' phases.
+        'probackup_sync_s': phase_seconds(record, PROBACKUP_STEPS[1]) if method in PROBACKUP_METHODS else None,
+        'probackup_copy_s': probackup.get('copy_s'),
+        'probackup_stop_s': probackup.get('stop_s'),
+        'probackup_files_sync_s': probackup.get('files_sync_s'),
+        # parcopy*: its receiver's own timers (parcopy_summary).
+        'parcopy_streams': parcopy.get('streams'),
+        'parcopy_max_stream_bytes': parcopy.get('max_stream_bytes'),
+        'parcopy_balance': parcopy.get('balance'),
+        'parcopy_first_byte_s': parcopy.get('first_byte_s'),
+        'parcopy_last_byte_s': parcopy.get('last_byte_s'),
+        'parcopy_write_s': parcopy.get('write_s'),
+        'parcopy_fsync_s': parcopy.get('fsync_s'),
+        'parcopy_fsync_calls': parcopy.get('fsync_calls'),
+        'parcopy_fsync_expected': parcopy.get('fsync_expected'),
+        # Time until usable: the copy and then its start's time to consistency (started outputs).
+        'usable_s': (None if totals.get('wall_seconds') is None or ready is None
+                     else round(totals['wall_seconds'] + ready, 3)),
+        # probackup*: void (the source changed during the trial) and the byte diagnostic.
+        'void': verification.get('void'),
+        'bytes_identical': verification.get('bytes_identical'),
+        # The 8-stream link test at this speed (each trial's first visit to it); the link time of the
+        # run's source-to-dest wire bytes at the measured rate (link_seconds), and total_s above it.
+        'measured_s2d_gbit_8streams': link.get('source_to_dest_8streams_gbit'),
+        'link_time_s': link_time,
+        'above_link_s': (None if link_time is None or totals.get('wall_seconds') is None
+                         else round(totals['wall_seconds'] - link_time, 3)),
+        # dest's write-back settings in effect during the run (full_wb's while it was set).
+        'sysctl_dirty_background_bytes': in_effect.get(DIRTY_BACKGROUND_BYTES),
+        'sysctl_dirty_background_ratio': in_effect.get(DIRTY_BACKGROUND_RATIO),
         'verified': verification.get('verified'),
         # Staged methods: O (or B) against the capture S; pgdelta_direct*: against the files
         # pgdelta's datadir mode selects in the stopped source.
