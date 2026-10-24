@@ -1711,7 +1711,8 @@ def a5(cells, ctx):
 
 def a6(cells, ctx):
     """A6: v1proxy_s1's and burn4's W_net per calibrated CPU-s each at most half of v1proxy's, at 0.5 and 2 Gbit/s,
-    judged where v1proxy's W is measurable; an unmeasurable W counts at its bound."""
+    judged where v1proxy's W is measurable and both of the others' values exist (a short cell or a missing
+    calibrated CPU-s leaves that speed not judged); an unmeasurable W counts at its bound."""
     reason = blocked(ctx, 'busy')
     if reason:
         return {'verdict': None, 'text': f'not judged ({reason})'}
@@ -1730,7 +1731,9 @@ def a6(cells, ctx):
             continue
         rate = proxy['W_net'] / cpu[PROXY]
         one = per_cpu(cells.cell('busy', speed, PROXY_S1), PROXY_S1)
-        ok = every([None if one is None else one <= rate / 2, None if burn is None else burn <= rate / 2])
+        # Both parts of the registered condition, or this speed isn't judged (a short cell, no calibrated CPU-s):
+        # burn4's alone would give "cores" on half the rule.
+        ok = None if one is None or burn is None else one <= rate / 2 and burn <= rate / 2
         oks.append(ok)
         parts.append(f'{speed_name(speed)}: v1proxy {fmt(rate, 4)}, v1proxy_s1 {fmt(one, 4)}, burn4 {fmt(burn, 4)} '
                      's per CPU-s')

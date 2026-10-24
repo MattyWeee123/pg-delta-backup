@@ -423,6 +423,18 @@ class LedgerRules(unittest.TestCase):
         hot_burn = {**measurable, ('busy', None, 'burn4'): {'W_net': 0.2}}
         self.assertIs(exp12.a6(cells(hot_burn), context())['verdict'], False)
         self.assertIsNone(exp12.a6(cells(), context())['verdict'])  # v1proxy's W measurable nowhere
+        # Both parts or nothing: with v1proxy_s1's cells short (or no calibrated CPU-s of it), burn4's alone doesn't
+        # give "cores"; A6 isn't judged and D81 stays D.
+        both = {('busy', s, PROXY): {'W_net': 0.6, 'W_measurable': True} for s in exp12.REGISTERED}
+        short = {**both, **{('busy', s, PROXY_S1): {'n': 2} for s in exp12.REGISTERED}}
+        found = exp12.a6(cells(short), context())
+        self.assertIsNone(found['verdict'])
+        self.assertIn('D81 stays D', found['text'])
+        self.assertIsNone(exp12.a6(cells(both), context(cpu={PROXY_S1: None}))['verdict'])
+        # One speed judged with both parts: it decides.
+        one = {**both, ('busy', '0.5g', PROXY_S1): {'n': 2}}
+        self.assertIs(exp12.a6(cells(one), context())['verdict'], True)
+        self.assertIsNone(exp12.a6(cells({**both, ('busy', None, 'burn4'): {'n': 1}}), context())['verdict'])
         self.assertEqual(exp12.ha_caveat(cells(), context())[0], True)
         self.assertEqual(exp12.ha_caveat(cells({('busy', U, PROXY): {'D_net': 0.0}}), context())[0], False)
         self.assertIsNone(exp12.ha_caveat(cells({('busy', U, PROXY): {'n': 2}}), context())[0])
