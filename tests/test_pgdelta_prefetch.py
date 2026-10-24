@@ -300,6 +300,7 @@ class ListenerPrefetchTests(unittest.TestCase):
         """Everything but timings, paths and the prefetch's own statistics."""
         stats = copy.deepcopy(stats)
         stats.pop('timings_seconds')
+        stats.pop('protocol_timers')  # EXP-13's, which vary like timings
         receiver = stats.pop('receiver')
         # The final COMPLETE carries the receiver's statistics, whose length varies.
         down = stats['bytes_dest_to_source']

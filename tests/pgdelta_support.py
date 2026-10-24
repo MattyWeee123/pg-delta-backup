@@ -141,7 +141,7 @@ VOLATILE_RECEIVER_KEYS = frozenset((
     # how O was built, which depends on the rebuild switch, unlike pages_copied and bytes_copied
     'basis_copy_bytes', 'basis_copies'))
 VOLATILE_SENDER_KEYS = frozenset(('timings_seconds', 'jobs', 'hash_backend', 'worker_start_method', 'switches',
-                                  'receiver'))
+                                  'receiver', 'protocol_timers'))
 
 
 def comparable(outcome):

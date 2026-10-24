@@ -274,6 +274,12 @@ def build_parser():
     send.add_argument('--source', required=True, type=Path, help='new backup S (read-only)')
     send.add_argument('--connect', required=True, metavar='HOST:PORT')
     _sender_options(send)
+    # Experiment switch (EXP-13): the threshold of the busy and idle parts of the sender's waits.
+    send.add_argument('--busy-inflight-bytes', type=_byte_count, metavar='BYTES',
+                      help='statistics only: while the sender waits for the receiver, a moment counts as busy '
+                           'when some of its bytes are unsent, or more than BYTES are in flight (what the path '
+                           'holds without queueing), and idle otherwise; read from the TCP socket\'s send queue, '
+                           'on Linux. Without it only unsent bytes count as busy')
     _source_kind_option(send)
     _jobs_option(send, 'S')
     send.set_defaults(func=cmd_send)
@@ -426,7 +432,8 @@ def cmd_send(args):
         identity = _source_identity(args)
         channel = transport.connect_channel(host, port)
         try:
-            return sender.run_sender(channel, args.source, **_sender_kwargs(args, identity))
+            return sender.run_sender(channel, args.source, busy_inflight_bytes=args.busy_inflight_bytes,
+                                     **_sender_kwargs(args, identity))
         finally:
             channel.close()
 
