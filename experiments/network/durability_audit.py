@@ -25,7 +25,8 @@ pg_probackup catchup and then its sync -f.
 
     durability_audit.py check --scope O [--filesystem /data] TRACE...   the audit of traces, as JSON
     durability_audit.py run --trace FILE --scope O -- ARGV...           ARGV under strace, then check
-    durability_audit.py summary RUN_DIR                                 every audited run of a run_exp04 run
+    durability_audit.py summary [--json] RUN_DIR...                     every audited run of run_exp04 runs
+                                                                        (--json: by arm, for analysis/exp11.py)
 
 Limits: writes through a shared memory map (msync) and O_SYNC/O_DSYNC descriptors are not seen as
 flushes, and nothing here proves the disks honour cache flushes.
@@ -592,10 +593,56 @@ SUMMARY_COLUMNS = ('trial_id', 'method', 'view', 'ok', 'files', 'uncovered_files
                    'uncovered_changes', 'unmapped')
 
 
-def cmd_summary(args) -> None:
-    rows = summary_rows(args.run_dir)
+def _uncovered(result: dict, scope) -> list[str]:
+    """The paths a view left uncovered (files, then directory entries), relative to the output."""
+    def relative(path):
+        for root in scope:
+            if under(path, root):
+                return posixpath.relpath(path, root)
+        return path
+    paths = [entry['path'] for entry in result.get('uncovered_files', [])]
+    paths += [change['entry'] for change in result.get('uncovered_directory_changes', [])]
+    return list(dict.fromkeys(relative(path) for path in paths))
+
+
+def arm_results(run_dirs) -> dict:
+    """{'arms': {method: {...}}}: the audited records of run_exp04 runs by arm, the shape
+    analysis/exp11.py's --audit reads.
+
+    passed: every audited run of the arm ok (None if a run has no result); uncovered: what the runs'
+    timed phases left uncovered; tool_uncovered (probackup*): what the tool's own flush left, from the
+    catchup's trace alone. Paths are relative to the output; runs counts the audited runs.
+    """
+    arms: dict = {}
+    for run_dir in run_dirs:
+        for path in sorted(Path(run_dir).glob('runs/*/*.json')):
+            record = json.loads(path.read_text())
+            audited = record.get('audit') or {}
+            if not audited.get('result'):
+                continue
+            arm = arms.setdefault(record.get('method'), {'passed': True, 'runs': 0, 'uncovered': []})
+            scope = [posixpath.normpath(str(root)) for root in audited.get('scope') or ()]
+            ok = audited['result'].get('ok')
+            arm['passed'] = None if arm['passed'] is None or ok is None else arm['passed'] and ok
+            arm['runs'] += 1
+            arm['uncovered'] = list(dict.fromkeys(arm['uncovered'] + _uncovered(audited['result'], scope)))
+            if audited.get('tool_only'):
+                arm['tool_uncovered'] = list(dict.fromkeys(
+                    arm.get('tool_uncovered', []) + _uncovered(audited['tool_only'], scope)))
+    return {'arms': arms}
+
+
+def cmd_summary(args) -> dict | None:
+    if args.json:
+        result = arm_results(args.run_dir)
+        if not result['arms']:
+            raise SystemExit(f'no audited runs under {", ".join(args.run_dir)}')
+        # Printed whole, whether or not every arm passed: the analysis reads it.
+        print(json.dumps(result, indent=1))
+        return None
+    rows = [row for run_dir in args.run_dir for row in summary_rows(run_dir)]
     if not rows:
-        raise SystemExit(f'no audited runs under {args.run_dir}')
+        raise SystemExit(f'no audited runs under {", ".join(args.run_dir)}')
     print('\t'.join((*SUMMARY_COLUMNS, 'examples')))
     for row in rows:
         print('\t'.join([str(row[column]) for column in SUMMARY_COLUMNS] + [', '.join(row['examples'])]))
@@ -620,7 +667,9 @@ def build_parser() -> argparse.ArgumentParser:
             sub.add_argument('argv', nargs=argparse.REMAINDER)
         sub.set_defaults(func=func)
     sub = commands.add_parser('summary')
-    sub.add_argument('run_dir')
+    sub.add_argument('run_dir', nargs='+')
+    sub.add_argument('--json', action='store_true',
+                     help="each arm's result as JSON (arm_results), for analysis/exp11.py --audit")
     sub.set_defaults(func=cmd_summary)
     return parser
 

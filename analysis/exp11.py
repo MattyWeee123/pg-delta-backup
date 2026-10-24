@@ -22,7 +22,8 @@ A run counts if it passed its verification and every durability check that appli
 if A6 voided it; check (b) for full copies; parcopy's fsync count), and isn't void. Arms that fail
 A4 or that A5 reclassifies are left out of every baseline. The syscall audit's results, when given
 (--audit), are a JSON object mapping each arm to {"passed": bool, "uncovered": [paths],
-"tool_uncovered": [paths its own flush left, covered only by a sync -f]}, or {"arms": that}.
+"tool_uncovered": [paths its own flush left, covered only by a sync -f]}, or {"arms": that}, as
+`experiments/network/durability_audit.py summary --json RUN_DIR` prints it; or that RUN_DIR itself.
 """
 from __future__ import annotations
 
@@ -42,7 +43,7 @@ from plotting import COLORS, plt
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from experiments.network import measure  # noqa: E402
+from experiments.network import durability_audit, measure  # noqa: E402
 
 DATA = ROOT / 'docs' / 'experiments' / 'data'
 SWEEPS = [ROOT / 'results' / 'exp04' / 'exp11-local', ROOT / 'results' / 'exp04' / 'exp11-uniform']
@@ -1553,8 +1554,12 @@ def fig_phases(S, tag):
 
 
 def load_audit(path):
+    """The syscall audit's results by arm: a JSON file, or a run_exp04 results directory whose records
+    hold an audit (--syscall-audit), read as `durability_audit.py summary --json` reads it."""
     if not path:
         return {}
+    if Path(path).is_dir():
+        return durability_audit.arm_results([path])['arms']
     data = json.loads(Path(path).read_text())
     return data.get('arms', data) if isinstance(data, dict) else {}
 
@@ -1565,7 +1570,8 @@ def main(argv=None):
                         help='results directories from remote.py fetch (default: exp11-local and exp11-uniform)')
     parser.add_argument('--exp09-cells', default=str(DATA / 'exp09-10-cells.csv'))
     parser.add_argument('--exp09-runs', default=str(DATA / 'exp09-10-runs.csv'))
-    parser.add_argument('--audit', help="the syscall audit's results (JSON), from the smoke run")
+    parser.add_argument('--audit', help="the syscall audit's results, from the smoke run: JSON (durability_audit.py "
+                                        'summary --json), or the results directory of its --syscall-audit run')
     parser.add_argument('--datadir', default=str(DATA))
     parser.add_argument('--figdir', help='write figures here instead of docs/figures')
     parser.add_argument('--tag', default='', help='suffix for data and figure names (e.g. -smoke)')
