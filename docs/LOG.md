@@ -3,6 +3,16 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24 (afternoon, later): EXP-12's harness built and reviewed
+
+**Built** on local branches, as EXP-11's was: one agent for the load, the arms, the proxy for v1's source side and the correctness checks; one for `analysis/exp12.py`; then a merge with every test run. New: the fixed-rate load and its counters, loaddb, the source-side sampler and clock probe, the eviction that makes reads cold, the snapshot the proxy reads, and the seven negative controls of the correctness check, each failing through its own check on a local PostgreSQL 17.
+
+**Reviewed** by three adversarial reviewers (fidelity to the pre-registration, measurement validity, robustness on the VMs): 17 findings, 3 major, all fixed, each with a regression test checked to fail without its fix. The major ones: a copy its own tool aborted wasn't counted as wrong; a run's 15-s view could reach into the next run; and stopping the proxy's backup-mode session raised an error on Python 3.11 and later.
+
+**Tests:** 1,217, all passing (6 skipped), up from 1,072. The readings the code makes where the text leaves a choice are in EXP-12's "Analysis readings", dated, before any run.
+
+**Not testable on the Mac,** so first exercised by the smoke run: Linux's page-cache eviction and `fincore`, the source-side sampler, and the load's logs on the VMs.
+
 ## 2026-10-24 (afternoon): T10a and T12 pre-registered as EXP-12 and EXP-13
 
 **Why these two:** they head the queue re-ranked after T2. T10a measures the owner's bar (O4: a refresh slows a live source no more than `pg_basebackup` does) and checks every output under load. T12 measures DR's links, now v1's first target: what round-trip time, TCP buffers and TLS do to v1's path and to the full copies.
