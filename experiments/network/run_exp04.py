@@ -4322,9 +4322,8 @@ class Orchestrator:
                 kept['compress'] = attempt('compress the load logs (they are fetched as they are)',
                                            self.compress_load_logs)
             fetched = kept['fetched'] = attempt('fetch the load logs', self.fetch_load_logs)
-            if fetched and not trial.get('load_checks'):
-                trial['load_checks'] = attempt('the checks that wait for the logs',
-                                               lambda: self.finish_load_checks(trial))
+        if fetched and not trial.get('load_checks'):  # also after an error past step 15, before step 17's checks
+            trial['load_checks'] = attempt('the checks that wait for the logs', lambda: self.finish_load_checks(trial))
         attempt('remove the snapshot', lambda: self.remove_source(self.snapshot_data))
         if fetched or not self.load_used:
             attempt('remove the load directory', lambda: self.source.agent(

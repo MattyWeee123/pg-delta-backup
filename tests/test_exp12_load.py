@@ -1114,9 +1114,9 @@ class WholeTrial(Stubbed):
         self.assertEqual((bracket['status'], bracket['failure_kind']), ('error', 'tool'))
         self.assertEqual(trial['status'], 'fail')
 
-    def failing_trial(self, failure, fetch_fails=False):
-        """A trial whose link step fails when the warm block starts (an SSH failure, or remote.py stop's SIGTERM as
-        the KeyboardInterrupt _terminate raises); (orchestrator, trial, removed paths, the error raised)."""
+    def failing_trial(self, failure, fetch_fails=False, block='warm'):
+        """A trial whose link step fails when `block` starts (an SSH failure, or remote.py stop's SIGTERM as the
+        KeyboardInterrupt _terminate raises); (orchestrator, trial, removed paths, the error raised)."""
         class Failing(LoadStub):
             block = None
             removed: list = []
@@ -1126,7 +1126,7 @@ class WholeTrial(Stubbed):
                 return super().run_load_block(trial, block, *args)
 
             def set_speed(self, speed):
-                if self.block == 'warm':
+                if self.block == block:
                     raise failure
                 return super().set_speed(speed)
 
@@ -1144,7 +1144,9 @@ class WholeTrial(Stubbed):
         Failing.removed = []
         orchestrator = self.orchestrator(Failing, ['--repeats', '1', '--warm-source-repeats', '1',
                                                    '--warm-source-speeds', '2', '--warm-source-methods', 'full,v1proxy',
-                                                   '--moderate-repeats', '0', '--calibration-repeats', '0'])
+                                                   '--moderate-repeats', '0',
+                                                   *(['--calibration-repeats', '1', '--calibration-methods', 'full']
+                                                     if block == 'calibration' else ['--calibration-repeats', '0'])])
         raised = None
         try:
             trial = orchestrator.run_trial(0, 'hot', 0.01)
@@ -1177,6 +1179,21 @@ class WholeTrial(Stubbed):
                 self.assertTrue(saved['load']['kept_after_error']['fetched'])
                 if raised is None:
                     self.assertEqual(trial['status'], 'error')
+
+    def test_an_error_after_step_15_still_reads_the_fetched_logs(self):
+        # Step 15 fetched the logs; an error in the calibration block comes before step 17's checks: the clean-up
+        # runs them, so the outputs taken under the load get their cut and coverage.
+        orchestrator, trial, removed, raised = self.failing_trial(run_exp04.CommandError('ssh: broken pipe'),
+                                                                  block='calibration')
+        self.assertIsNone(raised)
+        self.assertEqual(trial['status'], 'error')
+        self.assertTrue(trial['load']['end']['fetched'])
+        self.assertNotIn('kept_after_error', trial['load'])
+        live = [r for r in orchestrator.records if (r.get('verification') or {}).get('oracle')]
+        self.assertTrue(live)
+        self.assertEqual(trial['load_checks']['outputs'], len(live))
+        self.assertEqual({r['verification']['oracle']['cut'] for r in live}, {'ok'})
+        self.assertIn(orchestrator.load_dir, removed)
 
     def test_a_failed_compress_at_step_15_fetches_the_logs_as_they_are(self):
         class NoZstd(LoadStub):
