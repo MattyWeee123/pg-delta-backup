@@ -1,5 +1,7 @@
 """EXP-11's blocks together: the core, parcopy, pg_probackup with the syscall audit, and the analysis.
 
+- the specification's run lines, read from docs/experiments/EXP-11-full-copy-baseline.md, parse through
+  remote.py start and run_exp04.parse_args, and plan the registered number of runs;
 - the syscall audit's records, by arm (durability_audit.py summary --json), in the shape
   analysis/exp11.py --audit reads, and read by it from a results directory;
 - parcopy's fsync count (A5) kept apart from check (a) in the analysis, as the harness records both;
@@ -11,12 +13,14 @@ The analysis's parts need the analysis venv's matplotlib and are skipped without
 import io
 import json
 from pathlib import Path
+import re
+import shlex
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
 
-from experiments.network import durability_audit, measure
+from experiments.network import durability_audit, measure, remote, run_exp04
 
 import test_durability_audit as audit_tests
 
@@ -30,6 +34,91 @@ if matplotlib is not None:
     import exp11
 
 needs_venv = unittest.skipUnless(matplotlib is not None, 'needs the analysis venv (matplotlib)')
+SPEC = Path(__file__).resolve().parents[1] / 'docs' / 'experiments' / 'EXP-11-full-copy-baseline.md'
+
+
+def spec_run_lines() -> dict:
+    """{invocation name: run_exp04's arguments} from the specification's "Run lines" block, expanded
+    and split as a POSIX shell would, then as remote.py start hands them to run_exp04.py."""
+    text = SPEC.read_text()
+    block = re.search(r'\*\*Run lines\*\*.*?```sh\n(.*?)```', text, re.S).group(1)
+    variables, lines = {}, {}
+    for line in block.replace('\\\n', ' ').splitlines():
+        assignment = re.match(r'^(\w+)=(.*)$', line.strip())
+        if assignment:
+            variables[assignment.group(1)] = ' '.join(shlex.split(assignment.group(2)))
+            continue
+        # Unquoted $M and $S, as the block writes them: expanded, then split on whitespace.
+        line = re.sub(r'\$(\w+)', lambda m: variables[m.group(1)], line)
+        words = shlex.split(line)
+        if words[:2] != ['python3', 'experiments/network/remote.py']:
+            continue
+        args = remote.build_parser().parse_args(words[2:])
+        lines[args.name] = args.args[1:] if args.args[:1] == ['--'] else args.args
+    return lines
+
+
+class RunLines(unittest.TestCase):
+    """EXP-11's "Run plan and budget": its run lines, exactly as written there."""
+
+    def parsed(self):
+        lines = spec_run_lines()
+        self.assertEqual(sorted(lines), ['exp11-local', 'exp11-uniform'])
+        return {name: run_exp04.parse_args(['--source-ip', '10.0.0.2', '--out', '/nonexistent/exp11', *argv])
+                for name, argv in lines.items()}
+
+    def test_they_parse_and_name_only_known_methods(self):
+        for name, args in self.parsed().items():
+            with self.subTest(name=name):
+                self.assertEqual(args.manifest_checksums, 'CRC32C')
+                methods = run_exp04.method_list(args.methods)
+                self.assertEqual([m for m in methods if m not in measure.ALL_METHODS], [])
+                self.assertIsNone(run_exp04.checksum_problem(methods, args.manifest_checksums))
+                self.assertEqual(run_exp04.block_problems(args, methods), [])
+
+    def test_they_plan_the_registered_runs(self):
+        totals = {}
+        for name, args in self.parsed().items():
+            speeds = measure.parse_speeds(args.speeds)
+            methods = run_exp04.method_list(args.methods)
+            limited = measure.parse_method_speeds(args.method_speeds, methods, speeds)
+            pairs = sum(len(measure.methods_at(methods, limited, speed['label'])) for speed in speeds)
+            patterns = args.patterns.split(',')
+            blocks = {'main': args.repeats * pairs,
+                      'extension': args.extension_repeats * len(run_exp04.method_list(args.extension_methods)),
+                      'warm_source': args.warm_source_repeats * len(run_exp04.method_list(args.warm_source_methods))}
+            totals[name] = {'pairs': pairs, 'patterns': patterns,
+                            **{block: count * len(patterns) for block, count in blocks.items()}}
+        # 25 arm-speed pairs per (trial, repeat) in hot and append, 24 in uniform; 250 + 80 + 18, then 120.
+        self.assertEqual(totals['exp11-local'], {'pairs': 25, 'patterns': ['hot', 'append'], 'main': 250,
+                                                 'extension': 80, 'warm_source': 18})
+        self.assertEqual(totals['exp11-uniform'], {'pairs': 24, 'patterns': ['uniform'], 'main': 120,
+                                                   'extension': 0, 'warm_source': 0})
+        self.assertEqual(sum(total['main'] + total['extension'] + total['warm_source'] for total in totals.values()),
+                         468)
+
+    def test_every_arm_is_run_and_verified_by_its_block(self):
+        class Dispatch:
+            """Each block's run_* and verify_* replaced by its own name."""
+            def __getattr__(self, name):
+                if name.startswith(('run_', 'verify_')):
+                    return lambda *args: name
+                raise AttributeError(name)
+
+        arms = {'full': ('run_full', None), 'full_nosync': ('run_full', None), 'full_syncfs': ('run_full', None),
+                'full_wb': ('run_full', None), 'probackup4': ('run_probackup', 'verify_probackup'),
+                'probackup8': ('run_probackup', 'verify_probackup'), 'parcopy4': ('run_parcopy', 'verify_direct'),
+                'parcopy8': ('run_parcopy', 'verify_direct'),
+                'pgdelta_direct_inplace': ('run_pgdelta_direct', 'verify_direct'),
+                'pgdelta_direct_inplace_j8': ('run_pgdelta_direct', 'verify_direct')}
+        local = self.parsed()['exp11-local']
+        self.assertEqual(sorted(run_exp04.method_list(local.methods)), sorted(arms))
+        for arm, (runner, verifier) in arms.items():
+            with self.subTest(arm=arm):
+                self.assertIn(arm, measure.TIERS)
+                self.assertEqual(run_exp04.Orchestrator.run_phases(Dispatch(), arm, {}, {}), runner)
+                if verifier:  # the pg_basebackup arms' pg_verifybackup and start are the core's tests
+                    self.assertEqual(run_exp04.Orchestrator.verify(Dispatch(), arm, {}, {}), verifier)
 
 
 def audited_record(trial_id, method, scope, result, tool_only=None) -> dict:
