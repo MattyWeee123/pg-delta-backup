@@ -1,21 +1,23 @@
-"""Tests for EXP-11's pg_probackup block (T2's released parallel arm): experiments/network/run_exp04.py
-and measure.py.
+"""Tests for EXP-11's pg_probackup block (T2's released parallel arm) and the syscall audit's place
+in the orchestrator: experiments/network/run_exp04.py and measure.py.
 
-No VM, PostgreSQL or pg_probackup is needed. The orchestrator runs with the stubs of
+No VM, PostgreSQL, pg_probackup or strace is needed. The orchestrator runs with the stubs of
 test_exp04_network and test_exp11_core; pg_probackup's console and help texts are 2.5.16's, as
 its source prints them; the outputs are small trees in temporary directories.
 """
 
 import csv
 import json
+import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from experiments.network import measure, run_exp04
+from experiments.network import durability_audit, measure, run_exp04
 
 import test_exp04_network as base
 import test_exp11_core as core
@@ -550,6 +552,125 @@ class Preflight(core.Clocked):
         probackup = run['t2_preflight']['probackup']
         self.assertEqual(probackup['versions'], {'source': VERSION, 'dest': VERSION})
         self.assertTrue(Path(probackup['ssh_config']).is_file())
+
+
+# --- the syscall audit in the orchestrator -------------------------------------------------------
+
+# strace stand-in: writes a trace line naming the command to its -o file, then runs the command.
+STUB_STRACE = """\
+import subprocess, sys
+args = sys.argv[1:]
+out = args[args.index('-o') + 1]
+command = args[args.index('--') + 1:]
+with open(out, 'w') as stream:
+    stream.write('4242 10:00:00.000001 openat(AT_FDCWD, "/x", O_RDONLY) = 3</x>\\n')
+    stream.write('# ' + ' '.join(args[:args.index('-o')]) + ' -- ' + ' '.join(command) + '\\n')
+sys.exit(subprocess.call(command))
+"""
+
+
+class Audit(core.Clocked):
+    def test_child_runs_under_strace_inside_gnu_time_while_tracing(self):
+        bin_dir = Path(self.tmp.name, 'bin')
+        bin_dir.mkdir()
+        strace = bin_dir / 'strace'
+        strace.write_text(f'#!{os.path.realpath(sys.executable)}\n' + STUB_STRACE)
+        strace.chmod(0o755)
+        gnu_time = base.stub_gnu_time(self.tmp.name)
+        log = Path(self.tmp.name, 'logs', 'probackup8.log')
+        with mock.patch.dict(os.environ, {'PATH': f'{bin_dir}:{os.environ["PATH"]}'}):
+            with mock.patch.object(run_exp04.time, 'perf_counter', __import__('time').perf_counter):
+                run_exp04.Child.trace = True
+                try:
+                    traced = run_exp04.Child(['/bin/echo', 'copied'], log, gnu_time=gnu_time).wait(60)
+                finally:
+                    run_exp04.Child.trace = False
+                plain = run_exp04.Child(['/bin/echo', 'copied'], Path(self.tmp.name, 'logs', 'plain.log'),
+                                        gnu_time=gnu_time).wait(60)
+        self.assertEqual(traced['exit_code'], 0)
+        self.assertEqual(traced['argv'], ['/bin/echo', 'copied'])  # the tool's own, for tool_reported
+        self.assertEqual(traced['launcher'][0], gnu_time)  # GNU time outside, so it never times strace's -o
+        self.assertEqual(traced['peak_rss_kb'], 4321)
+        self.assertEqual(traced['trace'], f'{log}.strace')
+        self.assertIn('# -f -tt -y -e trace=%file,%desc -- /bin/echo copied', Path(traced['trace']).read_text())
+        self.assertEqual(log.read_text(), 'copied\n')
+        self.assertNotIn('trace', plain)
+
+    class Audited(Probackup):
+        """--syscall-audit with every dest command's trace written as if strace had run it."""
+
+        def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None, stamp_lines=False):
+            traced = run_exp04.Child.trace
+            result = super().local_command(argv, log_name, timeout=timeout, cwd=cwd, env=env, stamp_lines=stamp_lines)
+            self.events.append(('traced', Path(argv[0]).name, traced))
+            if traced:
+                output = str(self.outputs / 'probackup8')
+                path = self.dest_log(log_name).with_name(self.dest_log(log_name).name + '.strace')
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(self.catchup_trace(output) if Path(argv[0]).name.startswith('pg_probackup')
+                                else self.sync_trace(output))
+                result['trace'] = str(path)
+            return result
+
+        @staticmethod
+        def catchup_trace(output):
+            data, label = f'{output}/base/5/16397', f'{output}/backup_label'
+            return (f'4242 10:00:00.000001 mkdir("{output}", 0700) = 0\n'
+                    f'4243 10:00:00.000002 openat(AT_FDCWD, "{data}", O_WRONLY|O_CREAT|O_TRUNC, 0600) = 5<{data}>\n'
+                    f'4243 10:00:00.000003 pwrite64(5<{data}>, "A"..., 8192, 0) = 8192\n'
+                    f'4243 10:00:00.000004 close(5<{data}>) = 0\n'
+                    f'4242 10:00:00.000005 openat(AT_FDCWD, "{label}", O_WRONLY|O_CREAT|O_TRUNC, 0600) = 6<{label}>\n'
+                    f'4242 10:00:00.000006 write(6<{label}>, "START"..., 240) = 240\n'
+                    f'4242 10:00:00.000007 close(6<{label}>) = 0\n'
+                    f'4242 10:00:00.000008 openat(AT_FDCWD, "{data}", O_RDWR) = 5<{data}>\n'
+                    f'4242 10:00:00.000009 fsync(5<{data}>) = 0\n')
+
+        @staticmethod
+        def sync_trace(output):
+            return (f'5000 10:00:01.000001 openat(AT_FDCWD, "{output}", O_RDONLY|O_NONBLOCK) = 3<{output}>\n'
+                    f'5000 10:00:01.000002 syncfs(3<{output}>) = 0\n')
+
+    def test_a_timed_phases_commands_are_traced_and_audited(self):
+        orchestrator = self.orchestrator(self.Audited, ['--syscall-audit', '--audit-filesystem', self.tmp.name])
+        orchestrator.verify = lambda method, paths, phases: (  # its start runs a command too
+            orchestrator.local_command(['/usr/lib/postgresql/17/bin/pg_ctl', 'start'], 'start.log')
+            and {'verified': True, 'basis_changes': [], 'output_bytes': 8432})
+        record = self.run_method(orchestrator, 'probackup8')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        traced = [event[1:] for event in orchestrator.events if event[0] == 'traced']
+        # Only the timed phase's commands: not the verification's start.
+        self.assertEqual(traced, [('pg_probackup-17', True), ('sync', True), ('pg_ctl', False)])
+        self.assertFalse(run_exp04.Child.trace)
+        audited = record['audit']
+        output = str(orchestrator.outputs / 'probackup8')
+        self.assertEqual(audited['scope'], [output])
+        self.assertTrue(audited['result']['ok'], audited['result'])
+        self.assertEqual(len(audited['result']['traces']), 2)
+        self.assertFalse(audited['tool_only']['ok'])
+        self.assertEqual([entry['path'] for entry in audited['tool_only']['uncovered_files']], [f'{output}/backup_label'])
+        self.assertIn('times nothing', audited['untimed'])
+
+    def test_without_the_audit_nothing_is_traced(self):
+        orchestrator = self.orchestrator(self.Audited)
+        orchestrator.verify = lambda method, paths, phases: {'verified': True, 'basis_changes': [],
+                                                              'output_bytes': 8432}
+        record = self.run_method(orchestrator, 'probackup8')
+        self.assertEqual({event[2] for event in orchestrator.events if event[0] == 'traced'}, {False})
+        self.assertNotIn('audit', record)
+
+    def test_the_audit_needs_strace_on_dest_and_is_recorded_in_run_json(self):
+        class Executing(core.RunJson.Executing):
+            pass
+
+        orchestrator, code, run = core.RunJson.execute(self, ['full', 'full_nosync'], ['--syscall-audit'],
+                                                       cls=Executing)
+        self.assertEqual(code, 0)
+        self.assertEqual(run['syscall_audit']['argv'], durability_audit.strace_argv('<log>.strace'))
+        self.assertEqual(run['syscall_audit']['filesystem'], '/data')
+        orchestrator.run['environment']['dest']['strace'] = None
+        with self.assertRaises(SystemExit) as refused:
+            orchestrator.preflight_audit()
+        self.assertIn('--syscall-audit needs strace on dest', str(refused.exception))
 
 
 if __name__ == '__main__':

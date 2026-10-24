@@ -80,7 +80,9 @@ A run that selects any of them also takes, in each trial, reference digests of t
 stopped source before and after the methods, and untimed probes (the durable write
 floor, the read floors, the backup-mode bracket, an 8-stream link test). Its
 extension and warm-source blocks (--extension-*, --warm-source-*) follow the main
-block, unthrottled.
+block, unthrottled. --syscall-audit (EXP-11's audit, untimed) runs every timed
+command on dest under strace and checks each run's traces against the durability
+definition (experiments/network/durability_audit.py).
 
 The end-to-end total is every timed phase, rsync's prep included. The prep
 and the capture run on different VMs with the link idle, so a real
@@ -129,7 +131,7 @@ if str(REPO_ROOT) not in sys.path:
 from benchmarks.backup import atomic_json, basebackup_command, combine_command  # noqa: E402
 from benchmarks.methods import RSYNC_OPTIONS, parse_pgdelta_stats, rsync_transfer_stats  # noqa: E402
 from experiments.change_patterns import workloads  # noqa: E402
-from experiments.network import measure  # noqa: E402
+from experiments.network import durability_audit, measure  # noqa: E402
 from experiments.network.agent import RESULT_PREFIX  # noqa: E402
 
 SCHEMA_RUN = 'exp04-method-run/1'
@@ -367,17 +369,27 @@ class Child:
     pipe that a thread of this process reads, writing each line to the log as
     it arrives, prefixed with the seconds since the launch on this clock
     (measure.stamp_line). No other process runs for it, inside the clock or out.
+
+    While Child.trace is set (EXP-11's syscall audit, run_exp04 --syscall-audit: Orchestrator.timed_phase
+    sets it around each timed phase), the command runs under strace (durability_audit.strace_argv), inside
+    GNU time, its trace beside its log; argv stays the tool's own.
     """
+
+    trace = False
 
     def __init__(self, argv, log_path: Path, *, cwd=None, env=None, gnu_time=None, stamp_lines=False):
         self.argv = [str(part) for part in argv]
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self.time_path = Path(f'{self.log_path}.time') if gnu_time else None
+        self.trace_path = Path(f'{self.log_path}.strace') if Child.trace else None
         launch = self.argv
+        if self.trace_path is not None:
+            self.trace_path.unlink(missing_ok=True)
+            launch = [*durability_audit.strace_argv(self.trace_path), *launch]
         if self.time_path is not None:
             self.time_path.unlink(missing_ok=True)
-            launch = measure.gnu_time_argv(gnu_time, self.time_path, self.argv)
+            launch = measure.gnu_time_argv(gnu_time, self.time_path, launch)
         self.launcher = launch[:5] if gnu_time else None
         self.stream = open(self.log_path, 'wb')
         self.reader = None
@@ -421,6 +433,8 @@ class Child:
                        'gnu_time': timing, 'launcher': self.launcher,
                        'log': str(self.log_path), 'timed_out': self.timed_out,
                        'stamped_lines': self.reader is not None}
+        if self.trace_path is not None:
+            self.result['trace'] = str(self.trace_path)
         return self.result
 
     def poll(self):
@@ -677,12 +691,19 @@ class Orchestrator:
                 'log_tail': result['log_tail'][-8000:], 'timed_out': False}
 
     def timed_phase(self, name: str, body) -> dict:
-        """Counters on both VMs around body(); body returns its command records."""
+        """Counters on both VMs around body(); body returns its command records.
+
+        With --syscall-audit, every command launched on dest meanwhile runs under strace (Child.trace).
+        """
         before_source = self.snapshot_source()
         before_dest = self.snapshot_dest()
         started_utc = time.time()
         started = time.perf_counter()
-        commands = body()
+        Child.trace = self.args.syscall_audit
+        try:
+            commands = body()
+        finally:
+            Child.trace = False
         wall = time.perf_counter() - started
         ended_utc = time.time()
         after_dest = self.snapshot_dest()
@@ -1784,6 +1805,25 @@ class Orchestrator:
         return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None,
                 'scope': FULL_BYTES_SCOPE}
 
+    def syscall_audit(self, method, paths, phases) -> dict:
+        """EXP-11's syscall audit of this run (--syscall-audit): its timed commands' traces on dest, read in
+        order, against the definition, for the output (and pgdelta's receipt beside it), on
+        --audit-filesystem. probackup* also get the catchup's trace alone ('tool_only'): what the tool's
+        own flush leaves to its sync -f. The result decides no status."""
+        traces = [command['trace'] for phase in phases.values() for command in phase.get('commands', ())
+                  if command.get('trace')]
+        scope = [str(paths[key]) for key in ('output', 'receipt') if key in paths]
+        options = {'filesystem': self.args.audit_filesystem, 'cwd': self.repo, 'ignore': [str(self.out)]}
+        audit = {'untimed': 'the commands ran under strace: this run times nothing', 'scope': scope,
+                 'result': durability_audit.audit_files(traces, scope, **options)}
+        if method in measure.PROBACKUP_METHODS and len(traces) > 1:
+            audit['tool_only'] = durability_audit.audit_files(traces[:-1], scope, **options)
+        result = audit['result']
+        log(f'  audit: {"ok" if result["ok"] else "NOT durable"}: {result["files_written"]} files '
+            f'({result["uncovered_file_count"]} uncovered), {result["directory_changes"]} directory changes '
+            f'({result["uncovered_directory_change_count"]} uncovered)')
+        return audit
+
     @staticmethod
     def stamped_command(phases: dict, phase: str, tool: str) -> tuple[dict | None, list]:
         """The first command of `phase` whose program name starts with `tool`, and its stamped lines."""
@@ -1892,6 +1932,8 @@ class Orchestrator:
             if problems:
                 raise CommandError('; '.join(problems))
             record['tool_reported'] = self.tool_reported(method, paths, phases)
+            if self.args.syscall_audit:
+                record['audit'] = self.syscall_audit(method, paths, phases)
             if method in measure.PGDELTA_METHODS:
                 # B0 the receiver read between its two timed phases, off the clock.
                 record['prefetch_untimed'] = measure.prefetch_untimed(
@@ -2715,6 +2757,18 @@ class Orchestrator:
         result['writeback_defaults'] = self.record_writeback_defaults()
         return result
 
+    def preflight_audit(self) -> dict:
+        """--syscall-audit: strace on dest, and what run.json says about the audit."""
+        strace = self.run['environment']['dest'].get('strace')
+        if not strace:
+            raise SystemExit('--syscall-audit needs strace on dest (infra/gcp/startup.sh installs it)')
+        return {'strace': strace, 'argv': durability_audit.strace_argv('<log>.strace'),
+                'filesystem': self.args.audit_filesystem,
+                'what': ("EXP-11's syscall audit: every command of every timed phase on dest runs under strace, "
+                         "its trace beside its log, and each run's record holds the audit of its traces against "
+                         "the durability definition (experiments/network/durability_audit.py). The runs time "
+                         'nothing')}
+
     def phase_floor(self, repeats: int) -> dict:
         """What an empty timed phase records: the counter snapshots' own cost.
 
@@ -2865,6 +2919,8 @@ class Orchestrator:
                                      '(infra/gcp/startup.sh installs it)')
             if self.t2:
                 self.run['t2_preflight'] = self.preflight_t2()
+            if args.syscall_audit:
+                self.run['syscall_audit'] = self.preflight_audit()
             if self.gnu_time:
                 self.run['rss_probe'] = self.rss_probe()
             if self.t2 or any(method in measure.PGDELTA_METHODS for method in self.methods):
@@ -2948,6 +3004,12 @@ def parse_args(argv=None):
     parser.add_argument('--probackup-byte-diagnostic', choices=('every', 'first_repeat'), default='every',
                         help="T2: probackup*'s byte diagnostic (against the trial's start reference digest) in "
                              "every run, or only in each trial's first repeat (EXP-11's first cut)")
+    parser.add_argument('--syscall-audit', action='store_true',
+                        help="T2: EXP-11's syscall audit: every command of every timed phase on dest runs under "
+                             'strace -f -tt -y -e trace=%%file,%%desc, and each record holds the audit of its '
+                             'traces (experiments/network/durability_audit.py). Untimed: the times mean nothing')
+    parser.add_argument('--audit-filesystem', default=durability_audit.DEFAULT_FILESYSTEM,
+                        help="--syscall-audit: the outputs' mount point, which a syncfs of it covers")
     parser.add_argument('--repeats', type=int, default=1)
     parser.add_argument('--extension-repeats', type=int, default=0,
                         help='T2: after the main block, this many more unthrottled repeats of '
