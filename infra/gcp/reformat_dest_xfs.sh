@@ -7,7 +7,7 @@
 # (/dev/md/pgdata, which startup.sh built), mounts it again at /data with startup.sh's
 # options and /data's old owner and mode, recreates /data/.startup-done, and prints the
 # filesystem's reflink setting. startup.sh keeps the XFS filesystem at the next boot: it
-# formats the array only when it holds no filesystem. To go back to ext4, recreate the VM.
+# formats the array only when it holds no filesystem. To go back to ext4, run reformat_dest_ext4.sh.
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./config.sh
