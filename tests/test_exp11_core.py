@@ -155,9 +155,11 @@ class T2Stub(StubOrchestrator):
         if args[:2] == ('sysctl', 'get'):
             return {'values': {name: self.kernel.values[name] for name in args[2:]}}
         if args[:2] == ('sysctl', 'set'):
-            for item in args[2:]:
-                self.kernel.set(*item.split('='))
-            return {'set': dict(item.split('=') for item in args[2:]), 'values': dict(self.kernel.values)}
+            wanted = dict(item.split('=') for item in args[2:])
+            for name, value in wanted.items():
+                self.kernel.set(name, value)
+            # As agent.py's: the values of the settings it wrote, read back, and no other.
+            return {'set': wanted, 'values': {name: self.kernel.values[name] for name in wanted}}
         return {}
 
     def tool_reported(self, method, paths, phases):
@@ -883,13 +885,17 @@ class Runs(Clocked):
         kinds = self.kinds(orchestrator)
         sysctl = [event[1] for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'local_agent'
                   and event[1][0] == 'sysctl']
-        self.assertEqual([call[:2] for call in sysctl],
-                         [('sysctl', 'get'), ('sysctl', 'set'), ('sysctl', 'set'), ('sysctl', 'get')])
+        # The guard, the set and both settings read back, then the reset and its check.
+        self.assertEqual([call[:2] for call in sysctl], [('sysctl', 'get'), ('sysctl', 'set'), ('sysctl', 'get'),
+                                                         ('sysctl', 'set'), ('sysctl', 'get')])
         # Set before the cache drop; reset by writing the ratio, never 0 to the bytes setting.
         self.assertEqual(sysctl[1][2:], ('vm.dirty_background_bytes=67108864',))
-        self.assertEqual(sysctl[2][2:], ('vm.dirty_background_ratio=10',))
-        self.assertLess([index for index, kind in enumerate(kinds) if kind == ('local_agent', 'sysctl')][1],
+        self.assertEqual(sysctl[3][2:], ('vm.dirty_background_ratio=10',))
+        self.assertLess([index for index, kind in enumerate(kinds) if kind == ('local_agent', 'sysctl')][2],
                         kinds.index('drop_caches'))
+        # Both values in force during the run, though agent.py's set reports only the one it wrote.
+        self.assertEqual(record['sysctl']['during'], {'vm.dirty_background_ratio': 0,
+                                                      'vm.dirty_background_bytes': 64 * MIB})
         self.assertEqual(orchestrator.kernel.values, {'vm.dirty_background_ratio': 10, 'vm.dirty_background_bytes': 0})
         self.assertNotIn(('vm.dirty_background_bytes', 0), orchestrator.kernel.writes)
         row = measure.summary_row(record)

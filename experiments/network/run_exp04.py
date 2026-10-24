@@ -1527,9 +1527,14 @@ class Orchestrator:
         return values
 
     def set_dirty_writeback(self, method) -> dict:
-        """full_wb's setting on dest (measure.HOST_TUNED_METHODS), set before the cache drop."""
+        """full_wb's setting on dest (measure.HOST_TUNED_METHODS), set before the cache drop.
+
+        Both settings are read back after it ('values', the record's sysctl.during): `agent.py sysctl set`
+        reports only the one it wrote, and the ratio's 0, which the bytes setting puts in force, is recorded too.
+        """
         settings = measure.HOST_TUNED_METHODS[method]
-        return self.local_agent('sysctl', 'set', *(f'{name}={value}' for name, value in settings.items()))
+        result = self.local_agent('sysctl', 'set', *(f'{name}={value}' for name, value in settings.items()))
+        return {**result, 'written': result.get('values'), 'values': self.dirty_writeback()}
 
     def reset_dirty_writeback(self) -> dict:
         """Back to the defaults: the ratio written to its recorded default, which sets the bytes setting to 0.
