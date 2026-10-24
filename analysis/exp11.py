@@ -340,9 +340,10 @@ class Session:
         for r in rows:
             if r['method'] not in measure.PARCOPY_METHODS and r['method'] not in measure.PROBACKUP_METHODS:
                 continue
-            if (r['status'] == 'fail' and not r['void']) or (r['status'] == 'error' and r['failure_kind'] == 'tool'):
+            aborted = r['status'] == 'error' and r.get('failure_kind') == 'tool'
+            if (r['status'] == 'fail' and not r['void']) or aborted:
                 self.a4.setdefault(r['method'], []).append(r)
-            elif r['status'] == 'error' and r['failure_kind'] is None:
+            elif r['status'] == 'error' and r.get('failure_kind') is None:
                 self.a4_undecided.setdefault(r['method'], []).append(r)
         self.excluded = {method: 'A5: not durable for the session (' + '; '.join(why) + ')'
                          for method, why in self.not_durable.items()}
@@ -782,7 +783,7 @@ def counts_lines(S):
     lines.append('- left out of every median: ' + (', '.join(f'{k} {n}' for k, n in sorted(left.items())) or 'none'))
     for r in S.rows:
         if r['status'] == 'error':
-            kind = {'tool': 'the tool', 'harness': 'the harness'}.get(r['failure_kind'], 'cause not recorded')
+            kind = {'tool': 'the tool', 'harness': 'the harness'}.get(r.get('failure_kind'), 'cause not recorded')
             lines.append(f'  - error ({kind}): {r["trial_id"]} r{r["repeat"]} {r["speed"]} {r["method"]}: '
                          f'{r["error"] or ""}')
     return lines
@@ -1466,7 +1467,7 @@ def a_lines(S, gates, verdict_fast, verdict_tuned):
     undecided = [f'**undecided** for {arm}: {len(runs)} errored run(s) whose cause isn\'t recorded ('
                  + ', '.join(f'{r["trial_id"]} r{r["repeat"]} {r["speed"]}' for r in runs) + ')'
                  for arm, runs in S.a4_undecided.items() if arm not in S.a4]
-    harness = sum(r['status'] == 'error' and r['failure_kind'] == 'harness' for r in S.rows
+    harness = sum(r['status'] == 'error' and r.get('failure_kind') == 'harness' for r in S.rows
                   if r['method'] in measure.PARCOPY_METHODS or r['method'] in measure.PROBACKUP_METHODS)
     say('- **A4** (a parcopy run fails verify_direct or doesn\'t start; a pg_probackup run doesn\'t start or differs '
         'logically while the reference digests match; either\'s copy aborted by the tool itself): '
@@ -1512,7 +1513,7 @@ def verdicts(S, exp09, audit=None):
     v_tuned, rows = ha_lines(ratios, bound, 'against B_tuned', fast='B_tuned')
     lines += rows + ['']
     crossing, found = crossover_lines(S, table, bound)
-    lines += crossing + [''] + drift_lines(gates) + code_lines(S) + ['']
+    lines += crossing + [''] + drift_lines(gates) + [''] + code_lines(S) + ['']
     ledger, required = ledger_lines(S, table, gates)
     lines += ledger + [''] + e_lines(S, found) + [''] + a_lines(S, gates, v_fast, v_tuned) + ['']
     lines += phase_table_lines(S, required) + [''] + above_link_lines(S) + [''] + order_lines(S)

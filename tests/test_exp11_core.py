@@ -469,7 +469,8 @@ class RunJson(Clocked):
         cases = {'dest: /data is xfs, not ext4': ({'data_mount': '/dev/md127 xfs rw,noatime,attr2,inode64 1.5T'}, {}),
                  'source: /data is ext4 mounted with data=writeback': (
                      {}, {'data_mount': '/dev/md127 ext4 rw,noatime,data=writeback 1.5T'}),
-                 'dest: /data is ext4 mounted with nobarrier': ({'data_mount': '/dev/md127 ext4 rw,nobarrier 1.5T'}, {}),
+                 'dest: /data is ext4 mounted with nobarrier': (
+                     {'data_mount': '/dev/md127 ext4 rw,nobarrier 1.5T'}, {}),
                  'dest: findmnt reports no filesystem at /data': ({'data_mount': None}, {})}
         for message, (dest, source) in cases.items():
             with self.subTest(message=message):
