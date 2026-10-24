@@ -478,6 +478,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
   - source programs are forbidden: v1 must work from the destination only.
 
 ### T10a Source slowdown, minimal version, plus the correctness check under load
+- **Pre-registered in full as [EXP-12](experiments/EXP-12-source-slowdown.md)** (October 24, 2026), revised after an independent review and a check of the revision, before any code for it exists.
 - **Question:** with a fixed-rate pgbench or HammerDB load on the source, how much do throughput and p95 latency drop? Compare against no backup at all, during a full copy, the capture, pgdelta and rsync, at 0.5 and 2 Gbit/s. Check every output: `pg_verifybackup`, recovery, and a logical match.
 - **Prediction:** the slowdown tracks source CPU. pgdelta uses about 4 times the full copy's source CPU, so its total throughput loss is 2-4 times the full copy's at 2 Gbit/s, and still higher at 0.5 Gbit/s. Every output is correct.
 - **Proves it wrong:** if pgdelta's loss is no higher than the full copy's where it wins on time, source CPU isn't a blocker. If it is higher, report slowdown next to time and move T5 ahead of T8. Any wrong output stops speed work.
@@ -563,6 +564,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 - **Needs:** T8's live-source path.
 
 ### T12 Latency and transport
+- **Pre-registered in full as [EXP-13](experiments/EXP-13-latency-transport.md)** (October 24, 2026), revised after an independent review and a check of the revision, before any code for it exists.
 - **Question:** what changes at 20, 60 and 120 ms round-trip time? Arms: pgdelta windows of 1, 4 and 16; one vs several TCP streams; SSH; 1% and 10% changes, with the high-churn fallback on and off.
 - **Prediction:** with a window of 4, pgdelta adds 2 s or less per 2.1 GB at 60 ms. A single-stream full copy slows down more.
 - **Proves it wrong:** if pgdelta slows down more than the full copy, the protocol needs deeper pipelining before any WAN claim.

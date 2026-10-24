@@ -3,6 +3,20 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24 (afternoon): T10a and T12 pre-registered as EXP-12 and EXP-13
+
+**Why these two:** they head the queue re-ranked after T2. T10a measures the owner's bar (O4: a refresh slows a live source no more than `pg_basebackup` does) and checks every output under load. T12 measures DR's links, now v1's first target: what round-trip time, TCP buffers and TLS do to v1's path and to the full copies.
+
+**How they were designed,** as EXP-11 was, before any code for them exists: for each test, two independent drafts (one for realism and decision value, one for measurement validity), merged into one; an adversarial review; a revision; an independent check of the revision; and a final pass. Where a fix offered options, the option that doesn't favour v1 was taken. The reviews and checks found 16 problems in EXP-12 (5 major) and then 9 more (2 major), and 12 in EXP-13 (4 major) and then 13 more (none major). All are answered in each write-up's "Revisions before running". Two examples of what they caught:
+- **EXP-12:** a plain-text `pg_dump` has carried a random restrict key since PostgreSQL 17.6, so a schema check by hash would have failed every good copy.
+- **EXP-13:** netem counts its child shaper's drops as its own, so a "zero drops" check would have discarded every run with raised TCP buffers.
+
+**Expected results, written down before running:**
+- **EXP-12:** the registered rule fires and moves T5 ahead of T8. The proxy for v1's source side most likely misses the bar on the worst drop if the source is busy above 50%, so a cap on source workers would follow (T10b moves up).
+- **EXP-13:** with Debian's default TCP buffers, one pgdelta stream is window-limited at 60 ms, so v1 loses scattered changes there; with raised buffers it wins. One TCP stream (D36) would then be contradicted for DR, unless Omni's nodes raise their buffers: a choice for the owner.
+
+**Cost if run:** EXP-12 about 3.45 days of harness work and about 3.4 hours of the VM pair; EXP-13 about 2–3 days and about 3.5–4 hours. Nothing is built or run.
+
 ## 2026-10-24 (later): EXP-11 rechecked; corrections applied
 
 An independent recheck read EXP-11's write-up and its summaries (the ledger, the README, the experiments index and this log) against the raw data: 33 findings, 12 major. Each was checked against the data, and all held, some in part: 25 distinct corrections, listed in [EXP-11](experiments/EXP-11-full-copy-baseline.md#corrections-after-the-recheck-october-24-2026). No registered verdict changes, and the pre-registered sections are untouched. The main ones:
