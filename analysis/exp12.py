@@ -2520,6 +2520,17 @@ def flag_lines(S, cells, ctx, d1, d2, base):
     return lines, weak, near, caveats
 
 
+def e3_check(item, late=True):
+    """E3 for one pause2 (a2_runs' item): W 1.6-2.0 s at ρ = 0.6 (1.3-2.0 at 0.3), D at least 0.95, the gap within
+    5 ms plus one latency of the signals and inside dest's mapped phase; with `late`, the late count at L 4-6 s at
+    0.6. None without its W or D (no numbers from the logs). Smoke item 12 judges by it, without the late count."""
+    if item['W'] is None or item['D'] is None:
+        return None
+    busy = item['block'] == 'busy'
+    return every([within(item['W'], 1.6 if busy else 1.3, 2.0), item['D'] >= 0.95,
+                  within(item['late_L'], 4.0, 6.0) if busy and late else None, item['signals_ok'], item['inside']])
+
+
 def e_lines(S, cells, ctx, d1, d2, a5v, a6v, moderate, caveats, near):
     lines = ['## Added predictions (busy block unless stated)']
     say = lines.append
@@ -2557,12 +2568,7 @@ def e_lines(S, cells, ctx, d1, d2, a5v, a6v, moderate, caveats, near):
         f'passes within 30 s in at least 95% of runs {word(None if share30 is None else share30 >= 0.95)} '
         f'({fmt(None if share30 is None else 100 * share30, 1)}%)')
     pauses = ctx['a2']
-    e3 = []
-    for item in pauses:
-        busy = item['block'] == 'busy'
-        lo = 1.6 if busy else 1.3
-        e3.append(every([within(item['W'], lo, 2.0), None if item['D'] is None else item['D'] >= 0.95,
-                         within(item['late_L'], 4.0, 6.0) if busy else None, item['signals_ok'], item['inside']]))
+    e3 = [e3_check(item) for item in pauses]
     say(f'- **E3** (pause2: W 1.6-2.0 s at ρ = 0.6, 1.3-2.0 at 0.3; D at least 0.95; the late count at L 4-6 s at 0.6; the '
         f'gap within 5 ms plus one latency of the signals, inside the mapped phase): {word(every(e3))} ('
         + ', '.join(f'{item["block"]} W {fmt(item["W"], 3)} D {fmt(item["D"], 3)} late {fmt(item["late_L"], 2)}'
@@ -2957,8 +2963,13 @@ def smoke_lines(S, cells, ctx):
                                                   for f in finals) or 'no sampler data')
         + '; p99 with and without it: compare the warm-ups of a sweep run with --sampler-interval-s 0')
     pauses = [item for item in ctx['a2'] if item['block'] == 'busy']
-    say(f'12. **pause2** at R_busy: {len(pauses)} runs; inside E3\'s ranges and matching the signals (A2) '
-        f'{word(every(item["ok"] for item in pauses))}')
+    checks = [e3_check(item, late=False) for item in pauses]
+    say(f'12. **pause2** at R_busy: {len(pauses)} runs; W 1.6-2.0 s and D at least 0.95 (E3\'s ranges), the gap '
+        f'matching the agent\'s signals and inside dest\'s mapped phase: {word(every(checks) if checks else None)} ('
+        + ', '.join(f'W {fmt(item["W"], 3)} D {fmt(item["D"], 3)} signals {yes(item["signals_ok"])} inside '
+                    f'{yes(item["inside"])}' for item in pauses)
+        + ('; a run without numbers' if None in checks else '') + '); if not, the window mapping or the arithmetic '
+        'is fixed and the item repeats')
     noise = [get(run, 'dirty_idle_noise', 'max_increase_bytes') for run in S.meta]
     nosync = [get(r['record'], 'durability', 'dirty_writeback_increase_bytes') for r in S.runs
               if r['method'] in measure.NON_DURABLE_METHODS]

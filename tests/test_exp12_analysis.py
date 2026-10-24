@@ -681,6 +681,22 @@ class Context(unittest.TestCase):
         # Inside dest's phase mapped through the offset, within the same margin.
         self.assertIs(self.pause(gap=(T0 - 0.01, T0 + 1.99), stop=T0 - 0.0101, cont=T0 + 1.99)['ok'], False)
 
+    def test_smoke_item_12_judges_by_e3s_ranges_not_a2s_wider_band(self):
+        # W 2.2 s and D 0.92 pass A2 (W up to 2.3, D at least 0.9) but not E3 (W 1.6-2.0 s at ρ 0.6, D at least 0.95).
+        for W, D, item12 in ((1.8, 1.0, 'held'), (2.2, 1.0, 'failed'), (1.8, 0.92, 'failed')):
+            with self.subTest(W=W, D=D):
+                stop, cont = T0 + 0.0499, T0 + 2.05
+                S = session([record('pause2', control_slot='busy_start', load_rate=1200, phases={
+                    measure.CONTROL_PHASE: {'control': {'sigstop_utc': [stop, stop + 0.0001],
+                                                        'sigcont_utc': [cont, cont + 0.0001]}}})])
+                S.runs[0]['stats'] = {'W': W, 'D': D, 'gap_utc': [T0 + 0.05, T0 + 2.05], 'late_L': 5.0}
+                S.runs[0]['settle'] = {'p99_ms': 1.0}
+                ctx = exp12.context(S)
+                self.assertIs(ctx['a2'][0]['ok'], True)  # A2 doesn't fire
+                self.assertEqual(exp12.e3_check(ctx['a2'][0], late=False), item12 == 'held')
+                line = next(text for text in exp12.smoke_lines(S, S.cells('main'), ctx) if text.startswith('12.'))
+                self.assertIn(f'inside dest\'s mapped phase: {item12}', line)
+
     def test_a2_blocks_its_blocks_loss_verdicts(self):
         S = session([record('pause2', control_slot='busy_start')])
         S.runs[0]['stats'] = {'W': 1.0, 'D': 1.0, 'gap_utc': None, 'late_L': 3.0}
