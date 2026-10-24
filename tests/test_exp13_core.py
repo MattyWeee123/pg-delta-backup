@@ -764,7 +764,12 @@ class Statistics(unittest.TestCase):
                           report['leaf_wait_idle_s'], report['page_send_s'], report['leaf_requests'],
                           report['leaf_waits_over_1ms'], report['window']),
                          (0.121, 1.5, 0.5, 1.0, 3.25, 19, 12, 16))
-        self.assertEqual(report['receiver'], {'hello_wait_s': 0.19, 'recv_wait_s': 4.0, 'publish_s': 6.5})
+        self.assertEqual(report['receiver'], {'hello_wait_s': 0.19, 'recv_wait_s': 4.0, 'publish_s': 6.5,
+                                              'published_utc': None})
+        # pgdelta's own layout: the receiver's timers and its publication's moment under protocol_timers.
+        timers = {'hello_wait_s': 0.2, 'recv_wait_s': 3.0, 'publish_s': 6.0, 'published_utc': 1790000006.5}
+        self.assertEqual(measure.pgdelta_protocol_report({'receiver': {'protocol_timers': timers}})['receiver'],
+                         timers)
         self.assertEqual(report['busy_idle_gap_s'], {'accept_wait': 0.0, 'basis_wait': 0.0, 'leaf_wait': 0.0,
                                                      'complete_wait': 0.0})
         # Nested parts ({'leaf_wait': {'total', 'busy', 'idle'}}) and bare names at the top level count too.
@@ -808,6 +813,13 @@ class Statistics(unittest.TestCase):
         self.assertEqual((row['window'], row['leaf_wait_idle_s'], row['publish_s'], row['drain_s'],
                           row['busy_split_valid'], row['prefetch_bytes']), (16, 1.0, 6.5, 0.12, True, 2 << 30))
         self.assertFalse(measure.summary_row({**record, 'method': TLS})['busy_split_valid'])
+        # With the receiver's launch on dest's clock and pgdelta's publication on the same clock, the drain is read
+        # there: its exit less its publication, without the interpreter's start-up that publish_s leaves out.
+        record['tool_reported']['receiver']['published_utc'] = 1790000006.45
+        record['phases'] = {measure.DIRECT_PHASE: {'commands': [
+            {'host': 'dest', 'role': 'receiver', 'started_utc': 1790000000.0, 'wall_seconds': 6.62}]}}
+        self.assertEqual(measure.receiver_exit_utc(record), 1790000006.62)
+        self.assertEqual(measure.summary_row(record)['drain_s'], 0.17)
 
 
 # --- durability: check (a)'s limit by the run's clock -------------------------------------------------------------

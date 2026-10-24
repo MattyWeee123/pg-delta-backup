@@ -298,16 +298,6 @@ def b_check(row):
     return written >= math.ceil(measure.DISK_WRITE_FRACTION * output)
 
 
-def receiver_exit_utc(record):
-    """The receiver's exit on dest's clock: its launch (started_utc) plus its wall; None without it."""
-    for phase in (record.get('phases') or {}).values():
-        for command in phase.get('commands', ()) if isinstance(phase, dict) else ():
-            if command.get('host') == 'dest' and 'receiver' in str(command.get('role', '')):
-                if command.get('started_utc') is not None and command.get('wall_seconds') is not None:
-                    return command['started_utc'] + command['wall_seconds']
-    return None
-
-
 def from_record(record: dict, row: dict) -> dict:
     """What a run's record adds to its summary row: checks (a) and (b) apart and the run's own limit, parcopy's fsync
     count, an error's kind, the link tests the run's visit carries (the N-stream steady rates, the zero-delay rates),
@@ -332,7 +322,7 @@ def from_record(record: dict, row: dict) -> dict:
     drain = row.get('drain_s')
     published = ((reported.get('receiver') or {}) if isinstance(reported.get('receiver'), dict) else {}).get(
         'published_utc')
-    exit_utc = receiver_exit_utc(record)
+    exit_utc = measure.receiver_exit_utc(record)
     if published is not None and exit_utc is not None:
         drain = round(exit_utc - published, 6)
     pages = reported.get('pages') if isinstance(reported.get('pages'), dict) else {}

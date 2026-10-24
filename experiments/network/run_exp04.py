@@ -1536,7 +1536,7 @@ class Orchestrator:
 
     def t12_checks(self, record: dict, method: str, verification: dict) -> None:
         """An EXP-13 run's own checks, after its verification: the receiver's wall (its launch to its exit; the drain
-        is that less publish_s) for pgdelta's arms; for v1_tls, stunnel's log showing the connection, TLS 1.3 and its
+        is its exit less pgdelta's publication on dest's clock, measure.t12_columns) for pgdelta's arms; for v1_tls, stunnel's log showing the connection, TLS 1.3 and its
         suite, or the run fails verification; and A11 (ii)'s network checks (measure.network_checks)."""
         if method in measure.PGDELTA_METHODS:
             receiver = next((command for phase in (record.get('phases') or {}).values()
