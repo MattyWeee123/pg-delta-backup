@@ -3225,7 +3225,7 @@ class Orchestrator:
         server or tools return is 'wrong'; only a harness-side failure, a timeout or a missing binary, 'unverified'."""
         try:
             return body()
-        except CommandError as exc:
+        except (CommandError, ValueError) as exc:  # an error, or an answer that doesn't read: the copy's
             return {'status': 'wrong', 'error': f'{type(exc).__name__}: {exc}'}
         except subprocess.TimeoutExpired as exc:
             return {'status': 'unverified', 'error': f'timed out: {exc}'}
@@ -3467,6 +3467,12 @@ class Orchestrator:
         else:
             action = {'evicted': self.source.agent('evict', *self.static_files(), timeout=600)}
         fincore = self.cache_state()
+        if not warm and measure.cache_flag(fincore, warm):
+            # EXP-12's smoke item 8: more than 1% still resident; once more, after a sync -f of the files (dirty pages
+            # can't be dropped), and the second reading is the one that counts.
+            action['first_fincore'] = fincore
+            action['evicted_again'] = self.source.agent('evict', '--sync', *self.static_files(), timeout=600)
+            fincore = self.cache_state()
         return {'policy': 'warm' if warm else 'evict', **action, 'fincore': fincore,
                 'cache_flag': measure.cache_flag(fincore, warm), 'seconds': round(time.perf_counter() - started, 3)}
 
@@ -3888,13 +3894,19 @@ class Orchestrator:
         self.current_trial['load']['restarts'].append(entry)
         return {'running': False, **entry}
 
-    def sampler_start(self) -> dict:
+    def sampler_start(self) -> dict | None:
+        """The sampler on the source, from the busy load's start to the load's end (--sampler-interval-s 0: none, as
+        smoke item 11's run without it)."""
+        if self.args.sampler_interval_s <= 0:
+            return None
         return self.source.agent('sampler', 'start', '--out', self.sampler_dir, '--load-dir', self.load_dir,
                                  '--interval', str(self.args.sampler_interval_s), '--psql', str(self.bin / 'psql'),
                                  '--host', f'{self.source_root}/s', '--port', str(PG_PORT), '--user', PG_USER,
                                  '--database', PG_DATABASE)
 
-    def sampler_stop(self) -> dict:
+    def sampler_stop(self) -> dict | None:
+        if self.args.sampler_interval_s <= 0:
+            return None
         return self.source.agent('sampler', 'stop', '--out', self.sampler_dir, timeout=120)
 
     @property
@@ -3982,15 +3994,22 @@ class Orchestrator:
         invariant = json.loads(self.query(measure.load_oracle_sql(), host=self.source.ip, port=PG_PORT,
                                           database=measure.LOAD_DATABASE, log_name=f'{when}-invariant.log'))
         schema = self.schema_hashes(self.source.ip, PG_PORT, f'{when}-schema')
+        # Smoke item 14: loaddb's size, before and after (at most 5% growth); its relations' pages, from the catalog.
+        sizes = json.loads(self.query(source_cluster.LOAD_RELATIONS_SQL, host=self.source.ip, port=PG_PORT,
+                                      database=measure.LOAD_DATABASE, log_name=f'{when}-loaddb-sizes.log'))
         result = {'logical': logical, 'invariant': {**invariant, **measure.atomicity(invariant)}, 'schema': schema,
+                  'loaddb_pages': {name: value.get('pages') for name, value in (sizes or {}).items()},
                   'seconds': round(time.perf_counter() - started, 3)}
         if when == 'start':
             result['zero'] = int(invariant.get('sum_abalance') or 0) == 0 == int(invariant.get('sum_n') or 0)
             self.references = result
         else:
             same, differences = measure.compare_logical(self.references['logical'], logical)
+            before = sum(pages or 0 for pages in self.references.get('loaddb_pages', {}).values())
+            after = sum(pages or 0 for pages in result['loaddb_pages'].values())
             result.update(logical_match=same, logical_differences=differences,
-                          schema_match=schema == self.references['schema'])
+                          schema_match=schema == self.references['schema'],
+                          loaddb_growth=round(after / before - 1, 6) if before else None)
         return result
 
     def take_snapshot(self) -> dict:
@@ -4187,6 +4206,16 @@ class Orchestrator:
         either side of its cut are read from that run's log in one pass per run (measure.pick_commits). Without the
         logs, cut and coverage are unverified.
         """
+        for record in self.records:
+            oracle = (record.get('verification') or {}).get('oracle')
+            if record.get('trial_id') == self.trial_id and oracle and oracle.get('progress') is None \
+                    and oracle.get('cut') is None:
+                # No n to cut at (its invariant query couldn't run, or the copy didn't start): the cut and coverage
+                # can't be judged; whatever else made it wrong still decides.
+                oracle['cut'] = oracle['coverage'] = 'unverified'
+                self.set_load_status(record)
+                save_json(self.record_path(record), record)
+                self.update_trial_run(record)
         records = [record for record in self.records if record.get('trial_id') == self.trial_id
                    and (record.get('verification') or {}).get('oracle', {}).get('progress') is not None]
         copies = [(record['verification']['oracle'], record) for record in records]
