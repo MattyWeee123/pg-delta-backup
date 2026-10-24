@@ -57,18 +57,21 @@ BASEBACKUP_NOSYNC_LOG = """\
 [+1.702300] pg_basebackup: renaming backup_manifest.tmp to backup_manifest
 [+1.703100] pg_basebackup: base backup completed
 """
-# pg_probackup 2.5 catchup's INFO lines on its console, stamped as above.
+# pg_probackup 2.5.16 catchup -b FULL's INFO lines on its console, stamped as above, in the order its
+# source prints them (src/catchup.c, src/backup.c): nothing marks the end of the copy threads.
 PROBACKUP_LOG = """\
-[+0.012000] INFO: Database catchup start, pg_probackup version: 2.5.16, PostgreSQL version: 17.6, remote: true, catchup-source-pgdata: /data/exp04/src/data, catchup-destination-pgdata: /data/exp04/out/probackup8
-[+0.402000] INFO: PGDATA size: 2112MB
+[+0.012000] INFO: Catchup start, pg_probackup version: 2.5.16, PostgreSQL version: 17.6, remote: true, catchup-mode: FULL
+[+0.013000] INFO: Database catchup start
+[+0.398000] INFO: pg_start_backup START LSN 2/A0000028
+[+0.402000] INFO: Source PGDATA size: 2112MB (excluded 0kB)
 [+0.410000] INFO: Start LSN (source): 2/A0000028, TLI: 1
 [+0.512000] INFO: Start transferring data files
-[+2.912000] INFO: Data files are transferred, time elapsed: 2s
-[+2.913000] INFO: wait for pg_stop_backup()
+[+2.912000] INFO: wait for pg_stop_backup()
 [+2.960000] INFO: pg_stop backup() successfully executed
+[+2.961000] INFO: stop_lsn: 2/A0000158
+[+3.008000] INFO: Databases synchronized. Transfered datafiles size: 2112MB, transfered wal size: 16MB, time elapsed: 2s
 [+3.010000] INFO: Syncing copied files to disk
 [+3.705000] INFO: Files are synced, time elapsed: 0
-[+3.706000] INFO: Catchup completed
 """
 # /proc/meminfo on pgd-dest (Debian 12, kernel 6.1, 32 GB), trimmed.
 MEMINFO = """\

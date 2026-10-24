@@ -1335,13 +1335,17 @@ def basebackup_phases(lines, wall_seconds: float | None = None) -> dict:
             'marks': marks}
 
 
-# pg_probackup catchup's INFO lines on its console (stderr), matched as lowercase text. The smoke
-# run settles the exact wording (EXP-11's item 1); a line not found leaves its intervals None.
+# pg_probackup catchup's INFO lines on its console (stderr), matched as lowercase text, in the order
+# 2.5.16 prints them (src/catchup.c's do_catchup and catchup_sync_destination_files, src/backup.c's
+# pg_stop_backup_consume). Catchup prints nothing when its copy threads finish: the next line,
+# "wait for pg_stop_backup()", follows the copy of pg_control and the query's send. The smoke run
+# checks the wording (EXP-11's item 1); a line not found leaves its intervals None.
 PROBACKUP_MARKERS = (
     ('started', 'catchup start'),
     ('copy', 'start transferring data files'),
-    ('copied', 'data files are transferred'),
     ('stop_backup', 'wait for pg_stop_backup'),
+    ('stopped', 'pg_stop backup() successfully executed'),
+    ('synchronized', 'databases synchronized'),
     ('sync', 'syncing copied files to disk'),
     ('synced', 'files are synced'),
 )
@@ -1351,21 +1355,22 @@ def probackup_phases(lines, wall_seconds: float | None = None) -> dict:
     """Where a pg_probackup catchup run's time went, from its timestamped console lines.
 
     - start: launch until "Start transferring data files" (SSH, the backup's start, file lists);
-    - copy: until "Data files are transferred" (its threads, file by file);
-    - stop: until "Syncing copied files to disk" (pg_backup_stop, the WAL stream's end, backup_label);
-    - files_sync: until "Files are synced" (its own per-file fsyncs);
+    - copy: until "wait for pg_stop_backup()" (its threads, file by file, then pg_control);
+    - stop: until "Syncing copied files to disk" (pg_backup_stop, the wait for the stop LSN's WAL,
+      backup_label, the WAL stream's end);
+    - files_sync: until "Files are synced" (its own fsync of each file of the source's list);
     - exit: from there until the process ended (with wall_seconds).
 
     The timed sync -f of the output that follows is a step of its own (probackup_sync_s).
     """
     marks = _first_marks(lines, PROBACKUP_MARKERS)
     return {'start_s': round(marks['copy'], 6) if 'copy' in marks else None,
-            'copy_s': _interval(marks, 'copy', 'copied'),
-            'stop_s': _interval(marks, 'copied', 'sync'),
+            'copy_s': _interval(marks, 'copy', 'stop_backup'),
+            'stop_s': _interval(marks, 'stop_backup', 'sync'),
             'files_sync_s': _interval(marks, 'sync', 'synced'),
             'exit_s': (round(wall_seconds - marks['synced'], 6)
                        if wall_seconds is not None and 'synced' in marks else None),
-            'complete': all(name in marks for name in ('copy', 'copied', 'sync', 'synced')),
+            'complete': all(name in marks for name in ('copy', 'stop_backup', 'sync', 'synced')),
             'marks': marks}
 
 
