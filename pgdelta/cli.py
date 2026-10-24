@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import sys
 import tempfile
+import time
 import traceback
 
 from pgdelta import datadir, flush, inplace, placement, prefetch, receiver, sender, transport
@@ -326,6 +327,7 @@ def cmd_receive(args):
 
 
 def _receive(args):
+    launched = getattr(args, 'launched', None)
     if args.stdio:
         channel = transport.stdio_channel()
         prefetched = prefetch.not_run(args.prefetch_basis, 'stdio: the sender is connected from the start')
@@ -334,7 +336,7 @@ def _receive(args):
                                          pg_controldata=_basis_controldata(args),
                                          reuse_any_basis=args.reuse_any_basis,
                                          local_source=args.local_source, prefetch=prefetched,
-                                         in_place=args.in_place, **_receiver_engine(args))
+                                         in_place=args.in_place, launched=launched, **_receiver_engine(args))
         finally:
             channel.close()
     else:
@@ -346,6 +348,7 @@ def _receive(args):
             log('warning: the TCP transport is neither authenticated nor encrypted; '
                 'use it only on a trusted network')
         listener = transport.listen(host, port)
+        listening = time.perf_counter()
 
         def wait():
             log(f'listening on {_format_address(listener.getsockname())}')
@@ -360,7 +363,8 @@ def _receive(args):
             channel, prefetched = wait(), prefetch.not_run('off', 'switched off (--prefetch-basis off)')
         log(prefetch.describe(prefetched))
         try:
-            return receiver.run_receiver(channel, setup=setup, prefetch=prefetched, **_receiver_engine(args))
+            return receiver.run_receiver(channel, setup=setup, prefetch=prefetched, launched=launched,
+                                         listening=listening, **_receiver_engine(args))
         finally:
             channel.close()
 
@@ -463,8 +467,12 @@ def _terminate(signum, frame):
     raise KeyboardInterrupt(f'signal {signum}')
 
 
-def main(argv=None):
+def main(argv=None, launched=None):
+    """Run one command. `launched`: time.perf_counter() when the process started its pgdelta part
+    (`python -m pgdelta` passes it); the receiver's publish_s counts from it, else from here (EXP-13)."""
+    launched = time.perf_counter() if launched is None else launched
     args = build_parser().parse_args(argv)
+    args.launched = launched
     signal.signal(signal.SIGTERM, _terminate)
     try:
         return args.func(args)

@@ -58,6 +58,7 @@ BEFORE = {
 SENDER_TIMERS = ['connect_s'] + [f'{kind}_{field}' for kind in waits.KINDS
                                  for field in ('wait_s', 'wait_busy_s', 'wait_idle_s', 'waits', 'waits_over_1ms')]
 SENDER_TIMERS += ['page_send_s', 'other_send_s', 'send_queue']
+RECEIVER_TIMERS = ['hello_wait_s', 'recv_wait_s', 'publish_s', 'published_utc']
 
 
 def before(window=None):
@@ -90,6 +91,13 @@ class WireTests(TreeTestCase):
         for window in (1, 16):
             with self.subTest(window=window):
                 self.assertEqual(session_fingerprint(window=window), before(window))
+
+    def test_the_receivers_complete_gains_only_its_timers(self):
+        _, receiver, channel = record(self.source, self.basis, self.root / 'O')
+        final = [protocol.decode_json(payload, 'COMPLETE') for code, payload in channel.frames_received
+                 if code == protocol.COMPLETE][0]['receiver']
+        self.assertEqual(sorted(set(final) - set(BEFORE['complete_receiver_keys'])), ['protocol_timers'])
+        self.assertEqual(sorted(final['protocol_timers']), sorted(RECEIVER_TIMERS))
 
     @unittest.skipUnless(shutil.which('git'), 'needs git')
     def test_the_commit_before_puts_the_same_bytes_on_the_wire(self):
@@ -473,7 +481,7 @@ class SlowedChannelTests(TreeTestCase):
         class SlowReplies(Slowed):
             delays = {protocol.ACCEPT: self.DELAY, protocol.LEAF_DIGESTS: self.DELAY, protocol.COMPLETE: self.DELAY}
 
-        slow, _ = session(self.source, self.basis, self.root / 'slow', receiver_class=SlowReplies, window=1)
+        slow, receiver = session(self.source, self.basis, self.root / 'slow', receiver_class=SlowReplies, window=1)
         self.assertEqual(snapshot(self.root / 'slow'), snapshot(self.source))
         for stats in (fast, slow):
             self.assertEqual(list(stats['protocol_timers']), SENDER_TIMERS)
@@ -490,6 +498,8 @@ class SlowedChannelTests(TreeTestCase):
         self.assertGreaterEqual(timers['leaf_waits_over_1ms'], 10)
         self.assertGreater(timers['page_send_s'], 0)
         self.assertGreater(timers['other_send_s'], 0)
+        self.assertEqual(slow['receiver']['protocol_timers'], receiver['protocol_timers'])
+        self.assertEqual(sorted(receiver['protocol_timers']), sorted(RECEIVER_TIMERS))
 
     def test_a_wait_is_busy_while_the_queue_holds_bytes_and_idle_after(self):
         """Queue readings stubbed: the sender's bytes count as unsent until LAG after its last send."""
@@ -625,6 +635,7 @@ class SlowedTcpTests(TreeTestCase):
         self.assertGreater(timers['complete_wait_busy_s'], 0.01)
         # ...and once it has, the receiver publishes and holds its COMPLETE back for 0.15 s.
         self.assertGreater(timers['complete_wait_idle_s'], 0.1)
+        self.assertIsNotNone(stats['receiver']['protocol_timers']['publish_s'])
 
 
 class Unread:
@@ -700,6 +711,76 @@ class LinuxSendQueueTests(unittest.TestCase):
         self.assertTrue(summary['send_queue']['split'])
         self.assertAlmostEqual(summary['leaf_wait_busy_s'] + summary['leaf_wait_idle_s'], summary['leaf_wait_s'],
                                delta=2e-6)
+
+
+# --- the receiver's timers ----------------------------------------------------------------------------
+
+
+class ReceiverTimerTests(TreeTestCase):
+    def test_hello_reads_and_publication_are_timed(self):
+        class SlowHello(Slowed):
+            delays = {protocol.HELLO: 0.1}
+
+        before_utc = time.time()
+        stats, receiver = session(self.source, self.basis, self.root / 'O', sender_class=SlowHello)
+        after_utc = time.time()
+        timers = receiver['protocol_timers']
+        self.assertEqual(stats['receiver']['protocol_timers'], timers)
+        self.assertGreaterEqual(timers['hello_wait_s'], 0.09)
+        self.assertGreater(timers['recv_wait_s'], 0)
+        self.assertGreater(timers['publish_s'], timers['hello_wait_s'])
+        self.assertLessEqual(before_utc, timers['published_utc'])
+        self.assertLessEqual(timers['published_utc'], after_utc)
+
+    def test_in_place_publication_is_the_commit(self):
+        stats, receiver = session(self.source, self.basis, None, receiver_options={'in_place': True})
+        self.assertTrue(receiver['in_place'])
+        self.assertEqual(snapshot(self.basis), snapshot(self.source))
+        self.assertIsNotNone(receiver['protocol_timers']['publish_s'])
+        self.assertIsNotNone(receiver['protocol_timers']['published_utc'])
+
+    def test_the_clocks_start_where_the_caller_says(self):
+        launched = time.perf_counter() - 5.0
+        _, receiver = session(self.source, self.basis, self.root / 'O',
+                              receiver_options={'launched': launched, 'listening': launched + 1.0})
+        timers = receiver['protocol_timers']
+        self.assertGreaterEqual(timers['hello_wait_s'], 4.0)
+        self.assertGreaterEqual(timers['publish_s'], 5.0)
+
+
+class CommandLineTimerTests(TreeTestCase):
+    """receive --listen and send: the statistics EXP-13's smoke item 13 reads, through the real commands."""
+
+    def test_send_and_receive_report_every_timer(self):
+        receiver = subprocess.Popen(
+            python_command('receive', '--basis', self.basis, '--output', self.root / 'O', '--listen', '127.0.0.1:0',
+                           '--reuse-any-basis', '--jobs', '1'),
+            stderr=subprocess.PIPE, text=True, cwd=REPO_ROOT, env=subprocess_env())
+        self.addCleanup(receiver.stderr.close)
+        self.addCleanup(lambda: receiver.poll() is None and receiver.kill())
+        port = receiver.stderr.readline().rsplit(':', 1)[1].strip()
+        time.sleep(0.3)  # the receiver listens this much longer before HELLO
+        stats_path = self.root / 'stats.json'
+        result = run('send', '--source', self.source, '--connect', f'127.0.0.1:{port}', '--node-blocks', NODE_BLOCKS,
+                     '--jobs', '1', '--window', '16', '--high-churn-node-fraction', '0.5',
+                     '--busy-inflight-bytes', '24000', '--stats-json', stats_path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(receiver.wait(timeout=60), 0)
+        self.assertEqual(snapshot(self.root / 'O'), snapshot(self.source))
+        stats = json.loads(stats_path.read_text())
+        self.assertEqual((stats['window'], stats['high_churn_node_fraction']), (16, 0.5))
+        self.assertGreaterEqual(stats['high_churn_files'], 1)
+        self.assertIn('leaf_requests', stats)
+        self.assertIn('pages', stats)
+        timers = stats['protocol_timers']
+        self.assertEqual(list(timers), SENDER_TIMERS)
+        self.assertGreater(timers['connect_s'], 0)
+        self.assertEqual(timers['send_queue']['busy_inflight_bytes'], 24000)
+        check_parts(self, timers, split=sys.platform.startswith('linux'))
+        received = stats['receiver']['protocol_timers']
+        self.assertEqual(sorted(received), sorted(RECEIVER_TIMERS))
+        self.assertGreaterEqual(received['hello_wait_s'], 0.3)
+        self.assertGreater(received['publish_s'], received['hello_wait_s'])
 
 
 if __name__ == '__main__':

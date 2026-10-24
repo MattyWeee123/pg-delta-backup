@@ -310,7 +310,8 @@ class ListenerPrefetchTests(unittest.TestCase):
         # files_digest covers the keyed file digests, and the key is new in every run.
         stats.pop('files_digest')
         kept = {key: value for key, value in receiver.items()
-                if not key.endswith('_seconds') and key not in ('prefetch', 'output', 'receipt', 'files_digest')}
+                if not key.endswith('_seconds')
+                and key not in ('prefetch', 'output', 'receipt', 'files_digest', 'protocol_timers')}
         return stats, kept
 
     def test_listen_prefetches_b_and_changes_nothing_but_its_own_statistics(self):

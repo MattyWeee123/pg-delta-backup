@@ -401,8 +401,15 @@ class _Verifier:
 
 class _Receiver:
     def __init__(self, channel, setup, jobs, hash_backend=DEFAULT_BACKEND, rebuild=DEFAULT_REBUILD,
-                 verify=DEFAULT_VERIFY, prefetch=None, fsync=DEFAULT_FSYNC):
+                 verify=DEFAULT_VERIFY, prefetch=None, fsync=DEFAULT_FSYNC, launched=None, listening=None):
         self.channel, self.setup = channel, setup
+        # EXP-13's protocol timers, on the time.perf_counter() clock: publish_s counts from `launched` (the
+        # receive command's start) and hello_wait_s from `listening` (its listener's), each else from here.
+        started = time.perf_counter()
+        self.launched = started if launched is None else launched
+        self.listening = started if listening is None else listening
+        self.hello_wait_seconds = self.publish_seconds = self.published_utc = None
+        self.recv_wait_seconds = 0.0
         # What the listener's prefetch of B did before the sender connected (pgdelta.prefetch), or None.
         self.prefetch = prefetch
         self.jobs, self.pool = jobs, None
@@ -619,7 +626,9 @@ class _Receiver:
         handlers = {protocol.LEAF_REQUEST: self._leaf_request, protocol.PAGE_DATA: self._page_data,
                     protocol.FILE_DONE: self._file_done}
         while True:
+            waited = time.perf_counter()
             code, payload = self._recv()
+            self.recv_wait_seconds += time.perf_counter() - waited
             if code == protocol.COMPLETE:
                 return self._complete(payload)
             if code not in handlers:
@@ -629,6 +638,7 @@ class _Receiver:
 
     def _read_hello(self):
         code, payload = self._recv()
+        self.hello_wait_seconds = time.perf_counter() - self.listening
         if code != protocol.HELLO:
             raise ProtocolError(f'expected HELLO, received {protocol.name(code)}')
         hello = protocol.decode_json(payload, 'HELLO')
@@ -1045,6 +1055,7 @@ class _Receiver:
         started = time.perf_counter()
         if self.in_place:
             self._finish_in_place()
+            self._mark_published()
             self.rebuild_seconds += time.perf_counter() - started
             self.final_stats = self.stats()
             self.channel.send_json(protocol.COMPLETE, {'published': True, 'receiver': self.final_stats})
@@ -1060,10 +1071,16 @@ class _Receiver:
             raise InvalidInput(f'output {output} appeared during the run; not replacing it')
         self._write_receipt('verified')
         self._publish(output)
+        self._mark_published()
         self.rebuild_seconds += time.perf_counter() - started
         self.final_stats = self.stats()
         self.channel.send_json(protocol.COMPLETE, {'published': True, 'receiver': self.final_stats})
         return dict(self.final_stats, acknowledged=True, acknowledgement_error=None)
+
+    def _mark_published(self):
+        """EXP-13's publish_s: O's publication (in place, B's commit) and its receipt are durable now."""
+        self.publish_seconds = time.perf_counter() - self.launched
+        self.published_utc = time.time()
 
     def _finish_in_place(self):
         """After every file is verified: delete what the source lacks, apply modes, fsync, then commit.
@@ -1250,6 +1267,14 @@ class _Receiver:
             'worker_start_method': None if self.pool is None else self.pool.start_method,
             # Reading B into the page cache while the listener waited (pgdelta.prefetch); null if not asked.
             'prefetch': self.prefetch,
+            # EXP-13's protocol timers (they vary from run to run, like timings): from listening (else this
+            # run's start) until HELLO arrived; the main loop's time reading frames after it; and from the
+            # receive command's start (else this run's) until the durable publication (in place: the commit),
+            # with that moment in seconds since the epoch, to place it against a caller's own clock.
+            'protocol_timers': {'hello_wait_s': _rounded(self.hello_wait_seconds),
+                                'recv_wait_s': round(self.recv_wait_seconds, 6),
+                                'publish_s': _rounded(self.publish_seconds),
+                                'published_utc': self.published_utc},
             'bytes_read': self.channel.received.summary(),
             'bytes_written': self.channel.sent.summary(),
         }
@@ -1262,7 +1287,7 @@ def _rounded(seconds):
 def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None, pg_controldata=None,
                  reuse_any_basis=False, local_source=None, jobs=DEFAULT_JOBS, hash_backend=DEFAULT_BACKEND,
                  rebuild=DEFAULT_REBUILD, verify=DEFAULT_VERIFY, prefetch=None, in_place=False,
-                 fsync=DEFAULT_FSYNC):
+                 fsync=DEFAULT_FSYNC, launched=None, listening=None):
     """Run one session as the receiver and return its statistics dict.
 
     Pass a ReceiverSetup from prepare_receiver(), or basis and output to run
@@ -1280,6 +1305,10 @@ def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None,
     the source's pg_control is then always sent whole. `fsync` ("main",
     "writeback" or "worker", pgdelta.flush) chooses where the output files
     are fsynced; it changes nothing but timings.
+    `launched` and `listening` (time.perf_counter() values) are when the
+    receive command started and when its listener started listening; the
+    protocol timers publish_s and hello_wait_s count from them, or, when
+    they are None, from the session's start after the local checks (EXP-13).
     """
     if setup is None:
         try:
@@ -1292,4 +1321,5 @@ def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None,
             except PgDeltaError:
                 pass
             raise
-    return _Receiver(channel, setup, jobs, hash_backend, rebuild, verify, prefetch, fsync).run()
+    return _Receiver(channel, setup, jobs, hash_backend, rebuild, verify, prefetch, fsync, launched,
+                     listening).run()
