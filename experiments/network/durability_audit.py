@@ -607,13 +607,31 @@ def _uncovered(result: dict, scope) -> list[str]:
     return list(dict.fromkeys(relative(path) for path in paths))
 
 
+# The audit's counts, summed over an arm's runs: (the result's key, the arm's key). The path lists
+# above are examples only (each kind is cut at LIMIT, then files and directory entries are merged and
+# deduplicated), so a count of what was left uncovered comes from these, never from a list's length.
+COUNTS = (('files_written', 'files'), ('uncovered_file_count', 'uncovered_files'),
+          ('directory_changes', 'directory_changes'),
+          ('uncovered_directory_change_count', 'uncovered_directory_changes'))
+
+
+def _add_counts(arm: dict, result: dict, prefix: str = '') -> None:
+    """Add a view's counts to the arm's (None, for good, once a run lacks one)."""
+    for key, name in COUNTS:
+        value, name = result.get(key), prefix + name
+        arm[name] = None if value is None or arm.get(name, 0) is None else arm.get(name, 0) + value
+
+
 def arm_results(run_dirs) -> dict:
     """{'arms': {method: {...}}}: the audited records of run_exp04 runs by arm, the shape
     analysis/exp11.py's --audit reads.
 
     passed: every audited run of the arm ok (None if a run has no result); uncovered: what the runs'
     timed phases left uncovered; tool_uncovered (probackup*): what the tool's own flush left, from the
-    catchup's trace alone. Paths are relative to the output; runs counts the audited runs.
+    catchup's trace alone. Paths are relative to the output; runs counts the audited runs. The path
+    lists are examples (LIMIT of each kind per run); the counts are files, uncovered_files,
+    directory_changes and uncovered_directory_changes, summed over the runs, and the same prefixed
+    tool_ for the catchup's trace alone.
     """
     arms: dict = {}
     for run_dir in run_dirs:
@@ -628,9 +646,11 @@ def arm_results(run_dirs) -> dict:
             arm['passed'] = None if arm['passed'] is None or ok is None else arm['passed'] and ok
             arm['runs'] += 1
             arm['uncovered'] = list(dict.fromkeys(arm['uncovered'] + _uncovered(audited['result'], scope)))
+            _add_counts(arm, audited['result'])
             if audited.get('tool_only'):
                 arm['tool_uncovered'] = list(dict.fromkeys(
                     arm.get('tool_uncovered', []) + _uncovered(audited['tool_only'], scope)))
+                _add_counts(arm, audited['tool_only'], 'tool_')
     return {'arms': arms}
 
 

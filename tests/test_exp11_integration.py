@@ -188,6 +188,43 @@ class AuditByArm(unittest.TestCase):
         self.assertFalse(any(path.startswith('/') for path in probackup['tool_uncovered']))
         self.assertEqual((arms['parcopy8']['passed'], arms['parcopy8']['uncovered'][0]), (False, 'f'))
 
+    @needs_venv
+    def test_counts_are_the_audits_not_the_number_of_example_paths(self):
+        # EXP-11's recheck: full_nosync left all 992 files and 1,021 directory changes uncovered, but the
+        # analysis printed 33, the merged and deduplicated first 20 examples of each kind.
+        nosync = '/data/exp04/out/full_nosync'
+        names = [f'{nosync}/base/1/{n}' for n in range(30)]
+        calls = [f'mkdir("{nosync}", 0700) = 0']
+        for fd, path in enumerate(names, start=3):
+            calls += [audit_tests.opened(path, fd), audit_tests.wrote(path, fd), audit_tests.closed(path, fd)]
+        result = durability_audit.audit([audit_tests.trace(*calls)], [nosync])
+        self.assertEqual((result['uncovered_file_count'], len(result['uncovered_files'])),
+                         (30, durability_audit.LIMIT))
+        runs = self.run_dir / 'runs' / '00-hot-f0.01-s5'
+        (runs / 'r0-unthrottled-full_nosync.json').write_text(
+            json.dumps(audited_record('00-hot-f0.01-s5', 'full_nosync', nosync, result)))
+        arms = durability_audit.arm_results([self.run_dir])['arms']
+        arm = arms['full_nosync']
+        self.assertFalse(arm['passed'])
+        self.assertEqual((arm['files'], arm['uncovered_files']), (30, 30))
+        self.assertEqual(arm['uncovered_directory_changes'], result['uncovered_directory_change_count'])
+        self.assertLess(len(arm['uncovered']), arm['uncovered_files'])  # the examples are no count
+        cell = exp11.audit_cell(arm)
+        self.assertTrue(cell.startswith(f'30 of 30 files, {arm["uncovered_directory_changes"]} of '
+                                        f'{arm["directory_changes"]} directory changes ('), cell)
+        # pg_probackup's own flush: its counts carry the tool_ prefix, files and directory changes apart.
+        probackup = arms['probackup8']
+        self.assertGreater(probackup['tool_uncovered_files'], 0)
+        self.assertGreater(probackup['tool_uncovered_directory_changes'], 0)
+        self.assertEqual((probackup['uncovered_files'], probackup['uncovered_directory_changes']), (0, 0))
+        self.assertTrue(exp11.audit_cell(probackup, 'tool_').startswith(
+            f'{probackup["tool_uncovered_files"]} of {probackup["tool_files"]} files, '
+            f'{probackup["tool_uncovered_directory_changes"]} of '))
+        # A summary without the counts (an older --audit JSON) can't give one: it says its paths are examples.
+        self.assertEqual(exp11.audit_cell({'uncovered': ['a', 'b']}), '2 paths, examples only (a, b)')
+        self.assertEqual(exp11.audit_cell({'uncovered': []}), '0')
+        self.assertEqual(exp11.audit_cell(arms['full'], 'tool_'), '0')
+
     def test_runs_of_several_directories_pool_by_arm(self):
         one = durability_audit.arm_results([self.run_dir])['arms']
         other = write_audited_run(Path(self.tmp.name, 'again'))
@@ -234,8 +271,8 @@ class AuditInTheAnalysis(unittest.TestCase):
                                                  'backup_label to its sync -f held')
         lines = exp11.durability_lines(analysis_tests.session(analysis_tests.runs('full', [3.0])), arms)
         left = arms['parcopy8']['uncovered']
-        self.assertIn(f'| parcopy8 | no | {len(left)} ({", ".join(left)}) | 0 |', lines)
-        self.assertTrue(any(line.startswith('| probackup8 | yes | 0 |') and 'backup_label' in line for line in lines))
+        self.assertIn(f'| parcopy8 | no | 1 of 1 files, 2 of 2 directory changes ({", ".join(left)}) | 0 |', lines)
+        self.assertTrue(any(line.startswith('| probackup8 | yes | 0 of ') and 'backup_label' in line for line in lines))
 
 
 @needs_venv

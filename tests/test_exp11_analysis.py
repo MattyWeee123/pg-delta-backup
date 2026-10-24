@@ -562,7 +562,9 @@ class DryRun(unittest.TestCase):
         self.assertIn("- pgdelta/ since EXP-09's deployed commit (exp11-local): not recorded", text)
         self.assertIn('**L3** (', text)
         self.assertNotIn('not judged (A7', text)
-        self.assertIn('| probackup8 | yes | 0 | 3 (pg_wal/000000010000000000000003, backup_label, pg_wal) |', text)
+        # A JSON without the audit's counts: the number of example paths, said to be examples only.
+        self.assertIn('| probackup8 | yes | 0 | 3 paths, examples only (pg_wal/000000010000000000000003, backup_label, '
+                      'pg_wal) |', text)
         self.assertIn('pg_probackup\'s own flush leaves WAL and backup_label to its sync -f held', text)
 
     def test_the_smoke_runs_shape(self):

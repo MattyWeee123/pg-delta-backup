@@ -23,8 +23,10 @@ if A6 voided it; check (b) for full copies; parcopy's fsync count), and isn't vo
 A4 (a copy the tool itself aborted, an error of kind 'tool', included) or that A5 reclassifies are
 left out of every baseline. The syscall audit's results, when given
 (--audit), are a JSON object mapping each arm to {"passed": bool, "uncovered": [paths],
-"tool_uncovered": [paths its own flush left, covered only by a sync -f]}, or {"arms": that}, as
-`experiments/network/durability_audit.py summary --json RUN_DIR` prints it; or that RUN_DIR itself.
+"tool_uncovered": [paths its own flush left, covered only by a sync -f], and the audit's counts
+"files", "uncovered_files", "directory_changes", "uncovered_directory_changes" (and the same prefixed
+"tool_")}, or {"arms": that}, as `experiments/network/durability_audit.py summary --json RUN_DIR`
+prints it; or that RUN_DIR itself. The paths are examples; the counts are what the audit table reports.
 """
 from __future__ import annotations
 
@@ -831,13 +833,24 @@ def durability_lines(S, audit):
     else:
         lines += ['| Arm | passed | uncovered | left by the tool\'s own flush |', '|---|---|---|---|']
         for arm, result in audit.items():
-            uncovered = result.get('uncovered') or []
-            tool = result.get('tool_uncovered') or []
             passed = result.get('passed', result.get('ok'))
-            lines.append(f'| {arm} | {"–" if passed is None else "yes" if passed else "no"} | {len(uncovered)}'
-                         + (f' ({", ".join(uncovered[:5])})' if uncovered else '') + f' | {len(tool)}'
-                         + (f' ({", ".join(tool[:5])})' if tool else '') + ' |')
+            lines.append(f'| {arm} | {"–" if passed is None else "yes" if passed else "no"} | '
+                         f'{audit_cell(result)} | {audit_cell(result, "tool_")} |')
     return lines
+
+
+def audit_cell(result, prefix=''):
+    """What a view of the audit left uncovered: the audit's own counts of files and directory changes,
+    with up to five example paths. The paths are examples only (the audit keeps 20 of each kind, and
+    the files and directory entries are merged and deduplicated), so their number is never a count; a
+    summary without the counts (an older --audit JSON) shows the number of example paths, marked so."""
+    paths = result.get(f'{prefix}uncovered') or []
+    examples = f' ({", ".join(paths[:5])}{", …" if len(paths) > 5 else ""})' if paths else ''
+    files, changes = result.get(f'{prefix}uncovered_files'), result.get(f'{prefix}uncovered_directory_changes')
+    if files is None or changes is None:
+        return f'{len(paths)} paths, examples only{examples}' if paths else '0'
+    return (f'{files} of {result.get(f"{prefix}files")} files, {changes} of '
+            f'{result.get(f"{prefix}directory_changes")} directory changes{examples}')
 
 
 def probe_lines(S):
