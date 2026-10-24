@@ -968,22 +968,74 @@ class Runs(Clocked):
         # The next run's guard passes.
         self.assertEqual(self.run_method(orchestrator, 'full')['status'], 'pass')
 
+    def test_a_reset_that_fails_once_is_retried_by_the_next_runs_guard(self):
+        class Flaky(T2Stub):
+            failures = 1  # full_wb's own reset fails, as on a transient sudo -n error
+
+            def local_agent(self, *args, timeout=600):
+                if args[:2] == ('sysctl', 'set') and args[2].startswith(measure.DIRTY_BACKGROUND_RATIO) \
+                        and self.failures:
+                    self.failures -= 1
+                    self.events.append(('local_agent', args))
+                    raise run_exp04.CommandError('dest agent sysctl failed (1): sudo: a password is required')
+                return super().local_agent(*args, timeout=timeout)
+
+        orchestrator = self.orchestrator(Flaky)
+        record = self.run_method(orchestrator, 'full_wb')
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('could not be reset', record['error'])
+        later = self.run_method(orchestrator, 'full')
+        self.assertEqual(later['status'], 'pass', later.get('error'))
+        self.assertEqual(later['sysctl']['guard_reset']['found'], {'vm.dirty_background_ratio': 0,
+                                                                   'vm.dirty_background_bytes': 64 * MIB})
+        self.assertEqual(later['sysctl']['before'], {'vm.dirty_background_ratio': 10, 'vm.dirty_background_bytes': 0})
+        self.assertIsNone(orchestrator.writeback_stuck)
+        self.assertNotIn('guard_reset', self.run_method(orchestrator, 'full')['sysctl'])
+
     def test_a_reset_that_does_not_take_fails_the_run_and_the_guard_stops_the_next(self):
         class Stuck(T2Stub):
             def local_agent(self, *args, timeout=600):
                 if args[:2] == ('sysctl', 'set') and args[2].startswith(measure.DIRTY_BACKGROUND_RATIO):
                     self.events.append(('local_agent', args))
-                    return {'set': {}, 'values': dict(self.kernel.values)}  # it did not take
+                    return {'set': {}, 'values': {}}  # it did not take
                 return super().local_agent(*args, timeout=timeout)
 
         orchestrator = self.orchestrator(Stuck)
         record = self.run_method(orchestrator, 'full_wb')
         self.assertEqual(record['status'], 'error')
         self.assertIn('could not be reset', record['error'])
+        self.assertIsNone(orchestrator.writeback_stuck)  # the next run's guard tries once more
         later = self.run_method(orchestrator, 'full')
-        self.assertEqual(later['status'], 'error')
+        self.assertEqual((later['status'], later['failure_kind']), ('error', 'harness'))
         self.assertIn('not at their defaults', later['error'])
-        self.assertNotIn('drop_caches', self.kinds(orchestrator)[-3:])
+        self.assertIn("the guard's reset did not take them back", later['error'])
+        self.assertIn('did not return to their defaults', later['sysctl']['guard_reset']['error'])
+        self.assertNotIn('drop_caches', self.kinds(orchestrator)[-4:])
+        self.assertIn('not at their defaults', orchestrator.writeback_stuck)
+
+    def test_settings_the_guard_cannot_reset_stop_the_trial(self):
+        orchestrator = self.orchestrator()
+        orchestrator.writeback_stuck = "dest's write-back settings are not at their defaults (...)"
+        orchestrator.run_method = lambda *args: {'status': 'error', 'error': 'refused'}
+        orchestrator.set_speed = lambda speed: {}
+        orchestrator.qdisc_stats = lambda: {}
+        trial = {'runs': []}
+        with self.assertRaises(run_exp04.CommandError) as stopped:
+            orchestrator.run_cell(trial, 'main', 0, UNTHROTTLED, ['full', 'full_syncfs'], {})
+        self.assertIn('stopped after', str(stopped.exception))
+        self.assertEqual(len(trial['runs']), 1)  # no run after it
+
+    def test_settings_the_guard_cannot_reset_stop_the_invocation(self):
+        class Stuck(RunJson.Executing):
+            def run_trial(self, index, pattern, fraction):
+                self.events.append(('trial', pattern))
+                self.writeback_stuck = "dest's write-back settings are not at their defaults (...)"
+                return {'trial_id': f'{index:02d}-{pattern}', 'status': 'error'}
+
+        orchestrator, code, run = RunJson.execute(self, ['full', 'full_wb'], ['--patterns', 'hot,append'], cls=Stuck)
+        self.assertEqual([event for event in orchestrator.events if event[0] == 'trial'], [('trial', 'hot')])
+        self.assertEqual(code, 1)
+        self.assertIn('not at their defaults', run['stopped'])
 
     def test_full_outputs_are_started_after_their_bytes_are_counted(self):
         class Verifying(T2Stub):

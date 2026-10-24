@@ -594,6 +594,9 @@ class Orchestrator:
         # dest's vm.dirty_background_ratio and _bytes as found at the start (execute), which every
         # run's guard requires and full_wb's reset restores; None outside T2 runs.
         self.writeback_defaults: dict | None = None
+        # Why dest's write-back settings could not be returned to those defaults, even by the guard's own
+        # reset: it stops the trial and the invocation, since every later run would be refused.
+        self.writeback_stuck: str | None = None
         # Check (a)'s idle noise in bytes: --dirty-noise-mib, or what the start-up windows measured.
         self.idle_noise_bytes: int | None = None
         # This trial's 8-stream link test per speed label (taken at each speed's first visit).
@@ -1546,15 +1549,33 @@ class Orchestrator:
         return (values.get(measure.DIRTY_BACKGROUND_RATIO) == default
                 and values.get(measure.DIRTY_BACKGROUND_BYTES) == 0)
 
-    def check_dirty_writeback(self) -> dict:
-        """The guard before every T2 run: the ratio at its recorded default and the bytes setting at 0."""
+    def check_dirty_writeback(self, sysctl: dict | None = None) -> dict:
+        """The guard before every T2 run: the ratio at its recorded default and the bytes setting at 0.
+
+        Settings found otherwise (full_wb's reset failed after its run, say on a transient sudo error) are
+        reset once here, the attempt recorded in sysctl['guard_reset'], and the run goes on if that took
+        them back. If it didn't, the run is refused (CommandError) and self.writeback_stuck says why, which
+        stops the trial (run_cell) and the invocation (execute): every later run would be refused too.
+        Returns the settings the run starts with.
+        """
         values = self.dirty_writeback()
-        if not self.writeback_at_defaults(values):
-            raise CommandError(f"dest's write-back settings are not at their defaults ({values}; want "
-                               f'{measure.DIRTY_BACKGROUND_RATIO}='
-                               f'{self.writeback_defaults[measure.DIRTY_BACKGROUND_RATIO]}, '
-                               f'{measure.DIRTY_BACKGROUND_BYTES}=0)')
-        return values
+        if self.writeback_at_defaults(values):
+            return values
+        try:
+            reset = self.reset_dirty_writeback()
+        except Exception as exc:
+            reset = {'error': f'{type(exc).__name__}: {exc}'}
+        if sysctl is not None:
+            sysctl['guard_reset'] = {'found': values, **reset}
+        if 'error' not in reset:
+            log(f"  dest's write-back settings were not at their defaults ({values}); reset by the guard")
+            return reset['values']
+        self.writeback_stuck = (f"dest's write-back settings are not at their defaults ({values}; want "
+                                f'{measure.DIRTY_BACKGROUND_RATIO}='
+                                f'{self.writeback_defaults[measure.DIRTY_BACKGROUND_RATIO]}, '
+                                f"{measure.DIRTY_BACKGROUND_BYTES}=0), and the guard's reset did not take them "
+                                f"back: {reset['error']}")
+        raise CommandError(self.writeback_stuck)
 
     def set_dirty_writeback(self, method) -> dict:
         """full_wb's setting on dest (measure.HOST_TUNED_METHODS), set before the cache drop.
@@ -2018,8 +2039,10 @@ class Orchestrator:
             record['phases'] = phases
             if self.writeback_defaults is not None:
                 # T2: dest's write-back settings at their defaults before every run (full_wb's are
-                # reset after its own); both recorded, and those in effect during the run.
-                record['sysctl'] = {'before': self.check_dirty_writeback()}
+                # reset after its own, and by the guard if that failed); both recorded, and those in
+                # effect during the run.
+                sysctl = record['sysctl'] = {}
+                sysctl['before'] = self.check_dirty_writeback(sysctl)
             record['preparation'] = self.prepare(method, paths, daemon_holder)
             if daemon_holder.get('dirty_writeback'):
                 record.setdefault('sysctl', {})['during'] = daemon_holder['dirty_writeback']['values']
@@ -2620,6 +2643,8 @@ class Orchestrator:
             if self.source_down:
                 raise CommandError(f'the source cluster is down after {method}: '
                                    f'{self.source_down}')
+            if self.writeback_stuck:
+                raise CommandError(f'stopped after {method}: {self.writeback_stuck}')
             if record['status'] not in ('pass', 'pending') and args.stop_on_error:
                 raise CommandError(f'{method} at {speed["label"]}: {record["error"]}')
         link['qdisc_after'] = self.qdisc_stats()
@@ -3087,8 +3112,12 @@ class Orchestrator:
             for index, (pattern, fraction) in enumerate(combos):
                 trial = self.run_trial(index, pattern, fraction)
                 self.run['trials'][trial['trial_id']] = trial['status']
+                if self.writeback_stuck:
+                    # Every later run would be refused by the guard: the invocation stops here.
+                    self.run['stopped'] = self.writeback_stuck
+                    log(f'stopping: {self.writeback_stuck}')
                 save_json(self.out / 'run.json', self.run)
-                if trial['status'] == 'error' and args.stop_on_error:
+                if self.writeback_stuck or (trial['status'] == 'error' and args.stop_on_error):
                     break
         finally:
             try:
