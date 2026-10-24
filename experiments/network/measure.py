@@ -2696,6 +2696,62 @@ def t12_schedule(methods, conditions, repeats: int, plan: dict) -> list[tuple[in
             for method in t12_methods_at(methods, condition['label'], repeat, plan)]
 
 
+# A15: a run that times out is a tool failure. Its bound is four times its arm's expected upper bound at the
+# condition, and at least 60 s; probackup8's is 240 s. The upper bounds are the pre-registration's, as written (s):
+# E1 at the anchor (the tuned anchor within 0.1 s of it), E4 for the full copies, E5 for the parcopy arms, and for
+# v1 E6 added to E1's hot, E7 (uniform 1%, at 1 Gbit/s as at 2) and E8 (uniform 10%). `full` at 1 Gbit/s, which runs
+# only in A16's variant, takes its 2 Gbit/s bound: a window-bound stream doesn't see the link rate.
+T12_TIMEOUT_FACTOR, T12_TIMEOUT_FLOOR_S, T12_TIMEOUT_PROBACKUP_S = 4, 60.0, 240.0
+_FULL_UPPER = {'2:0:default': 10.8, '2:0:tuned': 10.9, '2:20:default': 18, '2:60:default': 52, '2:120:default': 102,
+               '2:60:tuned': 12.2, '2:120:tuned': 13.8, '1:60:default': 52, '1:120:default': 102}
+T12_UPPER_S = {
+    'full': {workload: _FULL_UPPER for workload in ('hot', 'uniform1', 'uniform10')},
+    'parcopy8': {workload: {'2:0:default': 9.8, '2:20:default': 9.9, '2:60:default': 10.5, '2:60:tuned': 10.5,
+                            '2:120:default': 14.5, '2:120:tuned': 11.2, '1:60:default': 19.3, '1:120:default': 20.0}
+                 for workload in ('hot', 'uniform1', 'uniform10')},
+    'parcopy16': {workload: {'2:120:default': 11.0} for workload in ('hot', 'uniform1', 'uniform10')},
+    'v1': {'hot': {'2:0:default': 3.4, '2:0:tuned': 3.5, '2:20:default': 3.4 + 0.7, '2:60:default': 3.4 + 2.1,
+                   '2:120:default': 3.4 + 4.4, '2:60:tuned': 3.4 + 1.8, '2:120:tuned': 3.4 + 3.8},
+           'uniform1': {'2:0:default': 5.8, '2:0:tuned': 5.9, '2:20:default': 8.2, '2:60:default': 18.6,
+                        '2:120:default': 34, '2:60:tuned': 7.7, '2:120:tuned': 10.0, '1:60:default': 18.6,
+                        '1:120:default': 34},
+           'uniform10': {'2:0:default': 8.7, '2:0:tuned': 8.8, '2:20:default': 12.5, '2:60:default': 31,
+                         '2:60:tuned': 10.2, '2:120:tuned': 12.5}},
+}
+# v1's side arms: v1's bound plus the largest difference from v1 written for the arm (E9's window 1 in hot and 16,
+# E10's fallback in uniform 1%, E11's TLS at 120 ms tuned).
+T12_SIDE_EXTRA_S = {'pgdelta_direct_inplace_w1': 2.0, 'pgdelta_direct_inplace_w16': 0.1,
+                    'pgdelta_direct_inplace_hc': 2.8, 'pgdelta_direct_inplace_tls': 0.5}
+
+
+def t12_workload(pattern, fraction) -> str:
+    """A trial's workload as EXP-13 names it: hot (1%), uniform1, uniform10 (analysis/exp13.workload_name)."""
+    percent = f'{float(fraction) * 100:g}'
+    return 'hot' if pattern == 'hot' and percent == '1' else f'{pattern}{percent}'
+
+
+def t12_run_limit(method: str, workload: str, label: str) -> dict:
+    """A15's bound on one EXP-13 run (T12_UPPER_S): limit_s, and the written upper bound it is four times (upper_s).
+    A run with no written upper bound (another arm, workload or condition) gets limit_s None: run_exp04's
+    --command-timeout then bounds each of its commands, as outside EXP-13."""
+    if method in PROBACKUP_METHODS:
+        return {'limit_s': T12_TIMEOUT_PROBACKUP_S, 'upper_s': None, 'from': 'probackup8: 240 s (A15)'}
+    if method in FULL_VARIANTS:
+        family, extra = 'full', 0.0
+    elif method in PARCOPY_METHODS:
+        family, extra = method, 0.0
+    elif method == 'pgdelta_direct_inplace' or method in T12_SIDE_EXTRA_S:
+        family, extra = 'v1', T12_SIDE_EXTRA_S.get(method, 0.0)
+    else:
+        family, extra = None, 0.0
+    upper = ((T12_UPPER_S.get(family) or {}).get(workload) or {}).get(label)
+    if upper is None:
+        return {'limit_s': None, 'upper_s': None, 'from': f'no written upper bound for {method} in {workload} at {label}'}
+    upper = round(upper + extra, 3)
+    return {'limit_s': max(T12_TIMEOUT_FLOOR_S, round(T12_TIMEOUT_FACTOR * upper, 3)), 'upper_s': upper,
+            'from': f'{T12_TIMEOUT_FACTOR} x {upper} s, at least {T12_TIMEOUT_FLOOR_S:g} s (A15)'}
+
+
 def tcp_mem(value) -> tuple[int, ...] | None:
     """tcp_rmem or tcp_wmem as /proc/sys prints them ('4096\\t131072\\t6291456') or as written ('4096 131072
     6291456') -> (min, default, max); None for anything else."""
@@ -3557,7 +3613,11 @@ def t12_columns(record: dict) -> dict:
         'network_ok': network.get('ok'), 'excluded_reason': excluded_reason(record), 'inferred': False,
         'window_limited_bound': window_limited_bound(method, link),
         'receiver_wall_s': record.get('receiver_wall_s'),
-        'busy_split_valid': (None if method not in PGDELTA_METHODS else method not in TLS_METHODS)}
+        'busy_split_valid': (None if method not in PGDELTA_METHODS else method not in TLS_METHODS),
+        # A15's bound on the run, and why it failed where the harness knows ('timeout': it reached that bound).
+        'run_limit_s': (record.get('run_limit') or {}).get('limit_s'), 'failure_reason': record.get('failure_reason'),
+        # parcopy's connection set-up: its sender's control and data connections, all opened at once.
+        'parcopy_connect_s': parcopy_connect_s(reported.get('send_stats'))}
     for host in ('source', 'dest'):
         values = tcp.get(host) or {}
         columns[f'tcp_rmem_max_{host}'] = (tcp_mem(values.get('net.ipv4.tcp_rmem')) or (None,) * 3)[2]
@@ -3590,6 +3650,17 @@ def t12_columns(record: dict) -> dict:
         columns['drain_s'] = (None if publish is None or columns['receiver_wall_s'] is None
                               else round(columns['receiver_wall_s'] - publish, 6))
     return columns
+
+
+def parcopy_connect_s(send_stats) -> float | None:
+    """parcopy's sender's connection set-up (its stats' connected_s less select_s: the control connection and every
+    data connection opened), or None without them."""
+    if not isinstance(send_stats, dict):
+        return None
+    connected, selected = send_stats.get('connected_s'), send_stats.get('select_s')
+    if not isinstance(connected, (int, float)) or not isinstance(selected, (int, float)):
+        return None
+    return round(connected - selected, 6)
 
 
 def receiver_command(record: dict):
@@ -3626,6 +3697,7 @@ T12_FIELDS = (
     'drain_s', 'busy_split_valid',
     'tls_version', 'tls_suite', 'tls_connections',
     'noise_window_s', 'dirty_limit_bytes', 'network_ok', 'excluded_reason', 'inferred', 'window_limited_bound',
+    'run_limit_s', 'failure_reason', 'parcopy_connect_s',
 )
 
 

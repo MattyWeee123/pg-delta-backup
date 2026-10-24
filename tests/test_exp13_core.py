@@ -1378,6 +1378,127 @@ class Runs(Clocked13):
         self.assertEqual(record['processes'], {'source': ['sshd: bench'], 'dest': []})
 
 
+class Stalling(T12Stub):
+    """T12Stub whose pg_probackup catchup is a real process that stalls (a hang over SSH), run as run_exp04 runs any
+    timed command (Child, waited for with the run's bound)."""
+
+    def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None, stamp_lines=False):
+        if Path(str(argv[0])).name.startswith('pg_probackup'):
+            return run_exp04.Orchestrator.local_command(
+                self, [sys.executable, '-c', 'import time; time.sleep(60)'], log_name, timeout=timeout, cwd=cwd,
+                env=env, stamp_lines=stamp_lines)
+        return super().local_command(argv, log_name, timeout=timeout, cwd=cwd, env=env, stamp_lines=stamp_lines)
+
+
+class RunLimits(Clocked13):
+    """A15's timeout leg: a run that reaches four times its expected upper bound (at least 60 s; probackup8 240 s) is
+    stopped there and is a tool failure, failure_reason 'timeout'."""
+
+    def test_each_arms_bound_is_four_times_its_written_upper_bound(self):
+        limit = measure.t12_run_limit
+        self.assertEqual(limit('probackup8', 'uniform1', '2:60:default')['limit_s'], 240)
+        self.assertEqual(limit('full', 'uniform1', '2:120:default')['limit_s'], 408)  # E4: 102 s
+        self.assertEqual(limit('full', 'hot', '2:60:default')['limit_s'], 208)
+        self.assertEqual(limit('full', 'uniform1', '2:20:default')['limit_s'], 72)
+        self.assertEqual(limit('full', 'hot', '2:0:default')['limit_s'], 60)  # E1's 10.8 s: the 60 s floor
+        self.assertEqual(limit('full_nosync', 'hot', '2:0:default')['limit_s'], 60)
+        self.assertEqual(limit('parcopy8', 'uniform1', '1:120:default')['limit_s'], 80)  # E5: 20.0 s
+        self.assertEqual(limit('parcopy16', 'hot', '2:120:default')['limit_s'], 60)
+        self.assertEqual(limit(V1, 'uniform1', '2:120:default')['limit_s'], 136)  # E7: 34 s
+        self.assertEqual(limit(V1, 'uniform1', '1:60:default')['limit_s'], 74.4)
+        self.assertEqual(limit(V1, 'uniform10', '2:60:default')['limit_s'], 124)  # E8: 31 s
+        self.assertEqual(limit(V1, 'hot', '2:120:default')['upper_s'], 7.8)  # E1's 3.4 s plus E6's 4.4 s
+        self.assertEqual(limit('pgdelta_direct_inplace_hc', 'uniform10', '2:120:tuned')['upper_s'], 15.3)
+        self.assertEqual(limit('pgdelta_direct_inplace_hc', 'uniform10', '2:120:tuned')['limit_s'], 61.2)
+        # No written bound: --command-timeout, as outside EXP-13.
+        self.assertIsNone(limit(V1, 'append1', '2:60:default')['limit_s'])
+        self.assertIsNone(limit('full', 'hot', '5:0:default')['limit_s'])
+        # Every arm at every condition the run lines run has one.
+        for name, argv in spec_run_lines().items():
+            args = parse(*argv)
+            plan = run_exp04.t12_plan(args)
+            workload = measure.t12_workload(args.patterns, float(args.fractions))
+            for _, label, method in measure.t12_schedule(run_exp04.method_list(args.methods),
+                                                         measure.parse_conditions(args.conditions), args.repeats, plan):
+                with self.subTest(invocation=name, label=label, method=method):
+                    self.assertIsNotNone(limit(method, workload, label)['limit_s'])
+
+    def test_the_bounds_are_the_written_ranges_upper_ends(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'analysis'))
+        try:
+            import exp13_model
+        finally:
+            sys.path.pop(0)
+        written = exp13_model.WRITTEN
+        for label, value in measure.T12_UPPER_S['full']['hot'].items():
+            if label in written['E4'] or ('full', label) in written['E4']:
+                self.assertEqual(value, written['E4'][('full', label)][1])
+        self.assertEqual(measure.T12_UPPER_S['full']['hot']['2:0:default'], exp13_model.ANCHOR['full'][1])
+        for arm in ('parcopy8', 'parcopy16'):
+            for label, value in measure.T12_UPPER_S[arm]['uniform1'].items():
+                expected = exp13_model.ANCHOR[arm][1] if label == '2:0:default' else written['E5'][(arm, label)][1]
+                self.assertEqual(value, expected, (arm, label))
+        v1 = measure.T12_UPPER_S['v1']
+        for label, value in v1['uniform1'].items():
+            expected = (exp13_model.ANCHOR['uniform1'][1] + (0.1 if label == '2:0:tuned' else 0)
+                        if label.startswith('2:0:') else written['E7'][('uniform1', label)][1])
+            self.assertAlmostEqual(value, expected, msg=label)
+        for label, value in v1['uniform10'].items():
+            expected = (written['E8'][('uniform10', '2:0:default')][1] + (0.1 if label == '2:0:tuned' else 0)
+                        if label.startswith('2:0:') else written['E8'][('uniform10', label)][1])
+            self.assertAlmostEqual(value, expected, msg=label)
+        for label, value in v1['hot'].items():
+            expected = exp13_model.ANCHOR['hot'][1] + (0.1 if label == '2:0:tuned' else 0
+                                                       if label.startswith('2:0:')
+                                                       else written['E6'][('hot, added', label)][1])
+            self.assertAlmostEqual(value, expected, msg=label)
+
+    def test_a_stalled_copy_is_stopped_at_its_bound_as_a_tool_failure(self):
+        orchestrator = self.orchestrator(Stalling, ['--methods', f'full,parcopy8,probackup8,{V1},{TLS}'])
+        orchestrator.gnu_time = None
+        condition, link, _ = self.visit(orchestrator, '2:60:default')
+        began = time.monotonic()
+        with mock.patch.object(measure, 'T12_TIMEOUT_PROBACKUP_S', 0.5), \
+                mock.patch.object(T12Stub, 'processes_snapshot', lambda self: {'source': [], 'dest': []}):
+            record = orchestrator.run_method(TRIAL, 0, condition, dict(link), 'probackup8', 0, ['probackup8'])
+        self.assertLess(time.monotonic() - began, 10)  # stopped at its bound (0.5 s, at least RUN_LIMIT_FLOOR_S)
+        self.assertEqual((record['status'], record['failure_kind'], record['failure_reason']),
+                         ('error', 'tool', 'timeout'))
+        self.assertEqual(record['run_limit']['limit_s'], 0.5)
+        catchup = next(iter(record['phases'].values()))['commands'][0]
+        self.assertTrue(catchup['timed_out'])
+        self.assertIn('(timed out)', record['error'])
+        row = measure.summary_row(record)
+        self.assertEqual((row['run_limit_s'], row['failure_reason'], row['failure_kind']), (0.5, 'timeout', 'tool'))
+        self.assertIsNone(orchestrator.run_deadline)  # nothing after the clock gets the run's bound
+
+    def test_the_source_stops_a_sender_at_the_runs_bound(self):
+        orchestrator = self.orchestrator()
+        calls = []
+
+        def source_agent(*args, timeout=600):
+            calls.append((args, timeout))
+            return {'exit_code': -15, 'wall_seconds': 1.0, 'rusage': None, 'log': 'x.log', 'log_tail': '',
+                    'timed_out': True}
+
+        orchestrator.source.agent = source_agent
+        orchestrator.run_deadline = time.monotonic() + 30
+        result = run_exp04.Orchestrator.remote_command(orchestrator, ['python3', '-m', 'pgdelta', 'send'], 'send.log')
+        args, timeout = calls[0]
+        position = args.index('--timeout')
+        self.assertLessEqual(float(args[position + 1]), 30)
+        self.assertGreater(float(args[position + 1]), 29)
+        self.assertGreater(timeout, float(args[position + 1]))  # the SSH call outlasts the agent's own stop
+        self.assertTrue(result['timed_out'])
+        self.assertEqual(run_exp04.failed([result]), ['source: python3 exited -15 (timed out)'])
+        # Outside an EXP-13 run's clock: no --timeout, and --command-timeout bounds the call.
+        orchestrator.run_deadline = None
+        calls.clear()
+        run_exp04.Orchestrator.remote_command(orchestrator, ['true'], 'true.log')
+        self.assertNotIn('--timeout', calls[0][0])
+        self.assertEqual(calls[0][1], orchestrator.args.command_timeout)
+
+
 # --- the trial, the invocation and the reset after a failure ------------------------------------------------------
 
 class TrialFlow(WanFakes, TrialStub):

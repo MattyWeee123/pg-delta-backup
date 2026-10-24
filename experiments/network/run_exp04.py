@@ -209,6 +209,11 @@ CONTROL_SLOTS = (('busy_start', 'busy'), ('busy_end', 'busy'), ('moderate_start'
 CLOCK_PORT = 7300  # EXP-12: the clock probe's TCP exchange
 TAIL_VIEW_MARGIN_S = 0.05  # EXP-12: the quiet tail runs this far past the 15-s view's last bucket (quiet_tail)
 PROCESSES_SNAPSHOT_S = 5.0  # EXP-13: probackup8's ps of both VMs, this far into its clock (smoke item 16)
+# EXP-13 (A15): a timed command started or waited for when its run's bound has (almost) passed still gets this long,
+# so a command that has already exited is reaped, not stopped; and the source's agent this long more to stop its
+# command (agent.py's RUN_KILL_GRACE) and report.
+RUN_LIMIT_FLOOR_S = 1.0
+RUN_LIMIT_REPORT_S = 40.0
 # EXP-12: the clock probe tried this many times, the back-off growing by this much each time; no offset, no load.
 CLOCK_PROBE_ATTEMPTS, CLOCK_PROBE_BACKOFF_S = 3, 2.0
 BACKUP_LABEL = 't10a'  # EXP-12: the label of bracket's and the proxies' backups
@@ -717,6 +722,10 @@ class Orchestrator:
         self.visited: set = set()  # this trial's condition labels visited so far
         self.zero_delay: dict = {}  # this trial's zero-delay rates by tbf rate: {'one_stream', 'bound'} (Gbit/s)
         self.current_trial_record: dict | None = None
+        # A15: the bound on the EXP-13 run now running (measure.t12_run_limit), and its deadline on time.monotonic()
+        # while its timed phase runs; each of the phase's commands gets what is left of it (command_timeout).
+        self.run_limit_s: float | None = None
+        self.run_deadline: float | None = None
 
     # --- paths -------------------------------------------------------------
 
@@ -838,22 +847,34 @@ class Orchestrator:
             return {**measure.snapshot(self.dest_iface, tcp=True), 'qdisc': qdisc_counters(self.dest_iface)}
         return measure.snapshot(self.dest_iface)
 
+    def command_timeout(self) -> float:
+        """How long a timed command may run: what is left of its EXP-13 run's bound (A15, from when the run's clock
+        started; at least RUN_LIMIT_FLOOR_S), or --command-timeout outside such a run."""
+        if self.run_deadline is None:
+            return self.args.command_timeout
+        return max(RUN_LIMIT_FLOOR_S, self.run_deadline - time.monotonic())
+
     def local_command(self, argv, log_name: str, *, timeout: float | None = None,
                       cwd=None, env=None, stamp_lines: bool = False) -> dict:
         child = Child(argv, self.dest_log(log_name), cwd=cwd, env=env, gnu_time=self.gnu_time,
                       stamp_lines=stamp_lines)
-        return child.wait(timeout or self.args.command_timeout)
+        return child.wait(timeout or self.command_timeout())
 
     def remote_command(self, argv, log_name: str, *, cwd: str | None = None) -> dict:
         argv = [str(part) for part in argv]
         extra = ['--cwd', cwd] if cwd else []
         if self.gnu_time:
             extra += ['--gnu-time', self.gnu_time]
+        timeout = self.command_timeout()
+        if self.run_deadline is not None:
+            # A15: the agent stops the command on the source at the run's bound, and says so (timed_out).
+            extra += ['--timeout', f'{timeout:.3f}']
+            timeout += RUN_LIMIT_REPORT_S
         started_utc = time.time()
         started = time.perf_counter()
         try:
             result = self.source.agent('run', '--log', self.source_log(log_name), *extra, '--',
-                                       *argv, timeout=self.args.command_timeout)
+                                       *argv, timeout=timeout)
         except subprocess.TimeoutExpired:
             return {'host': 'source', 'argv': argv, 'exit_code': None, 'timed_out': True,
                     'wall_seconds': round(time.perf_counter() - started, 6),
@@ -864,7 +885,7 @@ class Orchestrator:
                 'started_utc': started_utc, 'rusage': result['rusage'],
                 'peak_rss_kb': result.get('peak_rss_kb'), 'gnu_time': result.get('gnu_time'),
                 'launcher': result.get('launcher'), 'log': result['log'],
-                'log_tail': result['log_tail'][-8000:], 'timed_out': False}
+                'log_tail': result['log_tail'][-8000:], 'timed_out': bool(result.get('timed_out'))}
 
     def timed_phase(self, name: str, body) -> dict:
         """Counters on both VMs around body(); body returns its command records.
@@ -879,12 +900,17 @@ class Orchestrator:
         started_utc = time.time()
         started = time.perf_counter()
         deferred: list = []
+        if self.run_limit_s:
+            # A15: the run's bound counts from its clock's start (an EXP-13 run is one timed phase); only the phase's
+            # commands get it, not the untimed verification after it.
+            self.run_deadline = time.monotonic() + self.run_limit_s
         Child.trace, Child.deferred = self.args.syscall_audit, deferred
         try:
             try:
                 commands = body()
             finally:
                 Child.trace, Child.deferred = False, None
+                self.run_deadline = None
             wall = time.perf_counter() - started
             ended_utc = time.time()
             after_dest = self.snapshot_dest()
@@ -2061,7 +2087,7 @@ class Orchestrator:
                          self.dest_log(f'{method}-receive.log'), cwd=self.repo,
                          gnu_time=self.gnu_time)
         holder['receiver'] = receiver
-        deadline = time.monotonic() + 600
+        deadline = time.monotonic() + min(600, self.command_timeout())
         while 'listening on' not in receiver.log_text():
             if receiver.poll() is not None or time.monotonic() > deadline:
                 receiver.signal()
@@ -2106,7 +2132,7 @@ class Orchestrator:
                                      f'{method}-send.log', cwd=self.remote_repo)
         if sender['exit_code'] != 0:
             receiver.signal()
-        result = receiver.wait(self.args.command_timeout)
+        result = receiver.wait(self.command_timeout())
         return [{**result, 'role': f'receiver, launched in {launched_in}: its wall '
                                    'and rusage cover its whole life'}, sender]
 
@@ -2867,8 +2893,14 @@ class Orchestrator:
         self.log_prefix = f'r{repeat}-{speed.get("slug") or speed["label"]}-'
         self.current_run = (repeat, speed['label'])
         if self.t12:
-            # EXP-13: the condition and what its visit measured (the ping minimum, the one-stream rate, ...).
+            # EXP-13: the condition and what its visit measured (the ping minimum, the one-stream rate, ...); A15's
+            # bound on the run, which its timed commands share from its clock's start (a run that reaches it is a
+            # tool failure, failure_reason 'timeout').
             record['condition'] = dict(self.condition or {})
+            record['run_limit'] = measure.t12_run_limit(method, measure.t12_workload(trial['pattern'],
+                                                                                      trial['fraction']),
+                                                        speed['label'])
+            self.run_limit_s, self.run_deadline = record['run_limit']['limit_s'], None
         try:
             stuck = self.output_stuck
             if stuck and (str(paths['output']) == stuck['data'] or method in measure.OUTPUT_START_METHODS):
@@ -2927,6 +2959,8 @@ class Orchestrator:
                 # A command of the method's own timed phases exited non-zero or timed out: for parcopy* and
                 # probackup*, a copy the tool itself aborted, which can be neither verified nor started (A4).
                 record['failure_kind'] = 'tool'
+                if any(command.get('timed_out') for phase in phases.values() for command in phase['commands']):
+                    record['failure_reason'] = 'timeout'  # EXP-13's A15: the run reached its bound
                 raise CommandError('; '.join(problems))
             record['tool_reported'] = self.tool_reported(method, paths, phases)
             if self.args.syscall_audit:
@@ -3018,6 +3052,7 @@ class Orchestrator:
                     record['cleanup_error'] = str(exc)
         self.log_prefix = ''
         self.current_run = None
+        self.run_limit_s = self.run_deadline = None
         record['finished_utc'] = utc_now()
         totals = record.get('totals') or {}
         log(f'  {record["status"]}: {totals.get("wall_seconds")} s, '

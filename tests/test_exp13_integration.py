@@ -492,5 +492,27 @@ class HarnessRecordsThroughTheAnalysis(core.Clocked13):
         self.assertEqual((tls['tls_version'], tls['busy_split_valid']), ('TLSv1.3', False))
 
 
+
+@needs_venv
+class TimeoutsThroughTheAnalysis(core.Clocked13):
+    """A15's timeout leg end to end: a probackup8 copy that stalls is stopped at its bound by the harness, recorded as a
+    tool failure ('timeout'), and the analysis excludes the arm from every baseline (S.a15)."""
+
+    def test_a_stalled_copy_lands_in_a15(self):
+        orchestrator = self.orchestrator(core.Stalling, ['--methods', f'full,parcopy8,probackup8,{V1},{TLS}'])
+        orchestrator.gnu_time = None
+        condition, link, _ = self.visit(orchestrator, '2:60:default')
+        with mock.patch.object(measure, 'T12_TIMEOUT_PROBACKUP_S', 0.5), \
+                mock.patch.object(core.T12Stub, 'processes_snapshot', lambda self: {'source': [], 'dest': []}):
+            record = orchestrator.run_method(core.TRIAL, 0, condition, dict(link), 'probackup8', 0, ['probackup8'])
+        self.assertEqual(record['failure_reason'], 'timeout')
+        rows, trials, _, _ = exp13.load(orchestrator.out)
+        S = exp13.Session(rows, trials)
+        self.assertEqual([row['failure_reason'] for row in S.a15['probackup8']], ['timeout'])
+        self.assertIn('1 timed out at 4 times the expected upper bound', S.excluded['probackup8'])
+        self.assertIsNone(S.baseline('B_rel', '2:60:default'))
+        self.assertEqual(rows[0]['left_out'], 'status error (tool: timeout)')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -35,9 +35,9 @@ that doesn't favour v1):
   "the faster of" can't be known without it.
 - A13 counts an arm's failing runs at a condition over the whole session (every trial's runs there): its cell for a
   baseline, three trials' for v1. A15's tool failures (a parcopy run that failed verify_direct or didn't start, a
-  probackup8 run that didn't start or differed logically while the user tables matched, either's copy its tool aborted)
-  exclude the arm from every baseline, as EXP-11's A4; they don't apply to `full` or to v1's arms, whose failed runs
-  are only left out.
+  probackup8 run that didn't start or differed logically while the user tables matched, either's copy its tool aborted
+  or stopped at A15's bound, failure_reason 'timeout') exclude the arm from every baseline, as EXP-11's A4; they don't
+  apply to `full` or to v1's arms, whose failed runs (a timeout among them) are only left out.
 - `full` at 1 Gbit/s, where it didn't run (A16), stands in with its pooled runs at 2 Gbit/s, the same r and host
   setting, labelled inferred, in B_fast, B_rel and F0 alike.
 - Δ at 1 Gbit/s isn't reported: no anchor runs at 1 Gbit/s. `parcopy8`'s tuned Δ uses the default anchor, labelled.
@@ -148,8 +148,8 @@ CLAIM_ROWS = ROWS[2:5]  # rows 1, 2 and 3: R1 makes them provisional
 BOUND_ROWS = ROWS[2:4]  # rows 1 and 2: they need a bound that passes A9
 
 # The summary's columns this script reads (measure.CSV_FIELDS), by type.
-TEXT = ('trial_id', 'pattern', 'speed', 'method', 'status', 'tier', 'error', 'failure_kind', 'host_tcp',
-        'excluded_reason', 'tls_version', 'tls_suite')
+TEXT = ('trial_id', 'pattern', 'speed', 'method', 'status', 'tier', 'error', 'failure_kind', 'failure_reason',
+        'host_tcp', 'excluded_reason', 'tls_version', 'tls_suite')
 FLAGS = ('verified', 'durable', 'durability_ok', 'void', 'network_ok', 'sysctl_ok', 'busy_split_valid',
          'window_limited_bound')
 NUMERIC = ('fraction', 'order_index', 'target_gbit', 'measured_s2d_gbit', 'measured_d2s_gbit',
@@ -331,6 +331,7 @@ def from_record(record: dict, row: dict) -> dict:
     return {'a_ok': a_ok, 'b_ok': durability['b_ok'] if 'b_ok' in durability else b_check(row),
             'fsync_ok': (fsync_count or {}).get('ok'), 'dirty_increase_bytes': increase, 'dirty_limit_bytes': limit,
             'noise_beyond_table': durability.get('noise_beyond_table'), 'failure_kind': kind,
+            'failure_reason': record.get('failure_reason') or row.get('failure_reason'),
             's2d_8_steady_gbit': link.get('source_to_dest_8streams_steady_gbit'),
             's2d_16_steady_gbit': link.get('source_to_dest_16streams_steady_gbit'),
             'zero_delay_bound_gbit': link.get('zero_delay_bound_gbit'),
@@ -452,10 +453,13 @@ class Session:
                          for method, why in self.not_durable.items()}
         for method, failed in self.a15.items():
             aborted = sum(r['status'] == 'error' for r in failed)
+            timeouts = sum(r.get('failure_reason') == 'timeout' for r in failed)
             self.excluded.setdefault(method, f'A15: {len(failed)} run(s) failed '
                                      + ('verify_direct or did not start' if method in measure.PARCOPY_METHODS
                                         else 'to start or the logical digest')
-                                     + (f', {aborted} of them a copy its tool aborted' if aborted else ''))
+                                     + (f', {aborted} of them a copy its tool aborted' if aborted else '')
+                                     + (f' ({timeouts} timed out at 4 times the expected upper bound, at least 60 s; '
+                                        'probackup8 240 s)' if timeouts else ''))
         for r in rows:
             r['usable'] = self.counts(r)
             r['left_out'] = '' if r['usable'] else self.why(r)
@@ -472,7 +476,9 @@ class Session:
         if r['void']:
             return 'void'
         if r['status'] != 'pass':
-            return f'status {r["status"]}' + (f' ({r["failure_kind"]})' if r['status'] == 'error' else '')
+            return f'status {r["status"]}' + (f' ({r["failure_kind"]}' + (f': {r["failure_reason"]}'
+                                                                           if r.get('failure_reason') else '') + ')'
+                                              if r['status'] == 'error' else '')
         if not r['verified']:
             return 'not verified'
         if r['durability_failures']:
