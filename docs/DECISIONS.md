@@ -295,6 +295,12 @@ The performance scorecard after D50's move: 6 A, 5 B, 6 C, 12 D and 3 X, with 3 
 - **T5 before T10b is a judgment, not a registered rule.** T5 is cheaper (half a day, under 1 VM hour), and its hash changes the CPU each source worker uses, which is what T10b sizes the cap against.
 - T8, T9 and T4 move down one place each, to 4th, 5th and 6th; T13, T11b, T6 and T7 keep theirs; T14 moves up to 11th.
 
+**Firming these results** (added October 24, evening, after the owner lifted the two-VM limit). T10a's verdicts stand as registered, but four things keep them from being firm: v1 was measured only by proxy; the load's client shared the source's CPU, so every deciding cell where W was measurable is flagged and the rows are fragile; the blocks ran in a fixed order, so load level is confounded with time in the session; and it is one session on one VM pair. The second came from a limit of two VMs that the project had set itself, not the owner and not a quota. The owner lifted it on October 24: the GCP project is funded by Google, and a VM count that shapes a design costs more in validity than the VMs cost. The binding limit is now the project's quota, 32 vCPUs across all regions (four n2-standard-8 VMs at once; raising it is the owner's call). So:
+- **T10b runs its load's client on a third VM** in the same zone, with the copy's link shaped only between source and dest (EXP-13's shaping already filters by peer). It also runs EXP-12's pgbench load at 0.67 and 0.33 of capacity beside HammerDB, so the two can be read by the same rules, with the load levels interleaved in a seeded order. It re-judges decision 2 (the worker cap) and the HA caveat with the client off the source.
+- **T8 measures v1 itself** on a live source in backup mode, with the client on its own VM and EXP-12's oracle. It replaces the proxy's readings: decision 1's proxy row, the HA caveat and the DR time estimates.
+- **Each is run in two sessions on fresh VMs,** one after the other, or at once if the owner raises the quota, so the variation between VM pairs is measured instead of assumed.
+- **Where a later, firmer result overlaps a fragile one here, the ledger follows the later one and says so;** EXP-12's own record stays as it ran.
+
 ## Where pgdelta stands today
 
 The conditions behind every number in this section: one VM pair, 2.1 GB, 1% of rows changed, idle source, CRC32C manifests (EXP-04b), and no added latency. "Uniform" means changes scattered over the whole table; "local" means hot-spot and append changes.
@@ -625,6 +631,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 - *Added October 24 (after T2): v1 now targets DR's links first (EXP-09's rule, after EXP-11's Out on fast links). By rule 3, the full-copy side should include a parallel copy (EXP-11's `parcopy8`) beside one stream: at 0.1 ms one TCP stream isn't window-limited, so EXP-11's crossovers (6.5 Gbit/s local, 5.0 uniform) may not hold at DR latency.*
 
 ### T8 v1 prototype: correctness under load, then speed
+- *October 24 (evening): v1's own slowdown arm runs with the load's client on a third VM, in two sessions on fresh VMs, and replaces T10a's proxy readings; see [Firming these results](#what-t10a-settled-october-24-2026).*
 - **Checks:**
   - an emitted manifest that passes `pg_verifybackup`;
   - recovery to the stop point and a logical comparison (the sponsor says merely starting isn't enough);
@@ -671,6 +678,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 - **Proves it wrong:** more than 10% extra time keeps the conservative default.
 
 ### T10b Slowdown and worker count under HammerDB
+- *October 24 (evening): the load's client runs on a third VM, the load levels interleave in a seeded order, EXP-12's pgbench load runs beside HammerDB, and the test runs in two sessions on fresh VMs, to firm T10a's fragile rows; see [Firming these results](#what-t10a-settled-october-24-2026).*
 - **Question:** with HammerDB running on the source at a fixed rate, how much do 1, 2, 4 and 8 workers slow it down?
 - **Prediction:** the slowdown grows with the worker count; 4 workers cost 10% or less.
 - **Proves it wrong:** if 8 cost no more than 2 points beyond 4, choose 8. If 4 cost more than 15%, lower the default.
