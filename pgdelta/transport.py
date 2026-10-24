@@ -126,7 +126,7 @@ def socket_channel(sock):
             except OSError:
                 pass
 
-    return Channel(reader, writer, closer=close)
+    return Channel(reader, writer, closer=close, sock=sock)
 
 
 def listen(host, port):
@@ -152,9 +152,14 @@ def accept_channel(listener):
 
 
 def connect_channel(host, port, timeout=30.0):
+    """Connect to a receiver; the channel's connect_seconds is the connect's own time (EXP-13's connect_s)."""
+    started = time.perf_counter()
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
     except OSError as exc:
         raise TransferError(f'cannot connect to {host}:{port}: {exc}') from exc
+    connected = time.perf_counter() - started
     sock.settimeout(None)
-    return socket_channel(sock)
+    channel = socket_channel(sock)
+    channel.connect_seconds = connected
+    return channel

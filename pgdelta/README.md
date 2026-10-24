@@ -56,7 +56,7 @@ python -m pgdelta local --source S18 --basis B17 --output O \
 
 A pg_controldata of another major version warns that the control file's CRC doesn't match and that its output is untrustworthy, yet still exits 0. pgdelta keeps the values it printed, adds an `untrustworthy` note to that identity, and the gate treats it as unknown. The statistics record both identities: `source_identity` and `basis_identity`, also under `receiver`.
 
-Experiment options on `send` and `local`: `--block` (default: the cluster's block size, else 8192), `--node-blocks` (default 128, so 1 MiB nodes) and `--high-churn-node-fraction F`.
+Experiment options on `send` and `local`: `--block` (default: the cluster's block size, else 8192), `--node-blocks` (default 128, so 1 MiB nodes), `--high-churn-node-fraction F` and `--window N` (default 4; see [The request window and the protocol timers](#the-request-window-and-the-protocol-timers-exp-13)).
 
 Exit codes (SPEC section 3): 0 success, 2 invalid or unsupported input, 3 transfer or I/O failure, 4 verification failure. A failure reported by the other end carries that end's code. An unexpected internal error is logged with its traceback and exits 3.
 
@@ -193,6 +193,30 @@ The sender's statistics record `source_kind` and `source_excluded`: the files, d
 
 The receiver logs one line when the sender connects, for example `prefetched 2120000000 of 2120000000 basis bytes (1019 of 1019 files) in 1.2 s, while waiting 4.0 s for the sender; stopped: finished`, and reports the same in its statistics under `prefetch` (see [Statistics JSON](#statistics-json)).
 
+### The request window and the protocol timers (EXP-13)
+
+Added for [EXP-13](../docs/experiments/EXP-13-latency-transport.md) (T12: what changes at DR round-trip times). Neither changes what is sent. At the defaults the bytes on the wire are the ones the code before them sent: `tests/test_pgdelta_waits.py` checks one fixed session's frames against fingerprints recorded at that commit, and against that commit's own run when the checkout has it.
+
+| Switch | Commands | Values (default first) | What it does |
+|---|---|---|---|
+| `--window N` | `send`, `local` | 4, or any N ≥ 1 | The sender hashes up to N files ahead of the one whose pages it sends, so the next files' leaf-digest round trips overlap hashing (D29). It reorders the frames on the wire, since a file's LEAF_REQUESTs go out earlier or later among other files' pages; the frames themselves, the output and every count are the same for any N |
+| `--busy-inflight-bytes BYTES` | `send` | none, or any BYTES ≥ 0 | Statistics only: the threshold of the busy and idle split below. EXP-13 passes the visit's one-stream steady rate times its ping minimum, what the path holds without queueing |
+
+**The protocol timers.** Both ends report where the protocol waits, under `protocol_timers` (see [Statistics JSON](#statistics-json)):
+- **The sender:** its TCP connect; its waits for the receiver, by kind (ACCEPT after HELLO, each file's basis digests, the leaf digests it asked for, the final COMPLETE), each with its count and how many lasted over 1 ms; and how long its sends blocked, page data apart from the rest. A wait whose reply had already arrived is no wait: it is neither timed nor counted.
+- **The receiver:** from listening until HELLO arrived; its main loop's time reading frames after HELLO; and from the command's start until O's publication (in place, B's commit) was durable, with that moment on the wall clock so a caller can place it against its own clock, as the prefetch's times.
+
+**Busy and idle.** Leaf requests travel in the same TCP stream as page data, and `send()` returns once the kernel has a frame, not once it has left. With large send buffers a request can sit behind tens of MB of earlier pages, and behind a queue at the link, while the link is busy with them: that time is sending, not a protocol round trip. So while a wait blocks, the sender wakes every millisecond and reads its socket's send queue: the bytes not yet sent (`SIOCOUTQNSD`) and not yet acknowledged (`SIOCOUTQ`).
+- A slice is **busy** when some bytes are unsent, or when the bytes in flight (unacknowledged less unsent) exceed `--busy-inflight-bytes`; without that switch only unsent bytes count. Otherwise it is **idle**.
+- Each slice takes the reading at its start, so a wait's busy and idle parts add up to it (to a microsecond, from rounding). Each part is good to about one slice per wait.
+- The readings exist on Linux over TCP. Over pipes (`local`), on macOS, or after a reading fails, the parts are null, `send_queue.why_not` says why, and the totals stay.
+- They see only the sender's own socket. Through a proxy (EXP-13's stunnel arm) the bytes the proxy holds don't show, so a wait can read idle while the link is busy.
+
+**What they cost** (measured on a Mac, Python 3.14, with the scripts kept out of the repository):
+- A wait whose reply is already there: 0.145 µs a call, against 0.138 µs before. Each send: two clock reads, 0.08 µs.
+- A blocked wait wakes every millisecond for two `ioctl`s, about 0.2 µs each. Over a 2 s wait, with a stand-in queue whose reading made two `fstat` calls (1.3 µs), the waiting thread used 25 ms of CPU, 1.3% of a core, at a time it would otherwise sleep.
+- End to end, in-process, 48 files of 2 MiB with 1% of their pages changed, alternating the commit before and this code over 6 rounds (18 runs each): medians 0.1325 s before and 0.1323 s after over pipes, 0.1338 s and 0.1343 s over local TCP; with the millisecond readings forced on, 0.1320 s and 0.1343 s. Every difference is within the runs' own spread (0.131–0.144 s).
+
 ### Reuse policy (the identity gate)
 
 The identity gate is an efficiency policy, not a correctness requirement. Correctness comes from verification: every output file, including every page copied from B, is re-hashed and checked against the source digest before O is published. A wrong or unrelated basis can't produce a wrong O. At worst it wastes the digest traffic of the comparison.
@@ -279,7 +303,7 @@ The receiver rejects missing or unknown HELLO fields. File indexes refer to the 
 2. The receiver validates every path and applies the identity gate against B under its reuse policy. It replies ACCEPT, listing the S files that also exist in B.
 3. In reuse mode a receiver thread hashes those basis files in index order and sends BASIS_NODES for each. Full mode sends no digests.
 4. The sender hashes each S file in order and compares nodes. It sends all LEAF_REQUESTs for that file at once, in chunks that keep each reply under half a frame.
-5. It keeps up to 4 files hashed ahead, so leaf round trips overlap hashing.
+5. It keeps up to 4 files hashed ahead (`--window`), so leaf round trips overlap hashing.
 6. For each file in turn, it sends PAGE_DATA for the differing and new pages in increasing page order, coalesced into runs of up to 1 MiB, then FILE_DONE.
 7. The receiver writes received pages at their offsets and takes every other page from the same offset in B; see [Building and verifying O](#building-and-verifying-o). A whole unchanged file is a straight copy.
 8. The receiver fsyncs the file, re-hashes all of it, and compares the result with the FILE_DONE digest, either right away or on the workers while it writes the next file. A mismatch is a fatal verification error.
@@ -359,6 +383,12 @@ Why 0 and not a new exit code: SPEC section 4 defines success as a verified, com
 - `files_digest`: the combined digest also stored in the receipt; null until every file has been sent
 - `files` `{total, unchanged, changed, new, size_mismatch}`
 - `pages` `{total, sent, reused, sent_bytes}` and `nodes` `{total, matched, descended, sent_whole}`
+- `window` (`--window`), `high_churn_node_fraction`, `high_churn_files` and `leaf_requests`, the LEAF_REQUEST frames sent
+- `protocol_timers`, the [protocol timers](#the-request-window-and-the-protocol-timers-exp-13) in seconds, which vary from run to run like `timings_seconds`:
+  - `connect_s`: the TCP connect (null when the sender didn't connect, as in `local`);
+  - for each kind of wait, `accept`, `basis`, `leaf` and `complete`: `<kind>_wait_s`, its parts `<kind>_wait_busy_s` and `<kind>_wait_idle_s` (null without send-queue readings), and the counts `<kind>_waits` and `<kind>_waits_over_1ms`;
+  - `page_send_s` and `other_send_s`: the time `send()` took for page data, and for every other frame (HELLO's JSON encoding included);
+  - `send_queue` `{split, why_not, busy_inflight_bytes, poll_s, readings}`: whether the parts were measured, why not, the threshold, the interval between readings, and how many were taken.
 - `bytes_source_to_dest` and `bytes_dest_to_source`, each `{total, control, node_digests, leaf_digests, page_data, by_message_type}`
 - `timings_seconds`, the time in each phase:
   - `hash_source`: hash S;
@@ -387,6 +417,7 @@ Why 0 and not a new exit code: SPEC section 4 defines success as a verified, com
   - `started_utc` and `ended_utc`: when it started and stopped reading, in seconds since the epoch on the receiver's clock, so a caller timing the receiver from outside can place the reading against its own intervals (null when it didn't run);
   - `stopped`: `finished`, `cap` or `error` if it ended on its own, else why it was stopped (`connected`, `interrupted`, `failed`);
   - `fadvise` (whether `POSIX_FADV_WILLNEED` was used), `noatime` (whether `O_NOATIME` was accepted) and `error`.
+- `receiver.protocol_timers` `{hello_wait_s, recv_wait_s, publish_s, published_utc}`: from listening until HELLO arrived; the main loop's time reading frames after it; from the command's start until the durable publication (in place, the commit); and that moment in seconds since the epoch. `python -m pgdelta` starts its clock before pgdelta's modules load; a library caller passes `launched` and `listening` to `run_receiver`, else both count from the session's start.
 
 The receiver's own statistics (what `run_receiver` returns) also have `acknowledged` and `acknowledgement_error`.
 
