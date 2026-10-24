@@ -452,13 +452,13 @@ class RunJson(Clocked):
             self.execute(['full', 'full_wb'], cls=Tuned)
         self.assertIn('vm.dirty_background_bytes is not 0', str(refused.exception))
 
-    def test_without_the_probackup_block_its_preflight_hook_refuses(self):
-        class Unbuilt(self.Executing):
-            check_probackup = run_exp04.Orchestrator.check_probackup
+    def test_the_probackup_preflight_hook_is_the_blocks_check(self):
+        class Unprovisioned(self.Executing):
+            check_probackup = run_exp04.Orchestrator.check_probackup  # dest reports no pg_probackup
 
-        with self.assertRaises(NotImplementedError) as refused:
-            self.execute(['full', 'probackup8'], cls=Unbuilt)
-        self.assertIn('build/exp11-probackup', str(refused.exception))
+        with self.assertRaises(SystemExit) as refused:
+            self.execute(['full', 'probackup8'], cls=Unprovisioned)
+        self.assertIn('pg_probackup (/usr/local/bin/pg_probackup-17) is not installed on dest', str(refused.exception))
 
     def test_a_run_without_t2_arms_does_none_of_it(self):
         orchestrator, code, run = self.execute(['full', 'pgdelta_direct_inplace'], ['--manifest-checksums', 'SHA256'])
@@ -803,7 +803,9 @@ class Runs(Clocked):
 
     def test_probackup_and_parcopy_are_dispatched_to_their_blocks(self):
         orchestrator = self.orchestrator()
-        for method, branch in (('probackup8', 'build/exp11-probackup'), ('parcopy4', 'build/exp11-parcopy')):
+        record = self.run_method(orchestrator, 'probackup8')
+        self.assertEqual(list(record['phases']), [measure.PROBACKUP_PHASE])
+        for method, branch in (('parcopy4', 'build/exp11-parcopy'),):
             with self.subTest(method=method):
                 record = self.run_method(orchestrator, method)
                 self.assertEqual(record['status'], 'error')
@@ -813,29 +815,17 @@ class Runs(Clocked):
         self.assertEqual(scripts, ['stop-clean', 'start'])
 
     def test_a_probackup_run_is_one_window_with_its_sync_f_inside(self):
-        clock = self.clock
-
         class Probackup(T2Stub):
-            # What the pg_probackup block's run_probackup must do: one timed phase, catchup then sync -f.
-            def run_probackup(self, method, paths):
-                steps = {}
-
-                def body():
-                    started = clock.now
-                    catchup = self.local_command(self.probackup_argv(method, paths), f'{method}.log', stamp_lines=True)
-                    log = self.dest_log(f'{method}.log')
+            # The pg_probackup block's run_probackup, its catchup's log what 2.5.16 prints.
+            def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None, stamp_lines=False):
+                result = super().local_command(argv, log_name, timeout=timeout, cwd=cwd, env=env,
+                                               stamp_lines=stamp_lines)
+                if Path(argv[0]).name.startswith('pg_probackup'):
+                    log = self.dest_log(log_name)
                     log.parent.mkdir(parents=True, exist_ok=True)
                     log.write_text(PROBACKUP_LOG)
-                    catchup['log'] = str(log)
-                    steps['catchup'] = {'wall_seconds': round(clock.now - started, 3)}
-                    started = clock.now
-                    sync = self.local_command(self.probackup_sync_argv(paths), f'{method}-sync.log')
-                    steps['sync'] = {'wall_seconds': round(clock.now - started, 3)}
-                    return [catchup, sync]
-
-                phase = self.timed_phase(measure.PROBACKUP_PHASE, body)
-                phase['steps'] = steps
-                return {measure.PROBACKUP_PHASE: phase}
+                    result['log'] = str(log)
+                return result
 
             def verify_probackup(self, method, paths):
                 return {'verified': True, 'basis_changes': [], 'output_bytes': 2_100_000_000}
@@ -950,8 +940,9 @@ class Runs(Clocked):
         with mock.patch.object(orchestrator, 'verify_direct', return_value={'verified': True}) as direct:
             orchestrator.verify('parcopy8', orchestrator.method_paths('parcopy8'), {})
         direct.assert_called_once()
-        with self.assertRaises(NotImplementedError):
+        with mock.patch.object(orchestrator, 'verify_probackup', return_value={'verified': True}) as probackup:
             orchestrator.verify('probackup4', orchestrator.method_paths('probackup4'), {})
+        probackup.assert_called_once()
 
     def test_the_warm_source_block_reads_the_source_instead_of_dropping_it(self):
         class Warm(T2Stub):

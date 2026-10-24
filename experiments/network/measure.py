@@ -1412,6 +1412,111 @@ def probackup_catchup_argv(exe: str, method: str, *, source_pgdata, dest_pgdata,
             f'--ssh-options=-F {ssh_config}', '--log-level-console=INFO']
 
 
+# The release whose catchup EXP-11 read (install_incumbents.sh installs it): its own flush covers the
+# source's file list and pg_control only, so probackup* end with a timed sync -f.
+PROBACKUP_VERSION = '2.5.16'
+_PROBACKUP_VERSION = re.compile(r'\b(\d+\.\d+\.\d+)\b')
+_PROBACKUP_PG = re.compile(r'PostgreSQL (\d+)')
+# What pg_probackup's remote mode always adds to its ssh command line (src/utils/remote.c, 2.5.16).
+PROBACKUP_SSH_FIXED_OPTIONS = ('-o', 'PasswordAuthentication=no', '-o', 'Compression=no', '-o',
+                               'ControlMaster=no', '-o', 'LogLevel=error')
+
+
+def probackup_version(text) -> dict | None:
+    """{'version', 'postgresql'} from `pg_probackup --version` ("pg_probackup-17 2.5.16 (PostgreSQL 17)");
+    None without a version number."""
+    found = _PROBACKUP_VERSION.search(text or '')
+    if found is None:
+        return None
+    major = _PROBACKUP_PG.search(text)
+    return {'version': found.group(1), 'postgresql': major.group(1) if major else None}
+
+
+def probackup_help_problems(help_text: str, argv) -> list[str]:
+    """What `pg_probackup catchup --help` lacks for a catchup command line: FULL among its catchup modes,
+    -j, and every long option the command line passes."""
+    text = help_text or ''
+    problems = []
+    modes = re.search(r'--backup-mode=\S+\s+catchup mode=([A-Z|]+)', text)
+    if modes is None or 'FULL' not in modes.group(1).split('|'):
+        problems.append('-b FULL is not among its catchup modes')
+    if re.search(r'-j, --threads\b', text) is None:
+        problems.append('-j (--threads) is not listed')
+    for part in argv:
+        option = str(part).split('=', 1)[0]
+        if option.startswith('--') and re.search(rf'(^|[\s\[,]){re.escape(option)}\b', text, re.MULTILINE) is None:
+            problems.append(f'{option} is not listed')
+    return problems
+
+
+def probackup_ssh_argv(exe, *, source_ip: str, ssh_user: str, ssh_config) -> list[str]:
+    """The ssh command pg_probackup's remote mode runs to start its agent on the source, as 2.5.16 builds
+    it (-l, our --ssh-options, its own options, the host, `<remote-path>/<its name> agent`), with
+    --version in place of agent: the preflight's proof that dest reaches the source's binary that way."""
+    exe = Path(str(exe))
+    return ['ssh', '-l', ssh_user, '-F', str(ssh_config), *PROBACKUP_SSH_FIXED_OPTIONS, source_ip,
+            f'{exe.parent}/{exe.name} --version']
+
+
+def probackup_outcome(started: bool, logical_match, reference_match) -> str:
+    """'pass', 'fail' or 'void' for a probackup* run at the trial's end (EXP-11's Verification, A4).
+
+    An output that doesn't start fails. One whose per-table digest differs from the source's is void
+    if the trial's two reference digests differ (the source changed during the trial, so the tool
+    can't be blamed), and fails otherwise, an unknown comparison included.
+    """
+    if not started:
+        return 'fail'
+    if logical_match:
+        return 'pass'
+    return 'void' if reference_match is False else 'fail'
+
+
+# probackup*'s byte diagnostic (EXP-11's Verification): every file the trial's reference digest selects
+# under these directories, global/pg_control left out (reference_excluded), against the output's by
+# SHA-256, and the output's extra files listed. It decides nothing.
+BYTE_DIAGNOSTIC_DIRECTORIES = ('base', 'global')
+
+
+def byte_view(digest: dict) -> dict:
+    """A digest's regular files under BYTE_DIAGNOSTIC_DIRECTORIES, without what a clean stop rewrites."""
+    entries = {path: entry for path, entry in digest['entries'].items()
+               if entry[0] == 'file' and path.split('/', 1)[0] in BYTE_DIAGNOSTIC_DIRECTORIES
+               and not reference_excluded(path)}
+    return {**digest, 'entries': entries, 'files': len(entries),
+            'bytes': sum(entry[1] for entry in entries.values())}
+
+
+def byte_diagnostic_paths(root) -> list[str]:
+    """The output's regular files under BYTE_DIAGNOSTIC_DIRECTORIES, relative, for files_digest."""
+    root = Path(root)
+    paths = []
+    for top in BYTE_DIAGNOSTIC_DIRECTORIES:
+        for directory, _, filenames in os.walk(root / top):
+            for name in filenames:
+                path = Path(directory) / name
+                rel = path.relative_to(root).as_posix()
+                if stat.S_ISREG(os.lstat(path).st_mode) and not reference_excluded(rel):
+                    paths.append(rel)
+    return sorted(paths)
+
+
+def byte_diagnostic(reference: dict, output: dict, limit: int = 20) -> dict:
+    """The reference's selected files under base/ and global/ against the output's (byte_view of each).
+
+    identical: every selected file is in the output with the same size and SHA-256. The output's extra
+    files are listed apart and don't count against it.
+    """
+    expected, actual = byte_view(reference)['entries'], byte_view(output)['entries']
+    missing = sorted(expected.keys() - actual.keys())
+    extra = sorted(actual.keys() - expected.keys())
+    differing = sorted(path for path in expected.keys() & actual.keys() if expected[path][:3] != actual[path][:3])
+    return {'identical': not missing and not differing, 'selected_files': len(expected),
+            'selected_bytes': sum(entry[1] for entry in expected.values()), 'output_files': len(actual),
+            'missing_count': len(missing), 'differing_count': len(differing), 'extra_count': len(extra),
+            'missing': missing[:limit], 'differing': differing[:limit], 'extra': extra[:limit]}
+
+
 # parcopy (experiments/network/parcopy.py, run as a module from the repository on both VMs).
 PARCOPY_MODULE = 'experiments.network.parcopy'
 PARCOPY_CHUNK_BYTES = 64 << 20  # ranges of at most this, assigned largest first to the lightest stream

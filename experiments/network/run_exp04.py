@@ -66,8 +66,10 @@ Optional methods for T2 (EXP-11, the fastest durable full copy; they need
                    full included, runs with --verbose, its lines timestamped as they arrive,
                    and its output is started on dest after pg_verifybackup
     probackup8, probackup4
-                   pg_probackup catchup -b FULL --stream -j 8 or 4 on dest from the live
-                   source over SSH, then sync -f of the output, in one timed phase
+                   pg_probackup catchup -b FULL --stream --temp-slot -j 8 or 4 on dest from
+                   the live source over SSH, then sync -f of the output, in one timed phase;
+                   its started copy's per-table digest is settled at the trial's end (pass,
+                   fail, or void if the source changed during the trial)
     parcopy8, parcopy4
                    a range-parallel copier built in the harness, 8 or 4 TCP streams, from
                    the cleanly stopped source, in pgdelta_direct*'s frame
@@ -557,6 +559,11 @@ class Orchestrator:
         self.reference_digests: dict = {}
         # The file the single-reader probe reads, relative to the source's data directory.
         self.probe_relation_path: str | None = None
+        # The (repeat, speed label) of the method run under way (run_method).
+        self.current_run: tuple | None = None
+        # This trial's probackup* outputs' byte views, by (repeat, speed label, method), for the byte
+        # diagnostic against the end reference digest if the source changed (finish_logical_checks).
+        self.byte_views: dict = {}
 
     # --- paths -------------------------------------------------------------
 
@@ -926,20 +933,148 @@ class Orchestrator:
         return ['sync', '-f', str(paths['output'])]
 
     def run_probackup(self, method, paths) -> dict:
-        """probackup*: one timed phase, measure.PROBACKUP_PHASE, whose steps (measure.PROBACKUP_STEPS) are
-        probackup_argv's catchup, run with stamp_lines, then probackup_sync_argv. Built on
-        build/exp11-probackup."""
-        raise NotImplementedError('built on build/exp11-probackup')
+        """probackup*: one timed phase (measure.PROBACKUP_PHASE), one counter window, two steps.
+
+        catchup: probackup_argv on dest, reading the live source over SSH with its own configuration
+        (setup_probackup_ssh), its console lines timestamped as they arrive, untranslated
+        (measure.probackup_phases). sync: at once, sync -f of the output, syncfs(2) of dest's /data.
+        catchup 2.5.16 fsyncs only the source's file list and pg_control, so the streamed WAL, backup_label
+        and every directory are flushed by this step (EXP-11: "tool + sync -f"; probackup_sync_s). A
+        catchup that failed gets no sync. Each step's wall and start offset are in `steps`.
+        """
+        steps: dict = {}
+        catchup_step, sync_step = measure.PROBACKUP_STEPS
+
+        def body():
+            origin = time.perf_counter()
+            catchup = self.local_command(self.probackup_argv(method, paths), f'{method}.log', env=messages_env(),
+                                         stamp_lines=True)
+            steps[catchup_step] = {'host': 'dest', 'offset_seconds': 0.0,
+                                   'wall_seconds': round(time.perf_counter() - origin, 3)}
+            if catchup['exit_code'] != 0:
+                return [catchup]
+            started = time.perf_counter()
+            sync = self.local_command(self.probackup_sync_argv(paths), f'{method}-sync.log')
+            steps[sync_step] = {'host': 'dest', 'offset_seconds': round(started - origin, 3),
+                                'wall_seconds': round(time.perf_counter() - started, 3)}
+            return [catchup, sync]
+
+        phase = self.timed_phase(measure.PROBACKUP_PHASE, body)
+        phase['steps'] = steps
+        return {measure.PROBACKUP_PHASE: phase}
 
     def verify_probackup(self, method, paths) -> dict:
-        """probackup*'s verification (untimed): the byte diagnostic, the start, the logical digest pending
-        until the trial's step 8. Built on build/exp11-probackup."""
-        raise NotImplementedError('built on build/exp11-probackup')
+        """probackup*: the output's bytes counted, the byte diagnostic, the start; its digest pending.
+
+        Untimed. First, with the output as catchup and sync -f left it: its bytes (durability check (b)),
+        its WAL, and the byte diagnostic against the trial's start reference digest
+        (probackup_byte_diagnostic). Then the output is started on dest as a full copy is, recovering
+        from its backup_label with the WAL it streamed: no archive, no standby.signal, no network, so no
+        WAL is fetched after the clock stopped (the server log's restored files are counted). Its
+        per-table digest is taken then, and compared with the source's at the trial's step 8
+        (finish_logical_checks, logical_match None until then): an output that doesn't start fails at once.
+        """
+        output = Path(paths['output'])
+        result = {'output_bytes': tree_bytes(output), 'wal': measure.wal_summary(measure.wal_files(output), None),
+                  'shared_extents': measure.shared_extents(output),
+                  'recovery_signals': [name for name in ('standby.signal', 'recovery.signal')
+                                       if (output / name).exists()]}
+        result['byte_diagnostic'] = self.probackup_byte_diagnostic(method, output)
+        result['bytes_identical'] = (result['byte_diagnostic'] or {}).get('identical')
+        result['output_start'] = self.check_output(method, output, recovery=True,
+                                                   query=measure.logical_digest_sql())
+        try:
+            server_log = self.dest_log(f'{method}-output-server.log').read_text(errors='replace')
+        except OSError:
+            server_log = ''
+        result['wal_files_restored'] = measure.restored_wal_files(server_log)
+        started = result['output_start']['ok']
+        if started:
+            result['logical'] = json.loads(result['output_start']['answer'])
+        result['logical_match'] = None
+        # Only a logical difference can be void, and only at the trial's end; a copy that doesn't start fails.
+        result['void'] = None if started else False
+        result['logical_check'] = ("compared with the source's digest at the trial's step 8, after the end "
+                                   'reference digest; void if the source changed during the trial')
+        result['basis_changes'] = measure.stat_changes(self.b0_stat, measure.tree_stat(self.b0))
+        result['verified'] = started and not result['basis_changes']
+        return result
+
+    def probackup_byte_diagnostic(self, method, output: Path) -> dict | None:
+        """EXP-11's byte diagnostic of a probackup* output, before its start; it decides nothing.
+
+        Every file the trial's start reference digest selects under base/ and global/ (global/pg_control
+        left out) against the output's, by SHA-256, and the output's extra files listed
+        (measure.byte_diagnostic). The output's view is kept for the trial, so finish_logical_checks can
+        compare it with the end reference too if the source changed. --probackup-byte-diagnostic
+        first_repeat (EXP-11's first cut) leaves it to each trial's first repeat; None without a reference.
+        """
+        reference = self.reference_digests.get('start')
+        if reference is None:
+            return None
+        repeat, speed = self.current_run or (None, None)
+        if self.args.probackup_byte_diagnostic == 'first_repeat' and repeat != 0:
+            return {'skipped': '--probackup-byte-diagnostic first_repeat', 'identical': None}
+        started = time.perf_counter()
+        view = measure.byte_view(measure.files_digest(output, measure.byte_diagnostic_paths(output)))
+        self.byte_views[(repeat, speed, method)] = view
+        return {**measure.byte_diagnostic(reference, view), 'reference': 'start',
+                'seconds': round(time.perf_counter() - started, 3)}
+
+    def setup_probackup_ssh(self) -> dict:
+        """pg_probackup's SSH configuration on dest (measure.probackup_ssh_config), and its log directory.
+
+        Written once, in the preflight (check_probackup), under the work directory, which no cleanup
+        removes. probackup_argv passes it to ssh with -F (--ssh-options); ssh refuses a configuration
+        others can write, so it is 0600.
+        """
+        paths = measure.probackup_paths(self.work)
+        text = measure.probackup_ssh_config(self.source.ip, self.args.ssh_user, self.args.ssh_key)
+        Path(paths['log_dir']).mkdir(parents=True, exist_ok=True)
+        config = Path(paths['ssh_config'])
+        config.write_text(text)
+        config.chmod(0o600)
+        return {'ssh_config': str(config), 'text': text}
 
     def check_probackup(self) -> dict:
-        """execute()'s preflight for probackup*: the same pg_probackup on both VMs. Built on
-        build/exp11-probackup."""
-        raise NotImplementedError('built on build/exp11-probackup')
+        """execute()'s preflight for probackup*: the same pg_probackup on both VMs, able to run catchup.
+
+        The version each VM's env reported (run.json environment, `--version`) must be found and the same
+        on both: its remote mode runs the source's binary as its agent. `catchup --help` on both must list
+        -b FULL among its modes, -j and every long option probackup_argv passes (measure.
+        probackup_help_problems). Then dest must reach the source's binary the way catchup will
+        (measure.probackup_ssh_argv, with setup_probackup_ssh's configuration). SystemExit otherwise.
+        """
+        environment = self.run['environment']
+        texts = {host: environment[host].get('pg_probackup') for host in ('source', 'dest')}
+        versions = {host: measure.probackup_version(text) for host, text in texts.items()}
+        missing = [host for host, version in versions.items() if version is None]
+        if missing:
+            raise SystemExit(f'pg_probackup ({self.args.pg_probackup}) is not installed on {", ".join(missing)} '
+                             f'({texts}); remote.py provision runs infra/gcp/install_incumbents.sh on both VMs')
+        if versions['source'] != versions['dest']:
+            raise SystemExit(f'pg_probackup differs between the VMs ({texts}); its remote mode needs the same '
+                             'release on both')
+        argv = self.probackup_argv('probackup8', self.method_paths('probackup8'))
+        dest_help = subprocess.run([self.args.pg_probackup, 'catchup', '--help'], capture_output=True, text=True,
+                                   timeout=120, stdin=subprocess.DEVNULL)
+        source_help = self.source.agent('run', '--log', f'{self.work}/logs/pg_probackup-catchup-help.log', '--',
+                                        self.args.pg_probackup, 'catchup', '--help')
+        problems = {host: measure.probackup_help_problems(text, argv) for host, text in (
+            ('dest', dest_help.stdout + dest_help.stderr), ('source', source_help.get('log_tail', '')))}
+        if any(problems.values()):
+            raise SystemExit(f'pg_probackup catchup --help lacks what probackup* pass: {problems}')
+        ssh = self.setup_probackup_ssh()
+        reach = subprocess.run(measure.probackup_ssh_argv(self.args.pg_probackup, source_ip=self.source.ip,
+                                                          ssh_user=self.args.ssh_user, ssh_config=ssh['ssh_config']),
+                               capture_output=True, text=True, timeout=120, stdin=subprocess.DEVNULL)
+        if reach.returncode != 0 or measure.probackup_version(reach.stdout) != versions['source']:
+            raise SystemExit(f"pg_probackup's SSH from dest does not reach {self.args.pg_probackup} on the source "
+                             f'({reach.returncode}): {(reach.stdout + reach.stderr).strip()[-1000:]}')
+        # as_read: the release whose catchup EXP-11 read (its flush, its log lines); another is recorded only.
+        return {'versions': texts, 'version': versions['dest'],
+                'as_read': versions['dest']['version'] == measure.PROBACKUP_VERSION,
+                'ssh_config': ssh['ssh_config'], 'reach': reach.stdout.strip()}
 
     def parcopy_receive_argv(self, method, paths) -> list:
         """parcopy's receiver on dest: listens, then writes O from the sender's streams."""
@@ -1420,6 +1555,9 @@ class Orchestrator:
                   'wal': measure.wal_summary(measure.wal_files_from_digest(digest), None)}
         if method in measure.IN_PLACE_METHODS:
             result['in_place_leftovers'] = measure.in_place_leftovers(digest)
+        if self.reference_digests.get('start'):
+            # T2: this run's own stopped-source digest against the trial's reference, reported only.
+            result['reference'] = self.source_against_reference(expected)
         result['shared_extents'] = measure.shared_extents(output)
         # Only now, with the files compared: starting the output changes it.
         result['output_start'] = self.check_output(method, output, recovery=False)
@@ -1428,6 +1566,17 @@ class Orchestrator:
                               and not result.get('in_place_leftovers')
                               and result['output_start']['ok'] and not result['basis_changes'])
         return result
+
+    def source_against_reference(self, digest: dict) -> dict:
+        """A stopped-source run's (v1, parcopy) own digest of the source against the trial's start reference.
+
+        EXP-11: a difference is reported only, and the run's own verification, against the source at the
+        time, stands. Both are compared without what a clean stop rewrites (measure.reference_view); the
+        summary lets finish_logical_checks compare with the end reference too.
+        """
+        view = measure.reference_view(digest)
+        same, differences = measure.compare_digests(self.reference_digests['start'], view)
+        return {'summary': measure.digest_summary(view), 'start_match': same, 'start_differences': differences}
 
     def verify_pgbackrest(self, method, paths) -> dict:
         """pgbackrest_*: start the restored B, let it replay the archive, and take its digest.
@@ -1703,6 +1852,7 @@ class Orchestrator:
             + ('' if record['block'] == 'main' else f' ({record["block"]})'))
         daemon_holder: dict = {}
         self.log_prefix = f'r{repeat}-{speed["label"]}-'
+        self.current_run = (repeat, speed['label'])
         try:
             stuck = self.output_stuck
             if stuck and (str(paths['output']) == stuck['data'] or method in measure.OUTPUT_START_METHODS):
@@ -1813,6 +1963,7 @@ class Orchestrator:
                 except Exception as exc:
                     record['cleanup_error'] = str(exc)
         self.log_prefix = ''
+        self.current_run = None
         record['finished_utc'] = utc_now()
         totals = record.get('totals') or {}
         log(f'  {record["status"]}: {totals.get("wall_seconds")} s, '
@@ -1958,36 +2109,125 @@ class Orchestrator:
                 'file_log': None if kept is None else str(kept), 'console_tail': console[-8000:]}
 
     def finish_logical_checks(self, trial: dict) -> dict | None:
-        """The source's per-table digest, against every pending pgBackRest run of this trial.
+        """The source's per-table digest against every pending run of this trial, and EXP-11's verdicts.
 
-        Taken once the trial's last method has run, as the row-level ground truth is: a scan
-        of the source earlier would set hint bits and change pages under the other methods.
-        Each pending run becomes 'pass' or 'fail'; its record and the CSV are rewritten.
+        Taken once the trial's last method has run, as the row-level ground truth is: a scan of the
+        source earlier would set hint bits and change pages under the other methods. In a T2 trial it
+        follows the end reference digest (trial['reference_match']).
+        - pgbackrest_*: 'pass' or 'fail'.
+        - probackup* (EXP-11's Verification): a match passes. A difference is void if the two reference
+          digests differ: the source changed during the trial, so the tool can't be blamed. Otherwise it
+          fails (A4); an output that didn't start failed already (measure.probackup_outcome).
+        - Reported only: a probackup* output's bytes against the end reference too, when the source
+          changed (bytes_identical: identical to either); a v1 or parcopy run's own stopped-source digest
+          against the end reference too. Neither changes a status.
+        - A4: the probackup* and parcopy* runs that fail their standard (a parcopy* that failed verify_direct
+          or didn't start; a probackup* failed as above), and the arms they exclude from every baseline;
+          runs that ended in an error are listed beside them.
+        Changed records and the CSV are rewritten. None when the trial has nothing to settle.
         """
-        pending = [record for record in self.records
-                   if record.get('trial_id') == self.trial_id and record.get('status') == 'pending']
-        if not pending:
+        records = [record for record in self.records if record.get('trial_id') == self.trial_id]
+        pending = [record for record in records if record.get('status') == 'pending']
+        pending_ids = {id(record) for record in pending}
+        settled = measure.PROBACKUP_METHODS + measure.PARCOPY_METHODS + measure.PGDELTA_DIRECT_METHODS
+        if not pending and not (self.t2 and any(record.get('method') in settled for record in records)):
             return None
-        started = time.perf_counter()
-        source = json.loads(self.query(measure.logical_digest_sql(), host=self.source.ip, port=PG_PORT,
-                                       log_name='source-logical-digest.log'))
-        check = {'source': source, 'seconds': round(time.perf_counter() - started, 3), 'runs': []}
-        for record in pending:
-            verification = record['verification']
-            match, differences = measure.compare_logical(source, verification.get('logical') or {})
-            verification.update(logical_match=match, logical_differences=differences, source_logical=source)
-            record['status'] = 'pass' if match else 'fail'
-            if not match:
-                record['error'] = "the restored copy's digest differs from the source's"
+        reference_match = trial.get('reference_match')
+        check: dict = {'reference_match': reference_match, 'runs': []}
+        source = None
+        if pending:
+            started = time.perf_counter()
+            source = json.loads(self.query(measure.logical_digest_sql(), host=self.source.ip, port=PG_PORT,
+                                           log_name='source-logical-digest.log'))
+            check.update(source=source, seconds=round(time.perf_counter() - started, 3))
+        changed = []
+        for record in records:
+            verification = record.get('verification') or {}
+            method = record.get('method')
+            updated = id(record) in pending_ids
+            if updated:
+                match, differences = measure.compare_logical(source, verification.get('logical') or {})
+                verification.update(logical_match=match, logical_differences=differences, source_logical=source)
+                if method in measure.PROBACKUP_METHODS:
+                    record['status'] = measure.probackup_outcome(True, match, reference_match)
+                    verification['void'] = record['status'] == 'void'
+                    if record['status'] == 'void':
+                        record['void_reason'] = ("its digest differs from the source's, and the source changed "
+                                                 'during the trial (its reference digests differ)')
+                else:
+                    record['status'] = 'pass' if match else 'fail'
+                if record['status'] == 'fail':
+                    record['error'] = ("the restored copy's digest differs from the source's" if method in
+                                       measure.PGBACKREST_METHODS else "the copy's digest differs from the source's")
+                check['runs'].append({'repeat': record['repeat'], 'speed': record['speed']['label'],
+                                      'method': method, 'match': match, 'status': record['status']})
+            if reference_match is False and 'end' in self.reference_digests:
+                updated = self.against_end_reference(record, verification) or updated
+            if updated:
+                changed.append(record)
+        for record in changed:
             save_json(self.record_path(record), record)
             for run in trial['runs']:
                 if (run['repeat'], run['speed'], run['method']) == (
                         record['repeat'], record['speed']['label'], record['method']):
                     run['status'] = record['status']
-            check['runs'].append({'repeat': record['repeat'], 'speed': record['speed']['label'],
-                                  'method': record['method'], 'match': match})
-        measure.write_csv(self.out / 'summary.csv', self.records)
+        if self.t2:
+            check['a4'] = self.a4_summary(records)
+            check['void_runs'] = [self.run_key(record) for record in records if record.get('status') == 'void']
+            # v1's and parcopy's own digests of the stopped source that differ from the start reference.
+            check['source_differs_from_reference'] = [
+                self.run_key(record) for record in records
+                if ((record.get('verification') or {}).get('reference') or {}).get('start_match') is False]
+        if changed:
+            measure.write_csv(self.out / 'summary.csv', self.records)
         return check
+
+    @staticmethod
+    def run_key(record: dict) -> dict:
+        return {'repeat': record.get('repeat'), 'speed': (record.get('speed') or {}).get('label'),
+                'method': record.get('method')}
+
+    def against_end_reference(self, record: dict, verification: dict) -> bool:
+        """When the source changed during the trial: the reported-only comparisons against the end reference.
+
+        Whether it added any to the record.
+        """
+        end, added = self.reference_digests['end'], False
+        key = (record.get('repeat'), (record.get('speed') or {}).get('label'), record.get('method'))
+        view = self.byte_views.get(key)
+        diagnostic = verification.get('byte_diagnostic')
+        if view is not None and isinstance(diagnostic, dict) and 'end' not in diagnostic:
+            diagnostic['end'] = measure.byte_diagnostic(end, view)
+            verification['bytes_identical'] = bool(diagnostic.get('identical')) or diagnostic['end']['identical']
+            added = True
+        reference = verification.get('reference')
+        if isinstance(reference, dict) and 'end_match' not in reference:
+            reference['end_match'] = (reference['summary']['listing_sha256']
+                                      == measure.digest_summary(end)['listing_sha256'])
+            added = True
+        return added
+
+    def a4_summary(self, records) -> dict:
+        """EXP-11's A4 for this trial: the parcopy* and probackup* runs that fail their standard."""
+        failed, errors = [], []
+        for record in records:
+            method = record.get('method')
+            if method not in measure.PROBACKUP_METHODS and method not in measure.PARCOPY_METHODS:
+                continue
+            verification = record.get('verification') or {}
+            if record.get('status') == 'fail':
+                start = verification.get('output_start') or {}
+                reason = ("the output didn't start" if not start.get('ok')
+                          else "its digest differs from the source's, which didn't change"
+                          if method in measure.PROBACKUP_METHODS else 'verify_direct failed')
+                failed.append({**self.run_key(record), 'reason': reason})
+            elif record.get('status') == 'error':
+                errors.append({**self.run_key(record), 'error': record.get('error')})
+        return {'failed_runs': failed, 'excluded_arms': sorted({run['method'] for run in failed}),
+                'errors': errors,
+                'rule': ('A4: an arm with a failed run is excluded from every baseline. A void run is not a '
+                         'failure, byte differences fail nothing, and runs that ended in an error are listed '
+                         'beside the failures for the analysis to judge')}
 
     def pgbackrest_run_record(self) -> dict | None:
         """What run.json says about pgBackRest: nothing unless a pgbackrest method is selected."""
@@ -2095,6 +2335,7 @@ class Orchestrator:
         self.trial_id = f'{index:02d}-{pattern}-f{fraction:g}-s{args.scale}'
         self.multi_stream_links = {}
         self.reference_digests = {}
+        self.byte_views = {}
         self.probe_relation_path = None
         trial = {'schema': SCHEMA_TRIAL, 'trial_id': self.trial_id, 'pattern': pattern,
                  'fraction': fraction, 'scale': args.scale, 'seed': args.seed,
@@ -2178,7 +2419,8 @@ class Orchestrator:
             trial['b0_differences'] = differences
             if not same:
                 raise CommandError('B0 changed during the trial: ' + '; '.join(differences))
-            bad = [run for run in trial['runs'] if run['status'] != 'pass']
+            # A void run (probackup*: the source changed during the trial) is neither a pass nor a failure.
+            bad = [run for run in trial['runs'] if run['status'] not in ('pass', 'void')]
             trial['status'] = 'pass' if not bad else 'fail'
         except Exception as exc:
             trial['status'] = 'error'
@@ -2703,6 +2945,9 @@ def parse_args(argv=None):
     parser.add_argument('--pg-probackup', default=measure.PROBACKUP_EXE,
                         help='pg_probackup on both VMs (probackup* methods; its remote mode runs it on the '
                              'source from the same directory)')
+    parser.add_argument('--probackup-byte-diagnostic', choices=('every', 'first_repeat'), default='every',
+                        help="T2: probackup*'s byte diagnostic (against the trial's start reference digest) in "
+                             "every run, or only in each trial's first repeat (EXP-11's first cut)")
     parser.add_argument('--repeats', type=int, default=1)
     parser.add_argument('--extension-repeats', type=int, default=0,
                         help='T2: after the main block, this many more unthrottled repeats of '
