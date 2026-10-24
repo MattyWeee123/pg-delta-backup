@@ -1490,9 +1490,11 @@ def rate_ratio(cells, ctx, speed, block='busy'):
         return 'exact', value, None if value is None else 1 / TRACK - 1e-12 <= value <= TRACK + 1e-12
     if mp and f.get('W_bound') is not None:
         value = math.inf if f['W_bound'] <= 0 else (p['W_net'] / cpu_p) / (f['W_bound'] / cpu_f)
+        value = override if override is not None else value
         return 'lower', value, False if value > TRACK else None
     if mf and p.get('W_bound') is not None:
         value = (p['W_bound'] / cpu_p) / (f['W_net'] / cpu_f) if f['W_net'] else None
+        value = override if override is not None else value
         return 'upper', value, False if value is not None and value < 1 / TRACK else None
     return None, None, None
 
@@ -1758,9 +1760,10 @@ def ha_caveat(cells, ctx):
 
 
 def near_line(cells, ctx, base):
-    """Each deciding difference within ±0.25 x δ of its δ, and each exact rate ratio within ±0.15 of 1.5 or 1/1.5,
-    whose crossing, alone or with other near ones, would change decision 1's row or cause, decision 2's row, or R2's
-    verdict (EXP-11's reading)."""
+    """Each deciding difference within ±0.25 x δ of its δ, and each rate ratio within ±0.15 of 1.5 or 1/1.5, whose
+    crossing, alone or with other near ones, would change decision 1's row or cause, decision 2's row, or R2's verdict
+    (EXP-11's reading). A ratio is R2's exact one (either line), or its bound where one W isn't measurable: the
+    lower bound against 1.5 and the upper against 1/1.5, the only line each decides at."""
     near = []
     for a_key, b_key, full_keys in dict.fromkeys(cells.consulted):
         found = cells.compare(a_key, b_key, full_keys and list(full_keys))
@@ -1770,10 +1773,11 @@ def near_line(cells, ctx, base):
             diff, delta = found[role]['diff'], found[role]['delta']
             if abs(diff - delta) <= NEAR * delta + 1e-12:
                 near.append(('diff', (a_key, b_key, role), diff, delta))
+    lines_of = {'exact': (TRACK, 1 / TRACK), 'lower': (TRACK,), 'upper': (1 / TRACK,)}
     for speed in REGISTERED:
         kind, value, _ = rate_ratio(cells, ctx, speed)
-        if kind == 'exact' and value is not None:
-            for line in (TRACK, 1 / TRACK):
+        if kind in lines_of and value is not None and math.isfinite(value):
+            for line in lines_of[kind]:
                 if abs(value - line) <= RATIO_NEAR + 1e-12:
                     near.append(('ratio', speed, value, line))
     cells.consulted = []

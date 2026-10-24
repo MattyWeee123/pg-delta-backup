@@ -587,6 +587,32 @@ class Flags(unittest.TestCase):
         ratios = [key for kind, key, *_ in exp12.near_line(c, ctx, base) if kind == 'ratio']
         self.assertEqual(sorted(ratios), ['0.5g', '2g'])
 
+    def test_near_the_line_reads_r2s_bounds_too(self):
+        # full not measurable at both speeds, its bound 0.0968 s: the ratio's lower bound (0.6 / 10) / (0.0968 / 2.5)
+        # = 1.55 puts R2 at "doesn't track" in both cells. Crossing 1.5 at both makes R2 not judged: near.
+        bound = {('busy', s, 'full'): {'W_bound': 0.0968} for s in exp12.REGISTERED}
+        c, ctx = cells(bound), context()
+        kind, value, verdict = exp12.rate_ratio(c, ctx, '2g')
+        self.assertEqual((kind, round(value, 4), verdict), ('lower', 1.5496, False))
+        base = exp12.outcome(c, ctx)
+        self.assertIs(base[3], False)
+        near = exp12.near_line(c, ctx, base)
+        self.assertEqual(sorted((key, line) for kind, key, _, line in near if kind == 'ratio'),
+                         [('0.5g', exp12.TRACK), ('2g', exp12.TRACK)])
+        # A lower bound far above the line, or one near 1/1.5 (where it decides nothing), isn't near.
+        far = {('busy', s, 'full'): {'W_bound': 0.05} for s in exp12.REGISTERED}
+        c = cells(far)
+        self.assertEqual([item for item in exp12.near_line(c, ctx, exp12.outcome(c, ctx)) if item[0] == 'ratio'], [])
+        # The upper bound, only full's W measurable: near 1/1.5 where crossing it changes R2.
+        upper = {**{('busy', s, 'full'): {'W_net': 0.1, 'W_measurable': True} for s in exp12.REGISTERED},
+                 **{('busy', s, 'pgdelta'): {'W_measurable': False, 'W_bound': 0.28} for s in exp12.REGISTERED}}
+        c = cells(upper)
+        kind, value, verdict = exp12.rate_ratio(c, ctx, '2g')
+        self.assertEqual((kind, round(value, 3), verdict), ('upper', 0.7, None))
+        near = exp12.near_line(c, ctx, exp12.outcome(c, ctx))
+        self.assertTrue(near)
+        self.assertEqual({line for kind, _, _, line in near if kind == 'ratio'}, {1 / exp12.TRACK})
+
     def test_fragile_when_a_view_changes_a_row(self):
         class Views:
             def __init__(self, tables):
