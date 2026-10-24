@@ -1381,10 +1381,13 @@ class PairedCells(Cells):
     """The paired view: each run of an arm against the same repeat's full run at the same speed in its block. The
     statistic is the median paired difference; its null the median of the same differences of null windows, each at
     its own run's T; net of that null's median, unclipped, against δ from it (with W_net(full)'s term from the main
-    view)."""
+    view). Only that pairing is defined: any other comparison (row 7b's warm v1proxy against its own cold cell, in
+    another block) is the main view's, so the view can't make a row fragile on a pairing of unrelated runs."""
 
     def compare(self, a_key, b_key=None, full_keys=None):
         b_key = b_key or (a_key[0], a_key[1], 'full')
+        if b_key != (a_key[0], a_key[1], 'full'):
+            return super().compare(a_key, b_key, full_keys)
         self.consulted.append((a_key, b_key, tuple(full_keys) if full_keys else None))
         main = self.S.cells('main')
         a, b = main.cell(*a_key), main.cell(*b_key)

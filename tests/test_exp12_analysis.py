@@ -1003,6 +1003,22 @@ class DryRun(unittest.TestCase):
         self.assertIn('the busy CPU at R_busy is above 50%', given)
         self.assertIn("**A12** (capacity drift against the smoke run's C, --capacity-tps): **flagged**", given)
 
+    def test_the_paired_view_pairs_only_an_arm_with_its_repeats_full_run(self):
+        # Row 7b compares warm v1proxy with its own cold cell: two blocks, and no full run between them. The paired view
+        # leaves that to the main view instead of pairing warm repeat k with busy repeat k.
+        with tempfile.TemporaryDirectory() as tmp:
+            sweep = exp12_smoke_data.write_session(Path(tmp) / 'results')
+            runs, trials, meta = exp12.load(sweep)
+            S = exp12.Session(runs, trials, [meta], sweeps=[sweep], resamples=300)
+        main, paired = S.cells('main'), S.cells('paired')
+        warm, cold = ('warm', '2g', PROXY), ('busy', '2g', PROXY)
+        fulls = [('warm', '2g', 'full'), ('busy', '2g', 'full')]
+        self.assertEqual(paired.compare(warm, cold, fulls), main.compare(warm, cold, fulls))
+        # Against the same repeat's full run in its block, it pairs.
+        own = paired.compare(cold)
+        self.assertEqual(own['W']['pairs'], 5)
+        self.assertNotIn('pairs', main.compare(cold)['W'])
+
     def test_a_copy_its_tool_aborted_is_wrong_and_stops_speed_work(self):
         # pgdelta's receiver finds a bad page and exits 3 in 3 of the 5 busy 2 Gbit/s runs: as the harness wrote it
         # before (status error, failure_kind tool) and as it writes it now (status fail). Either way the copy doesn't
