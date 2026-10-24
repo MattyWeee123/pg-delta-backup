@@ -1054,6 +1054,97 @@ class WholeTrial(Stubbed):
         self.assertEqual((bracket['status'], bracket['failure_kind']), ('error', 'tool'))
         self.assertEqual(trial['status'], 'fail')
 
+    def failing_trial(self, failure, fetch_fails=False):
+        """A trial whose link step fails when the warm block starts (an SSH failure, or remote.py stop's SIGTERM as
+        the KeyboardInterrupt _terminate raises); (orchestrator, trial, removed paths, the error raised)."""
+        class Failing(LoadStub):
+            block = None
+            removed: list = []
+
+            def run_load_block(self, trial, block, *args):
+                self.block = block
+                return super().run_load_block(trial, block, *args)
+
+            def set_speed(self, speed):
+                if self.block == 'warm':
+                    raise failure
+                return super().set_speed(speed)
+
+            def _source_agent(self, *args, timeout=600):
+                if args[0] == 'remove':
+                    self.removed.extend(args[3:])
+                return super()._source_agent(*args, timeout=timeout)
+
+            def fetch_load_logs(self):
+                if fetch_fails:
+                    self.at('dest', 'fetch the load logs')
+                    raise run_exp04.CommandError('tar: connection reset')
+                return super().fetch_load_logs()
+
+        Failing.removed = []
+        orchestrator = self.orchestrator(Failing, ['--repeats', '1', '--warm-source-repeats', '1',
+                                                   '--warm-source-speeds', '2', '--warm-source-methods', 'full,v1proxy',
+                                                   '--moderate-repeats', '0', '--calibration-repeats', '0'])
+        raised = None
+        try:
+            trial = orchestrator.run_trial(0, 'hot', 0.01)
+        except BaseException as exc:  # the interrupt goes on up, past the trial's clean-up
+            raised, trial = exc, orchestrator.current_trial
+        return orchestrator, trial, Failing.removed, raised
+
+    def test_an_error_or_an_interrupt_mid_trial_keeps_the_loads_logs(self):
+        for failure in (run_exp04.CommandError('ssh: connect to host source port 22: Connection timed out'),
+                        KeyboardInterrupt()):
+            with self.subTest(failure=type(failure).__name__):
+                orchestrator, trial, removed, raised = self.failing_trial(failure)
+                self.assertIs(raised, None if isinstance(failure, Exception) else failure)
+                busy = [record for record in orchestrator.records if record['block'] == 'busy']
+                self.assertTrue(busy)
+                events = [what for kind, what, _ in orchestrator.timeline]
+                tail = events[events.index('script load-stop'):]
+                self.assertEqual([what for what in tail if what in ('script load-stop', 'agent sampler',
+                                                                    'agent compress', 'fetch the load logs')],
+                                 ['script load-stop', 'agent sampler', 'agent compress', 'fetch the load logs'])
+                # The logs are on dest, the busy runs' cuts were read from them, and only then was the directory
+                # removed.
+                self.assertTrue(any(orchestrator.load_logs.iterdir()))
+                self.assertTrue(trial['load']['kept_after_error']['fetched'])
+                self.assertEqual(trial['load_checks']['outputs'],
+                                 sum(1 for r in busy if (r.get('verification') or {}).get('oracle')))
+                self.assertIn(orchestrator.load_dir, removed)
+                self.assertGreater(len(events), events.index('fetch the load logs'))
+                saved = json.loads((orchestrator.out / 'trials' / f'{orchestrator.trial_id}.json').read_text())
+                self.assertTrue(saved['load']['kept_after_error']['fetched'])
+                if raised is None:
+                    self.assertEqual(trial['status'], 'error')
+
+    def test_a_failed_compress_at_step_15_fetches_the_logs_as_they_are(self):
+        class NoZstd(LoadStub):
+            def _source_agent(self, *args, timeout=600):
+                if args[0] == 'compress':
+                    self.at('source', 'agent compress')
+                    raise run_exp04.CommandError('source agent compress failed (1): zstd: not found')
+                return super()._source_agent(*args, timeout=timeout)
+
+        orchestrator, trial = self.trial(cls=NoZstd)
+        self.assertEqual(trial['status'], 'error')
+        events = [what for _, what, _ in orchestrator.timeline]
+        # Step 15 stopped the sampler once; the clean-up compressed again, then fetched the files as they are.
+        self.assertEqual(events.count('agent sampler'), 2)  # its start and its one stop
+        self.assertEqual(events.count('agent compress'), 2)
+        self.assertEqual(events.count('fetch the load logs'), 1)
+        self.assertTrue(trial['load']['kept_after_error']['fetched'])
+        self.assertIn('check', trial['load']['end'])
+        self.assertTrue(any(error.startswith('compress the load logs') for error in trial['cleanup_errors']))
+
+    def test_logs_that_cannot_be_fetched_stay_on_the_source(self):
+        orchestrator, trial, removed, _ = self.failing_trial(run_exp04.CommandError('ssh: broken pipe'),
+                                                             fetch_fails=True)
+        self.assertNotIn(orchestrator.load_dir, removed)
+        self.assertIn(f'the load directory {orchestrator.load_dir} was left on the source: its logs are not on dest',
+                      trial['cleanup_errors'])
+        self.assertTrue(any(error.startswith('fetch the load logs: ') for error in trial['cleanup_errors']))
+
     def test_without_the_sampler(self):
         orchestrator, trial = self.trial(['--sampler-interval-s', '0'])
         self.assertEqual(trial['status'], 'pass')

@@ -661,6 +661,7 @@ class Orchestrator:
         self.load_runs: list = []  # every pgbench run of the trial, as load-start and load-stop reported it
         self.load_current: dict | None = None
         self.load_rate = None  # the current run's -R
+        self.load_used = False  # the load's directory on the source holds logs to keep (from step 7 on)
         # Source work left by a run for the next run's untimed step (before its settle): S verified and removed,
         # pgdelta's statistics read. Each is {'record', 'paths'} with what it needs.
         self.pending_source: list = []
@@ -3971,19 +3972,25 @@ class Orchestrator:
         files = [path for path in target.rglob('*') if path.is_file()]
         return {'dir': str(target), 'files': len(files), 'bytes': sum(path.stat().st_size for path in files)}
 
-    def end_load(self) -> dict:
+    def end_load(self, trial: dict) -> dict:
         """Step 15: the load stopped; --load-check-wait-s later, the source against every logged run (load-check);
-        the sampler stopped; the logs and the sampler's data compressed and fetched to dest."""
-        result = {'stop': self.load_stop()}
+        the sampler stopped; the logs and the sampler's data compressed and fetched to dest. Each step's result goes
+        into trial['load']['end'] as it is done, so end_load_quietly knows what is left after a failure."""
+        result = trial['load']['end'] = {}
+        result['stop'] = self.load_stop()
         self.pause(self.args.load_check_wait_s)
         result['check'] = self.source.script(SOURCE_CLUSTER, 'load-check', *self.load_args())
         log(f'{self.trial_id}: load-check {"ok" if result["check"].get("ok") else "FAILED"}: '
             f'sum(abalance) {result["check"].get("sum_abalance")}, sum(n) {result["check"].get("sum_n")}, '
             f'{result["check"].get("expected_commits")} commits logged')
         result['sampler'] = self.sampler_stop()
-        result['compress'] = self.source.agent('compress', self.load_dir, '--keep', measure.LOAD_STATE, timeout=3600)
+        result['compress'] = self.compress_load_logs()
         result['fetched'] = self.fetch_load_logs()
         return result
+
+    def compress_load_logs(self) -> dict:
+        """The load's logs and the sampler's data zstd-compressed in place on the source (the registry kept)."""
+        return self.source.agent('compress', self.load_dir, '--keep', measure.LOAD_STATE, timeout=3600)
 
     # --- T10a (EXP-12): the trial ----------------------------------------------------------------
 
@@ -4136,6 +4143,7 @@ class Orchestrator:
         self.multi_stream_links, self.reference_digests, self.byte_views = {}, {}, {}
         self.snapshot_digest, self.database_oids, self.references = None, {}, {}
         self.load_runs, self.load_current, self.load_rate = [], None, None
+        self.load_used = False
         self.pending_source, self.output_digests, self.static_digests = [], {}, set()
         self.repeat_counter, self.current_speed = 0, None
         trial = {'schema': SCHEMA_TRIAL, 'trial_id': self.trial_id, 'pattern': pattern, 'fraction': fraction,
@@ -4165,6 +4173,7 @@ class Orchestrator:
                 trial['snapshot'] = self.take_snapshot()
             trial['probes'] = self.load_probes()
             trial['clock'] = {'start': trial['probes']['clock']}
+            self.load_used = True  # from the capacity runs on, the load's directory holds logs
             trial['load']['capacity'] = self.load_capacity(trial)
             save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
             trial['load']['sampler'] = self.sampler_start()
@@ -4186,7 +4195,7 @@ class Orchestrator:
                 self.run_load_block(trial, 'moderate', args.moderate_repeats, self.moderate_speeds,
                                     self.moderate_methods, self.moderate_method_speeds)
                 self.flush_pending_source()
-            trial['load']['end'] = self.end_load()
+            self.end_load(trial)
             save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
             if args.calibration_repeats:
                 self.pause(args.calibration_idle_s)
@@ -4224,24 +4233,45 @@ class Orchestrator:
         return trial
 
     def end_load_quietly(self, trial: dict) -> None:
-        """After an error: the load and the sampler stopped, the source's leftovers removed, each failure recorded."""
-        steps = [('the pending source work', self.flush_pending_source)]
+        """After the trial, whatever ended it (an error, or an interrupt: remote.py stop's SIGTERM): the pending source
+        work, the load and the sampler stopped, and the load's logs kept. Unless step 15 fetched them, they are
+        compressed (best effort: a failure is recorded and the files go as they are), fetched to dest, and read for
+        the checks that wait for them (finish_load_checks); the runs recorded so far keep their numbers. The load's
+        directory is removed only once its logs are on dest; otherwise it is left on the source and named in
+        cleanup_errors. Each failure is recorded, and the trial's record saved."""
+        load = trial.setdefault('load', {})
+        end = load.get('end') or {}
+
+        def attempt(name, step):
+            try:
+                return step()
+            except Exception as exc:
+                trial.setdefault('cleanup_errors', []).append(f'{name}: {exc}')
+                return None
+        attempt('the pending source work', self.flush_pending_source)
         if self.load_current is not None:
-            steps.append(('stop the load', self.load_stop))
-        if 'end' not in trial.get('load', {}) and 'sampler' in trial.get('load', {}):
-            steps.append(('stop the sampler', self.sampler_stop))
-        for name, step in steps:
-            try:
-                step()
-            except Exception as exc:
-                trial.setdefault('cleanup_errors', []).append(f'{name}: {exc}')
-        for name, step in (('remove the snapshot', lambda: self.remove_source(self.snapshot_data)),
-                           ('remove the load directory', lambda: self.source.agent(
-                               'remove', '--under', str(Path(self.load_dir).parent), self.load_dir))):
-            try:
-                step()
-            except Exception as exc:
-                trial.setdefault('cleanup_errors', []).append(f'{name}: {exc}')
+            attempt('stop the load', self.load_stop)
+        if load.get('sampler') and 'sampler' not in end:
+            attempt('stop the sampler', self.sampler_stop)
+        fetched = end.get('fetched')
+        if not fetched and self.load_used:
+            log(f'{self.trial_id}: keeping the load\'s logs after the trial\'s end')
+            kept = load['kept_after_error'] = {}
+            if not end.get('compress'):
+                kept['compress'] = attempt('compress the load logs (they are fetched as they are)',
+                                           self.compress_load_logs)
+            fetched = kept['fetched'] = attempt('fetch the load logs', self.fetch_load_logs)
+            if fetched and not trial.get('load_checks'):
+                trial['load_checks'] = attempt('the checks that wait for the logs',
+                                               lambda: self.finish_load_checks(trial))
+        attempt('remove the snapshot', lambda: self.remove_source(self.snapshot_data))
+        if fetched or not self.load_used:
+            attempt('remove the load directory', lambda: self.source.agent(
+                'remove', '--under', str(Path(self.load_dir).parent), self.load_dir))
+        else:
+            trial.setdefault('cleanup_errors', []).append(
+                f'the load directory {self.load_dir} was left on the source: its logs are not on dest')
+        attempt('save the trial', lambda: save_json(self.out / 'trials' / f'{self.trial_id}.json', trial))
 
     def finish_load_checks(self, trial: dict) -> dict:
         """The checks that wait for the load's logs (fetched at step 15), for every live output of the trial and the
