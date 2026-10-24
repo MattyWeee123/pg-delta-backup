@@ -15,7 +15,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 - **EXP-12:** the registered rule fires and moves T5 ahead of T8. The proxy for v1's source side most likely misses the bar on the worst drop if the source is busy above 50%, so a cap on source workers would follow (T10b moves up).
 - **EXP-13:** with Debian's default TCP buffers, one pgdelta stream is window-limited at 60 ms, so v1 loses scattered changes there; with raised buffers it wins. One TCP stream (D36) would then be contradicted for DR, unless Omni's nodes raise their buffers: a choice for the owner.
 
-**Cost if run:** EXP-12 about 3.45 days of harness work and about 3.4 hours of the VM pair; EXP-13 about 2–3 days and about 3.5–4 hours. Nothing is built or run.
+**Cost if run:** EXP-12 about 3.45 days of harness work and about 3.4 hours of the VM pair; EXP-13 about 4.3 days and about 3.8 hours (3.5–4.3), over its 3.5-hour cut line and the ledger's 2 VM hours, an overrun the owner hasn't accepted yet. Nothing is built or run.
 
 ## 2026-10-24 (later): EXP-11 rechecked; corrections applied
 
