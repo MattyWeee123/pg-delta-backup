@@ -43,6 +43,11 @@ How this script reads what the text leaves open (recorded in the write-up before
   unclipped, against δ from that null.
 - A run's own net (`work_lost_net_s`, `worst_drop_net`) is its W or D minus the median of one null window at its
   own T, clipped at 0; a cell's is the pre-registration's.
+- Decision 1's rows are checked strictly in order, so row 5 (nothing measurable) comes before row 7 even where a
+  difference exceeds δ. A window whose log holds less than half of its rate's schedule has no numbers (it would read
+  as a window without loss). A2 fires on a pause2 run that fails a check it could make; a block without one says so.
+- A1's coverage control pairs outputs taken under the load only: without it a copy lacks no commit, its cut is open
+  after its last held one, and any later window would cover it.
 """
 from __future__ import annotations
 
@@ -1560,17 +1565,18 @@ def proxy_reading(cells, ctx, block='busy', speeds=REGISTERED):
     if reasons:
         return {'row': D1_ROWS[3], 'why': '; '.join(reasons), 'judged': judged}
     short = [speed for speed, value in judged.items() if value is None]
+    if not missed and short:
+        return {'row': D1_ROWS[3], 'why': 'a v1proxy or full cell short of 3 runs (or without a null) at '
+                                          + ', '.join(map(speed_name, short)) + ', and no judged miss',
+                'judged': judged}
+    if not missed and a4 != 'pass':
+        return {'row': D1_ROWS[3], 'why': f'A4 on v1proxy is {a4 or "not known"}, and no judged miss',
+                'judged': judged}
+    # Row 5 before rows 6 and 7, in the registered order (every one of its cells judged and nothing measurable).
+    if all(cells.measurable(block, speed, arm, role) is False for speed in speeds for arm in ('full', PROXY)
+           for role in ('W', 'D')):
+        return {'row': D1_ROWS[4], 'why': "neither full's nor v1proxy's W or D is measurable", 'judged': judged}
     if not missed:
-        if short:
-            return {'row': D1_ROWS[3], 'why': 'a v1proxy or full cell short of 3 runs (or without a null) at '
-                                              + ', '.join(map(speed_name, short)) + ', and no judged miss',
-                    'judged': judged}
-        if a4 != 'pass':
-            return {'row': D1_ROWS[3], 'why': f'A4 on v1proxy is {a4 or "not known"}, and no judged miss',
-                    'judged': judged}
-        if all(cells.measurable(block, speed, arm, role) is False for speed in speeds for arm in ('full', PROXY)
-               for role in ('W', 'D')):
-            return {'row': D1_ROWS[4], 'why': "neither full's nor v1proxy's W or D is measurable", 'judged': judged}
         return {'row': D1_ROWS[5], 'why': 'v1proxy meets O4 at ' + ', '.join(map(speed_name, speeds)),
                 'judged': judged}
     roles = sorted({role for found in missed.values() for role in found}, key=('W', 'D').index)
@@ -2148,9 +2154,11 @@ def instrument_lines(S, ctx):
     for block in ('busy', 'moderate'):
         items = [item for item in ctx['a2'] if item['block'] == block]
         fires = any(item['ok'] is False for item in items)
+        unchecked = [item for item in items if item['ok'] is None]
         lines.append(f'- **A2** ({block} block): ' + ('**fires**: the block\'s loss verdicts are "not judged: '
                                                        'instrument"' if fires else 'does not fire' if items
-                                                       else 'no pause2 run'))
+                                                       else 'no pause2 run: the instrument is unchecked')
+                     + (f'; {len(unchecked)} pause2 run(s) without every reading (no data)' if unchecked else ''))
     for block, a3 in ctx['a3'].items():
         if a3.get('runs'):
             lines.append(f'- **A3** ({block} block; none\'s median completed over scheduled {fmt(a3["ratio"], 4)}, '

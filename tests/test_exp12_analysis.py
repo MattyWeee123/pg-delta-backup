@@ -474,6 +474,10 @@ class DecisionOne(unittest.TestCase):
     def test_rows_5_and_6(self):
         quiet = {('busy', s, PROXY): {'D_net': 0.0, 'D_measurable': False} for s in exp12.REGISTERED}
         self.assertEqual(self.row(self.neither(quiet))['row'], '5. No measurable slowdown')
+        # Row 5 is checked before row 7: a difference beyond δ that no null shows is no measurable slowdown.
+        unseen = {('busy', s, PROXY): {'D_net': 0.05, 'D_measurable': False} for s in exp12.REGISTERED}
+        self.assertEqual(self.row(self.neither(unseen))['row'], '5. No measurable slowdown')
+        self.assertEqual(exp12.decision2(cells(self.neither(unseen)), context())['row'], 'No cap')
         # Measurable somewhere (full unthrottled doesn't count, the registered speeds do), but meeting: row 6.
         measurable = {('busy', s, PROXY): {'D_net': 0.02, 'D_measurable': True} for s in exp12.REGISTERED}
         self.assertEqual(self.row(self.neither(measurable))['row'], '6. v1 meets')
