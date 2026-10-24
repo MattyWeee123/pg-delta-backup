@@ -204,6 +204,15 @@ At each speed's first visit in a trial, `set_speed` also runs an 8-stream link t
 
 The run lines are in EXP-11's [Run plan](../../docs/experiments/EXP-11-full-copy-baseline.md#run-plan-and-budget).
 
+**Reading a T2 run.** `report.py` keeps the warm-source block's runs apart, as rows `METHOD (warm source)`, since their source cache was read rather than dropped; the extension's runs count with the main block's at the unthrottled link, as EXP-11 compares them. Its phase table adds T2's own timers and `above_link_s`, and it lists the runs that failed the durability checks, with `full_nosync`, the negative control, counted apart. EXP-11's predictions and rules are judged by `analysis/exp11.py`, after `remote.py fetch exp11-local` and `remote.py fetch exp11-uniform`:
+
+```sh
+.venv/bin/python analysis/exp11.py [--audit AUDIT.json]
+.venv/bin/python analysis/exp11.py --sweeps results/exp04/exp11-smoke --tag=-smoke   # the smoke run (item 11)
+```
+
+It reads both sweeps' `summary.csv`, run records, trial records and `run.json`, and EXP-09's curated CSVs for the drift gates and v0's crossovers. It chooses each envelope's arm on the main block, pooled over the workloads; judges the HA verdict, its ratios and A3 on every run outside the warm-source block; and every other prediction on the main block. A run counts only if it passed its verification and the durability checks that apply (check (a) not once A6 voids it, check (b) for full copies, parcopy's fsync count), and isn't void; arms that fail A4 or that A5 reclassifies leave every baseline. It writes `docs/experiments/data/exp11-runs.csv` and `exp11-cells.csv` and the figures `exp11-baselines.svg` and `exp11-phases.svg`. The syscall audit's results, when given, are a JSON object mapping each arm to `{"passed": bool, "uncovered": [paths], "tool_uncovered": [paths its own flush left]}`.
+
 ## Measurements
 
 For every timed phase, both VMs' counters are read just before and just after it:
@@ -619,5 +628,7 @@ The 0.5 Gbit/s and uniform unthrottled ratios are within 0.01 of the previous ru
   - on a real PostgreSQL, when its binaries are present (`PGDELTA_TEST_PG_BIN`): an output whose configuration listens on an address the host lacks and archives starts with the harness's settings, and its per-table digest is stable and follows a changed row.
 
 `python -m unittest discover -s tests -p test_exp11_core.py` covers T2's core without a VM: the method tables and command lines; `run.json`'s `method_flags` with each new arm's whole command line, the blocks and the preflight (an `execute()` with its VM steps stubbed); the CRC32C guard and the block options; `Child`'s stamped lines, and the phase parsers and the adder on PostgreSQL 17's `pg_basebackup --verbose` lines (with and without a sync, and cut short) and on `pg_probackup catchup`'s; `/proc/meminfo` and `/proc/diskstats`, and checks (a) and (b) with the 4 MiB limit and the idle noise; one counter window per arm, the flush inside it (a stand-in `run_probackup` with its `sync -f`); `full_wb`'s set and reset, after an exception too, with both values checked; the warm-source block; the trial's order, its blocks and a changed source; the 8-stream link test; and the agent's and the source's probes (a 3-stream blast over loopback, the durable write and read tests on temporary files, `sysctl`, `env`, the backup-mode bracket).
+
+`python -m unittest discover -s tests -p test_exp11_analysis.py` covers EXP-11's analysis with the analysis venv's matplotlib (skipped without it): `analysis/exp04.crossover` against the full copy and against a named baseline; the pooled choice of each envelope's arm (ties within 0.05 s, main-block runs only, void runs, A4's and A5's excluded arms, A6); the ratios with `R_adj` and the bound's gate (A3); the HA verdict's rows in order (Out with and without its qualifier, Confirmed, Bound missing, Undecided) and its flags (fragile, near the line, with void runs); crossovers against a chosen baseline, provisional ones, and L3's "below 2"; the drift gates and L3 and L4 not judged when the session is shifted; and dry runs of the whole script on a synthetic session (`tests/exp11_smoke_data.py`, written through `measure.write_csv`) in the full and the smoke shape, with void runs and with durability failures, into a temporary directory. It also covers `report.py` on a T2 summary.
 
 pgdelta's prefetch itself is tested in `tests/test_pgdelta_prefetch.py`.
