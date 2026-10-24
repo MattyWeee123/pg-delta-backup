@@ -5,9 +5,11 @@ samples of `tc -s -j qdisc show` and `tc filter show`.
 
 The samples are built from iproute2 6.1's print functions (tc/tc_qdisc.c, q_prio.c, q_netem.c, q_tbf.c and
 f_u32.c) and kernel 6.1's drop accounting (net/sched/sch_netem.c: a packet its tbf child refuses counts as netem's
-own drop too, and as the prio root's). They are NOT captures: smoke items 1 and 5 capture `wan.sh show --json` and
-`tc filter show` on the Debian 12 VMs (an 8-stream tuned link test at 120 ms for the drops), and these samples are
-replaced by those captures before the sweep (EXP-13's Tests row).
+own drop too, and as the prio root's). They are NOT captures. The Tests row registered captures from a Debian 12 host
+before the session; none exists before it, so the capture moved into the smoke run (EXP-13's analysis readings,
+October 24, 2026): smoke items 1 and 5 capture `wan.sh show --json` (an 8-stream tuned link test at 120 ms for the
+drops), `tc filter show` and the qdisc after `wan.sh off` on the VMs, each replaces its sample here (the VMs' addresses
+written as 10.0.0.12 and 10.0.0.13), and the tests run again, before the sweep.
 """
 
 import json
