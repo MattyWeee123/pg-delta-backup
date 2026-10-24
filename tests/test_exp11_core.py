@@ -1325,7 +1325,7 @@ class LinkTests(Clocked):
                 self.events.append(('blast', direction, streams))
                 if streams > 1:
                     raise run_exp04.CommandError('link test receiver failed: the 8-stream link test failed: stream 3 '
-                                                 'from 10.0.0.12: TimeoutError: timed out')
+                                                 'from 192.0.2.2: TimeoutError: timed out')
                 return {'sender': {}, 'receiver': {'gbit': 14.9, 'steady_gbit': 14.9}}
 
         orchestrator = self.orchestrator(Failing)
@@ -1335,7 +1335,7 @@ class LinkTests(Clocked):
         self.assertEqual(first['source_to_dest_gbit'], 14.9)
         for link in (first, again):
             self.assertIsNone(link['source_to_dest_8streams_gbit'])
-            self.assertIn('stream 3 from 10.0.0.12', link['multi_stream']['error'])
+            self.assertIn('stream 3 from 192.0.2.2', link['multi_stream']['error'])
         self.assertTrue(first['multi_stream']['measured_here'])
         self.assertFalse(again['multi_stream']['measured_here'])
         # Not tried again at that speed in the trial.
