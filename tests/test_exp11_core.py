@@ -589,6 +589,50 @@ class StampedLines(unittest.TestCase):
             self.assertFalse(child.wait(60)['stamped_lines'])
             self.assertEqual(child.log_text(), 'plain\n')
 
+    def test_the_clock_stops_when_the_command_exits_not_when_its_output_ends(self):
+        # A process that outlives the command holding its output (pg_probackup's ssh, say) keeps the stamping
+        # reader going; the timed phase's window ends at the command's exit, and the reader is waited for after.
+        argv = ['sh', '-c', 'echo started; (sleep 1; echo late) & echo done']
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(run_exp04, 'log'):
+            orchestrator = T2Stub(tmp, FakeClock())
+            self.addCleanup(orchestrator.pool.shutdown)
+            log = Path(tmp) / 'straggled.log'
+            started = time.perf_counter()
+            phase = orchestrator.timed_phase('x', lambda: [run_exp04.Child(argv, log, stamp_lines=True).wait(60)])
+            elapsed = time.perf_counter() - started
+            [command] = phase['commands']
+            self.assertLess(phase['wall_seconds'], 0.6)
+            self.assertLess(command['wall_seconds'], 0.6)
+            self.assertGreater(command['reader_wait_seconds'], 0.4)  # after the window
+            self.assertGreater(elapsed, 0.9)
+            self.assertEqual([text for _, text in measure.parse_stamped_lines(log.read_text())],
+                             ['started', 'done', 'late'])
+            self.assertIsNone(run_exp04.Child.deferred)
+            # Outside a timed phase, wait() waits for the reader itself, as before.
+            plain = run_exp04.Child(argv, Path(tmp) / 'plain.log', stamp_lines=True)
+            started = time.perf_counter()
+            result = plain.wait(60)
+            self.assertGreater(time.perf_counter() - started, 0.9)
+            self.assertIn('late', plain.log_text())
+            self.assertGreater(result['reader_wait_seconds'], 0.9)
+
+    def test_a_failed_phase_still_settles_its_readers(self):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(run_exp04, 'log'):
+            orchestrator = T2Stub(tmp, FakeClock())
+            self.addCleanup(orchestrator.pool.shutdown)
+            children = []
+
+            def body():
+                children.append(run_exp04.Child(['sh', '-c', 'echo one'], Path(tmp) / 'one.log', stamp_lines=True))
+                children[0].wait(60)
+                raise run_exp04.CommandError('the step after it failed')
+
+            with self.assertRaises(run_exp04.CommandError):
+                orchestrator.timed_phase('x', body)
+            self.assertTrue(children[0].stream.closed)
+            self.assertIn('one', children[0].log_text())
+            self.assertIsNone(run_exp04.Child.deferred)
+
     def test_basebackup_phases_and_the_adder(self):
         lines = measure.parse_stamped_lines(BASEBACKUP_LOG)
         phases = measure.basebackup_phases(lines, wall_seconds=3.06)

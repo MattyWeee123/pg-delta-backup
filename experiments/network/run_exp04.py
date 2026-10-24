@@ -382,6 +382,13 @@ class Child:
     pipe that a thread of this process reads, writing each line to the log as
     it arrives, prefixed with the seconds since the launch on this clock
     (measure.stamp_line). No other process runs for it, inside the clock or out.
+    The pipe ends only once every process holding it has exited, so a process
+    that outlives the command (a grandchild such as an ssh it started) keeps the
+    reader going: settle() waits for it, at most STAMP_READER_TIMEOUT, then
+    closes the log, and the wait is the result's reader_wait_seconds. wait()
+    settles at once, unless Child.deferred is a list (Orchestrator.timed_phase
+    sets one around each timed phase): then the Child goes on it, and is
+    settled after the window, so the clock stops when the command exits.
 
     While Child.trace is set (EXP-11's syscall audit, run_exp04 --syscall-audit: Orchestrator.timed_phase
     sets it around each timed phase), the command runs under strace (durability_audit.strace_argv), inside
@@ -389,6 +396,7 @@ class Child:
     """
 
     trace = False
+    deferred: list | None = None
 
     def __init__(self, argv, log_path: Path, *, cwd=None, env=None, gnu_time=None, stamp_lines=False):
         self.argv = [str(part) for part in argv]
@@ -433,11 +441,6 @@ class Child:
     def _finish(self, status, usage) -> dict:
         wall = time.perf_counter() - self.started
         self.process.returncode = os.waitstatus_to_exitcode(status)
-        if self.reader is not None:
-            # The pipe ends once every process holding it has exited; a straggler that keeps it
-            # open (a daemonised grandchild) costs this wait at most, after the clock.
-            self.reader.join(STAMP_READER_TIMEOUT)
-        self.stream.close()
         timing = measure.read_gnu_time(self.time_path) if self.time_path else None
         self.result = {'host': 'dest', 'argv': self.argv, 'exit_code': self.process.returncode,
                        'wall_seconds': round(wall, 6), 'started_utc': self.started_utc,
@@ -448,7 +451,20 @@ class Child:
                        'stamped_lines': self.reader is not None}
         if self.trace_path is not None:
             self.result['trace'] = str(self.trace_path)
+        if self.reader is not None and Child.deferred is not None:
+            Child.deferred.append(self)  # settled after the timed phase's window
+        else:
+            self.settle()
         return self.result
+
+    def settle(self) -> None:
+        """The stamping reader waited for until the output's pipe ends (at most STAMP_READER_TIMEOUT), then
+        the log closed; how long that took is the result's reader_wait_seconds."""
+        if self.reader is not None and not self.stream.closed:
+            started = time.perf_counter()
+            self.reader.join(STAMP_READER_TIMEOUT)
+            self.result['reader_wait_seconds'] = round(time.perf_counter() - started, 6)
+        self.stream.close()
 
     def poll(self):
         if self.result is None:
@@ -707,20 +723,28 @@ class Orchestrator:
         """Counters on both VMs around body(); body returns its command records.
 
         With --syscall-audit, every command launched on dest meanwhile runs under strace (Child.trace).
+        The window ends when body's last command has exited: a command whose output a thread stamps is
+        settled (its reader waited for until the output's pipe ends, Child.settle) after the window, so a
+        process that outlives it holding that pipe adds nothing to the clock, nor delays the next step.
         """
         before_source = self.snapshot_source()
         before_dest = self.snapshot_dest()
         started_utc = time.time()
         started = time.perf_counter()
-        Child.trace = self.args.syscall_audit
+        deferred: list = []
+        Child.trace, Child.deferred = self.args.syscall_audit, deferred
         try:
-            commands = body()
+            try:
+                commands = body()
+            finally:
+                Child.trace, Child.deferred = False, None
+            wall = time.perf_counter() - started
+            ended_utc = time.time()
+            after_dest = self.snapshot_dest()
+            after_source = self.snapshot_source()
         finally:
-            Child.trace = False
-        wall = time.perf_counter() - started
-        ended_utc = time.time()
-        after_dest = self.snapshot_dest()
-        after_source = self.snapshot_source()
+            for child in deferred:
+                child.settle()
         source = measure.snapshot_delta(before_source, after_source)
         dest = measure.snapshot_delta(before_dest, after_dest)
         phase = {'name': name, 'wall_seconds': round(wall, 3), 'started_utc': started_utc,
