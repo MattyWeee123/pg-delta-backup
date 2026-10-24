@@ -1961,7 +1961,10 @@ class Orchestrator:
                   'paths': {key: str(value) for key, value in paths.items()},
                   # T2: the trial's block (main, extension, warm_source) and the source's cache state.
                   'block': link.get('block', 'main'), 'source_cache': link.get('source_cache', 'cold'),
-                  'started_utc': utc_now(), 'status': 'running', 'error': None}
+                  'started_utc': utc_now(), 'status': 'running', 'error': None,
+                  # An error's kind: 'tool' when a command of the method's own timed phases failed,
+                  # 'harness' for anything else (EXP-11's A4 counts the first for parcopy* and probackup*).
+                  'failure_kind': None}
         log(f'{self.trial_id} r{repeat} {speed["label"]} [{order_index + 1}/{len(order)}] {method}'
             + ('' if record['block'] == 'main' else f' ({record["block"]})'))
         daemon_holder: dict = {}
@@ -2004,6 +2007,9 @@ class Orchestrator:
                 record['totals_serial'] = measure.serial_totals(phases)
             problems = [problem for phase in phases.values() for problem in phase['failures']]
             if problems:
+                # A command of the method's own timed phases exited non-zero or timed out: for parcopy* and
+                # probackup*, a copy the tool itself aborted, which can be neither verified nor started (A4).
+                record['failure_kind'] = 'tool'
                 raise CommandError('; '.join(problems))
             record['tool_reported'] = self.tool_reported(method, paths, phases)
             if self.args.syscall_audit:
@@ -2041,6 +2047,7 @@ class Orchestrator:
                 record['status'] = 'pending'
         except Exception as exc:  # record, clean up, carry on with the next method
             record['status'] = 'error'
+            record['failure_kind'] = record['failure_kind'] or 'harness'
             record['error'] = f'{type(exc).__name__}: {exc}'
             record['traceback'] = traceback.format_exc()
             log(f'  ERROR {record["error"]}')
@@ -2054,6 +2061,7 @@ class Orchestrator:
                     problem = f'{type(exc).__name__}: {exc}'
                     record['sysctl']['reset'] = {'error': problem}
                     record['status'] = 'error'
+                    record['failure_kind'] = record['failure_kind'] or 'harness'
                     record['error'] = (record['error'] + '; ' if record['error'] else '') + \
                         f"dest's write-back settings could not be reset: {problem}"
                     log(f"  ERROR dest's write-back settings could not be reset: {problem}")
@@ -2068,6 +2076,7 @@ class Orchestrator:
                     self.source_down = f'{type(exc).__name__}: {exc}'
                     record['source_restart'] = {'error': self.source_down}
                     record['status'] = 'error'
+                    record['failure_kind'] = record['failure_kind'] or 'harness'
                     record['error'] = (record['error'] + '; ' if record['error'] else '') + \
                         f'the source cluster could not be restarted: {self.source_down}'
                     log(f'  ERROR the source cluster could not be restarted: {self.source_down}')
@@ -2324,7 +2333,14 @@ class Orchestrator:
         return added
 
     def a4_summary(self, records) -> dict:
-        """EXP-11's A4 for this trial: the parcopy* and probackup* runs that fail their standard."""
+        """EXP-11's A4 for this trial: the parcopy* and probackup* runs that fail their standard.
+
+        A run fails it when its output didn't start, failed verify_direct, or (probackup*) holds a digest
+        that differs from an unchanged source's; and when the copy itself failed, its own timed command
+        exiting non-zero or timing out (failure_kind 'tool': parcopy's receiver or sender, pg_probackup's
+        catchup or its sync -f), since such an output can be neither verified nor started. Errors of the
+        harness around the tool (failure_kind 'harness') fail nothing and are listed apart.
+        """
         failed, errors = [], []
         for record in records:
             method = record.get('method')
@@ -2337,13 +2353,16 @@ class Orchestrator:
                           else "its digest differs from the source's, which didn't change"
                           if method in measure.PROBACKUP_METHODS else 'verify_direct failed')
                 failed.append({**self.run_key(record), 'reason': reason})
+            elif record.get('status') == 'error' and record.get('failure_kind') == 'tool':
+                failed.append({**self.run_key(record), 'reason': f"the copy itself failed: {record.get('error')}"})
             elif record.get('status') == 'error':
-                errors.append({**self.run_key(record), 'error': record.get('error')})
+                errors.append({**self.run_key(record), 'error': record.get('error'),
+                               'failure_kind': record.get('failure_kind')})
         return {'failed_runs': failed, 'excluded_arms': sorted({run['method'] for run in failed}),
                 'errors': errors,
-                'rule': ('A4: an arm with a failed run is excluded from every baseline. A void run is not a '
-                         'failure, byte differences fail nothing, and runs that ended in an error are listed '
-                         'beside the failures for the analysis to judge')}
+                'rule': ('A4: an arm with a failed run is excluded from every baseline, and a copy the tool itself '
+                         'aborted (its own timed command failed) is a failed run. A void run is not a failure, byte '
+                         'differences fail nothing, and errors of the harness around the tool are listed apart')}
 
     def pgbackrest_run_record(self) -> dict | None:
         """What run.json says about pgBackRest: nothing unless a pgbackrest method is selected."""

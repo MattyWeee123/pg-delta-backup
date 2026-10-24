@@ -5,6 +5,7 @@
 - the syscall audit's records, by arm (durability_audit.py summary --json), in the shape
   analysis/exp11.py --audit reads, and read by it from a results directory;
 - parcopy's fsync count (A5) kept apart from check (a) in the analysis, as the harness records both;
+- a copy parcopy itself aborted (a dropped range) through run_method and the analysis, which A4 excludes;
 - parcopy's listening time, so the analysis can place its last byte inside the transfer step.
 
 The analysis's parts need the analysis venv's matplotlib and are skipped without it.
@@ -23,6 +24,7 @@ from contextlib import redirect_stdout
 from experiments.network import durability_audit, measure, remote, run_exp04
 
 import test_durability_audit as audit_tests
+import test_parcopy as parcopy_tests
 
 try:
     import matplotlib  # noqa: F401
@@ -267,6 +269,29 @@ class FsyncCountApartFromCheckA(unittest.TestCase):
         # The summary's counts agree (10 and 10); the record's count, which also checks the output, doesn't.
         self.assertEqual(S.rows[0]['left_out'], 'durability failed: fsync count')
         self.assertTrue(S.rows[1]['usable'])  # without the record's count, the summary's decides
+
+
+@needs_venv
+class AbortedCopyInTheAnalysis(unittest.TestCase):
+    """A4 across the blocks: parcopy's receiver catches a dropped range and exits 3, run_method ends the run in
+    the tool's own error before any verification, and the analysis excludes the arm from every baseline."""
+
+    def test_a_dropped_range_through_run_method_and_the_analysis(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, stub, _ = parcopy_tests.synthetic_source(root)
+            _, outcome, _ = parcopy_tests.dropped_range_copy(source, stub, root / 'O', 4)
+            orchestrator, record = parcopy_tests.aborted_run(root / 'harness', parcopy_tests.exit_statuses(outcome))
+            self.assertEqual((record['status'], record['failure_kind']), ('error', 'tool'))
+            rows, trials, _ = exp11.load(orchestrator.out)
+        [row] = rows
+        self.assertEqual((row['method'], row['status'], row['failure_kind']), ('parcopy4', 'error', 'tool'))
+        S = exp11.Session(rows, trials)
+        self.assertEqual(list(S.a4), ['parcopy4'])
+        self.assertTrue(S.excluded['parcopy4'].startswith('A4: 1 run(s) failed'))
+        self.assertIsNone(S.choice('B_fast', row['speed']))
+        lines = exp11.a_lines(S, [], {'row': 'Undecided'}, {'row': 'Undecided'})
+        self.assertTrue(any(line.startswith('- **A4**') and 'fires for parcopy4' in line for line in lines), lines)
 
 
 class ParcopyListening(unittest.TestCase):

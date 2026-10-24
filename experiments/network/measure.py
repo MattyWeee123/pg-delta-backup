@@ -1730,7 +1730,7 @@ CSV_FIELDS = (
     'parcopy_last_byte_s', 'parcopy_write_s', 'parcopy_fsync_s', 'parcopy_fsync_calls', 'parcopy_fsync_expected',
     'usable_s', 'void', 'bytes_identical', 'measured_s2d_gbit_8streams', 'link_time_s', 'above_link_s',
     'sysctl_dirty_background_bytes', 'sysctl_dirty_background_ratio',
-    'verified', 'identical_to_s', 'logical_match', 'output_start_s', 'caches_dropped', 'error',
+    'verified', 'identical_to_s', 'logical_match', 'output_start_s', 'caches_dropped', 'error', 'failure_kind',
 )
 
 
@@ -1966,6 +1966,8 @@ def summary_row(record: dict) -> dict:
         'output_start_s': _get(verification, 'output_start', 'ready_seconds'),
         'caches_dropped': record.get('caches_dropped'),
         'error': record.get('error'),
+        # An error's kind: 'tool' (a command of the method's own timed phases failed) or 'harness'.
+        'failure_kind': record.get('failure_kind'),
     }
 
 

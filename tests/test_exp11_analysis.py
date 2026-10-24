@@ -168,6 +168,40 @@ class BaselineChoice(unittest.TestCase):
         self.assertEqual(S.choice('B_fast', U, void=True)['arm'], 'probackup8')
         self.assertNotIn('probackup8', S.excluded)
 
+    def test_a_copy_the_tool_aborted_fails_a4_and_an_error_of_the_harness_does_not(self):
+        parcopy = runs('parcopy8', [1.0] * 4) + runs('parcopy8', [None], status='error', failure_kind='tool', first=4,
+                                                      error='CommandError: dest: python3 exited 3')
+        rows = runs('full', [3.0] * 5) + runs('probackup8', [2.5] * 5) + parcopy
+        S = session(rows)
+        self.assertEqual(list(S.a4), ['parcopy8'])
+        self.assertIn('a copy the tool itself aborted', S.excluded['parcopy8'])
+        self.assertEqual(S.choice('B_fast', U)['arm'], 'probackup8')
+        self.assertEqual((S.bound()['measured'], S.bound()['excluded']), (False, ['parcopy8']))
+        # An error of the harness around the copy fails nothing; the run is only left out.
+        parcopy[-1]['failure_kind'] = 'harness'
+        S = session(rows)
+        self.assertEqual((S.a4, S.a4_undecided, S.excluded), ({}, {}, {}))
+        self.assertEqual(S.choice('B_fast', U)['arm'], 'parcopy8')
+        self.assertEqual(S.rows[-1]['left_out'], 'status error')
+        # One whose kind isn't recorded leaves A4 undecided for its arm, which stays in the baselines.
+        parcopy[-1]['failure_kind'] = None
+        S = session(rows)
+        self.assertEqual((S.a4, list(S.a4_undecided), S.excluded), ({}, ['parcopy8'], {}))
+        text = '\n'.join(exp11.a_lines(S, [], {'row': 'Out on fast links'}, {'row': 'Out on fast links'}))
+        self.assertIn('**undecided** for parcopy8: 1 errored run(s) whose cause isn\'t recorded', text)
+        self.assertNotIn('does not fire', text.split('**A4**')[1].split('\n')[0])
+        self.assertIn('**A4 is undecided** for parcopy8', '\n'.join(exp11.verdict_lines(S)))
+
+    def test_an_errored_runs_kind_from_its_record(self):
+        row = {'status': 'error', 'failure_kind': None}
+        failed = {'phases': {measure.DIRECT_PHASE: {'failures': ['dest: python3 exited 3']}}}
+        self.assertEqual(exp11.failure_kind(failed, row), 'tool')  # a record from before the harness wrote it
+        self.assertEqual(exp11.failure_kind({'phases': {}}, row), 'harness')
+        self.assertIsNone(exp11.failure_kind({}, row))  # a summary without its record can't tell
+        self.assertEqual(exp11.failure_kind({'failure_kind': 'harness', **failed}, row), 'harness')
+        self.assertEqual(exp11.failure_kind({}, {**row, 'failure_kind': 'tool'}), 'tool')
+        self.assertIsNone(exp11.failure_kind(failed, {**row, 'status': 'pass'}))
+
     def test_a_void_run_is_found_from_the_reference_digests_too(self):
         rows = runs('probackup8', [2.0], status='fail', logical_match=False)
         S = exp11.Session(rows, {('s', '00-hot'): {**trial('hot'), 'reference_match': False}})
@@ -510,6 +544,48 @@ class DryRun(unittest.TestCase):
         self.assertIn('**Verdict (with void runs, flagged):', text)
         self.assertIn('### With void runs included (flagged)', text)
         self.assertIn('void runs (not failures): 5', text)
+
+    def test_copies_the_tool_aborted_exclude_their_arm(self):
+        def abort(record):
+            # parcopy8's receiver caught a dropped range and exited 3, so the run ended in the tool's error before
+            # any verification, in records from before the harness wrote its kind.
+            if record['method'] == 'parcopy8' and record['speed']['label'] == U and record['repeat'] < 2:
+                record['phases'][measure.DIRECT_PHASE]['failures'] = ['dest: python3 exited 3',
+                                                                      'source: python3 exited 3']
+                record.update(status='error', error='CommandError: dest: python3 exited 3; source: python3 exited 3',
+                              output_bytes=None)
+                del record['verification']
+        with tempfile.TemporaryDirectory() as tmp:
+            sweeps = exp11_smoke_data.write_session(Path(tmp) / 'results', adjust=abort)
+            text = self.run_script(tmp, sweeps)
+            rows, trials = [], {}
+            for sweep in sweeps:
+                loaded, found, _ = exp11.load(sweep)
+                rows += loaded
+                trials.update(found)
+        S = exp11.Session(rows, trials)
+        # Main-block repeats 0 and 1, unthrottled, in each of the three trials.
+        self.assertIn('left out of every baseline: parcopy8: A4: 6 run(s) failed verify_direct or did not start, 6 of '
+                      'them a copy the tool itself aborted', text)
+        self.assertIn('fires for parcopy8: 00-hot-f0.01-s70 r0 unthrottled (the copy itself failed)', text)
+        self.assertNotIn('does not fire; void runs', text)
+        self.assertIn('  - error (the tool): 00-hot-f0.01-s70 r0 unthrottled parcopy8', text)
+        self.assertEqual(S.choice('B_fast', U)['arm'], 'parcopy4')
+        self.assertEqual(S.bound()['arm'], 'parcopy4')
+
+    def test_errors_whose_kind_is_unknown_leave_a4_undecided(self):
+        def abort(record):
+            if record['method'] == 'parcopy8' and record['speed']['label'] == U and record['repeat'] == 0:
+                record.update(status='error', error='CommandError: dest: python3 exited 3')
+        with tempfile.TemporaryDirectory() as tmp:
+            sweeps = exp11_smoke_data.write_session(Path(tmp) / 'results', adjust=abort)
+            for sweep in sweeps:  # the summary alone: no record to tell the tool's errors from the harness's
+                for record in (sweep / 'runs').rglob('*.json'):
+                    record.unlink()
+            text = self.run_script(tmp, sweeps)
+        self.assertIn('**undecided** for parcopy8: 3 errored run(s) whose cause isn\'t recorded', text)
+        self.assertIn('**A4 is undecided** for parcopy8 (3 errored run(s)', text)
+        self.assertIn('  - error (cause not recorded): 00-hot-f0.01-s70 r0 unthrottled parcopy8', text)
 
     def test_durability_failures_are_left_out_and_reclassify_an_arm(self):
         def fail(record):

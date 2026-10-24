@@ -191,21 +191,70 @@ class Plan(unittest.TestCase):
 
 # --- copies over loopback --------------------------------------------------------------------
 
+def synthetic_source(root: Path):
+    """A stopped data directory under root, with a file of 5 MiB and 3 bytes that splits into ranges and the
+    recorded modes, and a stub pg_controldata: (data directory, stub, its selection)."""
+    data = build_datadir(root / 'D')
+    rng = random.Random(11)
+    (data / LARGE).write_bytes(rng.randbytes(5 * MIB + 3))
+    for path, mode in FILE_MODES.items():
+        os.chmod(data / path, mode)
+    for path, mode in DIRECTORY_MODES.items():
+        os.chmod(data / path, mode)
+    os.chmod(data, ROOT_MODE)
+    stub = stub_controldata(root / 'bin')
+    return data, stub, datadir.select(data, stub)
+
+
+def dropped_range_copy(source, controldata, output, streams):
+    """A round trip whose plan loses its first stream's first range: (fsync calls, outcome, the lost range)."""
+    real, dropped = parcopy.plan, []
+
+    def dropping(selection, streams, chunk_bytes):
+        lists = real(selection, streams, chunk_bytes)
+        dropped.append(lists[0].pop(0))
+        return lists
+
+    with mock.patch.object(parcopy, 'plan', dropping), counted_fsyncs() as calls:
+        _, _, outcome = round_trip(source, controldata, output, streams)
+    [item] = dropped
+    return calls, outcome, item
+
+
+def exit_statuses(outcome) -> dict:
+    """What each end of a round trip exits with on parcopy's command line (finish): receiver and sender."""
+    with redirect_stderr(io.StringIO()):
+        return {end: parcopy.finish({}, None, outcome.get(f'{end}_error')) for end in ('receiver', 'sender')}
+
+
+def aborted_run(tmp, statuses: dict, method='parcopy4'):
+    """run_exp04's run_method for a parcopy run whose receiver and sender exit with these statuses, on the
+    harness's stubs and a fake clock: (orchestrator, record). Its results directory is <tmp>/out."""
+    class Receiver(FakeChild):
+        def wait(self, timeout):
+            return self.result or self._record(statuses['receiver'])
+
+    class Aborted(Parcopying):
+        def remote_command(self, argv, log_name, *, cwd=None):
+            return {**super().remote_command(argv, log_name, cwd=cwd), 'exit_code': statuses['sender']}
+
+    clock = FakeClock()
+    with mock.patch.object(run_exp04.time, 'perf_counter', clock), mock.patch.object(run_exp04, 'log'), \
+            mock.patch.object(run_exp04, 'Child', Receiver):
+        orchestrator = Aborted(str(tmp), clock)
+        try:
+            record = orchestrator.run_method(TRIAL, 0, SPEED, dict(LINK), method, 0, [method])
+        finally:
+            orchestrator.pool.shutdown()
+    return orchestrator, record
+
+
 class Copies(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
-        self.datadir = build_datadir(self.root / 'D')
-        rng = random.Random(11)
-        (self.datadir / LARGE).write_bytes(rng.randbytes(5 * MIB + 3))
-        for path, mode in FILE_MODES.items():
-            os.chmod(self.datadir / path, mode)
-        for path, mode in DIRECTORY_MODES.items():
-            os.chmod(self.datadir / path, mode)
-        os.chmod(self.datadir, ROOT_MODE)
-        self.stub = stub_controldata(self.root / 'bin')
-        self.selection = datadir.select(self.datadir, self.stub)
+        self.datadir, self.stub, self.selection = synthetic_source(self.root)
 
     def copy(self, streams, name=None, **kwargs):
         output = self.root / (name or f'O{streams}')
@@ -323,16 +372,8 @@ class Copies(unittest.TestCase):
         self.assert_holds_the_selection(output)
 
     def test_a_dropped_range_fails_the_copy_and_its_verification(self):
-        real, dropped = parcopy.plan, []
-
-        def dropping(selection, streams, chunk_bytes):
-            lists = real(selection, streams, chunk_bytes)
-            dropped.append(lists[0].pop(0))
-            return lists
-
-        with mock.patch.object(parcopy, 'plan', dropping):
-            output, calls, _, _, outcome = self.copy(4)
-        [item] = dropped
+        output = self.root / 'O4'
+        calls, outcome, item = dropped_range_copy(self.datadir, self.stub, output, 4)
         self.assertEqual((self.selection.inventory.files[item.file].path, item.offset, item.length), (LARGE, 0, MIB))
         self.assertIsInstance(outcome['receiver_error'], TransferError)
         self.assertIn(f'{LARGE} ({4 * MIB + 3} of {5 * MIB + 3} bytes)', str(outcome['receiver_error']))
@@ -345,6 +386,22 @@ class Copies(unittest.TestCase):
         self.assertFalse(result['identical_to_source'])
         self.assertTrue(any(difference.startswith(f'differs: {LARGE}') for difference in result['differences']),
                         result['differences'])
+        # In the harness, each end exits as parcopy's command line does (3: a transfer failure), so run_method
+        # ends the run in the tool's own error before any verification, and A4 excludes the arm.
+        statuses = exit_statuses(outcome)
+        self.assertEqual(statuses, {'receiver': 3, 'sender': 3})
+        orchestrator, record = aborted_run(self.root / 'harness-run', statuses)
+        self.assertEqual((record['status'], record['failure_kind']), ('error', 'tool'))
+        self.assertIn(f'dest: {Path(sys.executable).name} exited 3', record['error'])
+        self.assertIn('source: python3 exited 3', record['error'])
+        self.assertNotIn('verify', orchestrator.events)
+        self.assertNotIn('verification', record)
+        a4 = orchestrator.a4_summary([record])
+        self.assertEqual(a4['excluded_arms'], ['parcopy4'])
+        self.assertEqual([(run['method'], run['reason'].split(':')[0]) for run in a4['failed_runs']],
+                         [('parcopy4', 'the copy itself failed')])
+        self.assertEqual(a4['errors'], [])
+        self.assertEqual(measure.summary_row(record)['failure_kind'], 'tool')
 
     def verify_direct(self, output) -> dict:
         """run_exp04's verify_direct on `output`, against agent.py datadir-digest of the synthetic source."""
@@ -648,10 +705,11 @@ class OrchestratorRuns(unittest.TestCase):
 
         orchestrator = self.orchestrator()
         record = self.run_method(orchestrator, 'parcopy4', Silent)
-        self.assertEqual(record['status'], 'error')
+        self.assertEqual((record['status'], record['failure_kind']), ('error', 'tool'))
         self.assertEqual(list(record['phases']['receiver_transfer']['steps']), ['receiver_start'])
         self.assertNotIn('source', [kind[0] for kind in self.kinds(orchestrator) if isinstance(kind, tuple)])
         self.assertIn(('source_script', 'start'), self.kinds(orchestrator))
+        self.assertEqual(orchestrator.a4_summary([record])['excluded_arms'], ['parcopy4'])
 
     def test_a_failed_sender_stops_the_receiver_and_the_source_restarts(self):
         class Refused(Parcopying):
@@ -661,11 +719,30 @@ class OrchestratorRuns(unittest.TestCase):
 
         orchestrator = self.orchestrator(Refused)
         record = self.run_method(orchestrator, 'parcopy8')
-        self.assertEqual(record['status'], 'error')
+        self.assertEqual((record['status'], record['failure_kind']), ('error', 'tool'))
         self.assertIn('source: python3 exited 2', record['error'])
         [receiver] = FakeChild.started
         self.assertEqual(len(receiver.signals), 1)
         self.assertIn(('source_script', 'start'), self.kinds(orchestrator))
+        self.assertEqual(orchestrator.a4_summary([record])['excluded_arms'], ['parcopy8'])
+
+    def test_an_error_of_the_harness_around_the_copy_is_no_a4_failure(self):
+        class Unstoppable(Parcopying):
+            def _source_script(self, script, *args, timeout=7200):
+                if args[0] == 'stop-clean':
+                    raise run_exp04.CommandError('source_cluster.py stop-clean failed (1): pg_ctl: server does '
+                                                 'not shut down')
+                return super()._source_script(script, *args, timeout=timeout)
+
+        orchestrator = self.orchestrator(Unstoppable)
+        record = self.run_method(orchestrator, 'parcopy8')
+        self.assertEqual((record['status'], record['failure_kind']), ('error', 'harness'))
+        self.assertEqual(record['phases'], {})  # it failed before its timed phase
+        a4 = orchestrator.a4_summary([record])
+        self.assertEqual((a4['failed_runs'], a4['excluded_arms']), ([], []))
+        self.assertEqual([(run['method'], run['failure_kind']) for run in a4['errors']], [('parcopy8', 'harness')])
+        # A run that passes has no kind.
+        self.assertIsNone(self.run_method(self.orchestrator(), 'parcopy4')['failure_kind'])
 
 
 class Preflight(unittest.TestCase):

@@ -228,6 +228,11 @@ class Runs(core.Clocked):
         self.assertEqual([Path(command['argv'][0]).name for command in phase['commands']], ['pg_probackup-17'])
         self.assertEqual(list(phase['steps']), ['catchup'])
         self.assertNotIn(('dest', 'sync'), self.kinds(orchestrator))
+        # A copy the tool itself aborted: A4 counts it, as an output that didn't start.
+        self.assertEqual(record['failure_kind'], 'tool')
+        a4 = orchestrator.a4_summary([record])
+        self.assertEqual(a4['excluded_arms'], ['probackup4'])
+        self.assertIn('pg_probackup-17 exited 1', a4['failed_runs'][0]['reason'])
 
 
 # --- verification ----------------------------------------------------------------------
@@ -378,7 +383,8 @@ class Verdicts(core.Clocked):
         records = [record('probackup8', 0, logical=LOGICAL), record('probackup8', 1, logical=lost),
                    record('probackup4', 0, status='fail', started=False),
                    record('parcopy8', 0, status='fail', verified=False),
-                   {**record('parcopy4', 0, status='error'), 'error': 'CommandError: source: python3 exited 1'},
+                   {**record('parcopy4', 0, status='error'), 'failure_kind': 'harness',
+                    'error': 'CommandError: the source cluster could not be restarted'},
                    record('pgdelta_direct_inplace', 0, status='pass')]
         trial, check, query = self.finish(orchestrator, records, True)
         query.assert_called_once()

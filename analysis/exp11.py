@@ -20,7 +20,8 @@ extended arm in hot and append. Every statistic is a per-workload median, with t
 
 A run counts if it passed its verification and every durability check that applies (check (a) not
 if A6 voided it; check (b) for full copies; parcopy's fsync count), and isn't void. Arms that fail
-A4 or that A5 reclassifies are left out of every baseline. The syscall audit's results, when given
+A4 (a copy the tool itself aborted, an error of kind 'tool', included) or that A5 reclassifies are
+left out of every baseline. The syscall audit's results, when given
 (--audit), are a JSON object mapping each arm to {"passed": bool, "uncovered": [paths],
 "tool_uncovered": [paths its own flush left, covered only by a sync -f]}, or {"arms": that}, as
 `experiments/network/durability_audit.py summary --json RUN_DIR` prints it; or that RUN_DIR itself.
@@ -86,7 +87,7 @@ BOUND_MISSING = f'Within reach of {RELEASED}; bound not measured.'
 VIEWS = {'main': ('main',), 'ha': ('main', 'extension'), 'warm': ('warm_source',)}
 
 # The summary's columns this script reads (measure.CSV_FIELDS), by type.
-TEXT = ('trial_id', 'pattern', 'speed', 'method', 'status', 'tier', 'block', 'source_cache', 'error')
+TEXT = ('trial_id', 'pattern', 'speed', 'method', 'status', 'tier', 'block', 'source_cache', 'error', 'failure_kind')
 FLAGS = ('verified', 'durable', 'durability_ok', 'void', 'bytes_identical', 'logical_match')
 NUMERIC = ('order_index', 'target_gbit', 'measured_s2d_gbit', 'measured_s2d_gbit_8streams', 'total_s',
            'total_no_ssh_s', 'receiver_start_s', 'transfer_s', 'rebuild_s', 'fsync_s', 'verify_wait_s',
@@ -108,7 +109,7 @@ KEEP = ['sweep', 'trial_id', 'pattern', 'speed', 'method', 'repeat', 'block', 's
         'parcopy_balance', 'parcopy_listening_s', 'parcopy_first_byte_s', 'parcopy_last_byte_s', 'parcopy_write_s',
         'parcopy_fsync_s', 'parcopy_fsync_calls', 'parcopy_fsync_expected', 'fsync_ok', 'receiver_start_s', 'transfer_s', 'rebuild_s', 'fsync_s',
         'verify_wait_s', 'logical_match', 'bytes_identical', 'sysctl_dirty_background_bytes',
-        'sysctl_dirty_background_ratio', 'error']
+        'sysctl_dirty_background_ratio', 'error', 'failure_kind']
 CELL_COLUMNS = ('total_s', 'total_no_ssh_s', 'usable_s', 'above_link_s', 'link_time_s', 'measured_s2d_gbit',
                 'measured_s2d_gbit_8streams', 'wire_s2d_bytes', 'cpu_source_s', 'cpu_dest_s', 'pbb_checkpoint_s',
                 'pbb_stream_s', 'pbb_wal_end_s', 'pbb_sync_s', 'backup_mode_adder_s', 'probackup_copy_s',
@@ -204,11 +205,22 @@ def b_check(row):
     return written >= math.ceil(measure.DISK_WRITE_FRACTION * output)
 
 
+def failure_kind(record, row):
+    """An errored run's kind: 'tool' when a command of its own timed phases failed (A4 counts it for
+    parcopy* and probackup*), 'harness' otherwise; the record's or the summary's, or, for a record
+    from before the harness wrote it, found from its phases. None without a record to tell."""
+    kind = record.get('failure_kind') or row.get('failure_kind')
+    if kind is None and record and row.get('status') == 'error':
+        failed = any((phase or {}).get('failures') for phase in (record.get('phases') or {}).values())
+        kind = 'tool' if failed else 'harness'
+    return kind
+
+
 def from_record(record, row, run):
     """What a run's record adds to its summary row: checks (a) and (b) apart, the raw Dirty +
     Writeback increase and its limit (both recomputed from the summary without a record), parcopy's
-    fsync count (A5) apart from check (a), and the launch and exit of pg_basebackup's and
-    pg_probackup's own phases."""
+    fsync count (A5) apart from check (a), the launch and exit of pg_basebackup's and pg_probackup's
+    own phases, and an error's kind (failure_kind)."""
     durability = record.get('durability') or {}
     reported = record.get('tool_reported') or {}
     pbb = reported.get('basebackup_phases') or {}
@@ -229,7 +241,8 @@ def from_record(record, row, run):
     return {'a_ok': a_ok, 'b_ok': durability['b_ok'] if 'b_ok' in durability else b_check(row),
             'fsync_ok': (fsync_count or {}).get('ok'),
             'dirty_increase_bytes': increase, 'dirty_limit_bytes': limit,
-            'pbb_start_s': pbb.get('start_s'), 'probackup_start_s': probackup.get('start_s')}
+            'pbb_start_s': pbb.get('start_s'), 'probackup_start_s': probackup.get('start_s'),
+            'failure_kind': failure_kind(record, row)}
 
 
 def load(sweep):
@@ -311,18 +324,26 @@ class Session:
                 self.not_durable.setdefault(method, []).append(f'{count} runs at {SPEED_LABEL.get(speed, speed)} '
                                                                f'in {trial}')
         # A4: a parcopy run that fails verify_direct or doesn't start; a pg_probackup run that doesn't
-        # start or whose logical digest differs while the reference digests match (not void).
-        self.a4 = {}
+        # start or whose logical digest differs while the reference digests match (not void); and a copy
+        # of either that the tool itself aborted (an error of kind 'tool': its own timed command failed),
+        # which can be neither verified nor started. An error of the harness around the tool fails
+        # nothing; one whose kind is unknown (a summary without records) leaves A4 undecided for its arm.
+        self.a4, self.a4_undecided = {}, {}
         for r in rows:
-            if (r['method'] in measure.PARCOPY_METHODS or r['method'] in measure.PROBACKUP_METHODS) \
-                    and r['status'] == 'fail' and not r['void']:
+            if r['method'] not in measure.PARCOPY_METHODS and r['method'] not in measure.PROBACKUP_METHODS:
+                continue
+            if (r['status'] == 'fail' and not r['void']) or (r['status'] == 'error' and r['failure_kind'] == 'tool'):
                 self.a4.setdefault(r['method'], []).append(r)
+            elif r['status'] == 'error' and r['failure_kind'] is None:
+                self.a4_undecided.setdefault(r['method'], []).append(r)
         self.excluded = {method: 'A5: not durable for the session (' + '; '.join(why) + ')'
                          for method, why in self.not_durable.items()}
         for method, failed in self.a4.items():
+            aborted = sum(r['status'] == 'error' for r in failed)
             self.excluded[method] = (f'A4: {len(failed)} run(s) failed '
                                      + ('verify_direct or did not start' if method in measure.PARCOPY_METHODS
-                                        else 'to start or the logical digest'))
+                                        else 'to start or the logical digest')
+                                     + (f', {aborted} of them a copy the tool itself aborted' if aborted else ''))
         for r in rows:
             r['usable'] = self.counts(r)
             r['usable_void'] = self.counts(r, void=True)
@@ -746,7 +767,9 @@ def counts_lines(S):
     lines.append('- left out of every median: ' + (', '.join(f'{k} {n}' for k, n in sorted(left.items())) or 'none'))
     for r in S.rows:
         if r['status'] == 'error':
-            lines.append(f'  - error: {r["trial_id"]} r{r["repeat"]} {r["speed"]} {r["method"]}: {r["error"] or ""}')
+            kind = {'tool': 'the tool', 'harness': 'the harness'}.get(r['failure_kind'], 'cause not recorded')
+            lines.append(f'  - error ({kind}): {r["trial_id"]} r{r["repeat"]} {r["speed"]} {r["method"]}: '
+                         f'{r["error"] or ""}')
     return lines
 
 
@@ -928,6 +951,12 @@ def verdict_lines(S):
     lines = ['## EXP-09\'s HA rule, re-judged (unthrottled, 10 runs per extended arm, v1 at 4 jobs)']
     bound = S.bound()
     lines.append(f'- the bound (A3): {bound_state(bound)}')
+    undecided = {arm: runs for arm, runs in S.a4_undecided.items() if arm not in S.a4}
+    if undecided:
+        lines.append('- **A4 is undecided** for ' + ', '.join(f'{arm} ({len(runs)} errored run(s) whose cause isn\'t '
+                                                             'recorded)' for arm, runs in undecided.items())
+                     + ': each stays in the baselines, and the verdict below holds only if no such run was a copy '
+                       'the tool itself aborted')
     ratios = S.all_ratios()
     v4, rows = ha_lines(ratios, bound, 'v1 at 4 jobs')
     lines += rows
@@ -1388,11 +1417,19 @@ def a_lines(S, gates, verdict_fast, verdict_tuned):
             f'balance {fmt(bound["balance"], 3)})'
             + (('; Confirmed is blocked; parcopy stays in B_fast for Out and the crossovers, which are upper bounds'
                 if bound['is_fast'] else '; a released arm is faster: the "bound missing" row applies') if fails else ''))
+    fired = [f'fires for {arm}: ' + ', '.join(f'{r["trial_id"]} r{r["repeat"]} {r["speed"]}'
+                                             + (' (the copy itself failed)' if r['status'] == 'error' else '')
+                                             for r in runs) for arm, runs in S.a4.items()]
+    undecided = [f'**undecided** for {arm}: {len(runs)} errored run(s) whose cause isn\'t recorded ('
+                 + ', '.join(f'{r["trial_id"]} r{r["repeat"]} {r["speed"]}' for r in runs) + ')'
+                 for arm, runs in S.a4_undecided.items() if arm not in S.a4]
+    harness = sum(r['status'] == 'error' and r['failure_kind'] == 'harness' for r in S.rows
+                  if r['method'] in measure.PARCOPY_METHODS or r['method'] in measure.PROBACKUP_METHODS)
     say('- **A4** (a parcopy run fails verify_direct or doesn\'t start; a pg_probackup run doesn\'t start or differs '
-        'logically while the reference digests match): '
-        + ('; '.join(f'fires for {arm}: ' + ', '.join(f'{r["trial_id"]} r{r["repeat"]} {r["speed"]}' for r in runs)
-                     for arm, runs in S.a4.items()) or 'does not fire')
-        + '; void runs (not failures): ' + str(sum(r['void'] for r in S.rows)))
+        'logically while the reference digests match; either\'s copy aborted by the tool itself): '
+        + ('; '.join(fired + undecided) or 'does not fire')
+        + '; void runs (not failures): ' + str(sum(r['void'] for r in S.rows))
+        + f'; errors of the harness, not the tool (not failures): {harness}')
     failing = [r for r in S.rows if r['durability_failures']]
     say(f'- **A5** (a durable arm fails check (a) or (b), or parcopy\'s fsync count is wrong): {len(failing)} run(s) '
         'left out' + ('; reclassified as not durable for the session: ' + '; '.join(
