@@ -1,0 +1,87 @@
+old_commit,new_commit,date,author,subject
+db12c77b73dfd6463628f792285856ede40628d1,3e9ff920b47c190344fcbb3e2a8e3ff360653afe,2026-10-09,Matthew Wei,Add native PostgreSQL backup and restore benchmark smoke harness
+41a0105fd38bf247fd7135053e4f5d11b8aeaf5c,6c25fdf0ca6c2712391c364f19442205796e9c10,2026-10-09,MattyWeee123,Use public official-image mirror for bounded CI runs
+633782b84a17b8cd9d49595a109a11c6c71fed6e,6b7012c4b86c80478e4e9335065e25da6731a15b,2026-10-09,MattyWeee123,Preserve readable PostgreSQL evidence from CI containers
+24591fd32228fadf076de5e9fe4697f0ea4e737f,08908e8f112b5bf6508b34504d5e44501cc71e13,2026-10-09,MattyWeee123,Document measured smoke scope and mentor baseline deliverable
+66b533aa52979807bd3bfde44c8ecb593ef71e69,aeb520f830f92a6e651887717263e0f755ae515c,2026-10-09,MattyWeee123,Preserve native smoke results and reproducible raw evidence
+f2d57d14e05a167bc76f1e28197f828d08bced60,6c2da61606c010c181c53c596dc0e0e49fc5e63d,2026-10-09,MattyWeee123,Merge Sam’s benchmark harness and HammerDB workload into benchmark branch
+09425e0a88717e894998f7014d2ec58575f84b91,304a074e200219fc3e64964e5f628f1f62463646,2026-10-09,MattyWeee123,Share backup phases and evidence schema across benchmark entrypoints
+2fc3d1baf30adbcf872404d32d558ddada6f0b18,a26fc083b5e6d4ede1928e888fd10582cefe2f85,2026-10-09,MattyWeee123,Document consolidated workloads and verify packaged Compose runner
+a1728c992b215a96b056983f29dbf361082f3d95,7bc2a8fa781e340a44562bd6f51c9600a5460a01,2026-10-09,MattyWeee123,Require file checksum coverage for verified benchmark inputs
+c1d21b8b549d424c278ea5eead294fd602937b67,acbaec28b1a98a291cef8e2aba87c31108d66927,2026-10-17,Etash Jhanji,Measure benchmark resource usage
+719311277085f2c348825cd6b2e0923c3b9ccf4e,1150dbdee5c686cd0e3cbe2d8f71c593a2d62bc4,2026-10-17,Sam Ethan Mathew,Fix Windows WAL copy and unblock the native baseline registry pull
+78bc27191ec9de29003da06ebf6ffad190e6e627,c5a23387c8bb9935b3620b125f491bbc6aff8143,2026-10-17,Sam Ethan Mathew,Read HammerDB measurement sources for the degradation driver
+a85ccb4aa5425d39dc5ccd48674140606a1d247f,b9b761fc7593677907802d70b64bd54ee8a07d2c,2026-10-17,Sam Ethan Mathew,Align HammerDB degradation to the window the backup occupied
+bd6177501548abf05cbbdc2832858bde02e56890,1e2679d02142da336df23d71cc5028fd717e7c0b,2026-10-17,Matt Wei,Merge pull request #2 from MattyWeee123/codex/benchmark-resource-metrics
+e6e05e7518673f1c99fbc54455a2da38216e5886,2ace8fa10f87b1f01bdfe95925a0eeed06159257,2026-10-17,Sam Ethan Mathew,Fix timestamp zone loss and database path handling in the driver
+fb21e120ead4be63c9285601a47d9bee6c378c31,ada0f1a71c9b7235b936f32ba046e01eebaee47b,2026-10-17,Sam Ethan Mathew,Orchestrate matched HammerDB trials around a backup
+d593eb360465e3d724c1e0287d76e205cbc24692,8395419ca58550e7dc2c3bc312ce9a2288a45274,2026-10-17,Sam Ethan Mathew,Fix driver defects found by running it against the real fixture
+d9f6298f49560138a6dfcbdf8f5c1ac9093cc2e8,20bbdcaabe0a6c79568a991fd86dc5ea13120d29,2026-10-17,Sam Ethan Mathew,Merge remote-tracking branch 'origin/main' into benchmark-harness-v0.1
+42e0e356a24bf119b37447885b347936dbe17973,45a6cda380573a83713a676e07f8c7eea9be50b7,2026-10-17,Sam Ethan Mathew,Measure HammerDB degradation over aligned windows on the fixture
+dfb0a2f7c2e7b3182d165fa082e5b48ca8f57652,35020e98a2a61218ae551c04894ac9cffc184f5d,2026-10-17,Sam Ethan Mathew,Record PR #3 and the CI validation of the registry fallback
+e5345ef1ee2163c7c27953118d672f44cf96d4c2,a6193525a7ad20162493f46cc714009d28f8411f,2026-10-18,Sam Ethan Mathew,Write a handoff for the HammerDB degradation driver
+82726b4f6595e1edb377ad21b06f299da9577b7a,a41ff76e6466802c2c8020814a8416bcd0be8c5e,2026-10-19,Sam Ethan Mathew,Merge PR #3: Automate HammerDB degradation measurement over aligned windows
+0f2c496156202b8ed2938145c9d81d6abae025bd,64eebaf64921e2fc7ac7c467cdff53bd77ac9d68,2026-10-21,Matthew Wei,Update HammerDB handoff and point backlog at GitHub issues
+b00d44c79fb5611a0c69375be950bd12581569f1,cea75138b7e16fb72befc38341a10527b7c74756,2026-10-22,Matthew Wei,Add state-of-the-art research on PostgreSQL delta resync
+b9d15e6e4dba9ff3824976ce67c535d2dd3d06cb,787cae6a748836931dd278f8bf47da3d41573f6f,2026-10-22,Matthew Wei,Align docs with the research and archive superseded plans
+a96729ac311a640f37cd552f45c6120b3b35e348,481fe34983f01f9231e94fb0a6c5731d54ca3d3d,2026-10-22,Matthew Wei,"pgdelta v0 and experiments EXP-01 to EXP-07, with results"
+783ff30ddf5f27d0f706c9c24ac03fedd2e296ed,ed124c9f8ed5bc95903e17b55c9ef4490714c7ca,2026-10-22,Matthew Wei,"Log the billed cost read from the GCP console: $2.72 posted so far, $0.00 after credits, rest still posting"
+03129f200e67e3e8dfaa463eac9062d12c048259,c5e2296af92f40884a6be1d822bdfe115afa7ad1,2026-10-23,Matthew Wei,"Decision ledger: every design decision graded by its evidence, with a ranked experiment queue"
+f4d0b9351d0100b52c36df799a84c2a63fcd9a8b,f9348df5a7bf3af76b0addb7f0c93fee7427258e,2026-10-23,Matthew Wei,Close the sponsor questions by decision and record what AlloyDB Omni does today
+4cda7432dae6760ebfb6bc4a5f5538546be77634,6ec413f8897f2bd0ee429a9068b7bf7e0d063b80,2026-10-23,Matthew Wei,"Pre-register EXP-08 (T11), EXP-09 (T8a and v1's path) and EXP-10 (T3) before running"
+c92118658ee956696ff8a75ccce6578973db6bcc,fa29cbd96dc53c7ce665b66d66046f9860500af4,2026-10-23,Matthew Wei,"Revise the EXP-08/09/10 pre-registrations before running, after an independent review"
+02ee8935230d6f03e3cc71962a686960652e2b39,b4644fde4b73b9f55233537679794e14653382f1,2026-10-23,Matthew Wei,T11 correctness harness: scenario S2b and run_t11 for the incumbent tools
+6b47d36e45c121f01352ecdfd1c828666cbb1868,18fd756d7087a58a5c8657f03bc55569f987b855,2026-10-23,Matthew Wei,infra: install pg_probackup and WAL-G on a benchmark VM for T11
+ec86ec4188d518b0926240a20f7e15abf0cb8dd4,23b6d5dcec5754adde39a25c711dd58ae4f498ba,2026-10-23,Matthew Wei,"Engine switches for T3 and T8a: in-place refresh, fsync placement, direct read of a stopped data directory"
+350cda7802d35613e07398821eb4e0eadd35c549,1f8c463d706eae7d43345936f2b5739570a58ae1,2026-10-23,Matthew Wei,Document the T3 and T8a switches in pgdelta/README.md
+b9c6d352893e5d974ca4c4093d1efc3baba41de1,22ea7ee0bbddeede9d79b964745e55767e7f5899,2026-10-23,Matthew Wei,infra: install pgBackRest and xfsprogs; reformat dest's /data as XFS
+981f2d227cc61614f21ce685d3e5116d81114fab,5e10b921147c16e72a8bb930f56945b51093b699,2026-10-23,Matthew Wei,"EXP-04 harness: T3, T8a and T11 methods"
+e813eb1c4f4f6dabe1e185d93f68843b705120e8,2fe1da0faa47877e3693fb8a49bf9ce08863de0c,2026-10-23,Matthew Wei,T11: pass WAL-G catchup-push's --from-lsn as a decimal number
+393ad351132142b31b2db490d6f3f4e2140adccf,03141406dd643669276a9d54d35ad6dfec9683bd,2026-10-23,Matthew Wei,"EXP-03 logical state: read every table from its heap, not through an index"
+203bdf30be083f40eab66cb0951a810996310375,14520f5f466a5d63292002dd46d3c7d36e0acce5,2026-10-23,Matthew Wei,"S2b: build on PostgreSQL 18, whose pg_buffercache_evict() returns a record"
+8911540cad27ccd565ec7db27aa75d4939a09de9,2d203d4eaf99d277d81c45c0560349a35fcde6c9,2026-10-23,Matthew Wei,T11: keep WAL on the source only; B keeps EXP-03's settings by default
+c9df5ec7d05c2bf00a662c785eb341df6fbc15e7,1e3567e1cf599704085733cf85393e98fc0e5834,2026-10-23,Matthew Wei,"T11: tell refusals for a reason from errors, use pgdelta's exit codes, record harness errors"
+502fc8bfcc2deb90e33f6fe3b9a97e1d2bbb1504,1ef7f03adc4e10aeaeb53e2785221eff89dd1bfa,2026-10-23,Matthew Wei,T11 summaries: each run carries its own build's rows and settings
+e743e51d0bd7f893328b107203e5ff5c299f50cf,4dfffb99ad6dd48a8c30aca8b84b9031806d8f47,2026-10-23,Matthew Wei,T11: reuse checks.build_conf for scenario reuse; drop an unused constant
+8810eeabdacd03c890268115ee288fec354129ed,7d1094ec5ff920e6133ffe16febdae94ed1739dd,2026-10-23,Matthew Wei,In place: refuse a B whose files have another hard link
+8eeed9d5ce7bed6db16c4aca0266336a4033c5cf,47ff84f19bb14574273b290c0ac8ea09548ea273,2026-10-23,Matthew Wei,"In place: one run at a time on a B, and commit only a B that is still this run's"
+8c6a06e1791bb4386cf7c725b4a8cb61bb6675c2,199701320fab44452a74d6b201f071609ba0f7f0,2026-10-23,Matthew Wei,EXP-04 harness: never clone B0 for the in-place and pgBackRest runs
+86312691edd1e7198d28e8a1cb38b42292df7ee4,7066b68d465064e040ba9aa0324becc750e51761,2026-10-23,Matthew Wei,"In place: refuse a B that is not a PostgreSQL copy, or that the gate would not reuse"
+c0eddc5c79d281ff81c3132e65934bd6647a9f4b,3449172ab991f80f6e71fdde71b92516c652d28a,2026-10-23,Matthew Wei,EXP-04 harness: a source that failed to restart stops only its own trial
+192a1bde4dbf6b0b215c553f479d6e59c8bf7722,c55ffa75d47b7faabad79047b03083538375d5ad,2026-10-23,Matthew Wei,EXP-04 harness: read pgdelta's fsync mode as its receiver reports it
+e88137c7e17d668bcf3f38657204edbfc978b4d2,6110b1250aafd7fe5d14ae1eedba7d3560c76daa,2026-10-23,Matthew Wei,In place: say B is blocked only when it is
+efdf2af4de6dcb1504a3cd737b663ef8706aaef1,0c646e327c11568f751073938e340830dbca1519,2026-10-23,Matthew Wei,"EXP-04 harness: hash what pgdelta's datadir mode sends, not the file on disk"
+7d34a014ed4905d365bf96892c9a3f428902b0f5,23ed2fe6629385048da77db9d119d209091d0ba2,2026-10-23,Matthew Wei,Statistics: report the fsync mode in effect as fsync_mode; say what worker-mode fsync time overlaps
+bb13c923d38ab3759707426b5f11bdd3119da1bf,d5599a13c4fc6d9fbbef08f2d0ad09cdaf74e456,2026-10-23,Matthew Wei,datadir: apply the unlogged rule in global/ as PostgreSQL 17 does; plain list refuses what it cannot list hashably
+c413bdd417b29f724fedfdf96a558fe10fa8c09d,b7ba08efadb44c30fb2c800d2e28f1f0fd21c103,2026-10-23,Matthew Wei,Test --fsync writeback's real sync_file_range end to end on Linux
+8acaa9a8b96effca59ac66b3830d18c320c7275c,34fa36fcd3fff11d6846fd4ecb3f567bfc723a84,2026-10-23,Matthew Wei,EXP-04 harness: never remove the directory of an output server still running
+c13294ab3b0fdd474442b588b1e5582926f96700,9ffb9a65c1321b539fe749d73ef79739dab9d698,2026-10-23,Matthew Wei,"EXP-04 harness: time pgdelta_direct* as one span, with no untimed gap"
+9bee957797736f9f4375cf68ebb9b5bfd5a321c7,4b38d3bc038daea2d33fb41d6dd15451c7a56b85,2026-10-23,Matthew Wei,EXP-04 harness: pgbackrest_none sends uncompressed on the network too
+b53a323fd55b1c3ee59431348fa9df92ac8b9250,155169713032fec2307b9302a4b039d2b15809f2,2026-10-23,Matthew Wei,EXP-04 harness: count the WAL pgBackRest's recovery fetches in its wire bytes
+7333f53e2ecd49213b9e2efc1f192186fcdd1456,edb192e1165b89e901cd5f82e6c46a8773b4185a,2026-10-23,Matthew Wei,"EXP-04 harness: incremental_cfr, combined with pg_combinebackup --copy-file-range"
+a96def45c178f78b8d6a95d42f6678e7270c4f78,f93b17a7e35d5b1508f60ab7c5b1cb8047203273,2026-10-23,Matthew Wei,EXP-04 harness: say in run.json that pgBackRest's wire bytes include its recovery
+e40b6f4f8b4c6765f9642678e3554eb7cc931b42,5a2b63cfb1d613e8e45edc1a53a00c8e608c390a,2026-10-23,Matthew Wei,"Merge build/engine-v1-modes: in-place refresh, fsync placement and direct reads of a stopped data directory"
+326fd918df765a7570de44dfe41c4fd29fa4f082,b2a151ef4a57ba6ae10ed363df42961c2cfc34ee,2026-10-23,Matthew Wei,"Merge build/harness-t3-t8a-t11: harness methods for T3, T8a and pgBackRest"
+6253016479c9c251710bdfd12e5c438a81e8a280,6713fbcabed4666f5a49fd57c03343c7c486e78b,2026-10-23,Matthew Wei,"Merge build/incumbents-t11: T11 runner, scenario S2b and the incumbent tools installer"
+d21cc64c58c7b1ee9f0e3879cbc2c991d34d3d9e,b77f33d8cd30b35ba6e9ded9976dc4c7b233c2b5,2026-10-23,Matthew Wei,EXP-08: register pg_rewind's two WAL-retention arms before the registered run
+8203cf562e268064ab8acc37dc1bd6feab4bf078,c5a64912255b8577daaf0dd11004fc337e9e4390,2026-10-23,Matthew Wei,Cite the rewritten commit IDs after dropping an attribution line from the history
+2673e78d888eb1973d7ca9099ceb6c9a98c91067,8b07d71756c0777bc3ab932000abf5001a8e173e,2026-10-23,Matthew Wei,"T11: S2c, exposed pages, refusal classes, stale pages after recovery, B's WAL arms"
+4f06c134f88ea413b81839991f68c0fac8561cda,0ddec160fd81db7b3557201ff335a4bcdfefd678,2026-10-23,Matthew Wei,"T11: count stale pages before pg_amcheck, mask page-level hints, zero WAL size is the default arm"
+e1ee749a730b1a488b4cc405f1eaa34e2737d2ae,5c76649fe3eb976dad7685a749c08658e3895b43,2026-10-23,Matthew Wei,"EXP-09/10 analysis script, written and dry-run before the registered results; log the evening's build"
+a83dfb9401c4119c2f904527d486b12318954b49,94479661be7e8eb0b9ebbc187c77d655ba2a719c,2026-10-23,Matthew Wei,install_incumbents.sh: build pg_probackup from its official source when Postgres Pro's repository can't be reached
+b455c2950310915bb00f8f9c3f475ce98f908f31,185ab533b1d1aeb33ce25bf9d5f1c647fab94577,2026-10-23,Matthew Wei,install_incumbents.sh: the source build of pg_probackup needs gettext's msgfmt
+11996707587ce2e7fdf3df4027398807a45bf54e,21d2afa36e722f7c5feee84b6401a9cf1ce9e98f,2026-10-23,Matthew Wei,install_incumbents.sh: build pg_probackup against PostgreSQL 17's own libpq headers and libraries
+a6d9795cea3af67af2f801506fa8b81a4c75c544,58e3008b5197741bcf73f08f59141fb96c770456,2026-10-23,Matthew Wei,EXP-09 results and EXP-10's ext4 arms: v1's path takes 2.7 s against the full copy's 3.1 s for local changes; in place saves 1.6 s
+c8c8c4564cb429327e7f668123da3425494af169,1a553c6bfda6729bb3da10c13df0dc9781a8a442,2026-10-23,Matthew Wei,"EXP-08 analysis script, written and dry-run on smoke data before the registered results"
+e569d5522a397122e58ecfc97989826b0dc39194,371434c3b4e47a36d2f3cffe1274f1de95a086d7,2026-10-23,Matthew Wei,"Early write-back: flush a long copy from B every 8 MiB, not once after it"
+53cbc25ef18f82a1edf715d55c65e3dd0b89e1c5,b3b632ddc54e6a7b7c5d6221c429176cc9adf10c,2026-10-23,Matthew Wei,EXP-09/10: corrections from the independent recheck
+8d165a50316740d0b6b40b77267f545e4694458d,95415048787ee5f0ee5ddda5afdb7474d3773354,2026-10-23,Matthew Wei,"EXP-08 part B: pgBackRest delta restore against pgdelta, with the backup already in the repository"
+130be1493707cc0058be3f4f51c642e71bbf767d,94a4622822d44f912d0c98fe37b0520d5100e7e3,2026-10-23,Matthew Wei,"EXP-08 part A: pg_probackup catchup returns wrong data on two diverged copies, WAL-G refuses them, pg_rewind repairs them when B kept its WAL, pgdelta is correct on all"
+f708ea54172b99cb05e21892101a21ba6caa5deb,f6ef716a311003258ff4904b222fc93196f285b9,2026-10-23,Matthew Wei,"infra: reformat_dest_ext4.sh, to return dest's /data to startup.sh's ext4 for EXP-10's last sweep"
+d39603ec82a03e0dc15ed3ec00d8f105c4dbbb6d,885006a28f12e0a41eb879a1d0ded68036ffaf46,2026-10-23,Matthew Wei,EXP-08: corrections from the independent recheck
+78288d7fbef3da9f9be6eaf1eaceab489b323c8a,5458fe91a391d2e4f49b5883325f5697ed01935a,2026-10-23,Matthew Wei,"EXP-10 done: XFS clones adopted where available; the fixed early write-back saves 0.94-0.98 s, the fsync thread still a little more"
+ec667a494bc11c21801c1f07c0300b1a5a85ecf6,4628b0fbafdd4932e5ffbf2f9191034dcd436995,2026-10-23,Matthew Wei,"Ledger, README, log and experiment index updated with what T3, T8a and T11 settled; queue re-ranked"
+bdd61c96b53076a2f5b471be98104e5555bbd9e3,cf7a740e0d0c0cd7ae53f5653165f5c4b165874d,2026-10-23,Matthew Wei,"Second recheck: EXP-10's (b) judged as registered (failed in all three workloads), summaries keep their caveats, D53 to B, D87 folded into D58, one queue"
+49e0102524db6286b71530de46ce92364d65cb96,1349218383be28785f0239699581e179e299e68d,2026-10-23,Matthew Wei,"Third check: the clone result explained by the timers, not by cached pages; four risks to v1's HA result; D01 back to C"
+7c33cfc56a6205a4faaafd79e26a074228c689ef,1e3076afc6a4ac82ae7e41ab54a74ed950a7bba6,2026-10-23,Matthew Wei,"Fourth check: EXP-10 reports only what the timers show about the clone result; D02b split off; T9, T10a and T11b notes made testable"
+8eddfcc90568ea5d5bca690d5b14591191a68b10,58d2cbc45c2cc8133b8cf9e780ff3e87c6654c08,2026-10-23,Matthew Wei,"Fifth check: T9 keeps EXP-09's undecided band; the clone comparison is not presented as a bound; T10a, T11b and D02b made explicit"

@@ -65,7 +65,7 @@ An independent reviewer checked the first version before anything ran. Changes:
 
 ### Added October 23, after the ext4 results and before the rerun
 
-- **Early write-back reruns.** The first sweep's write-back arm started write-back only after each whole-file copy (see the results below). The fixed engine starts it every 8 MiB during the copy (commit e569d55).
+- **Early write-back reruns.** The first sweep's write-back arm started write-back only after each whole-file copy (see the results below). The fixed engine starts it every 8 MiB during the copy (commit 371434c).
 - **When and with what:** the arm reruns in the final ext4 sweep, next to that sweep's baseline (`pgdelta`) and fsync-thread arm, with the same workloads, 5 repeats, unthrottled.
 - **What stays the same:** prediction (b) and its rule. Judged on the rerun's own baseline, the fixed write-back arm replaces the first measurement of write-back only.
 
@@ -94,7 +94,7 @@ An independent reviewer checked the first version before anything ran. Changes:
 
 **The receiver's own timers explain the differences** (hot; medians of each timer over the 5 runs):
 - **Baseline:** the write phase took 3.07 s: 1.35 s copying B's bytes and 1.67 s flushing.
-- **Early write-back:** the fsync fell to 0.43 s, but the write phase stayed at 3.08 s, because the flushing moved into the `sync_file_range` calls (1.2 s). **The arm didn't test what it was meant to.** For a file copied whole from B, which is most files with local changes, write-back started once, after the copy, not every 8 MiB during it. So the hot and append runs made only 6–7 calls of about 300 MB each (uniform: 150 calls; per-run counts are in the receiver logs). The code is fixed (commit e569d55, with a regression test), and the arm reruns in the final ext4 sweep.
+- **Early write-back:** the fsync fell to 0.43 s, but the write phase stayed at 3.08 s, because the flushing moved into the `sync_file_range` calls (1.2 s). **The arm didn't test what it was meant to.** For a file copied whole from B, which is most files with local changes, write-back started once, after the copy, not every 8 MiB during it. So the hot and append runs made only 6–7 calls of about 300 MB each (uniform: 150 calls; per-run counts are in the receiver logs). The code is fixed (commit 371434c, with a regression test), and the arm reruns in the final ext4 sweep.
 - **fsync on a thread:** the thread spent 1.63 s flushing, but the main loop waited only 0.66 s for it, and the write phase fell to 2.15 s. The figure shows the median run's own values (it waited 0.76 s in that run).
 - **In place:** nothing is copied. The write phase is 0.14 s, of which 0.08 s is fsync (0.79 and 0.43 s for uniform, which writes about 610 MB of pages).
 

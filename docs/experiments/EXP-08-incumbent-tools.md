@@ -1,6 +1,6 @@
 # EXP-08: How do the incumbent refresh tools compare where pgdelta claims its edge?
 
-Status: **done** (results below, October 23–24, 2026). Pre-registered October 23, 2026, before the tooling for it ran. It was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026), and the first version is in git (commit 4cda743). This is test T11 of the [decision ledger](../DECISIONS.md#t11-incumbent-tools-where-pgdelta-claims-its-edge), whose registered predictions are marked "ledger" below.
+Status: **done** (results below, October 23–24, 2026). Pre-registered October 23, 2026, before the tooling for it ran. It was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026), and the first version is in git (commit 6ec413f). This is test T11 of the [decision ledger](../DECISIONS.md#t11-incumbent-tools-where-pgdelta-claims-its-edge), whose registered predictions are marked "ledger" below.
 
 ## Question
 
@@ -129,7 +129,7 @@ An independent reviewer checked the first version against the ledger and EXP-04b
 
 ## Results, part A: correctness on tricky old copies
 
-*Corrected October 24 after an independent recheck (18 findings, 11 major). The first version, in git as 130be14, explained a flagged page wrongly and didn't say how pgdelta and WAL-G's push/fetch mode actually ran.*
+*Corrected October 24 after an independent recheck (18 findings, 11 major). The first version, in git as 94a4622, explained a flagged page wrongly and didn't say how pgdelta and WAL-G's push/fetch mode actually ran.*
 
 **Run:** October 24, 2026, 00:00–00:05 UTC, on `pgd-dest` (Debian 12, PostgreSQL 17.11 from PGDG), both WAL arms, one run per (scenario, tool), 200,000 rows.
 

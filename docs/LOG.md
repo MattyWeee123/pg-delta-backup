@@ -3,24 +3,32 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24 (later): commit history rewritten so the commits link to Matt's GitHub account
+
+**Why:** GitHub showed "Matthew Wei authored and Matthew Wei committed" on most commits, linked to no account. This repository had no `user.email` set, so git used a made-up address from the laptop's hostname, and GitHub can't link an address it can't verify.
+
+**What changed:** the 65 commits with that address (or a second hostname address) now carry Matt's GitHub noreply address, as author and committer, with the committer date set to the author date. Nothing else changed: every commit's files are identical, and teammates' commits keep their own names and addresses. But a commit's ID covers its parents, so 86 of the 91 commits on `main` have new IDs, back to October 9. This repository's git identity is now set, so new commits link too.
+
+**Where old IDs are quoted:** this log, EXP-08 and EXP-10 now cite the new IDs. Teammates' specs, VALIDATION.md's CI records, the benchmark provenance files and the runs' `run.json` keep the IDs they recorded, since those record what actually ran; [the hash map](archive/2026-10-24-commit-hash-map.csv) gives the new ID for each.
+
 ## 2026-10-24 (later): four more rechecks; EXP-10's verdict on (b) corrected
 
 **Why:** the first rechecks ran before EXP-10's XFS arm and the write-back rerun existed, and before the ledger, README and index were updated. So a second independent recheck covered those, against the raw sweeps and the write-ups. Each round of corrections was then checked again, because a correction can itself be wrong, and twice one was.
 
-**Second recheck:** 21 problems, 4 major, corrected in commit bdd61c9:
+**Second recheck:** 21 problems, 4 major, corrected in commit cf7a740:
 - **(b) was judged against its registration.** I had compared the rerun's fsync thread with the rerun's baseline and called (b) held for local changes. The dated note allowed the rerun to replace only the write-back measurement. Judged that way, (b) failed in all three workloads (the better alternative saves 0.68, 0.99 and 0.996 s). The rule's outcome is unchanged: the fsync moves to a thread. For local changes the saving sits on the 1.0 s line in every way of counting it (0.99–1.04 s).
 - **The summaries had dropped caveats** that the write-ups keep: pgdelta ran in staged mode in T11, so its edge over `pg_probackup` is not yet shown from a live server; v1's 2.7 s was on a stopped source, and T2's registered prediction would reverse it.
 - **Two grades:** D53 (copy-then-patch) goes from A to B, since it ties gap-fill and its XFS advantage is inferred; D87 duplicated D58 and is folded into it. The October 24 scorecard is now 6 A, 6 B, 5 C, 12 D, 3 X and 3 moot.
 - **EXP-10 now reports the verifier's wait,** as its revision required.
 - **One queue,** not two that disagreed, and a section for T11b.
 
-**Third check, of those corrections** (2 major, 15 minor; commit 49e0102):
+**Third check, of those corrections** (2 major, 15 minor; commit 1349218):
 - **My first explanation of the clone result was wrong.** I had written that about half of the write phase's saving on XFS comes back as the verifier reading cloned pages from disk. For local changes the write phase falls 2.8 s and the transfer only 1.4 s; the final wait for the verifier is only about half of the 1.4 s that doesn't reach the transfer. I replaced it with an explanation the fourth check then rejected (below).
 - **The README listed two risks to v1's HA result** where EXP-09 names four (T2, T8, beyond RAM, persistent disks).
 - **D01 goes back to C:** its positioning against the incumbents was never measured from a live server, which is T8's. D02's A was scoped to the incremental hand-off.
 - Also: the figure compares the ext4 new-copy arms within one sweep; the summaries give pgBackRest's registered time-rule outcome; stale passages in the ledger carry dated notes.
 
-**Fourth check, of the third round's fixes** (6 major, 11 minor; commit 7c33cfc):
+**Fourth check, of the third round's fixes** (6 major, 11 minor; commit 1e3076a):
 - **My second explanation still claimed more than the timers show.** It said the extra waiting was mostly hashing B, and that in place's similar wait showed reading cloned pages adds only 0.13–0.18 s. No timer counts disk reads, and the untimed part has no breakdown. EXP-10 now reports only what the timers show: the final wait for the verifier and the untimed time both grow, the background hashing and verifying take longer, and in place on ext4, with no clones, shows most of the same growth.
 - **Ledger:** D02's pg_rewind half becomes its own row, D02b; the T9 persistent-disk note predicted the wrong direction (both methods move 2.1 GB through the disk, so the ratio should rise toward 1.0); T10a judges slowdown per source CPU-second; three dates corrected (arm (e) ran October 23).
 
@@ -86,11 +94,11 @@ Plus two smoke runs. Every output was verified.
 
 | Before | After | Where the old ID appears |
 |---|---|---|
-| `6936143` | `03129f2` | the decision ledger's commit, cited in this log |
-| `625285e` | `f4d0b93` | the owner-decisions commit |
-| `80f01f5` | `4cda743` | EXP-08/09/10's first pre-registration (EXP-08 now cites the new ID) |
-| `42aa35f` | `c921186` | the revised pre-registrations |
-| `c48e853` | `d21cc64` | the code deployed to the VMs for EXP-08/09/10: recorded in each run's `DEPLOYED.json` and `run.json`. The tree hash recorded there is unchanged. |
+| `6936143` | `c5e2296` | the decision ledger's commit, cited in this log |
+| `625285e` | `f9348df` | the owner-decisions commit |
+| `80f01f5` | `6ec413f` | EXP-08/09/10's first pre-registration (EXP-08 now cites the new ID) |
+| `42aa35f` | `fa29cbd` | the revised pre-registrations |
+| `c48e853` | `b77f33d` | the code deployed to the VMs for EXP-08/09/10: recorded in each run's `DEPLOYED.json` and `run.json`. The tree hash recorded there is unchanged. |
 
 ## 2026-10-23 (night): sponsor questions closed by decision; next, T11, T8a and T3
 
