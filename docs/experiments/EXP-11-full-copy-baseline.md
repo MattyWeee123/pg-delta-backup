@@ -387,6 +387,9 @@ An independent check of the revised version found 8 more problems, 2 major, and 
 - **The cut order puts the warm-source block before uniform's repeats,** says what happens if the projection is still over the line after every cut, and records the cut line, 3.5 hours, as the lead's decision.
 - **Smaller:** a `parcopy` run with the wrong `fsync` count fails A5; every ratio is also given at matched parallelism; E15's and E9's wording corrected.
 
+**After a review of the harness build (October 24, before running)**
+- **The run lines carry check (a)'s idle noise** (`--dirty-noise-mib $NOISE`, from smoke item 5). Without it, both sweeps would have judged check (a) against 4 MiB alone, not the registered limit. No rule changes.
+
 ## Limitations, known before running
 
 - **The data shape caps per-file parallelism.** Two heap files hold most of the 2.1 GB, and released tools split by file. At TB scale, tables split into 1 GiB segments that balance well, so a released parallel copy would gain more there. **This favours v1.**
