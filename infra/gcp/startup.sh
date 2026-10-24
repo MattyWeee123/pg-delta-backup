@@ -42,6 +42,17 @@ if ! command -v strace >/dev/null; then
   "${APT[@]}" update
   "${APT[@]}" install --no-install-recommends strace
 fi
+# EXP-12: zstd compresses the load's per-transaction logs before they are fetched; fincore (util-linux)
+# records what the source's page cache holds before every window, and where Debian's util-linux lacks
+# it, util-linux-extra has it.
+if ! command -v zstd >/dev/null; then
+  "${APT[@]}" update
+  "${APT[@]}" install --no-install-recommends zstd
+fi
+if ! command -v fincore >/dev/null; then
+  "${APT[@]}" update
+  "${APT[@]}" install --no-install-recommends util-linux-extra
+fi
 # VMs provisioned before pgbackrest and xfsprogs were (PGDG is configured above by then).
 if [ ! -x /usr/bin/pgbackrest ] || [ ! -x /usr/sbin/mkfs.xfs ]; then
   "${APT[@]}" update

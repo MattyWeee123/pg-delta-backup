@@ -33,6 +33,22 @@ command never gets in the way.
     agent.py sysctl get NAME... | set NAME=VALUE...
                                            kernel settings; set through sudo -n sysctl
 
+EXP-12 (T10a), the source's slowdown under a fixed-rate load:
+
+    agent.py evict PATH... --exclude NAME  posix_fadvise(DONTNEED) of every file below each PATH
+    agent.py fincore PATH...               resident bytes of every file below each PATH
+    agent.py burn --procs 4 --seconds 2    busy processes at nice 0 (the CPU reference)
+    agent.py load-pause 2.0                SIGSTOP, then SIGCONT, to the load's pgbench, both
+                                           stamped (the positive control)
+    agent.py settle-gate --rate R ...      until the load's last 10 progress lines pass the gate
+    agent.py clock-probe --listen|--connect IP:PORT
+                                           a timestamp exchange: the far clock's offset
+    agent.py sampler start|stop|run --out DIR
+                                           the 0.1-s sampler of the source's processes and the
+                                           pgbench threads' run-queue wait, with 1-s SQL readings
+    agent.py compress DIR                  zstd of every file below DIR (the load's logs)
+    agent.py run --tee ...                 the command's output copied to stdout as it arrives
+
 Standard library only; runs with the system python3 on Debian 12.
 """
 from __future__ import annotations
@@ -45,7 +61,10 @@ from pathlib import Path
 import platform
 import resource
 import shutil
+import signal
 import socket
+import statistics
+import struct
 import subprocess
 import sys
 import threading
@@ -63,7 +82,7 @@ RESULT_PREFIX = '@@EXP04@@ '
 LOG_TAIL_BYTES = 64 * 1024
 BLAST_CHUNK = 1 << 20
 PG_TOOLS = ('postgres', 'pg_basebackup', 'pg_combinebackup', 'pg_verifybackup', 'pgbench',
-            'pg_controldata')
+            'pg_controldata', 'pg_amcheck', 'pg_dump', 'pg_test_fsync')
 METADATA = 'http://metadata.google.internal/computeMetadata/v1/instance/'
 GNU_TIME = '/usr/bin/time'  # Debian package `time` (infra/gcp/startup.sh installs it)
 # The kernel's write-back settings recorded per VM (EXP-11 changes one on dest for full_wb).
@@ -71,6 +90,14 @@ VM_DIRTY = ('dirty_background_ratio', 'dirty_background_bytes', 'dirty_ratio', '
             'dirty_expire_centisecs', 'dirty_writeback_centisecs')
 WRITE_CHUNK = 1 << 20  # durable-write-test: each write
 READ_CHUNK = 4 << 20  # read-test: each read
+FINCORE_BATCH = 500  # fincore: files per invocation of util-linux's fincore
+CLOCK_EXCHANGE = struct.Struct('!d')  # clock-probe: one double each way
+# The sampler: its process list is rescanned every SAMPLER_RESCAN seconds; between, only the processes it
+# follows are read each tick. Its output lines are flushed every SAMPLER_FLUSH seconds.
+SAMPLER_RESCAN = 1.0
+SAMPLER_FLUSH = 1.0
+SAMPLER_FILES = {'samples': 'sampler.jsonl', 'sql': 'sampler-sql.jsonl', 'pid': 'sampler.pid',
+                 'final': 'sampler-final.json', 'log': 'sampler.log'}
 
 
 def emit(value) -> None:
@@ -169,6 +196,12 @@ def cmd_env(args) -> dict:
         'strace': (text_of(['strace', '-V']) or '').split('\n')[0] or None,
         'pg_basebackup_sync_method': '--sync-method' in (text_of([str(bin_dir / 'pg_basebackup'), '--help'])
                                                          or ''),
+        # EXP-12 (T10a): both clocks' state (its A8 gate), and the tools the load and its probes use. The
+        # PostgreSQL tools' versions are in `postgresql` (pgbench, pg_amcheck, pg_dump, pg_test_fsync).
+        'chrony': text_of(['chronyc', 'tracking']),
+        'zstd': (text_of(['zstd', '--version']) or '').split('\n')[0] or None,
+        'fincore': (text_of(['fincore', '--version']) or '').split('\n')[0] or None,
+        'shm': text_of(['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS,SIZE', '/dev/shm']),
     }
 
 
@@ -219,9 +252,19 @@ def cmd_run(args) -> dict:
         time_file.unlink(missing_ok=True)
     started_utc = time.time()
     started = time.monotonic()
+    tee = getattr(args, 'tee', False)
     with open(log, 'wb') as stream:
-        process = subprocess.Popen(launch, stdout=stream, stderr=subprocess.STDOUT,
+        process = subprocess.Popen(launch, stdout=subprocess.PIPE if tee else stream, stderr=subprocess.STDOUT,
                                    stdin=subprocess.DEVNULL, cwd=args.cwd or None, env=env)
+        if tee:
+            # EXP-12: each line to this agent's stdout too, as it arrives, so the orchestrator can stamp it on
+            # arrival over SSH (the staged capture's --verbose lines).
+            for line in iter(process.stdout.readline, b''):
+                stream.write(line)
+                stream.flush()
+                sys.stdout.buffer.write(line)
+                sys.stdout.flush()
+            process.stdout.close()
         _, status, usage = os.wait4(process.pid, 0)
         process.returncode = os.waitstatus_to_exitcode(status)
     wall = time.monotonic() - started
@@ -632,6 +675,382 @@ def cmd_sysctl(args) -> dict:
     return {'set': wanted, 'values': sysctl_values(wanted), 'utc': time.time()}
 
 
+# --- EXP-12 (T10a) ------------------------------------------------------------------------
+
+def tree_files(paths, exclude) -> list[Path]:
+    """Every regular file below each path (or the path itself), without entries named in exclude."""
+    files = []
+    for item in paths:
+        root = Path(item)
+        if root.is_file():
+            files.append(root)
+            continue
+        for directory, dirnames, filenames in os.walk(root):
+            dirnames[:] = sorted(name for name in dirnames if name not in exclude)
+            for name in sorted(filenames):
+                path = Path(directory) / name
+                if name not in exclude and path.is_file() and not path.is_symlink():
+                    files.append(path)
+    return files
+
+
+def cmd_evict(args) -> dict:
+    """posix_fadvise(POSIX_FADV_DONTNEED) on every file below each PATH: their clean pages leave the page cache,
+    the rest of the cache (the live load's) stays. --sync runs `sync -f` of each PATH first (EXP-12's smoke item 8)."""
+    if not hasattr(os, 'posix_fadvise'):
+        raise SystemExit('posix_fadvise is not available here')
+    started = time.monotonic()
+    synced = None
+    if args.sync:
+        subprocess.run(['sync', '-f', *args.paths], check=True)
+        synced = round(time.monotonic() - started, 3)
+    files = tree_files(args.paths, set(args.exclude))
+    evicted = skipped = 0
+    for path in files:
+        try:
+            fd = os.open(path, os.O_RDONLY)
+        except FileNotFoundError:
+            skipped += 1
+            continue
+        try:
+            evicted += os.fstat(fd).st_size
+            os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    return {'paths': args.paths, 'excluded': sorted(args.exclude), 'files': len(files) - skipped, 'bytes': evicted,
+            'skipped': skipped, 'sync_seconds': synced, 'seconds': round(time.monotonic() - started, 3),
+            'utc': time.time()}
+
+
+def cmd_fincore(args) -> dict:
+    """Resident bytes of every file below each PATH, from util-linux's fincore (--json --bytes), per PATH."""
+    started = time.monotonic()
+    result = {}
+    for item in args.paths:
+        rows = []
+        files = [str(path) for path in tree_files([item], set(args.exclude))]
+        for index in range(0, len(files), FINCORE_BATCH):
+            output = subprocess.run(['fincore', '--json', '--bytes', *files[index:index + FINCORE_BATCH]],
+                                    capture_output=True, text=True)
+            if output.returncode != 0 and not output.stdout.strip():
+                raise SystemExit(f'fincore failed ({output.returncode}): {output.stderr.strip()[-2000:]}')
+            rows += measure.parse_fincore_json(output.stdout)
+        result[item] = measure.residency(rows)
+    return {'paths': result, 'seconds': round(time.monotonic() - started, 3), 'utc': time.time()}
+
+
+def cmd_burn(args) -> dict:
+    """EXP-12's CPU reference: --procs forked processes, each busy at nice 0 until --seconds have passed.
+
+    The window, on this machine's clock, runs from before the first fork to after the last one was reaped.
+    """
+    deadline = time.monotonic() + args.seconds
+    started_utc = time.time()
+    children = []
+    for _ in range(args.procs):
+        pid = os.fork()
+        if pid == 0:  # a busy loop, and nothing else, until the deadline
+            try:
+                while time.monotonic() < deadline:
+                    pass
+            finally:
+                os._exit(0)
+        children.append(pid)
+    cpu = 0.0
+    for pid in children:
+        _, _, usage = os.wait4(pid, 0)
+        cpu += usage.ru_utime + usage.ru_stime
+    return {'procs': args.procs, 'seconds': args.seconds, 'started_utc': started_utc, 'ended_utc': time.time(),
+            'nice': os.getpriority(os.PRIO_PROCESS, 0), 'cpu_seconds': round(cpu, 3)}
+
+
+def cmd_load_pause(args) -> dict:
+    """EXP-12's positive control: SIGSTOP to the load's current pgbench, --seconds later SIGCONT.
+
+    Both signals are stamped on this machine's clock (the source's, as pgbench's log is), just before and just
+    after each kill(2). SIGCONT is sent whatever happens, so the load never stays stopped.
+    """
+    run = measure.load_run(measure.read_load_state(args.load_dir))
+    if run is None:
+        raise SystemExit(f'no load runs (no current run in {measure.load_state_path(args.load_dir)})')
+    pid = int(run['pid'])
+    stop_before = time.time()
+    os.kill(pid, signal.SIGSTOP)
+    stop_after = time.time()
+    paused = time.monotonic()
+    try:
+        time.sleep(max(0.0, args.seconds - (time.monotonic() - paused)))
+    finally:
+        cont_before = time.time()
+        os.kill(pid, signal.SIGCONT)
+        cont_after = time.time()
+    return {'run_id': run['run_id'], 'pid': pid, 'seconds': args.seconds,
+            'sigstop_utc': [stop_before, stop_after], 'sigcont_utc': [cont_before, cont_after],
+            'paused_s': round(cont_before - stop_after, 6)}
+
+
+def cmd_settle_gate(args) -> dict:
+    """EXP-12's settle gate on the source: the load's -P 1 lines read here, so the wait costs one SSH call.
+
+    After --min-s, every --poll-s until the last --window-s progress lines pass measure.settle_gate, or --max-s
+    has passed: then `unsettled` (the run is flagged; the window still starts).
+    """
+    run = measure.load_run(measure.read_load_state(args.load_dir))
+    if run is None:
+        raise SystemExit('no load runs: nothing to settle against')
+    path = measure.progress_path(args.load_dir, run['run_id'])
+    started = time.monotonic()
+    time.sleep(max(0.0, args.min_s))
+    checks = 0
+    while True:
+        checks += 1
+        lines = measure.parse_progress(path.read_text(errors='replace'))
+        gate = measure.settle_gate(lines, time.time(), args.rate, window_s=args.window_s, tolerance=args.tolerance,
+                                   lag_ms=args.lag_ms)
+        waited = time.monotonic() - started
+        if gate['passed'] or waited >= args.max_s:
+            recent = [line for line in lines if line['t'] > gate['evaluated_utc'] - args.window_s]
+            return {**gate, 'unsettled': not gate['passed'], 'waited_s': round(waited, 3), 'checks': checks,
+                    'min_s': args.min_s, 'max_s': args.max_s, 'run_id': run['run_id'], 'recent': recent}
+        time.sleep(min(args.poll_s, max(0.0, args.max_s - waited)))
+
+
+def cmd_clock_probe(args) -> dict:
+    """A timestamp exchange over one TCP connection: the far clock's offset (its time minus ours), and the round trip.
+
+    --listen: print LISTENING, accept one connection, and answer each 8-byte request with this machine's time.time()
+    until the peer closes. --connect: --samples exchanges; the one with the shortest round trip gives the offset
+    (measure.clock_offset), its far stamp taken half way.
+    """
+    host, port = _hostport(args.listen or args.connect)
+    if args.listen:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+        listener.listen(1)
+        listener.settimeout(args.timeout)
+        print('LISTENING', flush=True)
+        conn, peer = listener.accept()
+        listener.close()
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        answered = 0
+        with conn:
+            while len(conn.recv(CLOCK_EXCHANGE.size, socket.MSG_WAITALL)) == CLOCK_EXCHANGE.size:
+                conn.sendall(CLOCK_EXCHANGE.pack(time.time()))
+                answered += 1
+        return {'answered': answered, 'peer': peer[0]}
+    samples = []
+    with socket.create_connection((host, port), timeout=args.timeout) as conn:
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        for _ in range(args.samples):
+            sent = time.time()
+            conn.sendall(CLOCK_EXCHANGE.pack(sent))
+            far = CLOCK_EXCHANGE.unpack(conn.recv(CLOCK_EXCHANGE.size, socket.MSG_WAITALL))[0]
+            samples.append((sent, far, time.time()))
+    return {**measure.clock_offset(samples), 'peer': host, 'utc': time.time(),
+            'rtt_median_s': round(statistics.median(received - sent for sent, _, received in samples), 6)}
+
+
+def cmd_compress(args) -> dict:
+    """zstd of every regular file below DIR that isn't already compressed and isn't named in --keep, in place."""
+    keep = set(args.keep)
+    files = [str(path) for path in tree_files([args.dir], set()) if path.suffix != '.zst' and path.name not in keep]
+    started = time.monotonic()
+    before = sum(Path(path).stat().st_size for path in files)
+    if files:
+        result = subprocess.run(['zstd', '-q', '--rm', '-T0', *files], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise SystemExit(f'zstd failed ({result.returncode}): {result.stderr.strip()[-2000:]}')
+    after = sum(Path(path + '.zst').stat().st_size for path in files)
+    return {'files': len(files), 'bytes': before, 'compressed_bytes': after,
+            'seconds': round(time.monotonic() - started, 3)}
+
+
+# --- the sampler (EXP-12) ----------------------------------------------------------------------
+
+def proc_text(path) -> str | None:
+    try:
+        with open(path, 'rb') as stream:
+            return stream.read().decode('utf-8', 'replace')
+    except OSError:
+        return None
+
+
+def proc_ticks(pid: int, proc: Path = Path('/proc')):
+    """(utime + stime ticks, comm, ppid) of a process from /proc/<pid>/stat; None once it has gone."""
+    text = proc_text(proc / str(pid) / 'stat')
+    if text is None:
+        return None
+    comm = text[text.index('(') + 1:text.rindex(')')]
+    fields = text[text.rindex(')') + 2:].split()
+    return int(fields[11]) + int(fields[12]), comm, int(fields[1])
+
+
+class Sampler:
+    """EXP-12's sampler on the source: every tick (0.1 s), the VM-wide CPU and run queue, the CPU of the processes
+    it follows by group (measure.sampler_group: pgbench, the backends, walsenders, checkpointer, pg_basebackup,
+    pgdelta and its workers, burn, itself), each pgbench thread's run and run-queue wait (schedstat), and the
+    disks' counters; one JSON line per tick. Groups hold the ticks their processes used since the previous tick
+    (a process first seen after the start brings all its ticks, which it used since it began). Its process list is
+    rescanned every SAMPLER_RESCAN seconds, the load's current pgbench PID with it."""
+
+    def __init__(self, out: Path, load_dir, proc: Path = Path('/proc')):
+        self.out, self.load_dir, self.proc = out, load_dir, proc
+        self.groups: dict[int, str] = {}  # pid -> group, for the processes followed
+        self.ticks: dict[int, int] = {}
+        self.pgbench: int | None = None
+        self.rescanned = None
+
+    def rescan(self, first: bool = False) -> None:
+        run = measure.load_run(measure.read_load_state(self.load_dir)) if self.load_dir else None
+        self.pgbench = int(run['pid']) if run else None
+        own = os.getpid()
+        seen = {}
+        entries = [int(name) for name in os.listdir(self.proc) if name.isdigit()]
+        stats = {pid: proc_ticks(pid, self.proc) for pid in entries}
+        for pid in sorted(entries):
+            stat = stats.get(pid)
+            if stat is None:
+                continue
+            ticks, comm, ppid = stat
+            if pid in self.groups:
+                seen[pid] = self.groups[pid]
+                continue
+            cmdline = (proc_text(self.proc / str(pid) / 'cmdline') or '').replace('\0', ' ').strip()
+            parent = seen.get(ppid) or self.groups.get(ppid)
+            group = 'sampler' if pid == own else measure.sampler_group(comm, cmdline, parent)
+            if group:
+                seen[pid] = group
+                # Processes already there at the start count from now on; later ones bring their ticks.
+                self.ticks[pid] = ticks if first else 0
+        self.groups = seen
+        self.ticks = {pid: self.ticks.get(pid, 0) for pid in seen}
+
+    def sample(self) -> dict:
+        now = time.time()
+        if self.rescanned is None or time.monotonic() - self.rescanned >= SAMPLER_RESCAN:
+            self.rescan(first=self.rescanned is None)
+            self.rescanned = time.monotonic()
+        stat = proc_text(self.proc / 'stat') or ''
+        cpu = measure.parse_proc_stat(stat)
+        used = dict.fromkeys(measure.SAMPLER_GROUPS, 0)
+        for pid, group in list(self.groups.items()):
+            current = proc_ticks(pid, self.proc)
+            if current is None:
+                del self.groups[pid]
+                self.ticks.pop(pid, None)
+                continue
+            used[group] = used.get(group, 0) + max(0, current[0] - self.ticks.get(pid, 0))
+            self.ticks[pid] = current[0]
+        threads = {}
+        if self.pgbench is not None:
+            tasks = self.proc / str(self.pgbench) / 'task'
+            try:
+                for tid in os.listdir(tasks):
+                    parsed = measure.parse_schedstat(proc_text(tasks / tid / 'schedstat') or '')
+                    if parsed:
+                        threads[tid] = list(parsed)
+            except OSError:
+                pass
+        disks = {}
+        diskstats = proc_text(self.proc / 'diskstats')
+        if diskstats:
+            disks = {device: [counters[field] for field in measure.DISK_COUNTERS]
+                     for device, counters in measure.parse_diskstats(diskstats).items()
+                     if measure.DISK_DEVICE.match(device)}
+        return {'t': round(now, 6), 'cpu': [cpu[field] for field in measure.CPU_FIELDS[:8]],
+                'run': measure.parse_proc_running(stat), 'g': {key: value for key, value in used.items() if value},
+                'pgbench': self.pgbench, 'th': threads, 'd': disks}
+
+
+def sampler_paths(out) -> dict:
+    return {key: Path(out) / name for key, name in SAMPLER_FILES.items()}
+
+
+def sampler_run(args) -> dict:
+    """The sampler's loop, until SIGTERM: a tick every --interval, and psql's \\watch of measure.SAMPLER_SQL every
+    second over one held connection (when --psql is given), each to its own JSON-lines file. At the end its own CPU
+    and how many ticks it took, to sampler-final.json (EXP-12's smoke item 11)."""
+    paths = sampler_paths(args.out)
+    stopping = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+    watch = None
+    if args.psql:
+        sql_out = open(paths['sql'], 'w')
+        watch = subprocess.Popen([args.psql, '-X', '-A', '-t', '-q', '-h', args.host, '-p', str(args.port), '-U',
+                                  args.user, '-d', args.database], stdin=subprocess.PIPE, stdout=sql_out,
+                                 stderr=subprocess.STDOUT, text=True)
+        watch.stdin.write(f'{measure.SAMPLER_SQL} \\watch {args.sql_interval}\n')
+        watch.stdin.flush()
+    sampler = Sampler(Path(args.out), args.load_dir)
+    started, ticks, flushed = time.monotonic(), 0, time.monotonic()
+    late = 0
+    with open(paths['samples'], 'w') as stream:
+        due = time.monotonic()
+        while not stopping.is_set():
+            stream.write(json.dumps(sampler.sample(), separators=(',', ':')) + '\n')
+            ticks += 1
+            if time.monotonic() - flushed >= SAMPLER_FLUSH:
+                stream.flush()
+                flushed = time.monotonic()
+            due += args.interval
+            wait = due - time.monotonic()
+            if wait < 0:  # a tick that overran: the schedule restarts from now
+                late += 1
+                due = time.monotonic()
+            stopping.wait(max(0.0, wait))
+    if watch is not None:
+        watch.terminate()
+        try:
+            watch.wait(10)
+        except subprocess.TimeoutExpired:
+            watch.kill()
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    final = {'ticks': ticks, 'late_ticks': late, 'interval_s': args.interval,
+             'seconds': round(time.monotonic() - started, 3),
+             'cpu_seconds': round(usage.ru_utime + usage.ru_stime, 3), 'ended_utc': time.time()}
+    paths['final'].write_text(json.dumps(final))
+    return final
+
+
+def cmd_sampler(args) -> dict:
+    """start: the sampler under setsid (`sampler run`), its PID in DIR/sampler.pid. stop: SIGTERM, then its final
+    record. run: the loop itself (sampler_run)."""
+    paths = sampler_paths(args.out)
+    if args.action == 'run':
+        return sampler_run(args)
+    if args.action == 'start':
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        argv = [sys.executable, str(Path(__file__).resolve()), 'sampler', 'run', '--out', str(args.out),
+                '--interval', str(args.interval), '--sql-interval', str(args.sql_interval)]
+        if args.load_dir:
+            argv += ['--load-dir', str(args.load_dir)]
+        if args.psql:
+            argv += ['--psql', args.psql, '--host', args.host, '--port', str(args.port), '--user', args.user,
+                     '--database', args.database]
+        with open(paths['log'], 'w') as log:
+            process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                       start_new_session=True)
+        paths['pid'].write_text(str(process.pid))
+        return {'pid': process.pid, 'argv': argv, 'started_utc': time.time(), 'out': str(args.out)}
+    try:
+        pid = int(paths['pid'].read_text())
+    except (OSError, ValueError):
+        raise SystemExit(f'no sampler runs ({paths["pid"]})')
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline and not paths['final'].exists():
+        time.sleep(0.05)
+    try:
+        final = json.loads(paths['final'].read_text())
+    except (OSError, ValueError):
+        final = None
+    return {'pid': pid, 'final': final, 'stopped_utc': time.time()}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -659,6 +1078,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('--env', action='append', metavar='KEY=VALUE')
     sub.add_argument('--gnu-time', metavar='PATH',
                      help="run the command under GNU time and report its own peak RSS")
+    sub.add_argument('--tee', action='store_true',
+                     help="copy the command's output to stdout as it arrives, and exit with its exit code")
     sub.add_argument('argv', nargs=argparse.REMAINDER)
     sub.set_defaults(func=cmd_run)
     sub = commands.add_parser('blast-recv')
@@ -705,6 +1126,58 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('action', choices=('get', 'set'))
     sub.add_argument('settings', nargs='+', metavar='NAME or NAME=VALUE')
     sub.set_defaults(func=cmd_sysctl)
+    # EXP-12 (T10a).
+    sub = commands.add_parser('evict')
+    sub.add_argument('paths', nargs='+')
+    sub.add_argument('--exclude', action='append', default=[], metavar='NAME',
+                     help='a file or directory name to leave alone (repeatable)')
+    sub.add_argument('--sync', action='store_true', help='sync -f each path first')
+    sub.set_defaults(func=cmd_evict)
+    sub = commands.add_parser('fincore')
+    sub.add_argument('paths', nargs='+')
+    sub.add_argument('--exclude', action='append', default=[], metavar='NAME')
+    sub.set_defaults(func=cmd_fincore)
+    sub = commands.add_parser('burn')
+    sub.add_argument('--procs', type=positive_int, default=4)
+    sub.add_argument('--seconds', type=float, default=2.0)
+    sub.set_defaults(func=cmd_burn)
+    sub = commands.add_parser('load-pause')
+    sub.add_argument('seconds', type=float)
+    sub.add_argument('--load-dir', default=measure.LOAD_LOG_DIR)
+    sub.set_defaults(func=cmd_load_pause)
+    sub = commands.add_parser('settle-gate')
+    sub.add_argument('--rate', type=float, required=True)
+    sub.add_argument('--load-dir', default=measure.LOAD_LOG_DIR)
+    sub.add_argument('--min-s', type=float, default=0.0, help='wait at least this long first')
+    sub.add_argument('--max-s', type=float, default=60.0, help='then give up after this long: unsettled')
+    sub.add_argument('--window-s', type=int, default=measure.SETTLE_WINDOW_S)
+    sub.add_argument('--tolerance', type=float, default=measure.SETTLE_TOLERANCE)
+    sub.add_argument('--lag-ms', type=float, default=measure.SETTLE_LAG_MS)
+    sub.add_argument('--poll-s', type=float, default=1.0)
+    sub.set_defaults(func=cmd_settle_gate)
+    sub = commands.add_parser('clock-probe')
+    side = sub.add_mutually_exclusive_group(required=True)
+    side.add_argument('--listen', metavar='IP:PORT')
+    side.add_argument('--connect', metavar='IP:PORT')
+    sub.add_argument('--samples', type=positive_int, default=50)
+    sub.add_argument('--timeout', type=float, default=60)
+    sub.set_defaults(func=cmd_clock_probe)
+    sub = commands.add_parser('compress')
+    sub.add_argument('dir')
+    sub.add_argument('--keep', action='append', default=[], metavar='NAME', help='a file name to leave as it is')
+    sub.set_defaults(func=cmd_compress)
+    sub = commands.add_parser('sampler')
+    sub.add_argument('action', choices=('start', 'stop', 'run'))
+    sub.add_argument('--out', required=True, help='its files (tmpfs on the source)')
+    sub.add_argument('--load-dir', default=measure.LOAD_LOG_DIR, help="the load's registry: pgbench's PID")
+    sub.add_argument('--interval', type=float, default=0.1)
+    sub.add_argument('--sql-interval', type=float, default=1.0)
+    sub.add_argument('--psql', help='psql, for the 1-s SQL readings (none without it)')
+    sub.add_argument('--host')
+    sub.add_argument('--port', type=int, default=5432)
+    sub.add_argument('--user', default='study')
+    sub.add_argument('--database', default='postgres')
+    sub.set_defaults(func=cmd_sampler)
     return parser
 
 
@@ -717,7 +1190,11 @@ def positive_int(text: str) -> int:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    emit(args.func(args))
+    result = args.func(args)
+    emit(result)
+    # run --tee: the orchestrator reads this exit code as the command's, as it would over a plain ssh.
+    if getattr(args, 'tee', False):
+        return result['exit_code'] if result['exit_code'] is not None and result['exit_code'] >= 0 else 1
     return 0
 
 
