@@ -16,8 +16,9 @@ Reported beside, not judged: the same medians for every repeat of every loaded b
 sizes of loaddb's tables at the trial's start and end, and a per-minute view of each whole load from its pgbench
 logs: per whole minute of completions from the load's start, completions per second, and p50 and p99 from a
 histogram of 400 bins per decade (each percentile within 0.6% of nearest-rank), over the load-only transactions (those
-completed outside every copy's and control's window, t0 to t1 + 15 s; `none`'s is load-only) and over all. The copy windows and the
-warm-up are marked. Writes docs/figures/exp12-drift.svg.
+completed outside every copy's and control's window, t0 to t1 + 15 s; `none`'s is load-only) and over all, up to the
+stop signal. The copy windows, the warm-up and the warm block's reads of the database (the untimed step before each
+of its settles, from the run records) are marked. Writes docs/figures/exp12-drift.svg.
 """
 from __future__ import annotations
 
@@ -225,6 +226,19 @@ def load_runs(sweep, trial):
     return out
 
 
+def warm_reads(sweep):
+    """The warm block's reads of the database, (start, stop) in seconds: each run's untimed source step, which ends
+    as its settle starts, where its cache policy was the warm read."""
+    out = []
+    for path in sorted((sweep / 'runs').glob('*/*.json')):
+        record = json.loads(path.read_text())
+        untimed = record.get('source_untimed') or {}
+        settle = (record.get('settle') or {}).get('started_utc')
+        if (untimed.get('cache') or {}).get('policy') == 'warm' and settle and untimed.get('seconds') is not None:
+            out.append((settle - untimed['seconds'], settle))
+    return sorted(out)
+
+
 def windows_of(every, blocks):
     """Every copy's or control's window in these blocks, t0 to t1 + 15 s, in whole microseconds (`none`'s is
     load-only)."""
@@ -233,7 +247,7 @@ def windows_of(every, blocks):
             and r['t1'] is not None]
 
 
-def figure(views, runs, every, tag):
+def figure(views, runs, every, reads, tag):
     loads = [v for v in views if v['minutes']]
     if not loads:
         return 'no per-minute view: no load logs'
@@ -262,6 +276,10 @@ def figure(views, runs, every, tag):
             for ax in (top, middle, bottom):
                 ax.axvspan((warmup['started_utc'] - start) / 60, (warmup['ended_utc'] - start) / 60,
                            color=COLORS['grey'], alpha=0.12, lw=0)
+        stop = view['run'].get('signalled_utc') or view['run'].get('stopped_utc')
+        for index, (a, b) in enumerate(r for r in reads if start <= r[0] <= stop):
+            bottom.axvline((a + b) / 2 / 60 - start / 60, color=COLORS['purple'], lw=0.9, ls=':',
+                           label='the warm block\'s read of the database' if index == 0 else None)
         early, late = (group(runs, block, which) for block, which in LOADS[view['run']['kind']])
         for rows, color, name in ((early, COLORS['blue'], 'earlier settles (judged)'),
                                   (late, COLORS['red'], 'later settles (judged)')):
@@ -273,11 +291,11 @@ def figure(views, runs, every, tag):
         middle.set_ylabel('p50 latency (ms)')
         bottom.set_ylabel('p99 latency (ms)')
         bottom.set_yscale('log')
-        bottom.set_xlabel('minutes from the load\'s start (orange: copy windows; grey: the warm-up)')
+        bottom.set_xlabel('minutes from the load\'s start')
         top.legend(loc='lower right', fontsize=8.5)
         middle.legend(loc='upper right', fontsize=8.5)
         bottom.legend(loc='upper right', fontsize=8.5)
-    fig.suptitle('EXP-12: does the load drift over the session?', fontsize=12)
+    fig.suptitle('EXP-12: does the load drift over the session?\n(orange: copy and control windows, t0 to t1 + 15 s; grey: the warm-up; dotted: the warm block\'s reads)', fontsize=11)
     fig.tight_layout()
     return str(plotting.save(fig, f'exp12-drift{tag}'))
 
@@ -330,7 +348,7 @@ def main(argv=None):
         for run in load_runs(sweep, trial):
             if run['missing']:
                 print(f"  the {run['kind']} load: missing logs {', '.join(run['missing'])}")
-            stop = run.get('stopped_utc') or run.get('signalled_utc')
+            stop = run.get('signalled_utc') or run.get('stopped_utc')  # the stop signal; pgbench exits later
             blocks = [block for block, _ in LOADS[run['kind']]]
             minutes = minute_view(run['paths'], run['started_utc'], stop, windows_of(every, blocks))
             warmups = [w for w in exp12.get(trial, 'load', 'warmups') or [] if w.get('run_id') == run['run_id']]
@@ -340,16 +358,25 @@ def main(argv=None):
             if not rows:
                 print(f"  the {run['kind']} load: no whole minute after its warm-up")
                 continue
-            first, last = rows[:10], rows[-10:]
             print(f"  the {run['kind']} load: {len(minutes)} whole minutes, {len(rows)} after the warm-up; completions per "
                   f"second {min(m['transactions'] for m in rows) / 60:,.0f}–{max(m['transactions'] for m in rows) / 60:,.0f};"
                   f" load-only p50 {fmt(min(m['p50_only_ms'] for m in rows), 2)}–{fmt(max(m['p50_only_ms'] for m in rows), 2)}"
-                  f" ms, p99 {fmt(min(m['p99_only_ms'] for m in rows), 2)}–{fmt(max(m['p99_only_ms'] for m in rows), 2)} ms;"
-                  f" medians over its first and last 10 such minutes: p50 {fmt(median(m['p50_only_ms'] for m in first), 3)}"
-                  f" and {fmt(median(m['p50_only_ms'] for m in last), 3)} ms, p99 {fmt(median(m['p99_only_ms'] for m in first), 2)}"
-                  f" and {fmt(median(m['p99_only_ms'] for m in last), 2)} ms (reported, not judged)")
+                  f" ms, p99 {fmt(min(m['p99_only_ms'] for m in rows), 2)}–{fmt(max(m['p99_only_ms'] for m in rows), 2)} ms")
+            # Each minute belongs to the block of the next run to start after it (reported, not judged).
+            starts = sorted((r['t0'], r['block']) for r in every if r['block'] in blocks and r['t0'] is not None)
+            for block in dict.fromkeys(blocks):
+                mine = [m for m in rows if next((b for t, b in starts if t >= run['started_utc'] + 60 * m['minute'] + 30),
+                                                starts[-1][1] if starts else None) == block]
+                if mine:
+                    print(f"    {block} block's {len(mine)} minutes: median load-only p50 "
+                          f"{fmt(median(m['p50_only_ms'] for m in mine), 3)} ms, p99 {fmt(median(m['p99_only_ms'] for m in mine), 2)}"
+                          f" ms; the largest p99 {fmt(max(m['p99_only_ms'] for m in mine), 2)} ms (reported, not judged)")
     if views:
-        print(figure(views, runs, every, args.tag))
+        reads = warm_reads(sweep)
+        if reads:
+            print(f"\nThe warm block's reads of the database (untimed, each ending as a settle starts): {len(reads)}, "
+                  f"{fmt(min(b - a for a, b in reads), 2)}–{fmt(max(b - a for a, b in reads), 2)} s each")
+        print(figure(views, runs, every, reads, args.tag))
 
 
 if __name__ == '__main__':
