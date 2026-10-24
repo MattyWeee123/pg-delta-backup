@@ -272,12 +272,88 @@ def fig_write_path(table, tag):
     return plotting.save(fig, f'exp10-write-path{tag}')
 
 
+def load_extra(sweep: Path):
+    """load() plus the columns EXP-10's later sweeps need: rsync's prep, the combine, shared bytes."""
+    rows = load(sweep)
+    extra = {}
+    with (sweep / 'summary.csv').open() as f:
+        for row in csv.DictReader(f):
+            extra[(row['trial_id'], row['repeat'], row['speed'], row['method'])] = {
+                k: number(row.get(k)) for k in ('prep_s', 'combine_s', 'output_shared_bytes')}
+    for run in rows:
+        run.update(extra.get((run['trial_id'], run['repeat'], run['speed'], run['method']), {}))
+    return rows
+
+
+def unthrottled(rows):
+    """pattern -> method -> passing, verified runs at the unthrottled link."""
+    out = {}
+    for run in rows:
+        if run['speed'] == 'unthrottled' and run['status'] == 'pass' and run['verified']:
+            out.setdefault(run['pattern'], {}).setdefault(run['method'], []).append(run)
+    return out
+
+
+def m(runs, col):
+    values = [r[col] for r in runs if r.get(col) is not None]
+    return statistics.median(values) if values else None
+
+
+def exp10_later(before, xfs, after):
+    """EXP-10 arm (d) on XFS against the ext4 sweeps before and after it, and the write-back rerun."""
+    b, x, a = unthrottled(before), unthrottled(xfs), unthrottled(after)
+    lines = ['## EXP-10 (d): XFS against ext4 before and after (unthrottled, medians)',
+             '| Workload | full: ext4 before / XFS / ext4 after | pgdelta transfer: ext4 before / XFS / ext4 after | '
+             'pgdelta write phase on XFS | in place transfer on XFS | rsync prep on XFS | combine (copy-file-range) on XFS |',
+             '|---|---|---|---:|---:|---:|---:|']
+    adopt = {}
+    for p in PATTERNS:
+        def g(d, meth, col):
+            return m(d.get(p, {}).get(meth, []), col)
+        fb, fx, fa = g(b, 'full', 'total_s'), g(x, 'full', 'total_s'), g(a, 'full', 'total_s')
+        tb, tx, ta = g(b, 'pgdelta', 'transfer_s'), g(x, 'pgdelta', 'transfer_s'), g(a, 'pgdelta', 'transfer_s')
+        write = g(x, 'pgdelta', 'rebuild_s')
+        lines.append(f'| {p} | {fb:.2f} / {fx:.2f} / {fa:.2f} | {tb:.2f} / {tx:.2f} / {ta:.2f} | {write:.2f} | '
+                     f'{g(x, "pgdelta_inplace", "transfer_s"):.2f} | {g(x, "rsync_8k", "prep_s"):.2f} | '
+                     f'{g(x, "incremental_cfr", "combine_s"):.2f} |')
+        adopt[p] = write <= 1.5 and (tb - tx) >= 0.5 and (ta - tx) >= 0.5
+    local_ok = all(m(x[p]['pgdelta'], 'rebuild_s') <= 0.6 for p in LOCAL)
+    uni = m(x['uniform']['pgdelta'], 'rebuild_s')
+    lines.append(f'- **(d)** write phase ≤ 0.6 s for local changes: {"held" if local_ok else "failed"}; about 1 s (0.7–1.3) '
+                 f'for uniform: {"held" if 0.7 <= uni <= 1.3 else "failed"} ({uni:.2f} s)')
+    lines.append('- **(d) rule** (write phase ≤ 1.5 s and transfer ≥ 0.5 s faster than ext4 in the sweeps before and after): ' +
+                 ', '.join(f'{p} {"adopt reflinks" if ok else "no"}' for p, ok in adopt.items()))
+    prep = [m(x[p]['rsync_8k'], 'prep_s') for p in PATTERNS]
+    comb = [m(x[p]['incremental_cfr'], 'combine_s') for p in PATTERNS]
+    lines.append(f'- rsync prep on XFS < 0.5 s: {"held" if all(v < 0.5 for v in prep) else "failed"} ({min(prep):.2f}–{max(prep):.2f} s)')
+    lines.append(f'- combine with --copy-file-range on XFS < 2.5 s: {"held" if all(v < 2.5 for v in comb) else "failed"} '
+                 f'({min(comb):.2f}–{max(comb):.2f} s)')
+    if all('pgdelta_fsync_wb' in a.get(p, {}) for p in PATTERNS):
+        lines.append('\n## EXP-10 (b) rerun (final ext4 sweep, fixed early write-back)')
+        saves = {}
+        for p in PATTERNS:
+            base = m(a[p]['pgdelta'], 'transfer_s')
+            wb, wk = m(a[p]['pgdelta_fsync_wb'], 'transfer_s'), m(a[p]['pgdelta_fsync_worker'], 'transfer_s')
+            saves[p] = (base - wb, base - wk)
+            lines.append(f'- {p}: baseline {base:.2f} s, write-back {wb:.2f} s (saves {base - wb:.2f}), '
+                         f'fsync thread {wk:.2f} s (saves {base - wk:.2f})')
+        best = {p: max(v) for p, v in saves.items()}
+        lines.append(f'- **(b)** better alternative saves 1.0–1.6 s: {"held" if all(1.0 <= v <= 1.6 for v in best.values()) else "failed"}; '
+                     f'rule (≥ 0.5 s moves the fsync): {", ".join(f"{p} {v:.2f}" for p, v in best.items())}')
+    return lines
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sweep', default=str(ROOT / 'results/exp04/exp09-10-ext4'))
+    parser.add_argument('--xfs', default=str(ROOT / 'results/exp04/exp10-xfs'))
+    parser.add_argument('--ext4-after', default=str(ROOT / 'results/exp04/exp10-ext4b'))
     parser.add_argument('--tag', default='', help='suffix for data and figure names (e.g. -smoke)')
     args = parser.parse_args()
     plotting.style()
+    if Path(args.xfs, 'summary.csv').exists() and Path(args.ext4_after, 'summary.csv').exists():
+        print('\n'.join(exp10_later(load_extra(Path(args.sweep)), load_extra(Path(args.xfs)),
+                                     load_extra(Path(args.ext4_after)))))
     rows = load(Path(args.sweep))
     table = cells(rows)
     failed = [r for r in rows if r['status'] != 'pass' or not r['verified']]

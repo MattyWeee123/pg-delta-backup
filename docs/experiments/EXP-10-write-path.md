@@ -1,6 +1,6 @@
 # EXP-10: Where should pgdelta's destination time go?
 
-Status: **ext4 arms done** (results below, October 23, 2026, corrected after an independent recheck); the XFS arm (d) and a rerun of the early write-back arm are still to run. Pre-registered October 23, 2026, before the code for its new arms ran. This is test T3 of the [decision ledger](../DECISIONS.md#t3-destination-write-path-on-linux). Its arms, predictions and decision rules were written there on October 23. Changes since are dated below. The write-up was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026).
+Status: **done** (results below, October 23–24, 2026; the ext4 arms were corrected after an independent recheck). Pre-registered October 23, 2026, before the code for its new arms ran. This is test T3 of the [decision ledger](../DECISIONS.md#t3-destination-write-path-on-linux). Its arms, predictions and decision rules were written there on October 23. Changes since are dated below. The write-up was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026).
 
 ## Question
 
@@ -106,9 +106,60 @@ An independent reviewer checked the first version before anything ran. Changes:
 | (b) | moving the fsync saves 1.0–1.6 s (the better of the two alternatives) | **Failed in all three workloads, append by 4 ms:** the fsync thread saved 0.68 s (uniform), 0.99 s (hot) and 0.996 s (append); early write-back saved 0.01–0.06 s, but as implemented it didn't overlap flushing with copying (see above) | the saving is over 0.5 s in every workload, so **the fsync moves to a background thread** for the new-copy mode. Early write-back is re-measured with the fix before any decision on it |
 | (c) | sequential verification adds at least 1.0 s | **Failed:** it added 0.65–0.77 s | pipelined is never slower, so **pipelined stays the default** |
 | (e) | in place, a local-change transfer of 2.0–2.8 s | **Held:** 2.36 and 2.38 s, saving 1.56–1.58 s against the baseline in all three workloads. The revision's expectation of "the top end" was wrong: hashing B and re-reading it overlap in the pool instead of adding up | the rule compares with the baseline, and the saving is over 1 s, so **in place becomes the candidate default**, as T1's failed prediction anticipated. Against the improved new-copy mode (fsync on a thread) the gap is smaller: 0.57–0.59 s for local changes and 0.90 s for uniform |
-| (d) | XFS clones | to run | |
+| (d) | XFS clones | **held**; see the XFS section below | **adopt reflinks** where the filesystem has them |
 
 ### What this changes (rechecked; arm (d) and the write-back rerun pending)
 
 - **v1's write path is in place.** It is 1.56–1.58 s faster than today's new-copy path, and 0.57–0.59 s (local changes) or 0.90 s (uniform) faster than the new-copy path with the fsync thread. That second gap is below rule (e)'s 1 s threshold. So choosing in place as the default rests on the registered comparison with the baseline, plus O5 allowing it. In place is also the only arm that removes both of v0's write costs (the copy and most of the flush) and needs no room for a second copy. The new-copy mode stays for copies that must survive a failed refresh; there, the fsync moves to a background thread.
 - **The two numeric failures were overestimates:** the fsync thread saved 0.7–1.0 s, not 1.0–1.6 s, and pipelined verification saved 0.65–0.77 s, not over 1.0 s. Both rules still pick the same option as their predictions did.
+
+## Results: arm (d) on XFS, and the early write-back rerun
+
+**Runs:** October 24, 2026.
+- **Sweep `exp10-xfs`** (00:00–00:25 UTC): the destination's array reformatted as XFS with reflinks; full, `pgdelta`, `pgdelta_inplace`, `rsync_8k` and `incremental_cfr`; 75 runs.
+- **Sweep `exp10-ext4b`** (00:27–00:42 UTC): the array reformatted back to ext4 with `startup.sh`'s options (`infra/gcp/reformat_dest_ext4.sh`); full, `pgdelta`, the fixed `pgdelta_fsync_wb` and `pgdelta_fsync_worker`; 60 runs.
+- **Verification:** every run passed. On XFS, every new-copy output shared 1.5–2.1 GB of blocks with B0 as intended, and every in-place B shared none.
+- **Analysis:** `analysis/exp09_10.py`, function `exp10_later`.
+
+**No session drift** (unthrottled medians, seconds):
+
+| | ext4, first sweep | XFS | ext4, last sweep |
+|---|---:|---:|---:|
+| full copy, uniform / hot / append | 3.15 / 3.13 / 3.14 | 3.13 / 3.16 / 3.14 | 3.13 / 3.13 / 3.17 |
+| pgdelta transfer, uniform / hot / append | 4.44 / 3.94 / 3.94 | **3.33 / 2.54 / 2.54** | 4.41 / 3.97 / 3.98 |
+
+**On XFS** (medians, seconds):
+
+| Workload | pgdelta write phase | pgdelta transfer | in place, transfer | rsync's prep (`cp -a` of B0) | `pg_combinebackup --copy-file-range` |
+|---|---:|---:|---:|---:|---:|
+| uniform | 1.18 | 3.33 | 3.00 | 0.05 | 1.26 |
+| hot | 0.27 | 2.54 | 2.35 | 0.05 | 1.16 |
+| append | 0.25 | 2.54 | 2.36 | 0.05 | 1.02 |
+
+**With clones, writing a new copy costs almost nothing.** Copying B's bytes takes 0.03 s instead of 1.2–1.4 s, and the fsync falls to 0.2 s (0.8 s for uniform). Building a complete new copy on XFS is within 0.19 s of patching in place for local changes, and 0.33 s for uniform, while leaving B intact.
+
+| | Prediction | Result | Rule |
+|---|---|---|---|
+| (d) | the write phase on XFS drops to ≤ 0.6 s for local changes and about 1 s (0.7–1.3) for uniform | **Held:** 0.25–0.27 s and 1.18 s | write phase ≤ 1.5 s and transfer ≥ 0.5 s faster than ext4 in the sweeps before and after: **holds in every workload** (1.1–1.4 s faster), so **reflinks are adopted** where the filesystem supports them |
+| (d), rsync | rsync's prep takes < 0.5 s on XFS | **Held:** 0.05 s | |
+| (d), incremental | `pg_combinebackup --copy-file-range` < 2.5 s | **Held:** 1.02–1.26 s | |
+
+**Early write-back, rerun with the fix** (last ext4 sweep, transfer phase, medians):
+
+| Workload | baseline | early write-back (fixed) | fsync on a thread |
+|---|---:|---:|---:|
+| uniform | 4.41 | 3.98 (saves 0.43) | **3.72** (saves 0.69) |
+| hot | 3.97 | 2.99 (saves 0.98) | **2.93** (saves 1.03) |
+| append | 3.98 | 3.04 (saves 0.94) | **2.94** (saves 1.04) |
+
+- **Fixing write-back took its saving from 0.01 s to 0.94–0.98 s for local changes.** The first measurement was the bug, not the idea.
+- **Prediction (b), judged on the rerun:** it saves 1.0–1.6 s for local changes but only 0.69 s for uniform. So it **held for hot and append and failed for uniform**.
+- **The rule moves the fsync,** and the background thread is the better alternative in all three workloads.
+
+## Conclusions
+
+1. **v1's write path is in place behind a startup block,** decided by arm (e). It is 1.56–1.58 s faster than v0's new copy, and 0.6–0.9 s faster than a new copy with the fsync on a thread.
+2. **Where the old copy must survive a failed refresh** (owner decision O5's option), the new-copy mode moves its fsync to a background thread. On a filesystem with reflinks (XFS, which RHEL and Rocky installs of Omni can use) it also clones B. That makes the safe mode nearly as fast as in place. GKE's default ext4 has no reflinks, so there the safe mode costs 0.6–0.9 s.
+3. **Copy-then-patch stays the default for the new-copy mode.** It ties gap-fill on ext4, and it is the mode that turns into clones on XFS.
+4. **Pipelined verification stays:** sequential is 0.65–0.77 s slower.
+5. **Two predictions were overestimates (b, c), and two of the revision's expectations were wrong (the floor under in place, and "the top end" of (e)).** In every case the registered rule still picked the same option as the prediction did.
