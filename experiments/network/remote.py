@@ -50,6 +50,10 @@ PROVISION_SCRIPTS = (('startup.sh', 1800), ('install_incumbents.sh', 3600))
 # The commit deployed for EXP-08, EXP-09 and EXP-10 (c48e853 before the history rewrite; docs/LOG.md).
 # EXP-11 runs v1 on EXP-09's engine, so every deployment records pgdelta/'s changes since it.
 EXP09_DEPLOYED_COMMIT = 'b77f33d8cd30b35ba6e9ded9976dc4c7b233c2b5'
+# EXP-12 runs pgdelta at EXP-11's code and records pgdelta/'s diff from it. EXP-11's deployed commit isn't in the
+# repository; pgdelta/ last changed at 58d2cbc, before EXP-11's harness was built, so it is the same in every commit
+# up to EXP-11's sweep. This one recorded its smoke run, just before the sweep.
+EXP11_PGDELTA_COMMIT = '1aeeeb0e59ed276ccac2574e112bdfd3115e5628'
 PGDELTA_DIFF_LIMIT = 200_000  # characters of that diff kept in DEPLOYED.json; its hash covers all of it
 
 
@@ -146,7 +150,9 @@ def pgdelta_since(base: str | None = None) -> dict:
         added, removed, path = line.split('\t', 2)
         files.append({'path': path, 'added': int(added) if added.isdigit() else None,
                       'removed': int(removed) if removed.isdigit() else None})
-    return {'base': base, 'what': "git diff of pgdelta/ from EXP-09's deployed commit to the deployed tree",
+    what = {EXP09_DEPLOYED_COMMIT: "EXP-09's deployed commit", EXP11_PGDELTA_COMMIT: "EXP-11's pgdelta/"}.get(
+        base, base)
+    return {'base': base, 'what': f'git diff of pgdelta/ from {what} to the deployed tree',
             'files': files, 'diff_sha256': hashlib.sha256(diff.encode()).hexdigest(),
             'diff': diff[:PGDELTA_DIFF_LIMIT], 'diff_truncated': len(diff) > PGDELTA_DIFF_LIMIT}
 
@@ -164,6 +170,8 @@ def build_tarball() -> tuple[bytes, dict]:
         'contents': 'git ls-files of the working tree (tracked files, working-tree versions)',
         # EXP-11: v1 runs EXP-09's engine; what changed in pgdelta/ since (run.json's environment keeps it).
         'pgdelta_since_exp09': pgdelta_since(),
+        # EXP-12: pgdelta at EXP-11's code; what changed in pgdelta/ since.
+        'pgdelta_since_exp11': pgdelta_since(EXP11_PGDELTA_COMMIT),
     }
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode='w:gz') as tar:
