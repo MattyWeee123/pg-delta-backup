@@ -48,11 +48,11 @@ def spec_run_lines() -> dict:
     for line in block.replace('\\\n', ' ').splitlines():
         assignment = re.match(r'^(\w+)=(.*)$', line.strip())
         if assignment:
-            variables[assignment.group(1)] = ' '.join(shlex.split(assignment.group(2)))
+            variables[assignment.group(1)] = ' '.join(shlex.split(assignment.group(2), comments=True))
             continue
         # Unquoted $M and $S, as the block writes them: expanded, then split on whitespace.
         line = re.sub(r'\$(\w+)', lambda m: variables[m.group(1)], line)
-        words = shlex.split(line)
+        words = shlex.split(line, comments=True)  # '#' starts a comment, as in a POSIX shell
         if words[:2] != ['python3', 'experiments/network/remote.py']:
             continue
         args = remote.build_parser().parse_args(words[2:])
