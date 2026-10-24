@@ -78,6 +78,14 @@ class RunLines(unittest.TestCase):
                 self.assertIsNone(run_exp04.checksum_problem(methods, args.manifest_checksums))
                 self.assertEqual(run_exp04.block_problems(args, methods), [])
 
+    def test_they_carry_the_idle_noise_into_check_a(self):
+        # Check (a)'s limit is 4 MiB or the smoke run's idle noise, whichever is larger: each sweep must be
+        # given that noise (or measure its own), or it judges check (a) against 4 MiB alone.
+        for name, args in self.parsed().items():
+            with self.subTest(name=name):
+                self.assertTrue(args.dirty_noise_mib > 0 or args.idle_noise_windows > 0,
+                                (args.dirty_noise_mib, args.idle_noise_windows))
+
     def test_they_plan_the_registered_runs(self):
         totals = {}
         for name, args in self.parsed().items():

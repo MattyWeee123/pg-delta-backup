@@ -1,7 +1,7 @@
 """EXP-11 (T2: the fastest durable full copy, and whether v1's path still beats it), as pre-registered.
 
     .venv/bin/python analysis/exp11.py [--sweeps results/exp04/exp11-local results/exp04/exp11-uniform]
-        [--audit FILE] [--tag ...] [--datadir DIR] [--figdir DIR]
+        [--audit FILE] [--idle-noise-bytes BYTES] [--tag ...] [--datadir DIR] [--figdir DIR]
 
 Reads each sweep's summary.csv, per-run records, trial records and run.json from `remote.py fetch`
 (the hot-and-append invocation and the uniform one), and EXP-09's curated
@@ -217,11 +217,14 @@ def failure_kind(record, row):
     return kind
 
 
-def from_record(record, row, run):
+def from_record(record, row, run, idle_noise=None):
     """What a run's record adds to its summary row: checks (a) and (b) apart, the raw Dirty +
     Writeback increase and its limit (both recomputed from the summary without a record), parcopy's
     fsync count (A5) apart from check (a), the launch and exit of pg_basebackup's and pg_probackup's
-    own phases, and an error's kind (failure_kind)."""
+    own phases, and an error's kind (failure_kind).
+
+    With idle_noise (--idle-noise-bytes, the smoke run's), check (a) is judged again against the
+    registered limit, max(4 MiB, idle_noise), whatever limit the sweep itself used."""
     durability = record.get('durability') or {}
     reported = record.get('tool_reported') or {}
     pbb = reported.get('basebackup_phases') or {}
@@ -230,12 +233,14 @@ def from_record(record, row, run):
     if increase is None and row['dirty_increase_mb'] is not None:
         increase = row['dirty_increase_mb'] * 1e6
     limit = durability.get('limit_bytes')
-    if limit is None:
+    if idle_noise is not None:
+        limit = max(measure.DIRTY_LIMIT_BYTES, int(idle_noise))
+    elif limit is None:
         limit = max(measure.DIRTY_LIMIT_BYTES, int(run.get('idle_noise_bytes') or 0))
     # measure.durability_check folds a parcopy run's fsync count into its a_ok; check (a) here is the
     # Dirty + Writeback increase alone, and the count (the receiver's and the output's) is A5's own.
     fsync_count = durability.get('fsync_count')
-    if 'a_ok' in durability and fsync_count is None:
+    if 'a_ok' in durability and fsync_count is None and idle_noise is None:
         a_ok = durability['a_ok']
     else:
         a_ok = None if increase is None else increase <= limit
@@ -246,8 +251,9 @@ def from_record(record, row, run):
             'failure_kind': failure_kind(record, row)}
 
 
-def load(sweep):
-    """One sweep: (rows, trials, run). A row per summary line, typed, with what its record adds."""
+def load(sweep, idle_noise=None):
+    """One sweep: (rows, trials, run). A row per summary line, typed, with what its record adds (check (a)
+    against max(4 MiB, idle_noise) when it is given: from_record)."""
     sweep = Path(sweep)
     run = json.loads((sweep / 'run.json').read_text()) if (sweep / 'run.json').exists() else {}
     trials = {}
@@ -261,7 +267,7 @@ def load(sweep):
                    **{k: flag(line.get(k)) for k in FLAGS}, **{k: number(line.get(k)) for k in NUMERIC},
                    'repeat': int(line['repeat'])}
             path = sweep / 'runs' / line['trial_id'] / f"r{line['repeat']}-{line['speed']}-{line['method']}.json"
-            row.update(from_record(json.loads(path.read_text()) if path.exists() else {}, row, run))
+            row.update(from_record(json.loads(path.read_text()) if path.exists() else {}, row, run, idle_noise))
             rows.append(row)
     return rows, trials, run
 
@@ -286,8 +292,9 @@ def load_exp09(cells_path, runs_path):
 class Session:
     """Every run of the session with its standing under EXP-11's checks, and the trials and runs."""
 
-    def __init__(self, rows, trials=None, runs=None):
+    def __init__(self, rows, trials=None, runs=None, idle_noise=None):
         self.rows, self.trials, self.meta = rows, trials or {}, runs or []
+        self.idle_noise = idle_noise  # --idle-noise-bytes, which load() judged check (a) with, if given
         self.audit = {}  # the syscall audit's results, by arm (verdicts() sets them)
         self._choices = {}
         self.assess()
@@ -785,8 +792,11 @@ def durability_lines(S, audit):
     lines = ['## Durability (checks (a) and (b) in every run; A5, A6; the negative control)']
     limits = sorted({r['dirty_limit_bytes'] for r in S.rows if r['dirty_limit_bytes'] is not None})
     noise = [run.get('idle_noise_bytes') for run in S.meta if run.get('idle_noise_bytes') is not None]
+    registered = ('' if S.idle_noise is None else
+                  f'; judged again here with the smoke run\'s {S.idle_noise / (1 << 20):.2f} MiB (--idle-noise-bytes)')
     lines.append(f'- check (a) limit: {", ".join(f"{v / (1 << 20):.2f} MiB" for v in limits) or "–"} '
-                 f'(4 MiB or the idle noise: {", ".join(f"{v / (1 << 20):.2f} MiB" for v in noise) or "–"}); '
+                 f'(4 MiB or the idle noise: the sweeps\' '
+                 f'{", ".join(f"{v / (1 << 20):.2f} MiB" for v in noise) or "–"}{registered}); '
                  f'check (a) {"VOID for the session (A6)" if S.a_void else "in force"}')
     lines += ['| Arm | runs | (a) pass / fail / unchecked | (b) pass / fail / unchecked | largest increase, MB | '
               'smallest writes ÷ output | fsync count wrong | runs failing | excluded |', '|---|' + '---|' * 8]
@@ -1628,10 +1638,16 @@ def main(argv=None):
     parser.add_argument('--exp09-runs', default=str(DATA / 'exp09-10-runs.csv'))
     parser.add_argument('--audit', help="the syscall audit's results, from the smoke run: JSON (durability_audit.py "
                                         'summary --json), or the results directory of its --syscall-audit run')
+    parser.add_argument('--idle-noise-bytes', type=int, metavar='BYTES',
+                        help="check (a)'s idle noise as the smoke run measured it (its run.json "
+                             'dirty_idle_noise.max_increase_bytes): every run\'s check (a) is judged again against '
+                             'max(4 MiB, this), the registered limit, whatever limit its sweep used')
     parser.add_argument('--datadir', default=str(DATA))
     parser.add_argument('--figdir', help='write figures here instead of docs/figures')
     parser.add_argument('--tag', default='', help='suffix for data and figure names (e.g. -smoke)')
     args = parser.parse_args(argv)
+    if args.idle_noise_bytes is not None and args.idle_noise_bytes < 0:
+        parser.error('--idle-noise-bytes must be 0 or more')
     sweeps = [Path(s) for s in args.sweeps if Path(s, 'summary.csv').exists()]
     if not sweeps:
         raise SystemExit(f'no summary.csv under {", ".join(args.sweeps)}')
@@ -1640,11 +1656,11 @@ def main(argv=None):
     plotting.style()
     rows, trials, runs = [], {}, []
     for sweep in sweeps:
-        r, t, run = load(sweep)
+        r, t, run = load(sweep, args.idle_noise_bytes)
         rows += r
         trials.update(t)
         runs.append(run)
-    S = Session(rows, trials, runs)
+    S = Session(rows, trials, runs, args.idle_noise_bytes)
     lines, table = verdicts(S, load_exp09(args.exp09_cells, args.exp09_runs), load_audit(args.audit))
     print(f'{len(rows)} runs from {", ".join(str(s) for s in sweeps)}')
     print(*write_data(S, args.datadir, args.tag), sep='\n')

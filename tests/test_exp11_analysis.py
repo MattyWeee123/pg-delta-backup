@@ -597,6 +597,29 @@ class DryRun(unittest.TestCase):
         self.assertEqual(S.choice('B_fast', U)['arm'], 'parcopy4')
         self.assertEqual(S.bound()['arm'], 'parcopy4')
 
+    def test_check_a_is_judged_again_with_the_smoke_runs_noise(self):
+        def noisy(record):
+            # 5 MiB more Dirty + Writeback, in full's unthrottled runs in hot (main and extension): over the
+            # 4 MiB the sweep judged with, under the 6 MiB idle noise the smoke run measured.
+            if record['method'] == 'full' and record['pattern'] == 'hot' and record['speed']['label'] == U:
+                memory = record['phases'][measure.FULL_PHASE]['memory']['dest']
+                memory['dirty_writeback_bytes_after'] = memory['dirty_writeback_bytes_before'] + (5 << 20)
+        with tempfile.TemporaryDirectory() as tmp:
+            [sweep] = exp11_smoke_data.write_session(Path(tmp) / 'results', smoke=True, adjust=noisy)
+            as_run = exp11.Session(exp11.load(sweep)[0])
+            again = exp11.Session(exp11.load(sweep, 6 << 20)[0], idle_noise=6 << 20)
+            text = self.run_script(tmp, [sweep], '--tag=-smoke', '--idle-noise-bytes', str(6 << 20))
+        noisy_runs = [r for r in as_run.rows if r['method'] == 'full' and r['pattern'] == 'hot' and r['speed'] == U]
+        self.assertEqual(len(noisy_runs), 3)  # the main block, the extension and the warm-source block
+        self.assertEqual({(r['a_ok'], r['dirty_limit_bytes']) for r in noisy_runs}, {(False, 4 << 20)})
+        self.assertIn('full', as_run.not_durable)  # A5: more than one failing run at one speed in one trial
+        rows = [r for r in again.rows if r['method'] == 'full' and r['pattern'] == 'hot' and r['speed'] == U]
+        self.assertEqual({(r['a_ok'], r['dirty_limit_bytes']) for r in rows}, {(True, 6 << 20)})
+        self.assertEqual(again.not_durable, {})
+        self.assertFalse(any(r['a_ok'] for r in again.rows if r['method'] == 'full_nosync'))  # still the control
+        self.assertIn("judged again here with the smoke run's 6.00 MiB (--idle-noise-bytes)", text)
+        self.assertNotIn('left out of every baseline: full:', text)
+
     def test_errors_whose_kind_is_unknown_leave_a4_undecided(self):
         def abort(record):
             if record['method'] == 'parcopy8' and record['speed']['label'] == U and record['repeat'] == 0:

@@ -311,7 +311,7 @@ EXP-09 registered: within reach at most 0.9 times the full copy, unthrottled, fo
 2. `pg_basebackup`: `--sync-method` is listed.
 3. The syscall audit: one untimed run of every arm (10) at scale 5, every arm passing. An arm that fails is fixed before the main sweep if it is harness code (`parcopy`, the `pg_probackup` wrapper). A released tool or pgdelta that fails gets a timed `sync -f`, like `probackup*`, recorded here, dated, under rule 8.
 4. The 8-stream link rate unthrottled and at 10 Gbit/s.
-5. Checks (a) and (b): the idle noise of `Dirty + Writeback` on dest (the largest increase over 20 idle windows of 5 s), which sets check (a)'s limit with the 4 MiB; `full` within that limit at scale 5; `full_nosync` leaving most of its copy dirty; check (b) passing.
+5. Checks (a) and (b): the idle noise of `Dirty + Writeback` on dest (the largest increase over 20 idle windows of 5 s), which sets check (a)'s limit with the 4 MiB and goes into the run lines' `NOISE`, in MiB; `full` within that limit at scale 5; `full_nosync` leaving most of its copy dirty; check (b) passing.
 6. `parcopy`: `verify_direct` passes, its output starts, streams are balanced, and the `fsync` count equals the inventory's files plus directories plus one.
 7. The timestamped `pg_basebackup` phases parse, the adder's two intervals included.
 8. `full_wb`'s reset after a forced exception: the guard then sees the ratio at its default and the bytes setting at 0.
@@ -434,19 +434,20 @@ If the projection is still over 3.5 h after all four, the session runs anyway an
 ```sh
 M=full,full_nosync,full_syncfs,full_wb,probackup4,probackup8,parcopy4,parcopy8,pgdelta_direct_inplace
 S="--method-speeds full_nosync=2,unthrottled --method-speeds full_syncfs+full_wb=10,unthrottled"
+NOISE=4
 python3 experiments/network/remote.py start exp11-local -- --patterns hot,append \
     --speeds 2,5,10,unthrottled --repeats 5 --order-seed 11 --manifest-checksums CRC32C \
-    --methods $M,pgdelta_direct_inplace_j8 $S \
+    --dirty-noise-mib $NOISE --methods $M,pgdelta_direct_inplace_j8 $S \
     --method-speeds probackup4+parcopy4+pgdelta_direct_inplace_j8=unthrottled \
     --extension-repeats 5 \
     --extension-methods full,full_syncfs,probackup8,probackup4,parcopy8,parcopy4,pgdelta_direct_inplace,pgdelta_direct_inplace_j8 \
     --warm-source-repeats 3 --warm-source-methods full,probackup8,pgdelta_direct_inplace
 python3 experiments/network/remote.py start exp11-uniform -- --patterns uniform \
     --speeds 2,5,10,unthrottled --repeats 5 --order-seed 12 --manifest-checksums CRC32C \
-    --methods $M $S --method-speeds probackup4+parcopy4=unthrottled
+    --dirty-noise-mib $NOISE --methods $M $S --method-speeds probackup4+parcopy4=unthrottled
 ```
 
-The extension and the warm-source block always run unthrottled.
+The extension and the warm-source block always run unthrottled. `NOISE` carries check (a)'s idle noise into both sweeps: the smoke run's largest increase of `Dirty + Writeback` over its 20 idle windows, in MiB (smoke item 5), written here, dated, before the main sweep. Until then it is 4, which leaves the limit at 4 MiB. Without it, each sweep would judge check (a) against 4 MiB whatever the smoke run measured.
 
 ## What it needs built in the harness
 
