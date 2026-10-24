@@ -3115,12 +3115,14 @@ class Orchestrator:
         process = hold['process']
         requested = time.time()
         try:
-            process.stdin.write('stop\n')
-            process.stdin.close()
-        except (BrokenPipeError, OSError, ValueError):
-            pass
-        try:
-            stdout, stderr = process.communicate(timeout=600)
+            # communicate() writes the line and closes stdin itself, and ignores a backup-hold that has already
+            # exited. Closing stdin here first would make it fail before Python 3.13: it flushes stdin first, and a
+            # closed pipe raises ValueError there (gh-74389), as on dest's Debian 12 python3 (3.11). A second call
+            # (run_v1proxy's clean-up after an interrupted first) sends nothing more: communicate() refuses input once
+            # communication has started.
+            line = None if hold.get('stop_sent') else 'stop\n'
+            hold['stop_sent'] = True
+            stdout, stderr = process.communicate(input=line, timeout=600)
         except subprocess.TimeoutExpired:
             process.kill()
             stdout, stderr = process.communicate()

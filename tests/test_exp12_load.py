@@ -1241,6 +1241,94 @@ class CommandLines(Stubbed):
 
 # --- the run lines -------------------------------------------------------------------------------
 
+# backup-hold's stand-in: its start line, then a line of stdin, then its result line (source_cluster's protocol).
+BACKUP_HOLD_STANDIN = """\
+import json, sys
+print('BACKUP-STARTED ' + json.dumps({'lsn': '2/A0000028', 'utc': 1.0}), flush=True)
+line = sys.stdin.readline()
+print('@@EXP04@@ ' + json.dumps({'start': {'lsn': '2/A0000028'}, 'stop': {'lsn': '2/A0000158', 'by': line.strip()},
+                                 'one_session': True}), flush=True)
+"""
+# The orchestrator's real start_backup_hold and stop_backup_hold against the stand-in, run by another interpreter.
+BACKUP_HOLD_CALL = """\
+import json, sys, types
+sys.path.insert(0, sys.argv[1])
+from experiments.network import run_exp04
+fake = types.SimpleNamespace(backup_hold_argv=lambda: [sys.executable, sys.argv[2]],
+                             source=types.SimpleNamespace(argv=lambda argv: argv))
+hold = run_exp04.Orchestrator.start_backup_hold(fake)
+print(json.dumps(run_exp04.Orchestrator.stop_backup_hold(fake, hold)['backup']))
+"""
+
+
+class FlushingPopen(subprocess.Popen):
+    """Popen as Python before 3.13 communicates (dest's Debian 12 runs 3.11): stdin flushed first, which raises
+    ValueError on a pipe closed already (gh-74389, fixed in 3.13)."""
+
+    def communicate(self, input=None, timeout=None):
+        if self.stdin and not self._communication_started:
+            self.stdin.flush()
+        return super().communicate(input, timeout)
+
+
+def older_pythons() -> list[str]:
+    """Interpreters older than 3.13 here (EXP12_OLD_PYTHON first), whose communicate() still flushes stdin first."""
+    found = []
+    uv = map(str, Path.home().glob('.local/share/uv/python/cpython-3.1[12]*/bin/python'))
+    for candidate in (os.environ.get('EXP12_OLD_PYTHON'), '/usr/bin/python3', shutil.which('python3.11'),
+                      shutil.which('python3.12'), *uv):
+        if not candidate or not Path(candidate).exists() or str(Path(candidate).resolve()) in found:
+            continue
+        candidate = str(Path(candidate).resolve())
+        try:
+            version = subprocess.run([candidate, '-c', 'import sys; print(sys.version_info[:2] < (3, 13))'],
+                                     capture_output=True, text=True, timeout=30).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if version == 'True':
+            found.append(candidate)
+    return found
+
+
+class BackupHoldPipe(unittest.TestCase):
+    """The proxy's backup mode over a real pipe: the orchestrator's start_backup_hold and stop_backup_hold against a
+    stand-in for backup-hold (no PostgreSQL needed)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.standin = Path(self.tmp.name) / 'standin.py'
+        self.standin.write_text(BACKUP_HOLD_STANDIN)
+
+    def hold(self):
+        fake = Namespace(backup_hold_argv=lambda: [sys.executable, str(self.standin)],
+                         source=Namespace(argv=lambda argv: argv))
+        hold = run_exp04.Orchestrator.start_backup_hold(fake)
+        self.assertEqual(hold.get('start'), {'lsn': '2/A0000028', 'utc': 1.0})
+        return fake, hold
+
+    def test_the_stop_line_reaches_backup_hold_as_python_before_3_13_communicates(self):
+        with mock.patch.object(run_exp04.subprocess, 'Popen', FlushingPopen):
+            fake, hold = self.hold()
+            command = run_exp04.Orchestrator.stop_backup_hold(fake, hold)
+        self.assertEqual(command['exit_code'], 0)
+        self.assertEqual(command['backup']['stop'], {'lsn': '2/A0000158', 'by': 'stop'})
+        self.assertTrue(command['over_ssh'])
+
+    def test_under_an_older_python(self):
+        pythons = older_pythons()
+        if not pythons:
+            self.skipTest('no Python older than 3.13 here (EXP12_OLD_PYTHON names one)')
+        call = Path(self.tmp.name) / 'call.py'
+        call.write_text(BACKUP_HOLD_CALL)
+        for python in pythons:
+            with self.subTest(python=python):
+                result = subprocess.run([python, '-I', str(call), str(Path(__file__).resolve().parents[1]),
+                                         str(self.standin)], capture_output=True, text=True, timeout=120)
+                self.assertEqual(result.returncode, 0, result.stderr[-2000:])
+                self.assertEqual(json.loads(result.stdout.splitlines()[-1])['stop']['by'], 'stop')
+
+
 def spec_run_lines() -> dict:
     """{invocation name: run_exp04's arguments} from EXP-12's "Run lines" block, split as a POSIX shell would (comments
     included), its placeholders given test values, then as remote.py start hands them to run_exp04.py."""
