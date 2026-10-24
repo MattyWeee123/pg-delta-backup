@@ -964,6 +964,31 @@ class DryRun(unittest.TestCase):
         clean = S.cells('clean').cell('busy', '2g', 'full')
         self.assertLess(clean['n'], S.cells('main').cell('busy', '2g', 'full')['n'])
 
+    def test_a_settle_its_log_doesnt_cover_is_unsettled_and_never_enters_the_null(self):
+        # A run tied to the log of a load run that wasn't going then (as a record naming a dead run did): its settle
+        # holds no transaction, which would read as load-only time without loss.
+        def moved(item):
+            if item['method'] == 'full' and item['block'] == 'busy' and item['block_repeat'] == 0 \
+                    and item['speed']['label'] == '2g':
+                item['load_run'] = 'capacity-1'
+        with tempfile.TemporaryDirectory() as tmp:
+            sessions = []
+            for adjust in (None, moved):
+                sweep = exp12_smoke_data.write_session(Path(tmp) / ('moved' if adjust else 'plain'), adjust=adjust)
+                runs, trials, meta = exp12.load(sweep)
+                sessions.append(exp12.Session(runs, trials, [meta], sweeps=[sweep], resamples=200))
+        plain, S = sessions
+        run = next(r for r in S.runs if r['method'] == 'full' and r['block'] == 'busy' and r['block_repeat'] == 0
+                   and r['speed'] == '2g')
+        self.assertEqual(run['settle']['scheduled'], 0)
+        self.assertIs(S.gate_log_ok(run), False)
+        self.assertIs(S.settled(run), False)
+        self.assertTrue(run['flags']['unsettled'])
+        self.assertTrue(run['left_out'].startswith('no numbers from the logs'))
+        # Out of the null, and out of the view that puts the unsettled settles back.
+        self.assertEqual(plain.pool('busy').spans - S.pool('busy').spans, 1)
+        self.assertEqual(plain.pool('busy', 'unsettled').spans - S.pool('busy', 'unsettled').spans, 1)
+
     def test_durability_failures_leave_the_medians_and_full_reclassified_wins_every_speed(self):
         def dirty(item):
             if item['method'] == 'full' and item['block'] == 'busy' and item['speed']['label'] == '0.5g' \
@@ -1090,8 +1115,8 @@ class StubbedHarness(unittest.TestCase):
             self.assertTrue(all('scheduled in its' in r['left_out'] for r in loaded if r['method'] != 'pgdelta'))
             with mock.patch.object(exp12, 'LOG_COVERAGE', 0.0):
                 S = exp12.Session(runs, trials, [meta], sweeps=[out], resamples=200)
-            self.assertTrue(all(r['stats'] is not None for r in loaded if r['status'] != 'error'))
-            lines, _ = exp12.verdicts(S)
+                self.assertTrue(all(r['stats'] is not None for r in loaded if r['status'] != 'error'))
+                lines, _ = exp12.verdicts(S)
             text = '\n'.join(lines)
         finally:
             stub.doCleanups()

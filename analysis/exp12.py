@@ -532,6 +532,11 @@ def window_stats(span, t0, t1, rate):
     return stats
 
 
+def covered(span, rate):
+    """Whether a span's log holds at least LOG_COVERAGE of its rate's schedule over its length."""
+    return int(span.scheduled.sum()) >= LOG_COVERAGE * rate * (span.stop - span.start) / SECOND_US
+
+
 def settle_stats(span, rate, late_limit_us):
     """A settle's (or any load-only span's) latencies, its late share at L and its completions over its schedule."""
     lat = span.latency if span.latency is not None else np.zeros(0)
@@ -893,8 +898,12 @@ class Session:
 
     def gate_log_ok(self, r):
         """The settle gate's log part (A8): the settle's p99 at most twice its load run's warm-up's (its last minute),
-        and at most 0.1% of its transactions later than L. None where it can't be judged."""
+        and at most 0.1% of its transactions later than L. None where it can't be judged; False where its log holds
+        less than half its rate's schedule (LOG_COVERAGE), as a window then has no numbers: a settle the log doesn't
+        cover would read as one without loss."""
         settle = r['settle']
+        if settle and settle.get('span') is not None and r['rate'] and not covered(settle['span'], r['rate']):
+            return False
         if not settle or settle.get('p99_ms') is None:
             return None
         warmup = (settle.get('warmup') or {}).get('pool') or {}
@@ -950,16 +959,20 @@ class Session:
             if r['method'] == 'none':
                 # Its span holds its settle: left out with an unsettled settle, back in the 'unsettled' variant.
                 span = spans.get(('none', run_key))
-                if span is not None and not r['void'] and r['status'] != 'error' and (
+                if span is not None and not r['void'] and r['status'] != 'error' and covered(span, r['rate']) and (
                         settled is not False or variant == 'unsettled'):
                     series.append(pool_series(span, r['rate']))
                 continue
+            # A span the log doesn't cover (its load run's log holds nothing then) enters no variant: it would read
+            # as load-only time without any loss.
             span = spans.get(('settle', run_key))
-            if span is not None and (settled or (variant == 'unsettled' and settled is False)):
+            if span is not None and covered(span, r['rate']) and (
+                    settled or (variant == 'unsettled' and settled is False)):
                 series.append(pool_series(span, r['rate']))
         for trial_key, warmups in self.warmups.items():
             for warmup in warmups:
-                if warmup['span'] is None or not warmup['rate'] or self.warmup_pool(trial_key, warmup) != name:
+                if warmup['span'] is None or not warmup['rate'] or self.warmup_pool(trial_key, warmup) != name \
+                        or not covered(warmup['span'], warmup['rate']):
                     continue
                 series.append(pool_series(warmup['span'], warmup['rate']))
         null = Null(f'{name}/{variant}', series, self.resamples, self.seed) if series else None
@@ -2236,9 +2249,10 @@ def null_lines(S):
             lines.append(f'- {name}: no load-only time')
             continue
         unsettled = S.pool(name, 'unsettled')
+        more = (unsettled.seconds if unsettled is not None else pool.seconds) - pool.seconds
         latency = pool_latency(S, name)
         lines.append(f'- {name} (the warm block\'s too)' * (name == 'busy') + (f'- {name}' if name != 'busy' else '')
-                     + f': {pool.spans} spans, {pool.seconds} s of 1-s buckets ({unsettled.seconds - pool.seconds} s '
+                     + f': {pool.spans} spans, {pool.seconds} s of 1-s buckets ({more} s '
                        f'more with the unsettled settles); {S.resamples} resamples from seed {S.seed}; its latencies: '
                        f'p50 {fmt(latency["p50_ms"], 3)}, p95 {fmt(latency["p95_ms"], 3)}, p99 {fmt(latency["p99_ms"], 3)},'
                        f' p99.9 {fmt(latency["p999_ms"], 3)}, max {fmt(latency["max_ms"], 3)} ms over '

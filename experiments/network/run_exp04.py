@@ -3698,6 +3698,10 @@ class Orchestrator:
                 sysctl = record['sysctl'] = {}
                 sysctl['before'] = self.check_dirty_writeback(sysctl)
             record['source_untimed'] = self.before_settle(method, paths, record, daemon_holder)
+            # A load found dead in step 1 was restarted there (check_load): this run's settle and window are the
+            # restart's, so its log is the one the analysis reads them from.
+            record['load_run'] = (self.load_current or {}).get('run_id')
+            record['load_rate'] = self.load_rate if self.load_current is not None else None
             record['caches_dropped'] = 'dest'
             record['settle'] = self.settle(method, paths, record, daemon_holder)
             if daemon_holder.get('dirty_writeback'):

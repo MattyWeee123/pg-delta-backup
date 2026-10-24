@@ -1087,6 +1087,12 @@ class WholeTrial(Stubbed):
         self.assertEqual(len(voided), 1)
         self.assertEqual(orchestrator.run_key(voided[0]), restart['voided'])
         self.assertIn('restart-1', [run['run_id'] for run in trial['load']['runs']])
+        # The run whose step 1 found the load dead has its settle and window on the restart: its log is the restart's.
+        found = orchestrator.records[3]
+        self.assertEqual(found['source_untimed']['load']['restart'], 'restart-1')
+        self.assertEqual((found['load_run'], found['load_rate']), ('restart-1', orchestrator.args.load_rate))
+        self.assertFalse(found['void'])
+        self.assertEqual(orchestrator.records[4]['load_run'], 'restart-1')
 
 
 class CommandLines(Stubbed):
