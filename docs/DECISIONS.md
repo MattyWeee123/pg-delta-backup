@@ -701,6 +701,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 8. **Record overrides.** When a pre-registered rule is overridden, record it as a new decision with its own grade.
 9. **Close gates.** Plan gates such as the rsync gate get an owner and a date, and a gate that fires blocks the work that depends on it until it's answered.
 10. **Don't extrapolate.** Ratios measured at 2.1 GB are not projected to TB scale until T9 has run.
+11. **Only a firm decision picks a single route** (the owner, October 24, 2026). A decision is firm when the evidence that decides it is graded A for the conditions it is applied to: measured on the relevant platform, not by proxy or inference; pre-registered or replicated in a second session; not flagged fragile by its own robustness views; and not shaped by a constraint the project set itself and has since lifted. Anything less is provisional: the work keeps every route it would close open, as a branch, and an experiment is queued to make it firm before one route is chosen. A ranking of the queue by judgment is provisional too, and says so.
 
 ## What this ledger does not show
 
