@@ -1951,10 +1951,10 @@ class NewMethodFlags(unittest.TestCase):
             self.assertNotIn(method, measure.STAGED_METHODS)
         self.assertEqual(set(measure.PGDELTA_METHODS),
                          {'pgdelta', 'pgdelta_1thread', *measure.T3_METHODS, *measure.PGDELTA_DIRECT_METHODS})
-        # EXP-12's proxies patch a copy of B0 in place too.
+        # EXP-12's proxies patch a copy of B0 in place too, and so do EXP-13's side arms of v1.
         self.assertEqual(set(measure.BASIS_COPY_METHODS),
                          {'pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
-                          *measure.V1PROXY_METHODS, *measure.PGBACKREST_METHODS})
+                          *measure.V1PROXY_METHODS, *measure.T12_V1_ARMS, *measure.PGBACKREST_METHODS})
 
     def test_each_new_pgdelta_method_pins_its_flags(self):
         def receive(*middle, fsync='main', in_place=False):
@@ -1971,7 +1971,8 @@ class NewMethodFlags(unittest.TestCase):
             # In place there is nothing to copy B from: no --rebuild.
             'pgdelta_inplace': (JOBS, receive('--verify', 'pipelined', in_place=True)),
             'pgdelta_direct': (direct, receive('--rebuild', 'copy-patch', '--verify', 'pipelined')),
-            'pgdelta_direct_inplace': (direct, receive('--verify', 'pipelined', in_place=True)),
+            # EXP-13 pins v1's request window, 4, today's default.
+            'pgdelta_direct_inplace': ((*direct, '--window', '4'), receive('--verify', 'pipelined', in_place=True)),
         }
         for method, (send, received) in expected.items():
             with self.subTest(method=method):

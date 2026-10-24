@@ -15,7 +15,9 @@ import os
 from pathlib import Path
 import random
 import re
+import socket
 import stat
+import statistics
 import struct
 
 NETDEV_FIELDS = ('rx_bytes', 'rx_packets', 'rx_errs', 'rx_drop', 'rx_fifo', 'rx_frame',
@@ -48,11 +50,18 @@ T3_METHODS = ('pgdelta_gapfill_seq', 'pgdelta_seq', 'pgdelta_fsync_wb', 'pgdelta
 # pgdelta_direct_inplace, reading the snapshot: a cleanly stopped copy of the data directory on the live
 # source's disks, never the live files. v1proxy_s1 is the same with one sender job (and 4 on the receiver).
 V1PROXY_METHODS = ('v1proxy', 'v1proxy_s1')
+# T12 (EXP-13): v1's path at DR latency, each with one protocol setting changed: the sender's request
+# window (--window 1 or 16; v1 pins 4, today's value), the high-churn fallback at 0.5, and v1 through a
+# stunnel pair (TLS 1.3, mutual authentication; run_exp04 --conditions starts and stops the pair).
+T12_V1_ARMS = ('pgdelta_direct_inplace_w1', 'pgdelta_direct_inplace_w16', 'pgdelta_direct_inplace_hc',
+               'pgdelta_direct_inplace_tls')
+TLS_METHODS = ('pgdelta_direct_inplace_tls',)
 # T8a: the sender reads the cleanly stopped source's data directory; no capture. T2 (EXP-11) adds
 # v1's path at 8 jobs on each end, pgdelta_direct_inplace_j8. T10a's proxies take v1's path through
 # every dispatch too (they read the snapshot, method_paths' source_data, and never stop the source).
+# T12's side arms are v1's path too.
 PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
-                          *V1PROXY_METHODS)
+                          *V1PROXY_METHODS, *T12_V1_ARMS)
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
 PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
 # T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On
@@ -87,13 +96,16 @@ NON_DURABLE_METHODS = ('full_nosync',)
 PROBACKUP_VARIANTS = {'probackup8': {'jobs': 8}, 'probackup4': {'jobs': 4}}
 PROBACKUP_METHODS = tuple(PROBACKUP_VARIANTS)
 # The bound: a range-parallel copier built in the harness (experiments/network/parcopy.py), reading
-# the cleanly stopped source as v1 does, over 8 or 4 TCP streams.
-PARCOPY_VARIANTS = {'parcopy8': {'streams': 8}, 'parcopy4': {'streams': 4}}
+# the cleanly stopped source as v1 does, over 8 or 4 TCP streams. T12 (EXP-13) adds the same bound
+# over 16 streams, for the one condition where eight default windows can't fill the link.
+PARCOPY_VARIANTS = {'parcopy8': {'streams': 8}, 'parcopy4': {'streams': 4}, 'parcopy16': {'streams': 16}}
 PARCOPY_METHODS = tuple(PARCOPY_VARIANTS)
 # The arms EXP-11 adds. Selecting any of them makes a run T2's: it needs CRC32C manifests, and each
 # trial takes the reference digests and runs the probes (run_exp04.Orchestrator.run_trial).
-T2_METHODS = ('full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS, *PARCOPY_METHODS,
+T2_METHODS = ('full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS, 'parcopy8', 'parcopy4',
               'pgdelta_direct_inplace_j8')
+# The arms EXP-13 (T12) adds; its runs need --conditions (the emulated WAN) and CRC32C manifests.
+T12_METHODS = (*T12_V1_ARMS, 'parcopy16')
 # T10a (EXP-12), the source's slowdown under a fixed-rate load (run_exp04 --load). none: an empty timed
 # phase of --none-window-s, the null's own windows; capture: the staged capture alone, a local
 # pg_basebackup of S on the source; bracket: pg_backup_start and pg_backup_stop in one session.
@@ -117,7 +129,8 @@ PGDELTA_METHODS = PGDELTA_STAGED_METHODS + PGDELTA_DIRECT_METHODS
 RSYNC_METHODS = ('rsync_8k', 'rsync_default')
 STAGED_METHODS = PGDELTA_STAGED_METHODS + RSYNC_METHODS
 # pgdelta refreshing B itself (--in-place) rather than writing a new copy O.
-IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', *V1PROXY_METHODS)
+IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', *V1PROXY_METHODS,
+                    *T12_V1_ARMS)
 # Methods that patch B, a copy of B0 made before the cache drop and not timed: in a real
 # refresh B already exists. The copy keeps B0 itself unchanged for the next method.
 BASIS_COPY_METHODS = IN_PLACE_METHODS + PGBACKREST_METHODS
@@ -159,7 +172,11 @@ TIERS = {'full': 'omni_today', 'full_nosync': 'diagnostic', 'full_syncfs': 'rele
          # EXP-12's (its Arms table); none of these is in any of EXP-11's envelopes.
          'none': 'no_backup', 'capture': 'staged_capture', 'pgdelta': 'staged_v0', 'bracket': 'backup_mode',
          'v1proxy': 'v1_proxy', 'v1proxy_s1': 'v1_proxy_one_core', 'pause2': 'positive_control',
-         'burn4': 'cpu_reference'}
+         'burn4': 'cpu_reference',
+         # EXP-13's (its Arms table): the side arms are protocol readings beside v1, never v1's place in a
+         # row; parcopy16 is the bound with 16 streams, a B_fast candidate where it runs.
+         'parcopy16': 'bound', 'pgdelta_direct_inplace_w1': 'protocol', 'pgdelta_direct_inplace_w16': 'protocol',
+         'pgdelta_direct_inplace_hc': 'protocol', 'pgdelta_direct_inplace_tls': 'protocol_tls'}
 # The engine each pgdelta method runs, named by its flags, so that no change of pgdelta's
 # defaults can change what a method measures (as compare_methods pins EXP-02's):
 # - pgdelta: EXP-06's choice, which is also the command line's default on these 8-vCPU
@@ -183,6 +200,14 @@ TIERS = {'full': 'omni_today', 'full_nosync': 'diagnostic', 'full_syncfs': 'rele
 #   --rebuild (a copy of B0 made before the cache drop stands in for B, untimed).
 # - source_kind: the sender's --source-kind: 'datadir' reads the cleanly stopped source's data
 #   directory instead of a capture S.
+#
+# T12 (EXP-13) pins the sender's request window on v1's path (--window, added for it): 4, today's value
+# (pgdelta/sender.py's DEFAULT_WINDOW), so that no change of pgdelta's default can move v1 or its 8-job
+# variant, and 1 or 16 on its side arms. Each side arm changes one thing:
+# - window: the sender's --window, how many files it hashes ahead while it waits for leaf digests.
+# - high_churn: the sender's --high-churn-node-fraction (the fallback: a file's mismatched nodes sent whole).
+# - transport: 'tls' runs v1 through a stunnel pair: the receiver listens on localhost behind dest's
+#   stunnel, and the sender connects to the source's (run_exp04's pgdelta_*_argv); no flag changes.
 PGDELTA_ENGINES = {
     'pgdelta': {'jobs': 4, 'rebuild': 'copy-patch', 'verify': 'pipelined', 'prefetch_basis': 'on'},
     'pgdelta_1thread': {'jobs': 1, 'rebuild': 'gap-fill', 'verify': 'sequential', 'prefetch_basis': 'on'},
@@ -204,17 +229,26 @@ PGDELTA_ENGINES = {
     'pgdelta_direct': {'jobs': 4, 'rebuild': 'copy-patch', 'verify': 'pipelined', 'prefetch_basis': 'on',
                        'fsync': 'main', 'source_kind': 'datadir'},
     'pgdelta_direct_inplace': {'jobs': 4, 'rebuild': None, 'verify': 'pipelined', 'prefetch_basis': 'on',
-                               'fsync': 'main', 'in_place': True, 'source_kind': 'datadir'},
+                               'fsync': 'main', 'in_place': True, 'source_kind': 'datadir', 'window': 4},
     # T2 (EXP-11): v1's path with 8 jobs on each end, the rest as pgdelta_direct_inplace.
     'pgdelta_direct_inplace_j8': {'jobs': 8, 'rebuild': None, 'verify': 'pipelined', 'prefetch_basis': 'on',
-                                  'fsync': 'main', 'in_place': True, 'source_kind': 'datadir'},
+                                  'fsync': 'main', 'in_place': True, 'source_kind': 'datadir', 'window': 4},
     # T10a (EXP-12): v1's engine, pgdelta_direct_inplace's, reading the snapshot; and the same with one sender
     # job (send_jobs: the sender's --jobs, where it differs from the receiver's).
     'v1proxy': {'jobs': 4, 'rebuild': None, 'verify': 'pipelined', 'prefetch_basis': 'on', 'fsync': 'main',
-                'in_place': True, 'source_kind': 'datadir'},
+                'in_place': True, 'source_kind': 'datadir', 'window': 4},
     'v1proxy_s1': {'jobs': 4, 'send_jobs': 1, 'rebuild': None, 'verify': 'pipelined', 'prefetch_basis': 'on',
-                   'fsync': 'main', 'in_place': True, 'source_kind': 'datadir'},
+                   'fsync': 'main', 'in_place': True, 'source_kind': 'datadir', 'window': 4},
 }
+# T12 (EXP-13): v1's engine with one setting changed each (T12_V1_ARMS).
+_V1_ENGINE = PGDELTA_ENGINES['pgdelta_direct_inplace']
+PGDELTA_ENGINES.update({
+    'pgdelta_direct_inplace_w1': {**_V1_ENGINE, 'window': 1},
+    'pgdelta_direct_inplace_w16': {**_V1_ENGINE, 'window': 16},
+    'pgdelta_direct_inplace_hc': {**_V1_ENGINE, 'high_churn': 0.5},
+    'pgdelta_direct_inplace_tls': {**_V1_ENGINE, 'transport': 'tls'},
+})
+del _V1_ENGINE
 
 
 def send_jobs(engine: dict) -> int:
@@ -243,6 +277,10 @@ def pgdelta_args(engine: dict) -> dict:
     send = args['send']
     if engine.get('source_kind'):
         send += ('--source-kind', engine['source_kind'])
+    if engine.get('window') is not None:
+        send += ('--window', str(engine['window']))
+    if engine.get('high_churn') is not None:
+        send += ('--high-churn-node-fraction', f"{engine['high_churn']:g}")
     return {'send': send, 'receive': receive}
 
 
@@ -445,6 +483,11 @@ PROC_SCOPE['pause2'] = ("source: agent.py load-pause, which sends pgbench SIGSTO
 PROC_SCOPE['burn4'] = ('source: agent.py burn, 4 forked busy processes at nice 0 (its children, reaped; their CPU is '
                        'in the result, not in the per-process columns; no walsender). Peak RSS: none measured, no '
                        'largest single process')
+# T12 (EXP-13): v1 through the stunnel pair. Both stunnels start before the clock and stop after it (agent.py
+# stunnel), so neither is a child of a timed command.
+PROC_SCOPE['pgdelta_direct_inplace_tls'] = (PROC_SCOPE['pgdelta_direct_inplace'] + '. stunnel on each end is not '
+                                            'per-process (started before the clock by agent.py): the VM-wide CPU '
+                                            "columns include it, and the record's stunnel holds each one's own CPU")
 del _method, _jobs, _streams, _engine
 # rsync's copy of B0 (prep, on dest) and its capture of S (on source) touch
 # different machines and the link is idle during both, so they run at the same
@@ -586,7 +629,9 @@ def snapshot_delta(before: dict, after: dict) -> dict:
     """Net bytes and packets and CPU seconds between two snapshot() results of one host.
 
     With meminfo and diskstats in both (snapshots from before EXP-11 have neither), also the
-    window's Dirty and Writeback at each end (`memory`) and each disk's bytes (`disk`).
+    window's Dirty and Writeback at each end (`memory`) and each disk's bytes (`disk`). T12 (EXP-13)
+    snapshots also carry the TCP counters nstat reads (`nstat`) and the emulated WAN's qdisc counters
+    (`qdisc`), whose deltas are kept under the same keys.
     """
     if before['iface'] != after['iface']:
         raise ValueError('snapshots are of different interfaces')
@@ -602,6 +647,11 @@ def snapshot_delta(before: dict, after: dict) -> dict:
         delta['memory'] = memory_delta(before['meminfo'], after['meminfo'])
     if before.get('disks') is not None and after.get('disks') is not None:
         delta['disk'] = disk_delta(before['disks'], after['disks'])
+    if before.get('nstat') and after.get('nstat'):
+        delta['nstat'] = {name: after['nstat'][name] - before['nstat'][name]
+                          for name in NSTAT_COUNTERS if name in before['nstat'] and name in after['nstat']}
+    if before.get('qdisc') is not None and after.get('qdisc') is not None:
+        delta['qdisc'] = qdisc_delta(before['qdisc'], after['qdisc'])
     return delta
 
 
@@ -612,11 +662,12 @@ def _read_proc(path: Path) -> str | None:
         return None
 
 
-def snapshot(iface: str, proc: Path = Path('/proc')) -> dict:
+def snapshot(iface: str, proc: Path = Path('/proc'), tcp: bool = False) -> dict:
     """Counters of one interface and the aggregate CPU line, with clocks.
 
     Also, where /proc has them: meminfo's Dirty, Writeback and Cached (kB), and the counters of
-    every whole disk and md array (DISK_DEVICE) from diskstats.
+    every whole disk and md array (DISK_DEVICE) from diskstats. With tcp (T12, EXP-13), the TCP
+    counters nstat reads from /proc/net/snmp and /proc/net/netstat (NSTAT_COUNTERS).
     """
     import time
     netdev = parse_netdev((proc / 'net' / 'dev').read_text())
@@ -635,6 +686,10 @@ def snapshot(iface: str, proc: Path = Path('/proc')) -> dict:
         result['disks'] = {device: {field: counters[field] for field in DISK_COUNTERS}
                            for device, counters in parse_diskstats(diskstats).items()
                            if DISK_DEVICE.match(device)}
+    if tcp:
+        snmp, netstat = _read_proc(proc / 'net' / 'snmp'), _read_proc(proc / 'net' / 'netstat')
+        if snmp or netstat:
+            result['nstat'] = nstat_values(snmp or '', netstat or '')
     return result
 
 
@@ -1696,7 +1751,7 @@ def phase_disk_bytes(record: dict, host: str, key: str):
     return total
 
 
-def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
+def durability_check(record: dict, output_bytes, idle_noise=None, noise_table=None) -> dict:
     """EXP-11's checks (a) and (b) on one run's timed phases (one counter window each).
 
     (a) dest's Dirty + Writeback, read just before the clock starts and first after it stops, may
@@ -1707,6 +1762,10 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
     it is the control); `a_required` whether it writes on dest at all (EXP-12's arms that don't,
     NO_DEST_WRITE_METHODS, are checked all the same). A parcopy* run whose fsync count is not its
     inventory's (A5, parcopy_fsync_count) fails (a).
+
+    T12 (EXP-13): with noise_table (window length in seconds -> bytes, noise_table()), (a)'s limit follows the
+    run's clock: max(DIRTY_LIMIT_BYTES, the noise of the shortest length that covers it; noise_limit), and
+    the length is recorded (noise_window_s; noise_beyond_table when the clock outlasts every length).
     """
     method = record.get('method')
     phases = list((record.get('phases') or {}).values())
@@ -1714,6 +1773,10 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
     after = _get(phases[-1], 'memory', 'dest', 'dirty_writeback_bytes_after') if phases else None
     increase = None if before is None or after is None else after - before
     limit = max(DIRTY_LIMIT_BYTES, int(idle_noise or 0))
+    by_clock = None
+    if noise_table:
+        by_clock = noise_limit(noise_table, (record.get('totals') or {}).get('wall_seconds'))
+        limit = max(DIRTY_LIMIT_BYTES, by_clock['noise_bytes'])
     a_ok = None if increase is None else increase <= limit
     fsync_count = parcopy_fsync_count(record) if method in PARCOPY_METHODS else None
     if fsync_count is not None:
@@ -1740,7 +1803,10 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
             'idle_noise_bytes': None if idle_noise is None else int(idle_noise), 'a_ok': a_ok,
             'disk_write_bytes': written, 'output_bytes': output_bytes, 'b_required': b_required,
             'b_min_bytes': needed, 'b_ok': b_ok,
-            **({'fsync_count': fsync_count} if fsync_count is not None else {})}
+            **({'fsync_count': fsync_count} if fsync_count is not None else {}),
+            **({'noise_window_s': by_clock['window_s'], 'noise_beyond_table': by_clock['beyond_table'],
+                'noise_table_bytes': {str(length): value for length, value in sorted(noise_table.items())}}
+               if by_clock is not None else {})}
 
 
 # EXP-11's directory rule (a directory change is durable once a later fsync or syncfs on the same
@@ -2434,6 +2500,1067 @@ def wal_end_point(lines, launched_utc: float | None = None) -> dict | None:
     return None
 
 
+# --- T12 (EXP-13): conditions, the emulated WAN and what each visit and run checks -----------------------
+
+# A condition is RATE:RTT_MS:HOST: the link rate in Gbit/s, the added round-trip time r in ms (r/2 on each
+# VM's netem) and the host TCP setting: default (Debian's, as recorded at the start) or tuned (only the
+# tcp_rmem and tcp_wmem maxima raised, on both VMs).
+HOST_TCP_SETTINGS = ('default', 'tuned')
+TCP_MEM_SYSCTLS = ('net.ipv4.tcp_rmem', 'net.ipv4.tcp_wmem')
+# Every TCP setting each run records on both VMs; only the two maxima ever change.
+TCP_SYSCTLS = (*TCP_MEM_SYSCTLS, 'net.ipv4.tcp_congestion_control', 'net.ipv4.tcp_adv_win_scale',
+               'net.ipv4.tcp_slow_start_after_idle', 'net.ipv4.tcp_no_metrics_save', 'net.core.rmem_max',
+               'net.core.wmem_max', 'net.core.default_qdisc')
+TUNED_TCP_MAX_BYTES = 128 << 20
+# infra/gcp/wan.sh's tree: the prio root's plain band 1:1, its delayed band 1:2 with netem (20:) and netem's
+# tbf child (30:, parent 20:1).
+WAN_NETEM_LIMIT = 1000000
+WAN_QUEUE_FLOOR_MS = 50
+WAN_BURST_FLOOR = 131072
+WAN_PLAIN_BAND, WAN_DELAYED_BAND = '1:1', '1:2'
+WAN_NETEM_HANDLE, WAN_TBF_HANDLE = '20:', '30:'
+QDISC_COUNTERS = ('bytes', 'packets', 'drops', 'overlimits', 'requeues', 'backlog', 'qlen')
+QDISC_CUMULATIVE = ('bytes', 'packets', 'drops', 'overlimits', 'requeues')
+# The counters nstat reports (its names), from /proc/net/snmp (Tcp) and /proc/net/netstat (TcpExt).
+NSTAT_COUNTERS = {'TcpRetransSegs': ('Tcp', 'RetransSegs'),
+                  'TcpExtTCPLostRetransmit': ('TcpExt', 'TCPLostRetransmit'),
+                  'TcpExtTCPTimeouts': ('TcpExt', 'TCPTimeouts')}
+# The visit's checks: 20 pings 0.05 s apart, minimum in [r, r + 1 ms] and median at most minimum + 2 ms; 5
+# control no-ops each within 5 ms of the anchor's; per run, the sending sockets' minrtt in [r, r + 2 ms] and
+# netem's bytes on the source at least 0.98 x the run's wire bytes from source to dest.
+PING_COUNT, PING_INTERVAL_S = 20, 0.05
+PING_MIN_SLACK_MS, PING_MEDIAN_SLACK_MS = 1.0, 2.0
+CONTROL_NOOPS, CONTROL_NOOP_SLACK_S = 5, 0.005
+MINRTT_SLACK_MS = 2.0
+NETEM_BYTES_FRACTION = 0.98
+# The ss sampler: a sending socket carried at least this many bytes (acknowledged), and this share of all.
+SS_SENDING_MIN_BYTES, SS_SENDING_SHARE = 1 << 20, 0.01
+# The stunnel pair (TLS through a proxy): the sender connects to the source's stunnel on localhost, which
+# opens TLS 1.3 to dest's stunnel, which forwards to the receiver listening on localhost.
+STUNNEL_CLIENT_PORT, STUNNEL_SERVER_PORT = 7001, 7443
+STUNNEL_SERVER_NAME = 'pgd-exp13-server'
+
+
+def parse_condition(text: str) -> dict:
+    """'2:60:tuned' -> a condition: its label (canonical), slug (for file names), the tbf rate (parse_speed's),
+    the round trip and its half (each VM's netem delay), and the host setting. The anchor is r = 0."""
+    parts = text.strip().lower().split(':')
+    if len(parts) != 3:
+        raise ValueError(f'a condition is RATE:RTT_MS:HOST, got {text!r}')
+    speed = parse_speed(parts[0])
+    if speed['gbit'] is None:
+        raise ValueError(f'a condition needs a link rate, not {parts[0]!r}')
+    try:
+        rtt = float(parts[1])
+    except ValueError:
+        raise ValueError(f'bad round-trip time in {text!r}') from None
+    if not math.isfinite(rtt) or rtt < 0:
+        raise ValueError(f'the round-trip time in {text!r} must be 0 or more')
+    if parts[2] not in HOST_TCP_SETTINGS:
+        raise ValueError(f'the host setting in {text!r} must be one of {", ".join(HOST_TCP_SETTINGS)}')
+    gbit = speed['gbit']
+    return {'label': f'{gbit:g}:{rtt:g}:{parts[2]}', 'slug': f'{gbit:g}g-{rtt:g}ms-{parts[2]}', 'gbit': gbit,
+            'tc_rate': speed['tc_rate'], 'rtt_ms': rtt, 'delay_ms': rtt / 2, 'host_tcp': parts[2]}
+
+
+def parse_conditions(text: str) -> list[dict]:
+    conditions = [parse_condition(item) for item in (text or '').split(',') if item.strip()]
+    labels = [condition['label'] for condition in conditions]
+    if len(set(labels)) != len(labels):
+        raise ValueError(f'duplicate conditions in {text!r}')
+    if not conditions:
+        raise ValueError('no conditions given')
+    return conditions
+
+
+def parse_method_conditions(specs, methods, conditions) -> dict[str, list[str]]:
+    """--method-conditions: method -> the labels of the conditions it runs at, for the methods it limits.
+
+    As --method-speeds: each spec is METHODS=CONDITIONS, the methods joined with '+'; every method must be in
+    `methods` and named once, every condition one of `conditions`; a method no spec names runs at every one.
+    """
+    labels = [condition['label'] for condition in conditions]
+    limited: dict[str, list[str]] = {}
+    for spec in specs:
+        names, equals, values = spec.partition('=')
+        names = [name.strip() for name in names.split('+') if name.strip()]
+        if not equals or not names:
+            raise ValueError(f'--method-conditions wants METHODS=CONDITIONS, got {spec!r}')
+        chosen = [condition['label'] for condition in parse_conditions(values)]
+        unknown = [label for label in chosen if label not in labels]
+        if unknown:
+            raise ValueError(f'--method-conditions {spec!r}: {", ".join(unknown)} not in --conditions')
+        for name in names:
+            if name not in methods:
+                raise ValueError(f'--method-conditions {spec!r}: {name} is not in --methods')
+            if name in limited:
+                raise ValueError(f'--method-conditions names {name} twice')
+            limited[name] = [label for label in labels if label in chosen]
+    return limited
+
+
+def parse_repeats(text: str) -> list[int]:
+    """'2,4' -> [2, 4]: repeats counted from 1, as the specification counts them."""
+    repeats = sorted({int(item) for item in (text or '').split(',') if item.strip()})
+    if any(repeat < 1 for repeat in repeats):
+        raise ValueError(f'repeats are counted from 1, got {text!r}')
+    return repeats
+
+
+def parse_method_repeats(specs, methods) -> dict[str, list[int]]:
+    """--method-repeats: METHODS=REPEATS (methods joined with '+', repeats counted from 1), e.g. probackup8=1,3,5."""
+    limited: dict[str, list[int]] = {}
+    for spec in specs:
+        names, equals, values = spec.partition('=')
+        names = [name.strip() for name in names.split('+') if name.strip()]
+        if not equals or not names:
+            raise ValueError(f'--method-repeats wants METHODS=REPEATS, got {spec!r}')
+        repeats = parse_repeats(values)
+        for name in names:
+            if name not in methods:
+                raise ValueError(f'--method-repeats {spec!r}: {name} is not in --methods')
+            if name in limited:
+                raise ValueError(f'--method-repeats names {name} twice')
+            limited[name] = repeats
+    return limited
+
+
+def parse_count_at(specs, conditions, what: str = '--first-visit-link-streams') -> dict[str, list[int]]:
+    """N@CONDITIONS specs (e.g. 16@2:120:default; repeatable) -> condition label -> the counts asked for there."""
+    labels = [condition['label'] for condition in conditions]
+    found: dict[str, list[int]] = {}
+    for spec in specs:
+        count, at, values = spec.partition('@')
+        if not at or not count.strip().isdigit() or int(count) < 1:
+            raise ValueError(f'{what} wants N@CONDITIONS, got {spec!r}')
+        for condition in parse_conditions(values):
+            if condition['label'] not in labels:
+                raise ValueError(f'{what} {spec!r}: {condition["label"]} not in --conditions')
+            found.setdefault(condition['label'], []).append(int(count))
+    return found
+
+
+def parse_method_at(text: str, conditions) -> dict | None:
+    """--negative-control METHOD@CONDITIONS -> {'method', 'conditions'}; None when not given."""
+    if not text:
+        return None
+    method, at, values = text.partition('@')
+    if not at or not method.strip():
+        raise ValueError(f'--negative-control wants METHOD@CONDITIONS, got {text!r}')
+    labels = [condition['label'] for condition in conditions]
+    chosen = [condition['label'] for condition in parse_conditions(values)]
+    unknown = [label for label in chosen if label not in labels]
+    if unknown:
+        raise ValueError(f'--negative-control {text!r}: {", ".join(unknown)} not in --conditions')
+    return {'method': method.strip(), 'conditions': chosen}
+
+
+def t12_methods_at(methods, label: str, repeat: int, plan: dict) -> list[str]:
+    """The methods that run at condition `label` in repeat `repeat` (counted from 1), in --methods' order.
+
+    - --method-conditions limits a method to its conditions;
+    - --method-repeats limits a method to its repeats;
+    - otherwise a --baseline-methods method runs in --baseline-repeats only, or in every repeat at the
+      --baseline-every-repeat conditions;
+    - the negative control (--negative-control METHOD@CONDITIONS) runs at its conditions in the first repeat
+      only (it is last here; each visit draws its own order).
+    """
+    control = plan.get('negative_control') or {}
+    here = []
+    for method in methods:
+        if method == control.get('method'):
+            continue
+        limited = (plan.get('method_conditions') or {}).get(method)
+        if limited is not None and label not in limited:
+            continue
+        repeats = (plan.get('method_repeats') or {}).get(method)
+        if repeats is not None:
+            if repeat not in repeats:
+                continue
+        elif (method in (plan.get('baseline_methods') or ()) and label not in (plan.get('baseline_every') or ())
+              and repeat not in (plan.get('baseline_repeats') or ())):
+            continue
+        here.append(method)
+    if control and label in control['conditions'] and repeat == 1:
+        here.append(control['method'])
+    return here
+
+
+def t12_schedule(methods, conditions, repeats: int, plan: dict) -> list[tuple[int, str, str]]:
+    """Every (repeat, condition label, method) an invocation runs, repeats counted from 1, in condition order
+    (the run draws each repeat's order of conditions, and each visit's order of arms)."""
+    return [(repeat, condition['label'], method) for repeat in range(1, repeats + 1) for condition in conditions
+            for method in t12_methods_at(methods, condition['label'], repeat, plan)]
+
+
+def tcp_mem(value) -> tuple[int, ...] | None:
+    """tcp_rmem or tcp_wmem as /proc/sys prints them ('4096\\t131072\\t6291456') or as written ('4096 131072
+    6291456') -> (min, default, max); None for anything else."""
+    words = str(value).split() if value is not None else []
+    if len(words) != 3 or not all(word.isdigit() for word in words):
+        return None
+    return tuple(int(word) for word in words)
+
+
+def condition_tcp_settings(host: str, defaults: dict, tuned_max: int = TUNED_TCP_MAX_BYTES) -> dict:
+    """The tcp_rmem and tcp_wmem a host setting wants on one VM, as 'MIN DEFAULT MAX': that VM's recorded
+    defaults, or (tuned) the same with only the maximum raised to tuned_max."""
+    wanted = {}
+    for name in TCP_MEM_SYSCTLS:
+        values = tcp_mem(defaults.get(name))
+        if values is None:
+            raise ValueError(f'{name} has no recorded default ({defaults.get(name)!r})')
+        if host == 'tuned':
+            values = (*values[:2], int(tuned_max))
+        wanted[name] = ' '.join(str(value) for value in values)
+    return wanted
+
+
+def tcp_settings_problems(found: dict, wanted: dict) -> list[str]:
+    """What differs between the TCP settings a VM has and those a condition wants (tcp_mem's comparison)."""
+    return [f'{name} is {found.get(name)!r}, not {value!r}' for name, value in wanted.items()
+            if tcp_mem(found.get(name)) != tcp_mem(value)]
+
+
+def wan_expected(condition: dict, peer: str, control_port: int) -> dict:
+    """What wan.sh sets for a condition on each VM: netem's delay (r/2) and limit, the tbf's rate (bytes per
+    second, as tc reports it), burst (10 ms of tokens, at least 128 KiB) and queue (max(50 ms, r))."""
+    rate = condition['gbit'] * 1e9 / 8
+    return {'delay_ms': condition['delay_ms'], 'limit': WAN_NETEM_LIMIT, 'rate_bytes': rate,
+            'burst_bytes': max(WAN_BURST_FLOOR, int(rate / 100)),
+            'queue_ms': max(float(WAN_QUEUE_FLOOR_MS), float(condition['rtt_ms'])), 'peer': peer,
+            'control_port': int(control_port)}
+
+
+def parse_qdisc_json(text) -> list[dict]:
+    """`tc -s -j qdisc show dev DEV` -> its qdiscs: kind, handle, parent ('root' for the root qdisc), options, and
+    the counters it reports (QDISC_COUNTERS; None where absent)."""
+    data = json.loads(text) if isinstance(text, (str, bytes)) else text
+    qdiscs = []
+    for item in data or ():
+        if not isinstance(item, dict):
+            continue
+        entry = {'kind': item.get('kind'), 'handle': item.get('handle'),
+                 'parent': 'root' if item.get('root') else item.get('parent'),
+                 'options': item.get('options') if isinstance(item.get('options'), dict) else {}}
+        for key in QDISC_COUNTERS:
+            value = item.get(key)
+            entry[key] = value if isinstance(value, int) and not isinstance(value, bool) else None
+        qdiscs.append(entry)
+    return qdiscs
+
+
+_TC_TIME = re.compile(r'^([\d.]+)(s|ms|us|ns)$')
+_TC_RATE = re.compile(r'^([\d.]+)([KMGT]?)(i?)bit$')
+_TC_SIZE = re.compile(r'^([\d.]+)([KMG]?)(i?)b$')
+
+
+def _tc_time_ms(value, number_seconds: float):
+    """A tc time in ms: a number in tc's JSON unit (`number_seconds` seconds each: 1 for netem's delay, 1e-6 for
+    tbf's lat), or text with its unit ('30ms', '60.0ms'); None if neither."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value * number_seconds * 1000
+    found = _TC_TIME.match(str(value or ''))
+    if not found:
+        return None
+    return float(found.group(1)) * {'s': 1000, 'ms': 1, 'us': 1e-3, 'ns': 1e-6}[found.group(2)]
+
+
+def _tc_rate_bytes(value):
+    """tbf's rate in bytes per second: a number (tc's JSON) or text ('2Gbit')."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    found = _TC_RATE.match(str(value or ''))
+    if not found:
+        return None
+    base = 1024 if found.group(3) else 1000
+    return float(found.group(1)) * base ** ' KMGT'.index(found.group(2) or ' ') / 8
+
+
+def _tc_size_bytes(value):
+    """A tc size in bytes: a number (tc's JSON) or text ('2500000b', '2441Kb')."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    found = _TC_SIZE.match(str(value or '').split('/')[0])
+    if not found:
+        return None
+    base = 1024 if found.group(3) or found.group(2) else 1000
+    return float(found.group(1)) * base ** ' KMG'.index(found.group(2) or ' ')
+
+
+def wan_tree(qdiscs) -> dict:
+    """wan.sh's tree in parsed qdiscs (parse_qdisc_json): the prio root, the plain band's qdisc where one shows,
+    netem on the delayed band and its tbf child (each None where missing), and whether that is the tree.
+
+    netem_own_drops is netem's drop counter less its child tbf's, from the same snapshot: in kernel 6.1 netem
+    counts a packet its child refuses as its own drop (sch_netem.c, netem_dequeue), and so does the prio root.
+    The plain band's counters are its own qdisc's where tc shows one, else the root's less netem's.
+    """
+    root = next((qdisc for qdisc in qdiscs if qdisc['parent'] == 'root'), None)
+    netem = next((qdisc for qdisc in qdiscs if qdisc['parent'] == WAN_DELAYED_BAND), None)
+    tbf = next((qdisc for qdisc in qdiscs if netem is not None and qdisc['parent'] == f'{netem["handle"]}1'), None)
+    plain = next((qdisc for qdisc in qdiscs if qdisc['parent'] == WAN_PLAIN_BAND), None)
+
+    def counters(qdisc):
+        return None if qdisc is None else {key: qdisc.get(key) for key in QDISC_COUNTERS}
+
+    tree = {'is_wan': bool(root and root['kind'] == 'prio' and netem and netem['kind'] == 'netem'
+                           and tbf and tbf['kind'] == 'tbf'),
+            'root': None if root is None else {'kind': root['kind'], 'handle': root['handle'], **counters(root)},
+            'netem': None, 'tbf': None, 'plain': None, 'netem_own_drops': None}
+    if netem is not None and netem['kind'] == 'netem':
+        options = netem['options']
+        delay = options.get('delay')
+        delay = delay.get('delay') if isinstance(delay, dict) else delay
+        tree['netem'] = {'handle': netem['handle'], 'limit': options.get('limit'),
+                         'delay_ms': 0.0 if delay is None else _tc_time_ms(delay, 1.0), **counters(netem)}
+    if tbf is not None and tbf['kind'] == 'tbf':
+        options = tbf['options']
+        tree['tbf'] = {'handle': tbf['handle'], 'rate_bytes': _tc_rate_bytes(options.get('rate')),
+                       'burst_bytes': _tc_size_bytes(options.get('burst')),
+                       'latency_ms': _tc_time_ms(options.get('lat'), 1e-6), 'limit_bytes': options.get('limit'),
+                       **counters(tbf)}
+    if tree['netem'] and tree['tbf'] and None not in (tree['netem']['drops'], tree['tbf']['drops']):
+        tree['netem_own_drops'] = tree['netem']['drops'] - tree['tbf']['drops']
+    if plain is not None:
+        tree['plain'] = {'kind': plain['kind'], 'derived': False, **counters(plain)}
+    elif root is not None and tree['netem'] is not None:
+        tree['plain'] = {'kind': None, 'derived': True,
+                         **{key: (None if root.get(key) is None or tree['netem'].get(key) is None
+                                  else root[key] - tree['netem'][key]) for key in ('bytes', 'packets')}}
+    return tree
+
+
+_U32_HEAD = re.compile(r'^filter .*?\bpref (\d+) u32\b')
+_U32_FLOWID = re.compile(r'\*?(?:flowid|classid) (\S+)')
+_U32_MATCH = re.compile(r'^\s*match ([0-9a-f]{8})/([0-9a-f]{8}) at (\d+)')
+
+
+def parse_u32_filters(text: str) -> list[dict]:
+    """`tc filter show dev DEV` -> its u32 rules (iproute2's text: a 'filter ... pref P u32 ... flowid C' line,
+    then its '  match VALUE/MASK at OFFSET' lines): pref, flowid, and the fields wan.sh matches (dst, protocol,
+    sport, dport), with any other match kept in `other`."""
+    rules, current = [], None
+    for line in (text or '').splitlines():
+        head = _U32_HEAD.match(line)
+        if head:
+            flowid = _U32_FLOWID.search(line)
+            current = {'pref': int(head.group(1)), 'flowid': flowid.group(1), 'matches': []} if flowid else None
+            if current is not None:
+                rules.append(current)
+            continue
+        found = _U32_MATCH.match(line)
+        if found and current is not None:
+            current['matches'].append((int(found.group(1), 16), int(found.group(2), 16), int(found.group(3))))
+    parsed = []
+    for rule in rules:
+        fields = {'pref': rule['pref'], 'flowid': rule['flowid'], 'dst': None, 'protocol': None, 'sport': None,
+                  'dport': None, 'other': []}
+        for value, mask, offset in rule['matches']:
+            if offset == 16 and mask == 0xffffffff:
+                fields['dst'] = socket.inet_ntoa(value.to_bytes(4, 'big'))
+            elif offset == 8 and mask == 0x00ff0000:
+                fields['protocol'] = (value >> 16) & 0xff
+            elif offset == 20 and mask == 0xffff0000:
+                fields['sport'] = value >> 16
+            elif offset == 20 and mask == 0x0000ffff:
+                fields['dport'] = value & 0xffff
+            else:
+                fields['other'].append([f'{value:08x}', f'{mask:08x}', offset])
+        parsed.append(fields)
+    return parsed
+
+
+def wan_filter_problems(filters, peer: str, control_port: int) -> list[str]:
+    """What is wrong with wan.sh's filters (parse_u32_filters): the control port, as source and as destination
+    port of TCP to the peer, to the plain band; then everything else to the peer to the delayed band; nothing
+    else."""
+    def plain(rule, key):
+        other = 'dport' if key == 'sport' else 'sport'
+        return (rule['flowid'] == WAN_PLAIN_BAND and rule['dst'] == peer and rule['protocol'] == 6
+                and rule[key] == control_port and rule[other] is None and not rule['other'])
+
+    exceptions = [rule for rule in filters if plain(rule, 'sport') or plain(rule, 'dport')]
+    delayed = [rule for rule in filters if rule['flowid'] == WAN_DELAYED_BAND and rule['dst'] == peer
+               and rule['protocol'] is None and rule['sport'] is None and rule['dport'] is None and not rule['other']]
+    problems = []
+    for key in ('sport', 'dport'):
+        if not any(plain(rule, key) for rule in filters):
+            problems.append(f'no filter sends TCP {key} {control_port} to {peer} to the plain band')
+    if not delayed:
+        problems.append(f'no filter sends traffic to {peer} to the delayed band')
+    elif exceptions and min(rule['pref'] for rule in delayed) <= max(rule['pref'] for rule in exceptions):
+        problems.append("the delayed band's filter comes before the control port's")
+    unexpected = [rule for rule in filters if rule not in exceptions and rule not in delayed]
+    if unexpected:
+        problems.append(f'unexpected filters: {unexpected}')
+    return problems
+
+
+def _close(value, expected, relative: float, absolute: float = 0.0) -> bool:
+    return value is not None and abs(value - expected) <= max(absolute, relative * abs(expected))
+
+
+def wan_problems(tree: dict, filters, expected: dict) -> list[str]:
+    """The visit's tree check: whether one VM's parsed tree (wan_tree) and filters are wan.sh's for `expected`
+    (wan_expected): netem's delay (within 1%, at least 0.05 ms) and limit, the tbf's rate (1%), burst (2%) and
+    queue (2%, at least 1 ms; tc prints back what it computed from the limit), and the filters."""
+    if not tree.get('is_wan'):
+        return [f"the qdiscs are not wan.sh's tree: root {tree.get('root')}, netem {tree.get('netem')}, "
+                f"tbf {tree.get('tbf')}"]
+    netem, tbf = tree['netem'], tree['tbf']
+    problems = []
+    if not _close(netem['delay_ms'], expected['delay_ms'], 0.01, 0.05):
+        problems.append(f"netem's delay is {netem['delay_ms']} ms, not {expected['delay_ms']}")
+    if netem['limit'] != expected['limit']:
+        problems.append(f"netem's limit is {netem['limit']}, not {expected['limit']}")
+    if not _close(tbf['rate_bytes'], expected['rate_bytes'], 0.01):
+        problems.append(f"tbf's rate is {tbf['rate_bytes']} bytes/s, not {expected['rate_bytes']}")
+    if not _close(tbf['burst_bytes'], expected['burst_bytes'], 0.02):
+        problems.append(f"tbf's burst is {tbf['burst_bytes']} bytes, not {expected['burst_bytes']}")
+    if not _close(tbf['latency_ms'], expected['queue_ms'], 0.02, 1.0):
+        problems.append(f"tbf's queue is {tbf['latency_ms']} ms, not {expected['queue_ms']}")
+    return problems + wan_filter_problems(filters, expected['peer'], expected['control_port'])
+
+
+def qdisc_counters(tree: dict) -> dict:
+    """A snapshot's qdisc counters (T12's snapshot --qdisc): the root's, netem's, the tbf's and the plain band's,
+    from one `tc -s -j` reading (wan_tree), and whether it was wan.sh's tree."""
+    return {'is_wan': tree.get('is_wan'),
+            **{part: (None if tree.get(part) is None else {key: tree[part].get(key) for key in QDISC_COUNTERS
+                                                            if key in tree[part]})
+               for part in ('root', 'netem', 'tbf', 'plain')}}
+
+
+def qdisc_delta(before: dict, after: dict) -> dict:
+    """The qdisc counters' growth over a window (two qdisc_counters()), and netem's own drops over it: its drop
+    counter's growth less its tbf child's. A part missing at either end, or a counter that went backwards (the
+    tree replaced in between), leaves its values None."""
+    delta: dict = {'same_tree': bool(before.get('is_wan') and after.get('is_wan'))}
+    for part in ('root', 'netem', 'tbf', 'plain'):
+        first, last = before.get(part), after.get(part)
+        if not first or not last:
+            delta[part] = None
+            continue
+        values = {}
+        for key in QDISC_CUMULATIVE:
+            if first.get(key) is None or last.get(key) is None or last[key] < first[key]:
+                values[key] = None
+            else:
+                values[key] = last[key] - first[key]
+        delta[part] = values
+    netem, tbf = delta.get('netem') or {}, delta.get('tbf') or {}
+    delta['netem_own_drops'] = (None if netem.get('drops') is None or tbf.get('drops') is None
+                                else netem['drops'] - tbf['drops'])
+    return delta
+
+
+def qdisc_samples_summary(samples) -> dict:
+    """The tc sampler's readings (each a qdisc_counters() with its time): netem's largest backlog in packets
+    (qlen, against its limit, which counts packets) and in bytes, and how many readings had the tree."""
+    netem = [sample['netem'] for sample in samples if isinstance(sample.get('netem'), dict)]
+    qlens = [item['qlen'] for item in netem if item.get('qlen') is not None]
+    backlogs = [item['backlog'] for item in netem if item.get('backlog') is not None]
+    return {'samples': len(samples), 'with_tree': len(netem),
+            'netem_qlen_max': max(qlens) if qlens else None,
+            'netem_backlog_max_bytes': max(backlogs) if backlogs else None,
+            'limit': WAN_NETEM_LIMIT, 'at_limit': None if not qlens else max(qlens) >= WAN_NETEM_LIMIT}
+
+
+_PING_TIME = re.compile(r'\btime[=<]([\d.]+) ?ms\b')
+
+
+def parse_ping(text: str, count: int = PING_COUNT) -> dict:
+    """iputils ping's replies ('64 bytes from ...: icmp_seq=1 ttl=64 time=60.2 ms'): each round trip in ms,
+    their minimum, median and maximum, and how many of `count` came back."""
+    times = [float(value) for value in _PING_TIME.findall(text or '')]
+    return {'count': count, 'replies': len(times), 'times_ms': times,
+            'min_ms': min(times) if times else None, 'median_ms': statistics.median(times) if times else None,
+            'max_ms': max(times) if times else None}
+
+
+def ping_problems(pings: dict, rtt_ms: float) -> list[str]:
+    """The visit's ping check: every reply back, the minimum in [r, r + 1 ms], the median at most the minimum
+    + 2 ms."""
+    problems = []
+    if pings.get('replies') != pings.get('count'):
+        problems.append(f"{pings.get('replies')} of {pings.get('count')} pings came back")
+    low, middle = pings.get('min_ms'), pings.get('median_ms')
+    if low is None or not rtt_ms <= low <= rtt_ms + PING_MIN_SLACK_MS:
+        problems.append(f'the ping minimum {low} ms is outside [{rtt_ms:g}, {rtt_ms + PING_MIN_SLACK_MS:g}] ms')
+    if low is not None and (middle is None or middle > low + PING_MEDIAN_SLACK_MS):
+        problems.append(f'the ping median {middle} ms is above the minimum + {PING_MEDIAN_SLACK_MS:g} ms')
+    return problems
+
+
+def control_noop_problems(seconds, reference) -> list[str]:
+    """The visit's control-path check: each no-op over the control path at most 5 ms slower than the anchor's
+    (the median of the reference no-ops, taken with the tree at the anchor). One-sided: a no-op faster than the
+    anchor's says nothing about a delayed control path."""
+    if not reference:
+        return ['no reference no-ops at the anchor']
+    limit = statistics.median(reference) + CONTROL_NOOP_SLACK_S
+    slow = [round(value, 4) for value in seconds if value > limit]
+    return [f'control no-ops {slow} s exceed the anchor\'s {statistics.median(reference):.4f} s + '
+            f'{CONTROL_NOOP_SLACK_S:g} s'] if slow else []
+
+
+def parse_snmp(text: str) -> dict[str, dict[str, int]]:
+    """/proc/net/snmp or /proc/net/netstat: for each prefix ('Tcp', 'TcpExt'), its header line's names with the
+    values of the line after it."""
+    tables: dict[str, dict[str, int]] = {}
+    names: dict[str, list[str]] = {}
+    for line in (text or '').splitlines():
+        prefix, colon, rest = line.partition(':')
+        if not colon:
+            continue
+        words = rest.split()
+        if prefix in names:
+            header = names.pop(prefix)
+            try:
+                tables[prefix] = {name: int(value) for name, value in zip(header, words)}
+            except ValueError:
+                names[prefix] = words
+        else:
+            names[prefix] = words
+    return tables
+
+
+def nstat_values(snmp_text: str, netstat_text: str) -> dict[str, int]:
+    """nstat's TCP counters (NSTAT_COUNTERS, by nstat's names) from /proc/net/snmp and /proc/net/netstat."""
+    tables = {**parse_snmp(snmp_text), **parse_snmp(netstat_text)}
+    return {name: tables[prefix][field] for name, (prefix, field) in NSTAT_COUNTERS.items()
+            if field in tables.get(prefix, {})}
+
+
+def _ss_endpoint(text: str):
+    """'10.128.0.12:7000', '[::ffff:10.128.0.12]:5432' or '*:22' -> (address, port)."""
+    host, _, port = text.rpartition(':')
+    host = host.strip('[]')
+    if host.startswith('::ffff:'):
+        host = host[len('::ffff:'):]
+    return host, int(port) if port.isdigit() else None
+
+
+_SS_MS = re.compile(r'^(\d+)ms')
+
+
+def _ss_info(words) -> dict:
+    """One socket's `ss -i` line: the counters the samples keep (minrtt in ms; busy, rwnd_limited and
+    sndbuf_limited in ms; notsent and unacked, which ss prints only when not 0)."""
+    info: dict = {'notsent': 0, 'unacked': 0}
+    words = list(words)
+    for index, word in enumerate(words):
+        if word in ('send', 'pacing_rate', 'delivery_rate') and index + 1 < len(words):
+            info[word] = words[index + 1]
+            continue
+        key, colon, value = word.partition(':')
+        if not colon:
+            continue
+        if key in ('minrtt',):
+            info['minrtt_ms'] = float(value)
+        elif key == 'rtt':
+            mean, _, var = value.partition('/')
+            info['rtt_ms'], info['rttvar_ms'] = float(mean), float(var) if var else None
+        elif key in ('busy', 'rwnd_limited', 'sndbuf_limited'):
+            found = _SS_MS.match(value)
+            if found:
+                info[f'{key}_ms'] = int(found.group(1))
+        elif key == 'retrans':
+            now, _, total = value.partition('/')
+            info['retrans'], info['retrans_total'] = int(now), int(total) if total else None
+        elif value.isdigit():
+            info[key] = int(value)
+    return info
+
+
+def parse_ss(text: str, exclude_ports=()) -> list[dict]:
+    """`ss -tin` (with or without its header) -> one dict per TCP socket: state, local and peer endpoints, the
+    queues, and its info line's counters (_ss_info). Sockets with either port in exclude_ports (the harness's
+    control path) are left out."""
+    sockets, current = [], None
+    for line in (text or '').splitlines():
+        if not line.strip():
+            continue
+        if line[0].isspace():
+            if current is not None:
+                current.update(_ss_info(line.split()))
+            continue
+        words = line.split()
+        if words[0] in ('State', 'Netid', 'Recv-Q'):
+            current = None
+            continue
+        endpoints = [index for index, word in enumerate(words) if ':' in word and not word.endswith(':')]
+        if len(endpoints) < 2:
+            current = None
+            continue
+        local, peer = _ss_endpoint(words[endpoints[-2]]), _ss_endpoint(words[endpoints[-1]])
+        current = None
+        if local[1] in exclude_ports or peer[1] in exclude_ports:
+            continue
+        numbers = [word for word in words[:endpoints[-2]] if word.isdigit()]
+        current = {'state': None if words[0].isdigit() else words[0], 'local': f'{local[0]}:{local[1]}',
+                   'peer': f'{peer[0]}:{peer[1]}', 'local_port': local[1], 'peer_port': peer[1],
+                   'recv_q': int(numbers[-2]) if len(numbers) >= 2 else None,
+                   'send_q': int(numbers[-1]) if numbers else None}
+        sockets.append(current)
+    return sockets
+
+
+def ss_connections(samples) -> list[dict]:
+    """The ss sampler's readings (each {'t', 'ss': parse_ss()}) per connection (local, peer): when it was first
+    and last seen, in how many readings, its last reading (that connection's reading: ss's counters are
+    cumulative), its smallest minrtt and its largest notsent and unacked."""
+    found: dict = {}
+    for sample in samples:
+        for item in sample.get('ss') or ():
+            key = (item['local'], item['peer'])
+            entry = found.setdefault(key, {'local': item['local'], 'peer': item['peer'], 'first_t': sample.get('t'),
+                                           'samples': 0, 'notsent_max': 0, 'unacked_max': 0, 'minrtt_ms': None})
+            entry['samples'] += 1
+            entry['last_t'] = sample.get('t')
+            entry['last'] = item
+            entry['notsent_max'] = max(entry['notsent_max'], item.get('notsent') or 0)
+            entry['unacked_max'] = max(entry['unacked_max'], item.get('unacked') or 0)
+            if item.get('minrtt_ms') is not None:
+                entry['minrtt_ms'] = (item['minrtt_ms'] if entry['minrtt_ms'] is None
+                                      else min(entry['minrtt_ms'], item['minrtt_ms']))
+    return sorted(found.values(), key=lambda entry: (entry['first_t'] or 0, entry['local']))
+
+
+def ss_summary(connections) -> dict:
+    """A run's ss reading: its sending sockets (at least SS_SENDING_MIN_BYTES and SS_SENDING_SHARE of all bytes
+    acknowledged), their minrtt range, busy, rwnd_limited and sndbuf_limited times summed (E15's share is the
+    two limits over busy), retransmissions, and the main socket's (most bytes) readings with notsent and unacked
+    (stunnel's WAN socket, for v1_tls)."""
+    def acked(entry):
+        return (entry.get('last') or {}).get('bytes_acked') or 0
+
+    total = sum(acked(entry) for entry in connections)
+    threshold = max(SS_SENDING_MIN_BYTES, SS_SENDING_SHARE * total)
+    sending = [entry for entry in connections if acked(entry) >= threshold]
+
+    def summed(key):
+        return sum((entry['last'].get(key) or 0) for entry in sending) if sending else None
+
+    minrtts = [entry['minrtt_ms'] for entry in sending if entry['minrtt_ms'] is not None]
+    busy, rwnd, sndbuf = summed('busy_ms'), summed('rwnd_limited_ms'), summed('sndbuf_limited_ms')
+    main = max(sending, key=acked) if sending else None
+    last = (main or {}).get('last') or {}
+    return {'connections': len(connections), 'sending': [[entry['local'], entry['peer']] for entry in sending],
+            'bytes_acked': total, 'minrtt_ms_min': min(minrtts) if minrtts else None,
+            'minrtt_ms_max': max(minrtts) if minrtts else None, 'busy_ms': busy, 'rwnd_limited_ms': rwnd,
+            'sndbuf_limited_ms': sndbuf,
+            'limited_fraction': round((rwnd + sndbuf) / busy, 4) if busy else None,
+            'retrans_total': summed('retrans_total'),
+            'main': None if main is None else {
+                'local': main['local'], 'peer': main['peer'], 'minrtt_ms': main['minrtt_ms'],
+                'cwnd': last.get('cwnd'), 'busy_ms': last.get('busy_ms'),
+                'rwnd_limited_ms': last.get('rwnd_limited_ms'), 'sndbuf_limited_ms': last.get('sndbuf_limited_ms'),
+                'retrans': last.get('retrans'), 'retrans_total': last.get('retrans_total'),
+                'notsent': last.get('notsent'), 'unacked': last.get('unacked'),
+                'notsent_max': main['notsent_max'], 'unacked_max': main['unacked_max'],
+                'bytes_acked': last.get('bytes_acked')}}
+
+
+def steady_last(per_second_bytes, warmup_s: float, count: int = 3) -> dict:
+    """A link test's steady rate: the median of the last `count` complete one-second rates after the warmup
+    (per_second_bytes[i] holds the bytes received in second i after the first byte; only whole seconds)."""
+    first = math.ceil(warmup_s)
+    eligible = [(index, value) for index, value in enumerate(per_second_bytes or ()) if index >= first]
+    used = eligible[-count:]
+    rates = [value * 8 / 1e9 for _, value in used]
+    return {'gbit': round(statistics.median(rates), 4) if rates else None, 'seconds': [index for index, _ in used],
+            'complete_seconds': len(per_second_bytes or ())}
+
+
+def stunnel_config(role: str, *, accept: str, connect: str, cert, key, ca, log) -> str:
+    """One end of the stunnel pair (role 'client' on the source, 'server' on dest).
+
+    TLS 1.3 only, with OpenSSL's default suites; each end presents its certificate from the per-session CA and
+    requires the other's (mutual authentication); TCP_NODELAY on both of its sockets; stunnel's default
+    TIMEOUTclose (not set: dest's stunnel then waits for the source's close_notify, so the receiver's drain ends as
+    in clear); the log at level info, which names each connection, its protocol and suite. In the foreground,
+    with no pid file: agent.py stunnel starts and stops it.
+    """
+    lines = [f'; EXP-13 (T12): v1_tls\'s stunnel {role}', 'foreground = yes', 'pid =', f'output = {log}',
+             'debug = info', 'socket = l:TCP_NODELAY=1', 'socket = r:TCP_NODELAY=1', '', '[pgdelta]']
+    if role == 'client':
+        lines.append('client = yes')
+    lines += [f'accept = {accept}', f'connect = {connect}', f'cert = {cert}', f'key = {key}', f'CAfile = {ca}',
+              'verifyChain = yes', 'requireCert = yes', 'sslVersionMin = TLSv1.3', 'sslVersionMax = TLSv1.3']
+    if role == 'client':
+        lines.append(f'checkHost = {STUNNEL_SERVER_NAME}')
+    return '\n'.join(lines) + '\n'
+
+
+_STUNNEL_SUITE = re.compile(r'\b(TLSv1(?:\.\d)?|SSLv3) ciphersuite: (\S+)')
+_STUNNEL_ACCEPTED = re.compile(r'Service \[[^\]]+\] accepted connection from (\S+)')
+_STUNNEL_CLOSED = re.compile(r'Connection closed: (\d+) byte\(s\) sent to TLS, (\d+) byte\(s\) sent to socket')
+# What stunnel logs when it refuses a peer (smoke item 12's refusals; stunnel 5.68 and OpenSSL 3.0's messages).
+STUNNEL_REFUSAL_MARKERS = ('peer did not return a certificate', 'CERT: Verification error',
+                           'certificate verify failed', 'alert certificate required', 'unknown ca',
+                           'Rejected by CERT')
+
+
+def parse_stunnel_log(text: str) -> dict:
+    """stunnel's log (debug = info): the connections it accepted, each TLS connection's protocol and suite, the
+    bytes each closed connection moved, and any refusal (STUNNEL_REFUSAL_MARKERS)."""
+    lines = (text or '').splitlines()
+    suites = [found.groups() for found in map(_STUNNEL_SUITE.search, lines) if found]
+    closed = [tuple(int(value) for value in found.groups()) for found in map(_STUNNEL_CLOSED.search, lines) if found]
+    return {'lines': len(lines), 'connections': sum(1 for line in lines if _STUNNEL_ACCEPTED.search(line)),
+            'protocols': sorted({protocol for protocol, _ in suites}), 'suites': sorted({suite for _, suite in suites}),
+            'tls_version': suites[-1][0] if suites else None, 'tls_suite': suites[-1][1] if suites else None,
+            'closed': [{'to_tls': to_tls, 'to_socket': to_socket} for to_tls, to_socket in closed],
+            'refusals': [line for line in lines if any(marker in line for marker in STUNNEL_REFUSAL_MARKERS)]}
+
+
+# pgdelta's protocol timers (EXP-13, built in pgdelta for it), read wherever its --stats-json keeps them. The
+# sender's waits are each split into busy and idle parts, which add up to the wait.
+PGDELTA_SENDER_WAITS = ('accept_wait', 'basis_wait', 'leaf_wait', 'complete_wait')
+PGDELTA_SENDER_TIMERS = ('connect', 'accept_wait', 'basis_wait', 'leaf_wait', 'page_send', 'complete_wait')
+PGDELTA_SENDER_COUNTS = ('leaf_requests', 'leaf_waits_over_1ms')
+PGDELTA_RECEIVER_TIMERS = ('hello_wait', 'recv_wait', 'publish')
+
+
+def find_stat(stats, *names, skip=('receiver',)):
+    """The first scalar value under any of `names` anywhere in pgdelta's statistics, searched breadth first, the
+    branches named in `skip` left out (the sender's search skips the receiver's statistics); None if absent."""
+    queue = [stats]
+    while queue:
+        node = queue.pop(0)
+        if not isinstance(node, dict):
+            continue
+        for name in names:
+            value = node.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return value
+        queue += [value for key, value in node.items() if key not in skip and isinstance(value, dict)]
+    return None
+
+
+def _timer_names(base: str, part: str | None = None) -> tuple:
+    stem = base if part is None else f'{base}_{part}'
+    return (f'{stem}_s', f'{stem}_seconds', stem)
+
+
+def pgdelta_timer(stats, base: str, part: str | None = None, skip=('receiver',)):
+    """One of pgdelta's protocol timers (seconds): `base` (e.g. leaf_wait), or its busy or idle part, as
+    <base>[_<part>]_s, _seconds or bare, or as part of a dict under the base's name ({'busy': ...})."""
+    value = find_stat(stats, *_timer_names(base, part), skip=skip)
+    if value is not None:
+        return value
+    queue = [stats]
+    while queue:
+        node = queue.pop(0)
+        if not isinstance(node, dict):
+            continue
+        for name in _timer_names(base):
+            nested = node.get(name)
+            if isinstance(nested, dict):
+                keys = (('total_s', 'total', 'seconds', 's') if part is None
+                        else (f'{part}_s', f'{part}_seconds', part))
+                found = next((nested[key] for key in keys if isinstance(nested.get(key), (int, float))), None)
+                if found is not None:
+                    return found
+        queue += [value for key, value in node.items() if key not in skip and isinstance(value, dict)]
+    return None
+
+
+def pgdelta_protocol_report(reported: dict) -> dict:
+    """pgdelta's protocol timers from its statistics, as tool_reported() carries them: the sender's (connect_s,
+    each wait with its _busy_s and _idle_s, page_send_s), its leaf requests and waits over 1 ms, the window, the
+    fallback's fraction and files; and the receiver's (hello_wait_s, recv_wait_s, publish_s) under `receiver`.
+    Read defensively: a timer this pgdelta doesn't report is None. busy_idle_gap_s is, per wait, the wait less
+    its two parts (smoke item 13: within 2 ms)."""
+    reported = reported if isinstance(reported, dict) else {}
+    report: dict = {}
+    for base in PGDELTA_SENDER_TIMERS:
+        report[f'{base}_s'] = pgdelta_timer(reported, base)
+    gaps = {}
+    for base in PGDELTA_SENDER_WAITS:
+        busy, idle = pgdelta_timer(reported, base, 'busy'), pgdelta_timer(reported, base, 'idle')
+        report[f'{base}_busy_s'], report[f'{base}_idle_s'] = busy, idle
+        total = report[f'{base}_s']
+        gaps[base] = None if None in (total, busy, idle) else round(total - busy - idle, 6)
+    report['busy_idle_gap_s'] = gaps
+    for name in PGDELTA_SENDER_COUNTS:
+        report[name] = find_stat(reported, name)
+    report['window'] = find_stat(reported, 'window')
+    report['high_churn_node_fraction'] = reported.get('high_churn_node_fraction')
+    report['high_churn_files'] = find_stat(reported, 'high_churn_files')
+    receiver = reported.get('receiver') if isinstance(reported.get('receiver'), dict) else {}
+    report['receiver'] = {f'{base}_s': pgdelta_timer(receiver, base, skip=()) for base in PGDELTA_RECEIVER_TIMERS}
+    return report
+
+
+# A15 (EXP-13): a run is void only if a user-table file differs between the trial's reference digests. The user
+# tables are pgbench's and EXP-01's events, with their TOAST tables and every index of either, read from the
+# catalog (no user table is read): relation name and file path, as JSON.
+USER_TABLE_FILES_SQL = (
+    "WITH t AS (SELECT oid, reltoastrelid FROM pg_class WHERE relnamespace = 'public'::regnamespace "
+    "AND relkind IN ('r', 'p') AND (relname LIKE 'pgbench\\_%' OR relname = 'events')), "
+    'r AS (SELECT oid FROM t UNION SELECT reltoastrelid FROM t WHERE reltoastrelid <> 0 '
+    'UNION SELECT indexrelid FROM pg_index WHERE indrelid IN (SELECT oid FROM t) '
+    'OR indrelid IN (SELECT reltoastrelid FROM t WHERE reltoastrelid <> 0)) '
+    "SELECT coalesce(json_agg(json_build_object('relation', c.oid::regclass::text, 'path', "
+    "pg_relation_filepath(c.oid)) ORDER BY c.oid), '[]') FROM r JOIN pg_class c ON c.oid = r.oid "
+    'WHERE pg_relation_filepath(c.oid) IS NOT NULL;')
+_RELATION_FILE = re.compile(r'^(.*?/\d+)(?:_(?:fsm|vm|init))?(?:\.\d+)?$')
+FILE_CLASSES = ('user_table', 'catalog', 'other')
+
+
+def reference_changes(start: dict, end: dict) -> list[str]:
+    """Every path whose entry (kind, size, SHA-256) differs between two reference views, or that one lacks."""
+    first, last = start.get('entries') or {}, end.get('entries') or {}
+    return sorted(path for path in set(first) | set(last)
+                  if list((first.get(path) or [None] * 3)[:3]) != list((last.get(path) or [None] * 3)[:3]))
+
+
+def file_class(path: str, user_files) -> str:
+    """'user_table' for a user table's file (any fork or segment of a path in user_files), 'catalog' for any
+    other relation file (base/, global/), 'other' for the rest."""
+    found = _RELATION_FILE.match(path)
+    if found and found.group(1) in user_files:
+        return 'user_table'
+    return 'catalog' if path.startswith(('base/', 'global/')) else 'other'
+
+
+def reference_classes(start: dict, end: dict, user_files, limit: int = 50) -> dict:
+    """A15: the reference digests' differences by file class (FILE_CLASSES): every count, the first `limit`
+    paths of each, and whether the user tables match (None without the user tables' files)."""
+    changes = reference_changes(start, end)
+    known = user_files is not None
+    user_files = set(user_files or ())
+    classes = {name: [] for name in FILE_CLASSES}
+    for path in changes:
+        classes[file_class(path, user_files)].append(path)
+    return {'counts': {name: len(paths) for name, paths in classes.items()},
+            'paths': {name: paths[:limit] for name, paths in classes.items()},
+            'user_tables_match': (not classes['user_table']) if known else None,
+            'user_files': len(user_files) if known else None}
+
+
+def parse_noise_plan(text: str) -> list[tuple[float, int]]:
+    """--idle-noise-plan '5:20,30:6,120:3' -> [(window seconds, windows), ...]."""
+    plan = []
+    for item in (text or '').split(','):
+        if not item.strip():
+            continue
+        seconds, colon, count = item.partition(':')
+        if not colon or float(seconds) <= 0 or int(count) < 1:
+            raise ValueError(f'--idle-noise-plan wants SECONDS:WINDOWS,..., got {text!r}')
+        plan.append((float(seconds), int(count)))
+    return plan
+
+
+def parse_noise_table(text: str) -> dict[float, int]:
+    """--dirty-noise-table '5:4,30:4,120:4' (window seconds: MiB) -> window seconds -> bytes."""
+    table = {}
+    for item in (text or '').split(','):
+        if not item.strip():
+            continue
+        seconds, colon, mib = item.partition(':')
+        if not colon or float(seconds) <= 0 or float(mib) < 0:
+            raise ValueError(f'--dirty-noise-table wants SECONDS:MIB,..., got {text!r}')
+        table[float(seconds)] = int(float(mib) * (1 << 20))
+    return table
+
+
+def noise_table(given: dict, measured: dict | None = None) -> dict[float, int]:
+    """Check (a)'s noise per window length: the larger of the given and the measured (largest increase over that
+    length's idle windows), then, since a length's noise is the largest increase over windows of that length or
+    shorter, the running maximum from the shortest length up."""
+    lengths = sorted(set(given) | set(measured or {}))
+    table, running = {}, 0
+    for length in lengths:
+        running = max(running, int(given.get(length, 0)), int((measured or {}).get(length, 0)))
+        table[length] = running
+    return table
+
+
+def noise_limit(table: dict, clock_s) -> dict:
+    """The noise check (a) allows a run: that of the shortest window length that covers its clock, or the
+    longest length's, flagged beyond_table, for a run that outlasts every length (or whose clock is unknown)."""
+    lengths = sorted(table)
+    covering = [length for length in lengths if clock_s is not None and length >= clock_s]
+    window = covering[0] if covering else lengths[-1]
+    return {'window_s': window, 'noise_bytes': table[window], 'beyond_table': not covering}
+
+
+def _phase_sum(record: dict, *keys):
+    values = [_get(phase, *keys) for phase in (record.get('phases') or {}).values()]
+    if not values or any(value is None for value in values):
+        return None
+    return sum(values)
+
+
+def network_checks(record: dict) -> dict:
+    """A11 (ii) for one run, from its record: netem's own drops grow by 0 on both VMs (each phase's qdisc delta);
+    netem's sampled backlog stays below its limit on both; netem's bytes on the source are at least 0.98 x the
+    run's wire bytes from source to dest; the sysctl guard passed; and the sending sockets' minrtt is in [r,
+    r + 2 ms]. ok is False with any problem, None while a reading is missing, True otherwise."""
+    rtt = _get(record, 'condition', 'rtt_ms')
+    problems, unknown = [], []
+    values: dict = {}
+    for host in ('source', 'dest'):
+        own = _phase_sum(record, 'qdisc', host, 'netem_own_drops')
+        values[f'netem_own_drops_{host}'] = own
+        if own is None:
+            unknown.append(f"netem's own drops on {host}")
+        elif own > 0:
+            problems.append(f"netem's own drops on {host}: {own}")
+        samples = _get(record, 'qdisc', 'samples', host) or {}
+        values[f'netem_qlen_max_{host}'] = samples.get('netem_qlen_max')
+        if samples.get('at_limit'):
+            problems.append(f"netem's backlog on {host} reached its limit ({samples.get('netem_qlen_max')} packets)")
+        elif samples.get('at_limit') is None:
+            unknown.append(f"netem's sampled backlog on {host}")
+    netem_bytes = _phase_sum(record, 'qdisc', 'source', 'netem', 'bytes')
+    wire = (record.get('totals') or {}).get('wire_bytes_source_to_dest')
+    values['netem_bytes_source'], values['wire_bytes_source_to_dest'] = netem_bytes, wire
+    if netem_bytes is None or wire is None:
+        unknown.append("netem's bytes against the wire bytes")
+    elif netem_bytes < NETEM_BYTES_FRACTION * wire:
+        problems.append(f"netem's bytes on the source ({netem_bytes}) are under {NETEM_BYTES_FRACTION} x the wire "
+                        f'bytes ({wire})')
+    guard = _get(record, 'sysctl', 'tcp', 'ok')
+    if guard is False:
+        problems.append('the TCP sysctl guard failed')
+    elif guard is None:
+        unknown.append('the TCP sysctl guard')
+    ss = record.get('ss') or {}
+    low, high = ss.get('minrtt_ms_min'), ss.get('minrtt_ms_max')
+    values['minrtt_ms_min'], values['minrtt_ms_max'] = low, high
+    if rtt is None or low is None or high is None:
+        unknown.append("the sending sockets' minrtt")
+    elif low < rtt or high > rtt + MINRTT_SLACK_MS:
+        problems.append(f"the sending sockets' minrtt [{low}, {high}] ms is outside [{rtt:g}, "
+                        f'{rtt + MINRTT_SLACK_MS:g}] ms')
+    return {'ok': False if problems else (None if unknown else True), 'problems': problems, 'unknown': unknown,
+            **values}
+
+
+def window_limited_bound(method: str, link: dict):
+    """A9's window-limited bound for a parcopy* run: its stream count's link test at the condition (the trial's
+    first visit) under 0.9 x the zero-delay rate at the same tbf rate (link['zero_delay_bound_gbit']: the default
+    anchor's 8-stream test at 2 Gbit/s, the zero-delay probe at 1 Gbit/s). None for other arms or without both."""
+    if method not in PARCOPY_METHODS:
+        return None
+    streams = PARCOPY_VARIANTS[method]['streams']
+    rate = link.get(f'source_to_dest_{streams}streams_steady_gbit') or link.get(f'source_to_dest_{streams}streams_gbit')
+    zero = link.get('zero_delay_bound_gbit')
+    if not rate or not zero:
+        return None
+    return rate < 0.9 * zero
+
+
+def excluded_reason(record: dict) -> str | None:
+    """Why a T12 run is left out of every median, or None: an error (failure_kind), a failed verification, A11
+    (ii)'s network checks, or A13 (a durable arm failing check (a) or (b))."""
+    reasons = []
+    if record.get('status') == 'error':
+        reasons.append(f"error ({record.get('failure_kind')})")
+    elif record.get('status') == 'fail':
+        reasons.append('verification failed')
+    network = record.get('network_checks') or {}
+    if network.get('problems'):
+        reasons.append('A11: ' + '; '.join(network['problems']))
+    durability = record.get('durability') or {}
+    if durability.get('durable') and durability.get('ok') is False:
+        reasons.append('A13: durability check (a) or (b) failed')
+    return '; '.join(reasons) or None
+
+
+def t12_columns(record: dict) -> dict:
+    """The T12 columns of one record (empty for a run that isn't EXP-13's)."""
+    condition = record.get('condition') or {}
+    if not condition:
+        return {field: None for field in T12_FIELDS}
+    reported = record.get('tool_reported') or {}
+    receiver = reported.get('receiver') if isinstance(reported.get('receiver'), dict) else {}
+    tcp = _get(record, 'sysctl', 'tcp') or {}
+    ss = record.get('ss') or {}
+    main = ss.get('main') or {}
+    network = record.get('network_checks') or {}
+    durability = record.get('durability') or {}
+    samples = _get(record, 'qdisc', 'samples') or {}
+    link = record.get('link') or {}
+    tls = record.get('stunnel') or {}
+    method = record.get('method')
+    columns = {
+        'rate_gbit': condition.get('gbit'), 'rtt_ms': condition.get('rtt_ms'), 'host_tcp': condition.get('host_tcp'),
+        'ping_min_ms': condition.get('ping_min_ms'), 'visit_one_stream_gbit': condition.get('visit_one_stream_gbit'),
+        'zero_delay_gbit': condition.get('zero_delay_gbit'), 'busy_inflight_bytes': condition.get('busy_inflight_bytes'),
+        'sysctl_ok': tcp.get('ok'),
+        'netem_own_drops': (None if None in (network.get('netem_own_drops_source'), network.get('netem_own_drops_dest'))
+                            else network['netem_own_drops_source'] + network['netem_own_drops_dest']),
+        'netem_backlog_max': max([value for value in (samples.get(host, {}).get('netem_qlen_max')
+                                                      for host in ('source', 'dest')) if value is not None],
+                                 default=None),
+        'netem_backlog_max_bytes': max([value for value in (samples.get(host, {}).get('netem_backlog_max_bytes')
+                                                            for host in ('source', 'dest')) if value is not None],
+                                       default=None),
+        'ss_sockets': ss.get('connections'), 'ss_sending_sockets': len(ss.get('sending') or ()) if ss else None,
+        'minrtt_ms': main.get('minrtt_ms'), 'minrtt_ms_max': ss.get('minrtt_ms_max'), 'cwnd': main.get('cwnd'),
+        'busy_ms': ss.get('busy_ms'), 'rwnd_limited_ms': ss.get('rwnd_limited_ms'),
+        'sndbuf_limited_ms': ss.get('sndbuf_limited_ms'), 'limited_fraction': ss.get('limited_fraction'),
+        'retrans': ss.get('retrans_total'), 'notsent': main.get('notsent'), 'unacked': main.get('unacked'),
+        'notsent_max': main.get('notsent_max'), 'unacked_max': main.get('unacked_max'),
+        'tls_version': tls.get('tls_version'), 'tls_suite': tls.get('tls_suite'),
+        'tls_connections': tls.get('connections'),
+        'noise_window_s': durability.get('noise_window_s'), 'dirty_limit_bytes': durability.get('limit_bytes'),
+        'network_ok': network.get('ok'), 'excluded_reason': excluded_reason(record), 'inferred': False,
+        'window_limited_bound': window_limited_bound(method, link),
+        'receiver_wall_s': record.get('receiver_wall_s'),
+        'busy_split_valid': (None if method not in PGDELTA_METHODS else method not in TLS_METHODS)}
+    for host in ('source', 'dest'):
+        values = tcp.get(host) or {}
+        columns[f'tcp_rmem_max_{host}'] = (tcp_mem(values.get('net.ipv4.tcp_rmem')) or (None,) * 3)[2]
+        columns[f'tcp_wmem_max_{host}'] = (tcp_mem(values.get('net.ipv4.tcp_wmem')) or (None,) * 3)[2]
+        for part, key in (('netem', 'bytes'), ('netem', 'drops'), ('tbf', 'drops'), ('tbf', 'overlimits')):
+            columns[f'{part}_{key}_{host}'] = _phase_sum(record, 'qdisc', host, part, key)
+        columns[f'netem_own_drops_{host}'] = network.get(f'netem_own_drops_{host}')
+        for column, name in (('retrans_segs', 'TcpRetransSegs'), ('lost_retransmit', 'TcpExtTCPLostRetransmit'),
+                             ('tcp_timeouts', 'TcpExtTCPTimeouts')):
+            columns[f'{column}_{host}'] = _phase_sum(record, 'nstat', host, name)
+    for base in PGDELTA_SENDER_TIMERS:
+        columns[f'{base}_s'] = reported.get(f'{base}_s')
+    for base in PGDELTA_SENDER_WAITS:
+        columns[f'{base}_busy_s'] = reported.get(f'{base}_busy_s')
+        columns[f'{base}_idle_s'] = reported.get(f'{base}_idle_s')
+    for name in (*PGDELTA_SENDER_COUNTS, 'window', 'high_churn_node_fraction', 'high_churn_files'):
+        columns[name] = reported.get(name)
+    for base in PGDELTA_RECEIVER_TIMERS:
+        columns[f'{base}_s'] = receiver.get(f'{base}_s')
+    publish = columns.get('publish_s')
+    columns['drain_s'] = (None if publish is None or columns['receiver_wall_s'] is None
+                          else round(columns['receiver_wall_s'] - publish, 6))
+    return columns
+
+
+T12_FIELDS = (
+    'rate_gbit', 'rtt_ms', 'host_tcp', 'ping_min_ms', 'visit_one_stream_gbit', 'zero_delay_gbit',
+    'busy_inflight_bytes', 'sysctl_ok', 'tcp_rmem_max_source', 'tcp_rmem_max_dest', 'tcp_wmem_max_source',
+    'tcp_wmem_max_dest',
+    'netem_bytes_source', 'netem_bytes_dest', 'netem_drops_source', 'netem_drops_dest', 'tbf_drops_source',
+    'tbf_drops_dest', 'tbf_overlimits_source', 'tbf_overlimits_dest', 'netem_own_drops', 'netem_own_drops_source',
+    'netem_own_drops_dest', 'netem_backlog_max', 'netem_backlog_max_bytes',
+    'retrans_segs_source', 'retrans_segs_dest', 'lost_retransmit_source', 'lost_retransmit_dest',
+    'tcp_timeouts_source', 'tcp_timeouts_dest',
+    'ss_sockets', 'ss_sending_sockets', 'minrtt_ms', 'minrtt_ms_max', 'cwnd', 'busy_ms', 'rwnd_limited_ms',
+    'sndbuf_limited_ms', 'limited_fraction', 'retrans', 'notsent', 'unacked', 'notsent_max', 'unacked_max',
+    'window', 'high_churn_node_fraction', 'high_churn_files', 'leaf_requests', 'leaf_waits_over_1ms',
+    'connect_s', 'accept_wait_s', 'accept_wait_busy_s', 'accept_wait_idle_s', 'basis_wait_s', 'basis_wait_busy_s',
+    'basis_wait_idle_s', 'leaf_wait_s', 'leaf_wait_busy_s', 'leaf_wait_idle_s', 'page_send_s', 'complete_wait_s',
+    'complete_wait_busy_s', 'complete_wait_idle_s', 'hello_wait_s', 'recv_wait_s', 'publish_s', 'receiver_wall_s',
+    'drain_s', 'busy_split_valid',
+    'tls_version', 'tls_suite', 'tls_connections',
+    'noise_window_s', 'dirty_limit_bytes', 'network_ok', 'excluded_reason', 'inferred', 'window_limited_bound',
+)
+
+
 # --- results ----------------------------------------------------------------
 
 CSV_FIELDS = (
@@ -2480,6 +3607,9 @@ CSV_FIELDS = (
     'g4_bytes', 'g4_start', 'g4_atomic', 'g4_cut', 'g4_coverage', 'g4_rows', 'g4_static_digest', 'g4_schema',
     'amcheck_status', 'amcheck_relations', 'capture_end_lsn', 'capture_end_utc', 'cut_lo_utc', 'cut_hi_utc',
     'staleness_s', 'backup_start_lsn', 'backup_stop_lsn', 'proxy_backup_held', 'proxy_all_hashed',
+    # T12 (EXP-13): the condition, the emulator's and TCP's counters, the ss reading, pgdelta's protocol timers,
+    # TLS, check (a)'s limit by the run's clock, and A11's exclusions (t12_columns; empty outside EXP-13).
+    *T12_FIELDS,
 )
 # The columns the analysis fills from a record's `slowdown` (T10a), by name.
 SLOWDOWN_FIELDS = ('window_buckets', 'worst_drop', 'work_lost_s', 'worst_drop_net', 'work_lost_net_s',
@@ -2788,6 +3918,7 @@ def summary_row(record: dict) -> dict:
         # An error's kind: 'tool' (a command of the method's own timed phases failed) or 'harness'.
         'failure_kind': record.get('failure_kind'),
         **load_columns(record),
+        **t12_columns(record),
     }
 
 
