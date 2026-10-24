@@ -203,6 +203,28 @@ class StampedLines(unittest.TestCase):
         self.assertEqual(len(lines), 10)
         self.assertEqual(lines[1], (0.09487, 'pg_basebackup: checkpoint completed'))
 
+    def test_child_stamps_each_line_as_it_arrives(self):
+        script = ("import sys, time\nprint('first', flush=True)\ntime.sleep(0.3)\n"
+                  "print('second', file=sys.stderr, flush=True)\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            from test_exp04_network import stub_gnu_time
+            child = run_exp04.Child([sys.executable, '-c', script], Path(tmp) / 'logs' / 'x.log',
+                                    gnu_time=stub_gnu_time(tmp), stamp_lines=True)
+            result = child.wait(60)
+            lines = measure.parse_stamped_lines(child.log_text())
+            self.assertEqual(result['exit_code'], 0)
+            self.assertTrue(result['stamped_lines'])
+            self.assertEqual(result['peak_rss_kb'], 4321)  # GNU time's report goes to its own file
+            self.assertNotIn('EXP04-TIME', child.log_text())
+        self.assertEqual([text for _, text in lines], ['first', 'second'])
+        self.assertGreaterEqual(lines[1][0] - lines[0][0], 0.25)
+        self.assertLessEqual(lines[1][0], result['wall_seconds'])
+        # Without stamp_lines the log is the output as it was.
+        with tempfile.TemporaryDirectory() as tmp:
+            child = run_exp04.Child([sys.executable, '-c', "print('plain')"], Path(tmp) / 'y.log')
+            self.assertFalse(child.wait(60)['stamped_lines'])
+            self.assertEqual(child.log_text(), 'plain\n')
+
     def test_basebackup_phases_and_the_adder(self):
         lines = measure.parse_stamped_lines(BASEBACKUP_LOG)
         phases = measure.basebackup_phases(lines, wall_seconds=3.06)

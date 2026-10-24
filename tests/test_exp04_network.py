@@ -662,7 +662,7 @@ class StubOrchestrator(run_exp04.Orchestrator):
     def _wall(self, argv):
         return self.COMMAND_WALL.get(Path(str(argv[0])).name, 1.0)
 
-    def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None):
+    def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None, stamp_lines=False):
         argv = [str(part) for part in argv]
         self.events.append(('dest', argv, log_name))
         wall = self._wall(argv)
@@ -1468,7 +1468,7 @@ class FakeChild:
     LOG = 'listening on 10.0.0.13:7000\n'
     EXIT = None
 
-    def __init__(self, argv, log_path, *, cwd=None, env=None, gnu_time=None):
+    def __init__(self, argv, log_path, *, cwd=None, env=None, gnu_time=None, stamp_lines=False):
         self.argv = [str(part) for part in argv]
         self.log_path = Path(log_path)
         self.gnu_time = gnu_time
@@ -2762,7 +2762,7 @@ class OutputVerification(unittest.TestCase):
         answers = list(answers)
 
         class Server(StubOrchestrator):
-            def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None):
+            def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None, stamp_lines=False):
                 argv = [str(part) for part in argv]
                 self.events.append(('dest', argv, log_name))
                 data = Path(argv[argv.index('-D') + 1])

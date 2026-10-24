@@ -135,6 +135,8 @@ BASIS_COPY_REFLINK = '--reflink=never'
 # /bin/true under GNU time must report well under this, or the peak-RSS
 # figures would not be the tools' own (see measure.GNU_TIME_FORMAT).
 RSS_PROBE_LIMIT_KB = 16 * 1024
+# Child(stamp_lines=True): how long, after the command exited, to wait for its last lines.
+STAMP_READER_TIMEOUT = 30
 FULL_BYTES_SCOPE = ('pg_basebackup reports no byte counts; see output_minus_wal_padding_bytes '
                     '(output_bytes includes the zero-padded WAL segment, which is not sent)')
 CACHE_POLICY = ("sync; echo 3 > /proc/sys/vm/drop_caches on both VMs, once, before every "
@@ -271,9 +273,14 @@ class Child:
     high-water mark, inherited across fork). Signals other than SIGKILL then
     go to the command's process group except GNU time itself, so GNU time
     outlives the command and writes its report.
+
+    With stamp_lines, the command's output (stdout and stderr) comes through a
+    pipe that a thread of this process reads, writing each line to the log as
+    it arrives, prefixed with the seconds since the launch on this clock
+    (measure.stamp_line). No other process runs for it, inside the clock or out.
     """
 
-    def __init__(self, argv, log_path: Path, *, cwd=None, env=None, gnu_time=None):
+    def __init__(self, argv, log_path: Path, *, cwd=None, env=None, gnu_time=None, stamp_lines=False):
         self.argv = [str(part) for part in argv]
         self.log_path = Path(log_path)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,17 +291,38 @@ class Child:
             launch = measure.gnu_time_argv(gnu_time, self.time_path, self.argv)
         self.launcher = launch[:5] if gnu_time else None
         self.stream = open(self.log_path, 'wb')
+        self.reader = None
         self.started_utc = time.time()
         self.started = time.perf_counter()
-        self.process = subprocess.Popen(launch, stdout=self.stream, stderr=subprocess.STDOUT,
-                                        stdin=subprocess.DEVNULL, cwd=cwd, env=env,
+        self.process = subprocess.Popen(launch, stdout=subprocess.PIPE if stamp_lines else self.stream,
+                                        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, cwd=cwd, env=env,
                                         start_new_session=True)
+        if stamp_lines:
+            self.reader = threading.Thread(target=self._copy_stamped, name=f'stamp-{self.process.pid}',
+                                           daemon=True)
+            self.reader.start()
         self.result = None
         self.timed_out = False
+
+    def _copy_stamped(self) -> None:
+        """The reader thread: each output line to the log as it arrives, with when it arrived."""
+        pipe = self.process.stdout
+        try:
+            for line in iter(pipe.readline, b''):
+                self.stream.write(measure.stamp_line(time.perf_counter() - self.started, line))
+                self.stream.flush()
+        except ValueError:  # the log was closed after STAMP_READER_TIMEOUT
+            pass
+        finally:
+            pipe.close()
 
     def _finish(self, status, usage) -> dict:
         wall = time.perf_counter() - self.started
         self.process.returncode = os.waitstatus_to_exitcode(status)
+        if self.reader is not None:
+            # The pipe ends once every process holding it has exited; a straggler that keeps it
+            # open (a daemonised grandchild) costs this wait at most, after the clock.
+            self.reader.join(STAMP_READER_TIMEOUT)
         self.stream.close()
         timing = measure.read_gnu_time(self.time_path) if self.time_path else None
         self.result = {'host': 'dest', 'argv': self.argv, 'exit_code': self.process.returncode,
@@ -302,7 +330,8 @@ class Child:
                        'rusage': measure.rusage_record(usage),
                        'peak_rss_kb': timing['maxrss_kb'] if timing else None,
                        'gnu_time': timing, 'launcher': self.launcher,
-                       'log': str(self.log_path), 'timed_out': self.timed_out}
+                       'log': str(self.log_path), 'timed_out': self.timed_out,
+                       'stamped_lines': self.reader is not None}
         return self.result
 
     def poll(self):
@@ -507,8 +536,9 @@ class Orchestrator:
         return measure.snapshot(self.dest_iface)
 
     def local_command(self, argv, log_name: str, *, timeout: float | None = None,
-                      cwd=None, env=None) -> dict:
-        child = Child(argv, self.dest_log(log_name), cwd=cwd, env=env, gnu_time=self.gnu_time)
+                      cwd=None, env=None, stamp_lines: bool = False) -> dict:
+        child = Child(argv, self.dest_log(log_name), cwd=cwd, env=env, gnu_time=self.gnu_time,
+                      stamp_lines=stamp_lines)
         return child.wait(timeout or self.args.command_timeout)
 
     def remote_command(self, argv, log_name: str, *, cwd: str | None = None) -> dict:
