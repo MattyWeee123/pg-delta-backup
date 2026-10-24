@@ -1063,7 +1063,8 @@ class StubbedRuns(unittest.TestCase):
                                  (engine['jobs'], engine['verify'], 'process', engine['prefetch_basis']))
                 if engine.get('rebuild'):
                     self.assertEqual(receive.rebuild, engine['rebuild'])
-                self.assertEqual((send.jobs, send.hash_backend), (engine['jobs'], 'process'))
+                # Each end its own jobs (EXP-12's v1proxy_s1: one on the sender, 4 on the receiver).
+                self.assertEqual((send.jobs, send.hash_backend), (measure.send_jobs(engine), 'process'))
                 if 'fsync' in engine:
                     self.assertEqual(receive.fsync, engine['fsync'])
                 self.assertEqual(bool(getattr(receive, 'in_place', False)), bool(engine.get('in_place')))
@@ -1950,9 +1951,10 @@ class NewMethodFlags(unittest.TestCase):
             self.assertNotIn(method, measure.STAGED_METHODS)
         self.assertEqual(set(measure.PGDELTA_METHODS),
                          {'pgdelta', 'pgdelta_1thread', *measure.T3_METHODS, *measure.PGDELTA_DIRECT_METHODS})
+        # EXP-12's proxies patch a copy of B0 in place too.
         self.assertEqual(set(measure.BASIS_COPY_METHODS),
                          {'pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
-                          *measure.PGBACKREST_METHODS})
+                          *measure.V1PROXY_METHODS, *measure.PGBACKREST_METHODS})
 
     def test_each_new_pgdelta_method_pins_its_flags(self):
         def receive(*middle, fsync='main', in_place=False):
@@ -2261,7 +2263,8 @@ class NewMethodRuns(unittest.TestCase):
         self.assertNotIn('drop_caches', self.kinds(orchestrator))
 
     def test_a_copy_of_b0_that_shares_blocks_fails_the_run_before_the_cache_drop(self):
-        for method in measure.BASIS_COPY_METHODS:
+        # EXP-12's proxies copy B0 in their settle, before dest's cache drop too (test_exp12_load).
+        for method in (method for method in measure.BASIS_COPY_METHODS if method not in measure.V1PROXY_METHODS):
             with self.subTest(method=method):
                 orchestrator = self.orchestrator()
                 orchestrator.pgbackrest = {'backups': {}}
@@ -2349,7 +2352,8 @@ class NewMethodRuns(unittest.TestCase):
                 self.events.append('listening')
                 return commands
 
-        for method in measure.PGDELTA_DIRECT_METHODS:
+        # T8a's frame; EXP-12's proxies, which never stop the source, have their own (test_exp12_load).
+        for method in (method for method in measure.PGDELTA_DIRECT_METHODS if method not in measure.V1PROXY_METHODS):
             with self.subTest(method=method):
                 orchestrator = self.orchestrator(Snapshots)
                 record = self.run_method(orchestrator, method)

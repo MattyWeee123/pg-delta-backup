@@ -44,9 +44,15 @@ METHODS = ('full', 'incremental', 'pgdelta', 'rsync_8k', 'rsync_default')
 # T3 (the destination's write path): staged like pgdelta, each with one switch changed.
 T3_METHODS = ('pgdelta_gapfill_seq', 'pgdelta_seq', 'pgdelta_fsync_wb', 'pgdelta_fsync_worker',
               'pgdelta_inplace')
+# T10a (EXP-12): v1's source side by proxy. Backup mode held on the live source around v1's own path,
+# pgdelta_direct_inplace, reading the snapshot: a cleanly stopped copy of the data directory on the live
+# source's disks, never the live files. v1proxy_s1 is the same with one sender job (and 4 on the receiver).
+V1PROXY_METHODS = ('v1proxy', 'v1proxy_s1')
 # T8a: the sender reads the cleanly stopped source's data directory; no capture. T2 (EXP-11) adds
-# v1's path at 8 jobs on each end, pgdelta_direct_inplace_j8.
-PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8')
+# v1's path at 8 jobs on each end, pgdelta_direct_inplace_j8. T10a's proxies take v1's path through
+# every dispatch too (they read the snapshot, method_paths' source_data, and never stop the source).
+PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
+                          *V1PROXY_METHODS)
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
 PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
 # T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On
@@ -88,10 +94,22 @@ PARCOPY_METHODS = tuple(PARCOPY_VARIANTS)
 # trial takes the reference digests and runs the probes (run_exp04.Orchestrator.run_trial).
 T2_METHODS = ('full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS, *PARCOPY_METHODS,
               'pgdelta_direct_inplace_j8')
+# T10a (EXP-12), the source's slowdown under a fixed-rate load (run_exp04 --load). none: an empty timed
+# phase of --none-window-s, the null's own windows; capture: the staged capture alone, a local
+# pg_basebackup of S on the source; bracket: pg_backup_start and pg_backup_stop in one session.
+T10A_ARMS = ('none', 'capture', 'bracket', *V1PROXY_METHODS)
+# The controls (--controls), run at the blocks' starts and ends and never in a repeat: pause2 stops
+# pgbench for 2.0 s (agent.py load-pause, the positive control), burn4 runs 4 busy processes for 2.0 s
+# (agent.py burn, the CPU reference).
+CONTROL_METHODS = ('pause2', 'burn4')
+CONTROLS = {'pause2': {'agent': 'load-pause', 'seconds': 2.0},
+            'burn4': {'agent': 'burn', 'procs': 4, 'seconds': 2.0}}
+T10A_METHODS = (*T10A_ARMS, *CONTROL_METHODS)
 # Variants run only when named in --methods.
 OPTIONAL_METHODS = ('pgdelta_1thread', *T3_METHODS, 'incremental_cfr', *PGDELTA_DIRECT_METHODS,
                     *PGBACKREST_METHODS, 'full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS,
-                    *PARCOPY_METHODS)
+                    *PARCOPY_METHODS, *(method for method in T10A_ARMS if method not in V1PROXY_METHODS),
+                    *CONTROL_METHODS)
 ALL_METHODS = METHODS + OPTIONAL_METHODS
 # pgdelta methods that capture S on the source first, with the receiver started beside the capture.
 PGDELTA_STAGED_METHODS = ('pgdelta', 'pgdelta_1thread', *T3_METHODS)
@@ -99,15 +117,25 @@ PGDELTA_METHODS = PGDELTA_STAGED_METHODS + PGDELTA_DIRECT_METHODS
 RSYNC_METHODS = ('rsync_8k', 'rsync_default')
 STAGED_METHODS = PGDELTA_STAGED_METHODS + RSYNC_METHODS
 # pgdelta refreshing B itself (--in-place) rather than writing a new copy O.
-IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8')
+IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', *V1PROXY_METHODS)
 # Methods that patch B, a copy of B0 made before the cache drop and not timed: in a real
 # refresh B already exists. The copy keeps B0 itself unchanged for the next method.
 BASIS_COPY_METHODS = IN_PLACE_METHODS + PGBACKREST_METHODS
 # Methods that read the source cluster stopped cleanly before the cache drop (untimed), and
-# restart it afterwards, whatever happened.
-SOURCE_STOP_METHODS = PGDELTA_DIRECT_METHODS + PARCOPY_METHODS
+# restart it afterwards, whatever happened. Never the proxies: they read the snapshot while the live
+# source runs under its load (EXP-12).
+SOURCE_STOP_METHODS = tuple(method for method in PGDELTA_DIRECT_METHODS
+                            if method not in V1PROXY_METHODS) + PARCOPY_METHODS
 # Methods that write a whole new copy: durability check (b) applies to them.
 FULL_COPY_METHODS = (*FULL_VARIANTS, *PROBACKUP_METHODS, *PARCOPY_METHODS)
+# EXP-12's check (b): the full copies and staged pgdelta's new O, which copy_file_range of B0's unchanged
+# blocks writes in full on ext4. FULL_COPY_METHODS itself stays the full copies, as EXP-11's analysis reads it.
+DISK_WRITE_CHECK_METHODS = (*FULL_COPY_METHODS, 'pgdelta')
+# EXP-12: the live outputs the load's oracle checks (G4): started, recovering from their backup_label, then
+# checked for the invariant, the consistent cut, coverage, the row counts, amcheck and the schema.
+G4_METHODS = ('full', 'pgdelta')
+# EXP-12: arms that write nothing on dest, so durability check (a) says nothing about them.
+NO_DEST_WRITE_METHODS = ('none', 'capture', 'bracket', *CONTROL_METHODS)
 # Methods that move their bytes over several TCP streams: their time above link time is taken
 # against the 8-stream link test, the others' against the single stream's.
 MULTI_STREAM_METHODS = PROBACKUP_METHODS + PARCOPY_METHODS
@@ -122,7 +150,11 @@ OUTPUT_START_METHODS = (PGDELTA_DIRECT_METHODS + PGBACKREST_METHODS + tuple(FULL
 TIERS = {'full': 'omni_today', 'full_nosync': 'diagnostic', 'full_syncfs': 'released',
          'full_wb': 'host_tuned', 'probackup8': 'released', 'probackup4': 'released',
          'parcopy8': 'bound', 'parcopy4': 'bound', 'pgdelta_direct_inplace': 'v1',
-         'pgdelta_direct_inplace_j8': 'v1_8_jobs'}
+         'pgdelta_direct_inplace_j8': 'v1_8_jobs',
+         # EXP-12's (its Arms table); none of these is in any of EXP-11's envelopes.
+         'none': 'no_backup', 'capture': 'staged_capture', 'pgdelta': 'staged_v0', 'bracket': 'backup_mode',
+         'v1proxy': 'v1_proxy', 'v1proxy_s1': 'v1_proxy_one_core', 'pause2': 'positive_control',
+         'burn4': 'cpu_reference'}
 # The engine each pgdelta method runs, named by its flags, so that no change of pgdelta's
 # defaults can change what a method measures (as compare_methods pins EXP-02's):
 # - pgdelta: EXP-06's choice, which is also the command line's default on these 8-vCPU
@@ -171,14 +203,28 @@ PGDELTA_ENGINES = {
     # T2 (EXP-11): v1's path with 8 jobs on each end, the rest as pgdelta_direct_inplace.
     'pgdelta_direct_inplace_j8': {'jobs': 8, 'rebuild': None, 'verify': 'pipelined', 'prefetch_basis': 'on',
                                   'fsync': 'main', 'in_place': True, 'source_kind': 'datadir'},
+    # T10a (EXP-12): v1's engine, pgdelta_direct_inplace's, reading the snapshot; and the same with one sender
+    # job (send_jobs: the sender's --jobs, where it differs from the receiver's).
+    'v1proxy': {'jobs': 4, 'rebuild': None, 'verify': 'pipelined', 'prefetch_basis': 'on', 'fsync': 'main',
+                'in_place': True, 'source_kind': 'datadir'},
+    'v1proxy_s1': {'jobs': 4, 'send_jobs': 1, 'rebuild': None, 'verify': 'pipelined', 'prefetch_basis': 'on',
+                   'fsync': 'main', 'in_place': True, 'source_kind': 'datadir'},
 }
 
 
+def send_jobs(engine: dict) -> int:
+    """The sender's --jobs: the engine's send_jobs where it pins one, its jobs otherwise."""
+    return engine.get('send_jobs', engine['jobs'])
+
+
 def pgdelta_engine_args(engine: dict) -> dict:
-    """{'send': argv, 'receive': argv}: the hashing and rebuilding flags of `engine` on each end."""
-    jobs = ('--jobs', str(engine['jobs']))
+    """{'send': argv, 'receive': argv}: the hashing and rebuilding flags of `engine` on each end.
+
+    Each end takes its own --jobs: the receiver the engine's jobs, the sender its send_jobs (send_jobs()).
+    """
     rebuild = ('--rebuild', engine['rebuild']) if engine.get('rebuild') else ()
-    return {'send': jobs, 'receive': (*jobs, *rebuild, '--verify', engine['verify'])}
+    return {'send': ('--jobs', str(send_jobs(engine))),
+            'receive': ('--jobs', str(engine['jobs']), *rebuild, '--verify', engine['verify'])}
 
 
 def pgdelta_args(engine: dict) -> dict:
@@ -201,13 +247,16 @@ def pgdelta_switches(engine: dict) -> dict:
     An in-place engine pins no --rebuild, so the receiver's rebuild is left out
     (pgdelta_switches_match compares only the switches named here).
     """
-    backend = 'process' if engine['jobs'] > 1 else 'serial'
+    def backend(jobs):
+        return 'process' if jobs > 1 else 'serial'
+
     verify = engine['verify'] if engine['jobs'] > 1 else 'sequential'  # no workers: always sequential
-    receiver = {'jobs': engine['jobs'], 'hash_backend': backend, 'rebuild': engine.get('rebuild'),
+    receiver = {'jobs': engine['jobs'], 'hash_backend': backend(engine['jobs']), 'rebuild': engine.get('rebuild'),
                 'verify': verify}
     if receiver['rebuild'] is None:
         del receiver['rebuild']
-    return {'sender': {'jobs': engine['jobs'], 'hash_backend': backend}, 'receiver': receiver}
+    sender = send_jobs(engine)
+    return {'sender': {'jobs': sender, 'hash_backend': backend(sender)}, 'receiver': receiver}
 
 
 def pgdelta_switches_match(expected: dict, reported) -> bool:
@@ -368,7 +417,30 @@ for _method in PARCOPY_METHODS:
                            f'walsender); dest: parcopy receive. Each end runs its {_streams} streams as threads '
                            'of one process (the receiver its fsync threads too), so CPU includes them. Peak RSS: '
                            'largest single process (one per end)')
-del _method, _jobs, _streams
+# T10a (EXP-12). The load's pgbench and its backends run beside every arm on the source; no per-process column
+# covers them (the sampler's groups do), and the VM-wide CPU columns include them.
+PROC_SCOPE['none'] = ('nothing runs: an empty timed phase with the counter reads every arm makes (no command, no '
+                      'walsender). Peak RSS: none, there is no largest single process')
+PROC_SCOPE['capture'] = ("source: agent.py run, then the local pg_basebackup S (its WAL-streaming child not added; "
+                         'its walsender is not per-process). Peak RSS: the largest single process')
+PROC_SCOPE['bracket'] = ('source: agent.py run, then psql (pg_backup_start and pg_backup_stop in one session); the '
+                         "backend that runs them, and the checkpointer, are the server's, not per-process (no "
+                         'walsender). Peak RSS: the largest single process, psql')
+for _method in V1PROXY_METHODS:
+    _engine = PGDELTA_ENGINES[_method]
+    PROC_SCOPE[_method] = (f'source: pgdelta send at --jobs {send_jobs(_engine)}, reading the stopped snapshot, '
+                           + (f'which starts {send_jobs(_engine)} worker processes with spawn, as its own children, '
+                              if send_jobs(_engine) > 1 else 'which hashes in its own process, ')
+                           + 'so CPU includes them; source_cluster.py backup-hold over SSH, holding backup mode in '
+                           "one psql session (its backend and the checkpointer are the server's, not per-process; no "
+                           f'walsender); dest: pgdelta receive at --jobs {_engine["jobs"]}, with its workers. Peak '
+                           'RSS: largest single process')
+PROC_SCOPE['pause2'] = ("source: agent.py load-pause, which sends pgbench SIGSTOP and SIGCONT (pgbench's own CPU is "
+                        'not per-process here; no walsender). Peak RSS: none measured, no largest single process')
+PROC_SCOPE['burn4'] = ('source: agent.py burn, 4 forked busy processes at nice 0 (its children, reaped; their CPU is '
+                       'in the result, not in the per-process columns; no walsender). Peak RSS: none measured, no '
+                       'largest single process')
+del _method, _jobs, _streams, _engine
 # rsync's copy of B0 (prep, on dest) and its capture of S (on source) touch
 # different machines and the link is idle during both, so they run at the same
 # time in one timed phase, as a real cp-then-rsync refresh would.
@@ -392,6 +464,16 @@ FULL_PHASE = 'transfer'
 PROBACKUP_PHASE = 'catchup_sync'
 PROBACKUP_STEPS = ('catchup', 'sync')
 PARCOPY_PHASE = DIRECT_PHASE
+# T10a (EXP-12): one timed phase per arm, one counter window, staged pgdelta keeping its two. none: an empty
+# phase; capture: the local pg_basebackup of S; bracket: backup mode alone; the controls: the agent's command;
+# the proxies: one phase in four steps, backup_start (backup-hold's pg_backup_start, until it prints the start
+# LSN), receiver_start, transfer, then backup_stop (pg_backup_stop in the same session, until the stop LSN).
+NONE_PHASE = 'none'
+CAPTURE_PHASE = 'capture'
+BRACKET_PHASE = 'bracket'
+CONTROL_PHASE = 'control'
+V1PROXY_PHASE = 'backup_transfer'
+V1PROXY_STEPS = ('backup_start', 'receiver_start', 'transfer', 'backup_stop')
 SPEED_ORDERS = ('shuffle', 'alternate', 'ascending')
 DIGEST_CHUNK = 1 << 20
 DEFAULT_WAL_SEGMENT = 16 << 20
@@ -1613,11 +1695,13 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
     """EXP-11's checks (a) and (b) on one run's timed phases (one counter window each).
 
     (a) dest's Dirty + Writeback, read just before the clock starts and first after it stops, may
-    grow by at most max(DIRTY_LIMIT_BYTES, idle_noise). (b) for a full copy (FULL_COPY_METHODS), the
-    bytes dest's md array wrote in the window are at least DISK_WRITE_FRACTION of output_bytes. `ok`
-    is whether both hold (b only where it applies); None while a needed counter is missing.
-    `durable` says whether the arm is meant to be durable (full_nosync is not: it is the control).
-    A parcopy* run whose fsync count is not its inventory's (A5, parcopy_fsync_count) fails (a).
+    grow by at most max(DIRTY_LIMIT_BYTES, idle_noise). (b) for a full copy, or staged pgdelta's new O
+    (DISK_WRITE_CHECK_METHODS, EXP-12), the bytes dest's md array wrote in the window are at least
+    DISK_WRITE_FRACTION of output_bytes. `ok` is whether both hold (b only where it applies); None while a
+    needed counter is missing. `durable` says whether the arm is meant to be durable (full_nosync is not:
+    it is the control); `a_required` whether it writes on dest at all (EXP-12's arms that don't,
+    NO_DEST_WRITE_METHODS, are checked all the same). A parcopy* run whose fsync count is not its
+    inventory's (A5, parcopy_fsync_count) fails (a).
     """
     method = record.get('method')
     phases = list((record.get('phases') or {}).values())
@@ -1633,7 +1717,7 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
         elif fsync_count['ok'] is None and a_ok:
             a_ok = None
     written = phase_disk_bytes(record, 'dest', 'write_bytes')
-    b_required = method in FULL_COPY_METHODS
+    b_required = method in DISK_WRITE_CHECK_METHODS
     needed = None if not b_required or output_bytes is None else math.ceil(DISK_WRITE_FRACTION * output_bytes)
     b_ok = None if needed is None or written is None else written >= needed
     if a_ok is False or b_ok is False:
@@ -1643,6 +1727,9 @@ def durability_check(record: dict, output_bytes, idle_noise=None) -> dict:
     else:
         ok = True
     return {'durable': method not in NON_DURABLE_METHODS, 'ok': ok,
+            'a_required': method not in NO_DEST_WRITE_METHODS,
+            'md_write_ratio': (None if written is None or not output_bytes
+                               else round(written / output_bytes, 4)),
             'dirty_writeback_before_bytes': before, 'dirty_writeback_after_bytes': after,
             'dirty_writeback_increase_bytes': increase, 'limit_bytes': limit,
             'idle_noise_bytes': None if idle_noise is None else int(idle_noise), 'a_ok': a_ok,
@@ -1722,6 +1809,585 @@ def digest_summary(digest: dict) -> dict:
             'entries': len(digest['entries']), 'listing_sha256': listing.hexdigest()}
 
 
+# --- T10a (EXP-12): the load, its logs and the oracle ----------------------------------
+
+# The load's database, beside the benchmark's postgres in the same cluster: pgbench -i -s 2 -F 90 (200,000
+# accounts, about 30 MB, 10% free per page so the updates are HOT) and load_progress, one row per client, each
+# on its own page (fillfactor 10, a 900-byte filler). Autovacuum is off for all of them.
+LOAD_DATABASE = 'loaddb'
+LOAD_SCALE = 2
+LOAD_FILLFACTOR = 90
+LOAD_ACCOUNTS = 100_000 * LOAD_SCALE
+LOAD_PROGRESS_FILLFACTOR = 10
+LOAD_FILLER_BYTES = 900
+LOAD_TABLES = ('pgbench_accounts', 'pgbench_branches', 'pgbench_tellers', 'pgbench_history', 'load_progress')
+# Added to the source's postgresql.conf for every arm alike (EXP-12's Setup), then a restart: no checkpoint
+# starts inside a window except one an arm asks for; WAL write and sync times; checkpoints and autovacuum
+# runs logged. synchronous_commit and shared_buffers are EXP-01's, pinned here.
+LOAD_SERVER_CONFIG = {'checkpoint_timeout': '30min', 'max_wal_size': '16GB', 'track_wal_io_timing': 'on',
+                      'log_checkpoints': 'on', 'log_autovacuum_min_duration': '0', 'synchronous_commit': 'on',
+                      'shared_buffers': '128MB'}
+# The scripts (experiments/network/load/), in -f order: pgbench's script number in each log line.
+LOAD_SCRIPTS = (('commit.sql', 99), ('abort.sql', 1))
+COMMIT_SCRIPT, ABORT_SCRIPT = 0, 1
+# The rolled-back change; a balance this large carries one (each commit moves a balance by at most 5,000).
+LOAD_ABORT_DELTA = 1_000_000_000
+LOAD_LEAK_THRESHOLD = LOAD_ABORT_DELTA // 2
+# Where each pgbench run writes on the source (tmpfs, so logging adds no disk I/O), and its registry there.
+LOAD_LOG_DIR = '/dev/shm/exp12'
+LOAD_STATE = 'load.json'
+# pgbench_load_argv's fixed options: no vacuum, prepared statements, per-transaction logs, 1-s progress lines
+# with Unix timestamps. -R makes it open loop on a Poisson schedule, latency measured from the schedule.
+PGBENCH_FIXED = ('-n', '-M', 'prepared')
+
+
+def pgbench_load_argv(pgbench, *, rate, clients: int, threads: int, duration_s: int, seed: int, prefix,
+                      scripts, host, port: int, user: str, database: str = LOAD_DATABASE) -> list[str]:
+    """One pgbench run of the load: open loop at `rate` per second, or closed loop (C) when rate is 0 or None."""
+    argv = [str(pgbench), *PGBENCH_FIXED, '-c', str(clients), '-j', str(threads)]
+    if rate:
+        argv += ['-R', str(rate)]
+    argv += ['-T', str(duration_s), '--random-seed', str(seed)]
+    for name, weight in LOAD_SCRIPTS:
+        argv += ['-f', f'{scripts}/{name}@{weight}']
+    return argv + ['-l', '--log-prefix', str(prefix), '-P', '1', '--progress-timestamp', '-h', str(host),
+                   '-p', str(port), '-U', user, database]
+
+
+def load_state_path(directory) -> Path:
+    return Path(directory) / LOAD_STATE
+
+
+def read_load_state(directory) -> dict:
+    """The load's registry on the source: {'runs': [...], 'current': run_id or None}; empty if absent."""
+    try:
+        return json.loads(load_state_path(directory).read_text())
+    except (OSError, ValueError):
+        return {'runs': [], 'current': None}
+
+
+def write_load_state(directory, state: dict) -> None:
+    path = load_state_path(directory)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(state, indent=1, sort_keys=True))
+    temporary.replace(path)
+
+
+def load_run(state: dict, run_id=None) -> dict | None:
+    """A run of the registry by its id, or the current one."""
+    wanted = run_id or state.get('current')
+    return next((run for run in state.get('runs', ()) if run['run_id'] == wanted), None)
+
+
+def progress_path(directory, run_id: str) -> Path:
+    """pgbench's -P 1 lines (its stderr) for one run."""
+    return Path(directory) / f'{run_id}-progress.log'
+
+
+def summary_path(directory, run_id: str) -> Path:
+    """pgbench's closing summary (its stdout) for one run."""
+    return Path(directory) / f'{run_id}-summary.log'
+
+
+def pgbench_log_names(run: dict) -> list[str]:
+    """The per-transaction log files of a run: PREFIX.PID for its first thread, PREFIX.PID.N for the others."""
+    base = f'{run["run_id"]}.{run["pid"]}'
+    return [base] + [f'{base}.{thread}' for thread in range(1, int(run['threads']))]
+
+
+def log_lines(path):
+    """The lines of a pgbench log, zstd-compressed (.zst, through `zstd -dc`) or not."""
+    path = Path(path)
+    if path.suffix != '.zst':
+        with open(path, encoding='ascii', errors='replace') as stream:
+            yield from stream
+        return
+    import subprocess
+    process = subprocess.Popen(['zstd', '-dc', str(path)], stdout=subprocess.PIPE, text=True,
+                               encoding='ascii', errors='replace')
+    try:
+        yield from process.stdout
+    finally:
+        process.stdout.close()
+        if process.wait() != 0:
+            raise ValueError(f'zstd -dc {path} failed ({process.returncode})')
+
+
+def existing_log(directory, name: str) -> Path:
+    """name in directory, or its compressed form name.zst where only that exists."""
+    path = Path(directory) / name
+    compressed = path.with_name(path.name + '.zst')
+    return compressed if not path.exists() and compressed.exists() else path
+
+
+def parse_pgbench_line(line: str):
+    """(client, transaction, latency_us, script, end_us, lag_us) of one pgbench -l line, or None.
+
+    PostgreSQL 17 writes `client_id transaction_no time script_no time_epoch time_us [schedule_lag]`: time is
+    the latency in microseconds (from the scheduled start under -R), 'failed' for a failed transaction; the
+    completion time is time_epoch seconds plus time_us. latency_us is None for a failed one, lag_us None
+    without -R.
+    """
+    fields = line.split()
+    if len(fields) < 6:
+        return None
+    try:
+        latency = None if fields[2] in ('failed', 'skipped') else int(fields[2])
+        lag = int(fields[6]) if len(fields) > 6 else None
+        return (int(fields[0]), int(fields[1]), latency, int(fields[3]),
+                int(fields[4]) * 1_000_000 + int(fields[5]), lag)
+    except ValueError:
+        return None
+
+
+def transaction_times(parsed) -> tuple[int, int, int]:
+    """(scheduled, started, ended) in microseconds of a parsed line: the schedule is the completion minus the
+    latency, and the actual start the schedule plus the lag (without -R, both are the start)."""
+    _, _, latency, _, end, lag = parsed
+    scheduled = end - (latency or 0)
+    return scheduled, scheduled + (lag or 0), end
+
+
+def count_commits(paths) -> dict[int, int]:
+    """client -> its committed transactions (commit.sql, not failed) over the given log files."""
+    counts: dict[int, int] = {}
+    for path in paths:
+        for line in log_lines(path):
+            parsed = parse_pgbench_line(line)
+            if parsed and parsed[3] == COMMIT_SCRIPT and parsed[2] is not None:
+                counts[parsed[0]] = counts.get(parsed[0], 0) + 1
+    return counts
+
+
+def pick_commits(paths, wanted: dict) -> dict:
+    """{(client, position): (scheduled, started, ended)} for the wanted commits of one run's logs.
+
+    wanted maps a client to the positions (0-based, among its committed transactions in this run, in order) to
+    find. Each client is in one thread's file, its lines in completion order, so one pass finds them all.
+    """
+    found, seen = {}, {}
+    for path in paths:
+        for line in log_lines(path):
+            parsed = parse_pgbench_line(line)
+            if not parsed or parsed[3] != COMMIT_SCRIPT or parsed[2] is None:
+                continue
+            client = parsed[0]
+            position = seen.get(client, 0)
+            seen[client] = position + 1
+            if position in wanted.get(client, ()):
+                found[(client, position)] = transaction_times(parsed)
+    return found
+
+
+PROGRESS_LINE = re.compile(r'^progress: (\d+(?:\.\d+)?) s, (\d+(?:\.\d+)?) tps, lat (\d+(?:\.\d+)?) ms '
+                           r'stddev (\S+?)(?:, (\d+) failed)?(?:, lag (\d+(?:\.\d+)?) ms)?(?:, (\d+) skipped)?\s*$')
+
+
+def parse_progress_line(line: str) -> dict | None:
+    """One pgbench -P line with --progress-timestamp: its Unix time (the end of its second), tps, latency and
+    schedule lag (ms; None without -R); None for another line."""
+    found = PROGRESS_LINE.match(line.strip())
+    if not found:
+        return None
+    stamp, tps, latency, stddev, failed, lag, skipped = found.groups()
+    try:
+        deviation = float(stddev)
+    except ValueError:
+        deviation = None
+    return {'t': float(stamp), 'tps': float(tps), 'lat_ms': float(latency), 'stddev_ms': deviation,
+            'failed': int(failed) if failed else 0, 'lag_ms': float(lag) if lag is not None else None,
+            'skipped': int(skipped) if skipped else 0}
+
+
+def parse_progress(text: str) -> list[dict]:
+    return [parsed for line in text.splitlines() if (parsed := parse_progress_line(line))]
+
+
+# EXP-12's settle gate, live part (A8): over the settle's last 10 s, every second's completions within +-5% of R
+# and the mean schedule lag under 1 ms, from pgbench's -P 1 lines. Its p99 and late parts are the analysis's.
+SETTLE_WINDOW_S = 10
+SETTLE_TOLERANCE = 0.05
+SETTLE_LAG_MS = 1.0
+
+
+def settle_gate(lines, now: float, rate: float, *, window_s: int = SETTLE_WINDOW_S,
+                tolerance: float = SETTLE_TOLERANCE, lag_ms: float = SETTLE_LAG_MS) -> dict:
+    """Whether the progress lines of the last window_s seconds before `now` pass the gate.
+
+    Each line covers the second that ends at its stamp, so the window holds the lines stamped in
+    (now - window_s, now]; fewer than window_s of them fail it (pgbench just started, or stalled).
+    """
+    recent = [line for line in lines if now - window_s < line['t'] <= now + 1e-6]
+    lags = [line['lag_ms'] for line in recent if line['lag_ms'] is not None]
+    low, high = rate * (1 - tolerance), rate * (1 + tolerance)
+    off_rate = [line['tps'] for line in recent if not low <= line['tps'] <= high]
+    mean_lag = round(sum(lags) / len(lags), 4) if lags else None
+    passed = (len(recent) >= window_s and not off_rate and mean_lag is not None and mean_lag < lag_ms)
+    return {'passed': passed, 'lines': len(recent), 'off_rate': off_rate, 'mean_lag_ms': mean_lag,
+            'tps_range': [low, high], 'evaluated_utc': now}
+
+
+# The counters read around every pgbench start and stop, with the load stopped: each client's n, and the sums.
+LOAD_COUNTERS_SQL = ("SELECT json_build_object('n', (SELECT json_object_agg(client, n ORDER BY client) FROM "
+                     "load_progress), 'sum_n', (SELECT sum(n) FROM load_progress), 'sum_abalance', (SELECT "
+                     "sum(abalance) FROM pgbench_accounts))::text;")
+
+
+def load_oracle_sql() -> str:
+    """(iii) on a copy's loaddb, as JSON: the sums of abalance and n, the accounts, how many balances carry a
+    rolled-back change (|abalance| at least LOAD_LEAK_THRESHOLD), and each client's n (for the cut, (iv))."""
+    return ("SELECT json_build_object('sum_abalance', a.s, 'accounts', a.c, 'leaked', a.l, 'sum_n', p.s, "
+            "'clients', p.c, 'n', p.n)::text FROM (SELECT sum(abalance) AS s, count(*) AS c, count(*) FILTER "
+            f"(WHERE abs(abalance) >= {LOAD_LEAK_THRESHOLD}) AS l FROM pgbench_accounts) a, (SELECT sum(n) AS s, "
+            "count(*) AS c, json_object_agg(client, n ORDER BY client) AS n FROM load_progress) p;")
+
+
+def atomicity(answer: dict) -> dict:
+    """(iii): the two sums equal, and no balance carrying a rolled-back change."""
+    sum_abalance, sum_n = answer.get('sum_abalance'), answer.get('sum_n')
+    equal = sum_abalance is not None and sum_n is not None and int(sum_abalance) == int(sum_n)
+    leaked = int(answer.get('leaked') or 0)
+    return {'ok': equal and leaked == 0, 'sums_equal': equal, 'leaked': leaked,
+            'difference': None if sum_abalance is None or sum_n is None else int(sum_abalance) - int(sum_n)}
+
+
+def row_counts_sql(tables=LOGICAL_TABLES) -> str:
+    """(vi) in every run: the benchmark database's tables' row counts, as JSON."""
+    parts = ', '.join(f"'{table}', (SELECT count(*) FROM {table})" for table, _ in tables)
+    return f'SELECT json_build_object({parts})::text;'
+
+
+def compare_rows(reference: dict, counts: dict) -> tuple[bool, list[str]]:
+    """Row counts against a logical digest's ({table: {rows, md5}}) or another count's."""
+    differences = []
+    for table in sorted(reference.keys() | counts.keys()):
+        left, right = reference.get(table), counts.get(table)
+        left = left.get('rows') if isinstance(left, dict) else left
+        right = right.get('rows') if isinstance(right, dict) else right
+        if left is None or right is None or int(left) != int(right):
+            differences.append(f'{table}: {left} rows in the reference, {right} in the copy')
+    return not differences, differences
+
+
+# (vii): the schema dumps, with a fixed \restrict key (since PostgreSQL 17.6 a plain dump carries a random one
+# otherwise), of the load's and the benchmark's databases.
+SCHEMA_RESTRICT_KEY = 'exp12'
+SCHEMA_DATABASES = (LOAD_DATABASE, 'postgres')
+
+
+def schema_dump_argv(pg_dump, *, host, port: int, user: str, database: str) -> list[str]:
+    return [str(pg_dump), '--schema-only', f'--restrict-key={SCHEMA_RESTRICT_KEY}', '-h', str(host), '-p',
+            str(port), '-U', user, '-d', database]
+
+
+def amcheck_argv(pg_amcheck, *, host, port: int, user: str, database: str = LOAD_DATABASE) -> list[str]:
+    """pg_amcheck of every relation of loaddb, heap tuples against their index entries too; --verbose names
+    each relation it checks, so a run that checked none is seen."""
+    return [str(pg_amcheck), '--heapallindexed', '--verbose', '-h', str(host), '-p', str(port), '-U', user,
+            '-d', database]
+
+
+AMCHECK_CHECKING = re.compile(r'pg_amcheck: checking (heap table|btree index) "')
+AMCHECK_SKIPPING = re.compile(r'pg_amcheck: warning: skipping database')
+
+
+def amcheck_result(exit_code, text: str) -> dict:
+    """pg_amcheck's verdict: 'ok', 'wrong' (it reported corruption or an error) or 'unverified' (it skipped the
+    database, which lacks the amcheck extension, or checked no relation)."""
+    lines = text.splitlines()
+    checked = sum(1 for line in lines if AMCHECK_CHECKING.search(line))
+    skipped = [line for line in lines if AMCHECK_SKIPPING.search(line)]
+    problems = [line for line in lines if line.strip() and not AMCHECK_CHECKING.search(line)
+                and not line.startswith('pg_amcheck: including database')]
+    if skipped or checked == 0:
+        status = 'unverified'
+    elif exit_code != 0:
+        status = 'wrong'
+    else:
+        status = 'ok'
+    return {'status': status, 'exit_code': exit_code, 'relations_checked': checked, 'skipped': skipped,
+            'problems': problems[:20]}
+
+
+# The oracle's checks, in the order a started copy meets them: start (it starts and answers), atomic (iii), cut
+# (iv), coverage (v), rows (vi, with the static digest in a cell's first repeat), amcheck, schema (vii).
+ORACLE_CHECKS = ('start', 'atomic', 'cut', 'coverage', 'rows', 'amcheck', 'schema')
+# EXP-12's smoke item 5: the oracle's seven negative controls, each the check it must fail through. The index
+# page's also needs (iii) to pass, since no other check reads that page. The coverage control is the analysis's.
+ORACLE_CONTROLS = {
+    'no_wal': 'start',  # a copy made with -X none: it doesn't start
+    'n_raised': 'atomic',  # one client's n raised alone, on a started copy
+    'cut_extended': 'cut',  # one client's prefix extended by 100: its n and one balance both raised by 100
+    'cut_back': 'cut',  # the same cut back by 100
+    'heap_page': 'atomic',  # a heap page of loaddb's pgbench_accounts overwritten on a stopped copy: (iii) errors
+    'index_page': 'amcheck',  # a leaf page of pgbench_accounts_pkey overwritten the same way
+    'schema': 'schema',  # a column added to load_progress on a started copy
+}
+ORACLE_CONTROL_SHIFT = 100
+ORACLE_CONTROL_PASSING = {'index_page': ('atomic',)}
+
+
+def oracle_control_verdict(name: str, statuses: dict) -> dict:
+    """Whether a negative control failed through its own check (and passed those it must pass): `ok`."""
+    target = ORACLE_CONTROLS[name]
+    failed = sorted(check for check, status in statuses.items() if status == 'wrong')
+    passing = ORACLE_CONTROL_PASSING.get(name, ())
+    ok = statuses.get(target) == 'wrong' and all(statuses.get(check) == 'ok' for check in passing)
+    return {'control': name, 'target': target, 'must_pass': list(passing), 'failed': failed, 'ok': ok}
+
+
+def oracle_status(checks: dict) -> str:
+    """A live output's status from its checks' ('ok', 'wrong', 'unverified', or None while pending): any wrong is
+    'fail'; then anything pending, 'pending'; then anything unverified, 'unverified'; else 'pass'."""
+    values = [checks.get(check) for check in ORACLE_CHECKS] + [checks.get('bytes')]
+    if 'wrong' in values:
+        return 'fail'
+    if None in values:
+        return 'pending'
+    if 'unverified' in values:
+        return 'unverified'
+    return 'pass'
+
+
+# --- T10a (EXP-12): the consistent cut and coverage, from the load's logs -----------------
+
+CUT_TOLERANCE_US = 1000  # (iv): within 1 ms
+COVERAGE_MARGIN_S = 0.05  # (v): within the recorded offset plus 50 ms
+
+
+def locate_commit(runs, client: int, index: int):
+    """(run_id, position) of a client's index-th commit (0-based, counted over every logged run in order: a
+    copy's n), with its position among that run's commits; None if no logged run holds it."""
+    key = str(client)
+    for run in runs:
+        start, stop = (run.get('start') or {}).get('n', {}), (run.get('stop') or {}).get('n', {})
+        if key in start and key in stop and int(start[key]) <= index < int(stop[key]):
+            return run['run_id'], index - int(start[key])
+    return None
+
+
+def cut_queries(progress: dict, runs) -> dict:
+    """client -> {'n', 'held': its last held commit, 'lacking': its first lacking one}, each (run_id, position)
+    or None (nothing held; or nothing lacking, past every logged run's end), and 'unmapped' when the copy holds
+    a commit no logged run made (n above every run's stop, or below the first run's start)."""
+    total = {}
+    for run in runs:
+        for key, value in ((run.get('stop') or {}).get('n') or {}).items():
+            total[key] = max(total.get(key, 0), int(value))
+    first = {key: int(value) for key, value in ((runs[0].get('start') or {}).get('n') or {}).items()} if runs else {}
+    queries = {}
+    for key, n in sorted(progress.items(), key=lambda item: int(item[0])):
+        client, n = int(key), int(n)
+        held = locate_commit(runs, client, n - 1) if n > first.get(key, 0) else None
+        lacking = locate_commit(runs, client, n) if n < total.get(key, 0) else None
+        unmapped = n > total.get(key, 0) or n < first.get(key, 0) or (n > first.get(key, 0) and held is None)
+        queries[client] = {'n': n, 'held': held, 'lacking': lacking, 'unmapped': unmapped}
+    return queries
+
+
+def wanted_commits(queries_list) -> dict:
+    """{run_id: {client: {position, ...}}}: every commit the cut queries of several copies need."""
+    wanted: dict = {}
+    for queries in queries_list:
+        for client, query in queries.items():
+            for side in ('held', 'lacking'):
+                if query[side] is not None:
+                    run_id, position = query[side]
+                    wanted.setdefault(run_id, {}).setdefault(client, set()).add(position)
+    return wanted
+
+
+def consistent_cut(queries: dict, commits: dict) -> dict:
+    """(iv): no committed transaction the copy lacks completed before one it holds started, within 1 ms.
+
+    commits maps (run_id, client, position) to (scheduled, started, ended) in microseconds (pick_commits per run).
+    The cut lies in [lo, hi]: lo the latest start of a last held commit, hi the earliest end of a first lacking
+    one; it is consistent if hi >= lo - 1 ms. A client whose n no logged run explains fails it.
+    """
+    starts, ends, missing = [], [], []
+    for client, query in queries.items():
+        for side, into, index in (('held', starts, 1), ('lacking', ends, 2)):
+            if query[side] is None:
+                continue
+            times = commits.get((query[side][0], client, query[side][1]))
+            if times is None:
+                missing.append(f'client {client}: {side} commit {query[side]} not in its log')
+            else:
+                into.append((times[index], client))
+    unmapped = sorted(client for client, query in queries.items() if query['unmapped'])
+    lo, hi = (max(starts) if starts else None), (min(ends) if ends else None)
+    ok = (not unmapped and not missing
+          and (lo is None or hi is None or hi[0] >= lo[0] - CUT_TOLERANCE_US))
+    return {'ok': ok, 'lo_us': lo[0] if lo else None, 'lo_client': lo[1] if lo else None,
+            'hi_us': hi[0] if hi else None, 'hi_client': hi[1] if hi else None,
+            'gap_us': None if lo is None or hi is None else hi[0] - lo[0],
+            'unmapped_clients': unmapped, 'missing': missing[:20]}
+
+
+def coverage(cut: dict, start_utc: float, stop_utc: float, offset_s: float) -> dict:
+    """(v): the cut lies between the copy's backup start and its clock stop, both on dest's clock mapped to the
+    source's (plus offset_s, source minus dest), within |offset| plus 50 ms. A cut that ends before the window
+    opens (a copy of an old state) or begins after it closes fails it."""
+    margin = abs(offset_s or 0.0) + COVERAGE_MARGIN_S
+    start, stop = start_utc + (offset_s or 0.0), stop_utc + (offset_s or 0.0)
+    lo = None if cut.get('lo_us') is None else cut['lo_us'] / 1e6
+    hi = None if cut.get('hi_us') is None else cut['hi_us'] / 1e6
+    ok = (lo is None or lo <= stop + margin) and (hi is None or hi >= start - margin)
+    return {'ok': ok, 'window_source_utc': [round(start, 6), round(stop, 6)], 'margin_s': round(margin, 6),
+            'cut_utc': [lo, hi]}
+
+
+def cut_time(cut: dict) -> float | None:
+    """One time for the cut (seconds, the source's clock): its interval's middle, or the end that is known."""
+    lo, hi = cut.get('lo_us'), cut.get('hi_us')
+    if lo is None and hi is None:
+        return None
+    if lo is None or hi is None:
+        return (lo if hi is None else hi) / 1e6
+    return (lo + hi) / 2e6
+
+
+# --- T10a (EXP-12): the source's cache, its CPU, the sampler and the clocks --------------
+
+def parse_fincore_json(text: str) -> list[dict]:
+    """util-linux `fincore --json --bytes`: [{'res': resident bytes, 'size': bytes, 'file': path}, ...]."""
+    value = json.loads(text)
+    rows = value.get('fincore', []) if isinstance(value, dict) else []
+    result = []
+    for row in rows:
+        result.append({'res': int(row.get('res') or 0), 'size': int(row.get('size') or 0), 'file': row.get('file')})
+    return result
+
+
+def residency(rows) -> dict:
+    """Files, bytes and resident bytes of fincore rows, and the resident share (None for no bytes)."""
+    size = sum(row['size'] for row in rows)
+    resident = sum(row['res'] for row in rows)
+    return {'files': len(rows), 'bytes': size, 'resident_bytes': resident,
+            'resident_share': round(resident / size, 6) if size else None}
+
+
+# The cache flag (A8): before a cold window more than 1% of the benchmark database's files or of the snapshot
+# resident, or less than 99% of loaddb's; before a warm one, less than 95% of them.
+CACHE_COLD_MAX, CACHE_LOAD_MIN, CACHE_WARM_MIN = 0.01, 0.99, 0.95
+
+
+def cache_flag(fincore: dict, warm: bool) -> bool | None:
+    """Whether the cache state before a window raises A8's cache flag; None without the readings."""
+    shares = {name: (fincore.get(name) or {}).get('resident_share') for name in ('benchmark', 'snapshot', 'loaddb')}
+    if shares['benchmark'] is None or shares['loaddb'] is None:
+        return None
+    statics = [shares['benchmark']] + ([shares['snapshot']] if shares['snapshot'] is not None else [])
+    if warm:
+        return any(share < CACHE_WARM_MIN for share in statics) or shares['loaddb'] < CACHE_LOAD_MIN
+    return any(share > CACHE_COLD_MAX for share in statics) or shares['loaddb'] < CACHE_LOAD_MIN
+
+
+# VM-wide busy CPU without steal, as EXP-12 counts the source's CPU-s (steal reported apart).
+CPU_BUSY_NO_STEAL = ('user', 'nice', 'system', 'irq', 'softirq')
+
+
+def busy_seconds(cpu: dict | None, fields=CPU_BUSY_NO_STEAL):
+    """The busy seconds of a snapshot_delta's cpu dict over `fields`; None without it."""
+    if not isinstance(cpu, dict):
+        return None
+    try:
+        return round(sum(cpu[f'{field}_seconds'] for field in fields), 3)
+    except KeyError:
+        return None
+
+
+def phases_cpu(record: dict, host: str = 'source', fields=CPU_BUSY_NO_STEAL):
+    """Busy seconds of a host over a run's timed phases (without steal by default); None if any is missing."""
+    values = [busy_seconds(_get(phase, 'cpu', host), fields) for phase in (record.get('phases') or {}).values()]
+    if not values or any(value is None for value in values):
+        return None
+    return round(sum(values), 3)
+
+
+def clock_offset(samples) -> dict:
+    """The offset of the far clock (its time minus ours) from (sent, far, received) timestamp exchanges: the one
+    with the shortest round trip, where the far stamp is taken half way."""
+    best = min(samples, key=lambda sample: sample[2] - sample[0])
+    sent, far, received = best
+    return {'offset_s': round(far - (sent + received) / 2, 6), 'rtt_s': round(received - sent, 6),
+            'samples': len(samples)}
+
+
+# The sampler (agent.py sampler): the groups whose processes it follows every tick, by name.
+SAMPLER_GROUPS = ('pgbench', 'backend', 'walsender', 'checkpointer', 'walwriter', 'bgwriter', 'autovacuum',
+                  'postgres_other', 'pg_basebackup', 'pgdelta', 'burn', 'agent', 'sampler')
+POSTGRES_AUXILIARY = (('walsender', 'walsender'), ('checkpointer', 'checkpointer'), ('walwriter', 'walwriter'),
+                      ('background writer', 'bgwriter'), ('autovacuum worker', 'autovacuum'))
+
+
+def sampler_group(comm: str, cmdline: str, parent_group: str | None = None) -> str | None:
+    """The sampler's group of a process from its comm and command line (its title, for PostgreSQL's), or None for
+    one it doesn't follow. A spawned worker of pgdelta is pgdelta's by its parent; burn's processes are forks of
+    `agent.py burn`, with its command line."""
+    if comm == 'pgbench':
+        return 'pgbench'
+    if comm == 'pg_basebackup':
+        return 'pg_basebackup'
+    if cmdline.startswith('postgres: '):
+        title = cmdline[len('postgres: '):]
+        for prefix, group in POSTGRES_AUXILIARY:
+            if title.startswith(prefix):
+                return group
+        # A client backend's title: user, database, then [local] or host(port), then its state.
+        words = title.split()
+        return 'backend' if len(words) >= 3 and (words[2] == '[local]' or '(' in words[2]) else 'postgres_other'
+    if comm == 'postgres':
+        return 'postgres_other'
+    if 'pgdelta' in cmdline or parent_group == 'pgdelta':
+        return 'pgdelta'
+    if 'agent.py' in cmdline:
+        if ' burn' in cmdline:
+            return 'burn'
+        return 'sampler' if ' sampler' in cmdline else 'agent'
+    return None
+
+
+def parse_schedstat(text: str) -> tuple[int, int] | None:
+    """(run ns, run-queue wait ns) from /proc/<pid>/task/<tid>/schedstat: time on a CPU, time waiting for one."""
+    fields = text.split()
+    if len(fields) < 2:
+        return None
+    return int(fields[0]), int(fields[1])
+
+
+def parse_proc_running(text: str) -> int | None:
+    """procs_running from /proc/stat: the run queue's length now."""
+    for line in text.splitlines():
+        if line.startswith('procs_running '):
+            return int(line.split()[1])
+    return None
+
+
+# Once a second, over one held connection: WAL write and sync counts and times, the checkpointer, and the
+# autovacuum workers with their databases. It shows a mechanism; no verdict uses it.
+SAMPLER_SQL = ("SELECT json_build_object('t', extract(epoch FROM clock_timestamp()), 'wal', (SELECT row_to_json(w) "
+               "FROM pg_stat_wal w), 'checkpointer', (SELECT row_to_json(c) FROM pg_stat_checkpointer c), "
+               "'autovacuum', (SELECT coalesce(json_agg(json_build_object('pid', pid, 'datname', datname)), '[]') "
+               "FROM pg_stat_activity WHERE backend_type = 'autovacuum worker'))::text")
+
+
+# The capture's G4 boundary (EXP-12): pg_basebackup --verbose's "write-ahead log end point" line.
+WAL_END_LINE = re.compile(r'write-ahead log end point: ([0-9A-Fa-f]+/[0-9A-Fa-f]+)')
+
+
+def wal_end_point(lines, launched_utc: float | None = None) -> dict | None:
+    """The LSN and stamp of a stamped pg_basebackup --verbose log's end point line, with its UTC on the stamping
+    clock when the launch's is given; None without the line."""
+    for seconds, text in lines:
+        found = WAL_END_LINE.search(text)
+        if found:
+            return {'lsn': found.group(1), 'seconds': seconds,
+                    'utc': None if launched_utc is None else round(launched_utc + seconds, 6)}
+    return None
+
+
 # --- results ----------------------------------------------------------------
 
 CSV_FIELDS = (
@@ -1753,7 +2419,90 @@ CSV_FIELDS = (
     'usable_s', 'void', 'bytes_identical', 'measured_s2d_gbit_8streams', 'link_time_s', 'above_link_s',
     'sysctl_dirty_background_bytes', 'sysctl_dirty_background_ratio',
     'verified', 'identical_to_s', 'logical_match', 'output_start_s', 'caches_dropped', 'error', 'failure_kind',
+    # T10a (EXP-12). The harness fills what a run itself knows: its block, the load, its window on both clocks, its
+    # settle, the source's CPU, checks (a) and (b), the oracle's checks, G4's staleness and dest's wait. What only
+    # the load's logs and the sampler give (W, D, latencies, the client's wait, most flags) the analysis fills from
+    # each record's `slowdown` (analysis/exp12.py), and is empty here until it does.
+    'block_repeat', 'control_slot', 'load_rate', 'load_run', 'load_void', 't0_utc', 't1_utc', 'clock_offset_s',
+    'settle_s', 'settle_gate_passed', 'dest_wait_s', 'tail_verification_s',
+    'window_buckets', 'worst_drop', 'work_lost_s', 'worst_drop_net', 'work_lost_net_s', 'late_count_s',
+    'lat_p50_ms', 'lat_p95_ms', 'lat_p99_ms', 'lat_p999_ms', 'lat_max_ms', 'lat_p99_worst5s_ms', 'backlog_end',
+    'cpu_source_busy_s', 'cpu_source_calibrated_s', 'cpu_source_excess_s', 'steal_s', 'client_wait_s',
+    'client_wait_worst_bucket_s', 'dirty_increase_bytes', 'md_write_ratio',
+    'flag_unsettled', 'flag_checkpoint', 'flag_steal', 'flag_cache', 'flag_client', 'flag_client_wait_w',
+    'flag_client_wait_d', 'flag_autovacuum',
+    'g4_bytes', 'g4_start', 'g4_atomic', 'g4_cut', 'g4_coverage', 'g4_rows', 'g4_static_digest', 'g4_schema',
+    'amcheck_status', 'amcheck_relations', 'capture_end_lsn', 'capture_end_utc', 'cut_lo_utc', 'cut_hi_utc',
+    'staleness_s', 'backup_start_lsn', 'backup_stop_lsn', 'proxy_backup_held', 'proxy_all_hashed',
 )
+# The columns the analysis fills from a record's `slowdown` (T10a), by name.
+SLOWDOWN_FIELDS = ('window_buckets', 'worst_drop', 'work_lost_s', 'worst_drop_net', 'work_lost_net_s',
+                   'late_count_s', 'lat_p50_ms', 'lat_p95_ms', 'lat_p99_ms', 'lat_p999_ms', 'lat_max_ms',
+                   'lat_p99_worst5s_ms', 'backlog_end', 'client_wait_s', 'client_wait_worst_bucket_s',
+                   'flag_checkpoint', 'flag_steal', 'flag_client', 'flag_client_wait_w', 'flag_client_wait_d',
+                   'flag_autovacuum')
+
+
+def calibrated_cpu(record: dict):
+    """EXP-12's calibrated CPU-s of a run without load: the source's VM-wide busy CPU over its timed phases (steal
+    left out), minus the idle rate (step 6's) times their wall. None without either."""
+    busy = phases_cpu(record)
+    rate = record.get('idle_rate_no_steal')
+    wall = (record.get('totals') or {}).get('wall_seconds')
+    if busy is None or rate is None or wall is None:
+        return None
+    return round(busy - rate * wall, 3)
+
+
+def excess_cpu(record: dict):
+    """Under load, a view: the timed phases' busy CPU (steal left out) minus the settle's rate times their wall."""
+    busy = phases_cpu(record)
+    rate = _get(record, 'settle', 'busy_rate_no_steal')
+    wall = (record.get('totals') or {}).get('wall_seconds')
+    if busy is None or rate is None or wall is None:
+        return None
+    return round(busy - rate * wall, 3)
+
+
+def load_columns(record: dict) -> dict:
+    """The T10a columns of one record (empty for a run that isn't EXP-12's)."""
+    window = record.get('window') or {}
+    settle = record.get('settle') or {}
+    oracle = _get(record, 'verification', 'oracle') or {}
+    durability = record.get('durability') or {}
+    g4 = record.get('g4') or {}
+    backup = _get(record, 'proxy', 'backup') or {}
+    slowdown = record.get('slowdown') or {}
+    phases = record.get('phases') or {}
+    steal = [_get(phase, 'cpu', 'source', 'steal_seconds') for phase in phases.values()]
+    gate = settle.get('gate')
+    cache = _get(record, 'source_untimed', 'cache') or {}
+    columns = {
+        'block_repeat': record.get('block_repeat'), 'control_slot': record.get('control_slot'),
+        'load_rate': record.get('load_rate'), 'load_run': record.get('load_run'), 'load_void': record.get('void'),
+        't0_utc': window.get('t0_utc'), 't1_utc': window.get('t1_utc'),
+        'clock_offset_s': window.get('clock_offset_s', record.get('clock_offset_s')),
+        'settle_s': settle.get('seconds'), 'settle_gate_passed': None if gate is None else gate.get('passed'),
+        'dest_wait_s': settle.get('dest_wait_s'), 'tail_verification_s': _get(record, 'tail', 'verification_s'),
+        'cpu_source_busy_s': phases_cpu(record),
+        'cpu_source_calibrated_s': calibrated_cpu(record) if record.get('block') == 'calibration' else None,
+        'cpu_source_excess_s': excess_cpu(record) if record.get('load_rate') else None,
+        'steal_s': None if not steal or None in steal else round(sum(steal), 3),
+        'dirty_increase_bytes': durability.get('dirty_writeback_increase_bytes'),
+        'md_write_ratio': durability.get('md_write_ratio'),
+        'flag_unsettled': settle.get('unsettled') if settle else None, 'flag_cache': cache.get('cache_flag'),
+        'g4_bytes': oracle.get('bytes'), 'g4_start': oracle.get('start'), 'g4_atomic': oracle.get('atomic'),
+        'g4_cut': oracle.get('cut'), 'g4_coverage': oracle.get('coverage'), 'g4_rows': oracle.get('rows'),
+        'g4_static_digest': oracle.get('static_digest'), 'g4_schema': oracle.get('schema'),
+        'amcheck_status': oracle.get('amcheck'), 'amcheck_relations': oracle.get('amcheck_relations'),
+        'capture_end_lsn': (g4.get('capture_end') or {}).get('lsn'),
+        'capture_end_utc': (g4.get('capture_end') or {}).get('utc'),
+        'cut_lo_utc': (g4.get('cut_utc') or [None, None])[0], 'cut_hi_utc': (g4.get('cut_utc') or [None, None])[1],
+        'staleness_s': g4.get('staleness_s'), 'backup_start_lsn': backup.get('start_lsn'),
+        'backup_stop_lsn': backup.get('stop_lsn'), 'proxy_backup_held': backup.get('held'),
+        'proxy_all_hashed': _get(record, 'proxy', 'hashed', 'all_hashed')}
+    columns.update({field: slowdown.get(field) for field in SLOWDOWN_FIELDS})
+    return columns
 
 
 def _get(value, *keys):
@@ -1990,6 +2739,7 @@ def summary_row(record: dict) -> dict:
         'error': record.get('error'),
         # An error's kind: 'tool' (a command of the method's own timed phases failed) or 'harness'.
         'failure_kind': record.get('failure_kind'),
+        **load_columns(record),
     }
 
 

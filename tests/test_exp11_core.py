@@ -237,7 +237,8 @@ class MethodTables(unittest.TestCase):
         self.assertEqual(measure.NON_DURABLE_METHODS, ('full_nosync',))
         self.assertEqual(measure.PROBACKUP_VARIANTS, {'probackup8': {'jobs': 8}, 'probackup4': {'jobs': 4}})
         self.assertEqual(measure.PARCOPY_VARIANTS, {'parcopy8': {'streams': 8}, 'parcopy4': {'streams': 4}})
-        self.assertEqual(set(measure.TIERS), set(T2_ARMS))
+        # EXP-12's arms have tiers of their own, in none of EXP-11's envelopes (test_exp12_load).
+        self.assertEqual(set(measure.TIERS) - {'pgdelta', *measure.T10A_METHODS}, set(T2_ARMS))
         self.assertEqual({method for method, tier in measure.TIERS.items() if tier in ('omni_today', 'released')},
                          {'full', 'full_syncfs', 'probackup8', 'probackup4'})
         self.assertEqual({method for method, tier in measure.TIERS.items() if tier == 'bound'},
