@@ -57,18 +57,21 @@ BASEBACKUP_NOSYNC_LOG = """\
 [+1.702300] pg_basebackup: renaming backup_manifest.tmp to backup_manifest
 [+1.703100] pg_basebackup: base backup completed
 """
-# pg_probackup 2.5 catchup's INFO lines on its console, stamped as above.
+# pg_probackup 2.5.16 catchup -b FULL's INFO lines on its console, stamped as above, in the order its
+# source prints them (src/catchup.c, src/backup.c): nothing marks the end of the copy threads.
 PROBACKUP_LOG = """\
-[+0.012000] INFO: Database catchup start, pg_probackup version: 2.5.16, PostgreSQL version: 17.6, remote: true, catchup-source-pgdata: /data/exp04/src/data, catchup-destination-pgdata: /data/exp04/out/probackup8
-[+0.402000] INFO: PGDATA size: 2112MB
+[+0.012000] INFO: Catchup start, pg_probackup version: 2.5.16, PostgreSQL version: 17.6, remote: true, catchup-mode: FULL
+[+0.013000] INFO: Database catchup start
+[+0.398000] INFO: pg_start_backup START LSN 2/A0000028
+[+0.402000] INFO: Source PGDATA size: 2112MB (excluded 0kB)
 [+0.410000] INFO: Start LSN (source): 2/A0000028, TLI: 1
 [+0.512000] INFO: Start transferring data files
-[+2.912000] INFO: Data files are transferred, time elapsed: 2s
-[+2.913000] INFO: wait for pg_stop_backup()
+[+2.912000] INFO: wait for pg_stop_backup()
 [+2.960000] INFO: pg_stop backup() successfully executed
+[+2.961000] INFO: stop_lsn: 2/A0000158
+[+3.008000] INFO: Databases synchronized. Transfered datafiles size: 2112MB, transfered wal size: 16MB, time elapsed: 2s
 [+3.010000] INFO: Syncing copied files to disk
 [+3.705000] INFO: Files are synced, time elapsed: 0
-[+3.706000] INFO: Catchup completed
 """
 # /proc/meminfo on pgd-dest (Debian 12, kernel 6.1, 32 GB), trimmed.
 MEMINFO = """\
@@ -449,13 +452,13 @@ class RunJson(Clocked):
             self.execute(['full', 'full_wb'], cls=Tuned)
         self.assertIn('vm.dirty_background_bytes is not 0', str(refused.exception))
 
-    def test_without_the_probackup_block_its_preflight_hook_refuses(self):
-        class Unbuilt(self.Executing):
-            check_probackup = run_exp04.Orchestrator.check_probackup
+    def test_the_probackup_preflight_hook_is_the_blocks_check(self):
+        class Unprovisioned(self.Executing):
+            check_probackup = run_exp04.Orchestrator.check_probackup  # dest reports no pg_probackup
 
-        with self.assertRaises(NotImplementedError) as refused:
-            self.execute(['full', 'probackup8'], cls=Unbuilt)
-        self.assertIn('build/exp11-probackup', str(refused.exception))
+        with self.assertRaises(SystemExit) as refused:
+            self.execute(['full', 'probackup8'], cls=Unprovisioned)
+        self.assertIn('pg_probackup (/usr/local/bin/pg_probackup-17) is not installed on dest', str(refused.exception))
 
     def test_a_run_without_t2_arms_does_none_of_it(self):
         orchestrator, code, run = self.execute(['full', 'pgdelta_direct_inplace'], ['--manifest-checksums', 'SHA256'])
@@ -802,34 +805,22 @@ class Runs(Clocked):
         # parcopy's runs are in tests/test_parcopy.py.
         orchestrator = self.orchestrator()
         record = self.run_method(orchestrator, 'probackup8')
-        self.assertEqual(record['status'], 'error')
-        self.assertIn('NotImplementedError: built on build/exp11-probackup', record['error'])
+        self.assertEqual(list(record['phases']), [measure.PROBACKUP_PHASE])
+        # A live-source arm: the source is neither stopped nor restarted.
         self.assertNotIn('source_script', [kind[0] for kind in self.kinds(orchestrator)])
 
     def test_a_probackup_run_is_one_window_with_its_sync_f_inside(self):
-        clock = self.clock
-
         class Probackup(T2Stub):
-            # What the pg_probackup block's run_probackup must do: one timed phase, catchup then sync -f.
-            def run_probackup(self, method, paths):
-                steps = {}
-
-                def body():
-                    started = clock.now
-                    catchup = self.local_command(self.probackup_argv(method, paths), f'{method}.log', stamp_lines=True)
-                    log = self.dest_log(f'{method}.log')
+            # The pg_probackup block's run_probackup, its catchup's log what 2.5.16 prints.
+            def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None, stamp_lines=False):
+                result = super().local_command(argv, log_name, timeout=timeout, cwd=cwd, env=env,
+                                               stamp_lines=stamp_lines)
+                if Path(argv[0]).name.startswith('pg_probackup'):
+                    log = self.dest_log(log_name)
                     log.parent.mkdir(parents=True, exist_ok=True)
                     log.write_text(PROBACKUP_LOG)
-                    catchup['log'] = str(log)
-                    steps['catchup'] = {'wall_seconds': round(clock.now - started, 3)}
-                    started = clock.now
-                    sync = self.local_command(self.probackup_sync_argv(paths), f'{method}-sync.log')
-                    steps['sync'] = {'wall_seconds': round(clock.now - started, 3)}
-                    return [catchup, sync]
-
-                phase = self.timed_phase(measure.PROBACKUP_PHASE, body)
-                phase['steps'] = steps
-                return {measure.PROBACKUP_PHASE: phase}
+                    result['log'] = str(log)
+                return result
 
             def verify_probackup(self, method, paths):
                 return {'verified': True, 'basis_changes': [], 'output_bytes': 2_100_000_000}
@@ -944,8 +935,9 @@ class Runs(Clocked):
         with mock.patch.object(orchestrator, 'verify_direct', return_value={'verified': True}) as direct:
             orchestrator.verify('parcopy8', orchestrator.method_paths('parcopy8'), {})
         direct.assert_called_once()
-        with self.assertRaises(NotImplementedError):
+        with mock.patch.object(orchestrator, 'verify_probackup', return_value={'verified': True}) as probackup:
             orchestrator.verify('probackup4', orchestrator.method_paths('probackup4'), {})
+        probackup.assert_called_once()
 
     def test_the_warm_source_block_reads_the_source_instead_of_dropping_it(self):
         class Warm(T2Stub):
