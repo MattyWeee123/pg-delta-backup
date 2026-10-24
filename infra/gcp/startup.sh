@@ -12,8 +12,9 @@ if [ ! -x /usr/lib/postgresql/17/bin/postgres ] || ! command -v mdadm >/dev/null
   "${APT[@]}" update
   # --no-install-recommends keeps mdadm from pulling in a mail server.
   # time: GNU time, which EXP-04 runs every tool under for its own peak RSS.
+  # strace: EXP-11's syscall audit of each arm's flushes.
   "${APT[@]}" install --no-install-recommends curl ca-certificates gnupg mdadm rsync \
-    python3 sysstat iproute2 time postgresql-common
+    python3 sysstat iproute2 time strace postgresql-common
   install -d /usr/share/postgresql-common/pgdg
   curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
     https://www.postgresql.org/media/keys/ACCC4CF8.asc
@@ -35,6 +36,11 @@ fi
 if [ ! -x /usr/bin/time ]; then
   "${APT[@]}" update
   "${APT[@]}" install --no-install-recommends time
+fi
+# VMs provisioned before strace was added to the list above (EXP-11).
+if ! command -v strace >/dev/null; then
+  "${APT[@]}" update
+  "${APT[@]}" install --no-install-recommends strace
 fi
 # VMs provisioned before pgbackrest and xfsprogs were (PGDG is configured above by then).
 if [ ! -x /usr/bin/pgbackrest ] || [ ! -x /usr/sbin/mkfs.xfs ]; then

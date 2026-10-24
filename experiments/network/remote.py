@@ -6,8 +6,9 @@ pgd-dest under nohup, so the Mac can disconnect while it runs.
 
     remote.py ips                         addresses of both VMs
     remote.py wait-ready                  wait for the startup script on both VMs
-    remote.py provision                   run this tree's infra/gcp/startup.sh again on both
-                                          (installs what a VM made from an older one lacks)
+    remote.py provision                   run this tree's infra/gcp/startup.sh again on both,
+                                          then install_incumbents.sh (installs what a VM made
+                                          from an older one lacks, and pg_probackup on both)
     remote.py deploy                      tarball of the tracked files -> ~/pgd on both
     remote.py setup-ssh                   key on pgd-dest, authorized on pgd-source
     remote.py start NAME -- ARGS...       run_exp04.py ARGS on pgd-dest, results in
@@ -43,6 +44,9 @@ CONFIG_KEYS = ('PROJECT', 'ZONE', 'SOURCE_VM', 'DEST_VM', 'GCLOUD', 'SSH_USER', 
 REMOTE_REPO = '~/pgd'
 RESULTS_ROOT = '/data/exp04-results'
 DEST_KEY = '~/.ssh/exp04_ed25519'
+# What `provision` runs on each VM, in order, with its timeout in seconds. install_incumbents.sh can
+# build pg_probackup from source when its repository can't be reached.
+PROVISION_SCRIPTS = (('startup.sh', 1800), ('install_incumbents.sh', 3600))
 
 
 def load_config(path: Path = CONFIG) -> dict:
@@ -170,20 +174,24 @@ def cmd_wait_ready(config, args) -> int:
 
 
 def cmd_provision(config, args) -> int:
-    """Run the working tree's startup.sh as root on both VMs.
+    """Run the working tree's startup.sh, then install_incumbents.sh, as root on each VM.
 
     A VM keeps the startup script it was created with in its metadata, so a reboot
     reruns that one. The script is idempotent: with /data mounted it only installs
-    missing packages (pgBackRest and xfsprogs on VMs made before T11 and T3).
+    missing packages (pgBackRest and xfsprogs on VMs made before T11 and T3, strace before
+    T2). install_incumbents.sh, idempotent too, installs pg_probackup and WAL-G; EXP-11 needs
+    pg_probackup on both VMs, since its remote mode runs the binary on the source as well.
     """
-    script = (REPO_ROOT / 'infra' / 'gcp' / 'startup.sh').read_bytes()
     # From a file, with stdin closed: apt's maintainer scripts must not read the script itself.
     command = ('f=$(mktemp) && cat > "$f" && sudo bash "$f" < /dev/null; status=$?; '
                'rm -f "$f"; exit $status')
+    scripts = [(name, (REPO_ROOT / 'infra' / 'gcp' / name).read_bytes(), timeout)
+               for name, timeout in PROVISION_SCRIPTS]
     for role, vm in instances(config).items():
-        result = ssh(config, vm['external'], command, input_bytes=script, timeout=1800)
-        tail = result.stdout.decode(errors='replace').strip().splitlines()[-1:]
-        print(f'{role}: {tail[0] if tail else "done"}')
+        for name, script, timeout in scripts:
+            result = ssh(config, vm['external'], command, input_bytes=script, timeout=timeout)
+            tail = result.stdout.decode(errors='replace').strip().splitlines()[-1:]
+            print(f'{role} {name}: {tail[0] if tail else "done"}')
     return 0
 
 

@@ -3331,9 +3331,19 @@ class InfraScripts(unittest.TestCase):
                 redirect_stdout(io.StringIO()):
             self.assertEqual(remote.cmd_provision({}, Namespace()), 0)
         script = (self.SCRIPT.parent / 'startup.sh').read_bytes()
+        # Then install_incumbents.sh on each (EXP-11: pg_probackup on both VMs).
+        incumbents = (self.SCRIPT.parent / 'install_incumbents.sh').read_bytes()
         self.assertEqual([(address, payload) for address, _, payload in calls],
-                         [('203.0.113.1', script), ('203.0.113.2', script)])
+                         [('203.0.113.1', script), ('203.0.113.1', incumbents),
+                          ('203.0.113.2', script), ('203.0.113.2', incumbents)])
         self.assertIn('sudo bash "$f" < /dev/null', calls[0][1])
+        self.assertIn('sudo bash "$f" < /dev/null', calls[1][1])
+
+    def test_startup_installs_strace(self):
+        # EXP-11's syscall audit runs every arm under strace once.
+        text = (self.SCRIPT.parent / 'startup.sh').read_text()
+        self.assertIn('python3 sysstat iproute2 time strace postgresql-common', text)
+        self.assertIn('install --no-install-recommends strace', text)
 
 
 class NewMethodReport(unittest.TestCase):
