@@ -1145,6 +1145,37 @@ class WholeTrial(Stubbed):
                       trial['cleanup_errors'])
         self.assertTrue(any(error.startswith('fetch the load logs: ') for error in trial['cleanup_errors']))
 
+    def test_the_clock_probe_is_tried_again_and_without_an_offset_the_load_never_starts(self):
+        def flaky(failures):
+            class Flaky(LoadStub):
+                calls = 0
+
+                def clock_probe(self):
+                    Flaky.calls += 1
+                    if Flaky.calls <= failures:
+                        self.at('both', 'clock probe failed')
+                        raise run_exp04.CommandError('the clock probe did not start on the source: ')
+                    return super().clock_probe()
+            return Flaky
+        orchestrator, trial = self.trial(cls=flaky(2))
+        self.assertEqual(trial['status'], 'pass')
+        self.assertEqual(trial['clock']['start']['offset_s'], 0.0)
+        self.assertEqual(len(trial['clock']['start']['failed_attempts']), 2)
+        self.assertTrue(all(record['window']['t0_source_utc'] is not None for record in orchestrator.records
+                            if record['block'] != 'calibration'))
+        # Three failures: no offset, so no load and no run; the trial ends in an error that says why.
+        orchestrator = self.orchestrator(flaky(3), ['--repeats', '1'])
+        orchestrator.clock_offset_s = 0.002  # an earlier trial's offset is not this one's
+        trial = orchestrator.run_trial(0, 'hot', 0.01)
+        self.assertEqual(trial['status'], 'error')
+        self.assertIn('no clock offset between the VMs', trial['error'])
+        self.assertIn('failed 3 times', trial['error'])
+        events = [what for _, what, _ in orchestrator.timeline]
+        self.assertEqual(events.count('clock probe failed'), 3)
+        self.assertNotIn('script load-start', events)
+        self.assertNotIn('script load-capacity', events)
+        self.assertEqual(orchestrator.records, [])
+
     def test_without_the_sampler(self):
         orchestrator, trial = self.trial(['--sampler-interval-s', '0'])
         self.assertEqual(trial['status'], 'pass')

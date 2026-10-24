@@ -206,6 +206,8 @@ WARM_BLOCKS = ('warm_source', 'warm')
 # EXP-12's control slots: pause2 and burn4 at the busy block's start and end, pause2 at the moderate block's start.
 CONTROL_SLOTS = (('busy_start', 'busy'), ('busy_end', 'busy'), ('moderate_start', 'moderate'))
 CLOCK_PORT = 7300  # EXP-12: the clock probe's TCP exchange
+# EXP-12: the clock probe tried this many times, the back-off growing by this much each time; no offset, no load.
+CLOCK_PROBE_ATTEMPTS, CLOCK_PROBE_BACKOFF_S = 3, 2.0
 BACKUP_LABEL = 't10a'  # EXP-12: the label of bracket's and the proxies' backups
 LOAD_SCRIPT_DIR = 'experiments/network/load'  # under the repository, on the source
 # EXP-12: pgbench's --random-seed by run, from --load-seed (default --order-seed): each run its own.
@@ -4109,6 +4111,23 @@ class Orchestrator:
             f'(round trip {result["rtt_s"] * 1000:.3f} ms)')
         return {**result, 'source': agent_result(stdout)}
 
+    def clock_probe_retried(self) -> dict:
+        """The clock probe, tried up to CLOCK_PROBE_ATTEMPTS times with a growing back-off: one TCP exchange that
+        failed (an SSH hiccup, a listener that didn't answer) would leave every window of the trial unmapped. The
+        earlier attempts' errors are kept; after the last, its error is raised."""
+        errors = []
+        for attempt in range(CLOCK_PROBE_ATTEMPTS):
+            try:
+                result = self.clock_probe()
+            except Exception as exc:
+                errors.append(f'{type(exc).__name__}: {exc}')
+                log(f'{self.trial_id}: the clock probe failed (attempt {attempt + 1} of {CLOCK_PROBE_ATTEMPTS}): {exc}')
+                if attempt + 1 < CLOCK_PROBE_ATTEMPTS:
+                    self.pause(CLOCK_PROBE_BACKOFF_S * (attempt + 1))
+                continue
+            return {**result, 'failed_attempts': errors} if errors else result
+        raise CommandError(f'the clock probe failed {CLOCK_PROBE_ATTEMPTS} times: ' + '; '.join(errors))
+
     def wal_sync_probe(self) -> dict:
         """Step 6: pg_test_fsync -s 2 on the source's /data."""
         result = self.source.agent('run', '--log', self.source_log('pg_test_fsync.log'), '--',
@@ -4121,7 +4140,7 @@ class Orchestrator:
         """Step 6, with no load: the idle rate, the clock offset, fincore of the data directory, the WAL sync probe.
         Each one's error is recorded and the trial goes on."""
         return {'idle': self.probe('the idle rate', self.idle_rate_probe),
-                'clock': self.probe('the clock probe', self.clock_probe),
+                'clock': self.probe('the clock probe', self.clock_probe_retried),
                 'fincore': self.probe('fincore', lambda: self.source.agent('fincore', self.source_data, timeout=900)),
                 'wal_sync': self.probe('the WAL sync probe', self.wal_sync_probe)}
 
@@ -4143,7 +4162,7 @@ class Orchestrator:
         self.multi_stream_links, self.reference_digests, self.byte_views = {}, {}, {}
         self.snapshot_digest, self.database_oids, self.references = None, {}, {}
         self.load_runs, self.load_current, self.load_rate = [], None, None
-        self.load_used = False
+        self.load_used, self.clock_offset_s = False, None  # an earlier trial's offset is no offset for this one
         self.pending_source, self.output_digests, self.static_digests = [], {}, set()
         self.repeat_counter, self.current_speed = 0, None
         trial = {'schema': SCHEMA_TRIAL, 'trial_id': self.trial_id, 'pattern': pattern, 'fraction': fraction,
@@ -4173,6 +4192,10 @@ class Orchestrator:
                 trial['snapshot'] = self.take_snapshot()
             trial['probes'] = self.load_probes()
             trial['clock'] = {'start': trial['probes']['clock']}
+            if self.clock_offset_s is None:
+                # Every window maps to the source's clock through it: without one, no run could be judged.
+                raise CommandError('no clock offset between the VMs (' + str(trial['clock']['start'].get('error'))
+                                   + '); the load is not started')
             self.load_used = True  # from the capacity runs on, the load's directory holds logs
             trial['load']['capacity'] = self.load_capacity(trial)
             save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
@@ -4205,7 +4228,7 @@ class Orchestrator:
             self.throttle('off')
             log(f'{self.trial_id}: the end references')
             trial['references']['end'] = self.take_references('end')
-            trial['clock']['end'] = self.probe('the clock probe', self.clock_probe)
+            trial['clock']['end'] = self.probe('the clock probe', self.clock_probe_retried)
             if args.snapshot:
                 digest = self.source.agent('datadir-digest', self.snapshot_data, '--pg-controldata',
                                            str(self.bin / 'pg_controldata'), timeout=3600)
