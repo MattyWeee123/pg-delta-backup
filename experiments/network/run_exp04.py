@@ -999,6 +999,48 @@ class Orchestrator:
         """The timed flush after pg_probackup catchup: syncfs(2) of the output's filesystem."""
         return ['sync', '-f', str(paths['output'])]
 
+    def wal_ticker_argv(self) -> list:
+        """psql on dest, connected to the source, emitting one empty WAL message per tick.
+
+        pg_logical_emit_message(false, ..., flush => true) writes and flushes a non-transactional WAL
+        record and nothing else: no table, no data file and no transaction status changes (EXP-11's smoke
+        run, October 24). It keeps WAL arriving at pg_probackup's stream, as on a live primary.
+        """
+        return [str(part) for part in self.psql_argv(self.source.ip, PG_PORT, 'SELECT 1')[:-2]]
+
+    def start_wal_ticker(self, method):
+        """probackup*: the WAL ticker, started untimed before the phase, or None when it is off."""
+        interval = self.args.probackup_wal_ticker
+        if not interval:
+            return None
+        log_path = self.dest_log(f'{method}-wal-ticker.log')
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = log_path.open('w')
+        script = (f"SELECT pg_logical_emit_message(false, 'pgd-tick', '', true) \\watch {interval}\n")
+        process = subprocess.Popen(self.wal_ticker_argv(), stdin=subprocess.PIPE, stdout=handle,
+                                   stderr=subprocess.STDOUT, text=True, env=server_env())
+        process.stdin.write(script)
+        process.stdin.flush()
+        return {'process': process, 'log': handle, 'interval_s': interval, 'started': time.perf_counter()}
+
+    def stop_wal_ticker(self, ticker) -> dict | None:
+        """Stops the ticker after the phase; its record (interval, seconds, exit). A ticker that died early
+        is reported, not fatal: the run then shows what pg_probackup does on an idle source."""
+        if ticker is None:
+            return None
+        process = ticker['process']
+        early = process.poll()
+        if early is None:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        ticker['log'].close()
+        return {'interval_s': ticker['interval_s'], 'seconds': round(time.perf_counter() - ticker['started'], 3),
+                'exited_early': early is not None, 'exit_code': early}
+
     def run_probackup(self, method, paths) -> dict:
         """probackup*: one timed phase (measure.PROBACKUP_PHASE), one counter window, two steps.
 
@@ -1026,8 +1068,16 @@ class Orchestrator:
                                 'wall_seconds': round(time.perf_counter() - started, 3)}
             return [catchup, sync]
 
-        phase = self.timed_phase(measure.PROBACKUP_PHASE, body)
+        # The WAL ticker (--probackup-wal-ticker; added after EXP-11's smoke run): on an idle source,
+        # pg_probackup's WAL stream notices the stop LSN only at its next timer tick, about 10 s after the
+        # stream started, so an idle source alone added up to 8 s to every catchup. Started before the clock.
+        ticker = self.start_wal_ticker(method)
+        try:
+            phase = self.timed_phase(measure.PROBACKUP_PHASE, body)
+        finally:
+            ticked = self.stop_wal_ticker(ticker)
         phase['steps'] = steps
+        phase['wal_ticker'] = ticked
         return {measure.PROBACKUP_PHASE: phase}
 
     def verify_probackup(self, method, paths) -> dict:
@@ -2466,7 +2516,10 @@ class Orchestrator:
                     'ssh_options': [f'{option}={value}' for option, value in measure.PROBACKUP_SSH_OPTIONS],
                     'ssh_config': measure.probackup_ssh_config(self.source.ip, self.args.ssh_user,
                                                                self.args.ssh_key),
-                    'sync': self.probackup_sync_argv(paths)}
+                    'sync': self.probackup_sync_argv(paths),
+                    'wal_ticker': ({'argv': self.wal_ticker_argv(), 'interval_s': self.args.probackup_wal_ticker,
+                                    'sql': "SELECT pg_logical_emit_message(false, 'pgd-tick', '', true)"}
+                                   if self.args.probackup_wal_ticker else None)}
         if method in measure.PARCOPY_METHODS:
             paths = self.method_paths(method)
             return {'receive_argv': [str(part) for part in self.parcopy_receive_argv(method, paths)],
@@ -3172,6 +3225,10 @@ def parse_args(argv=None):
     parser.add_argument('--probackup-byte-diagnostic', choices=('every', 'first_repeat'), default='every',
                         help="T2: probackup*'s byte diagnostic (against the trial's start reference digest) in "
                              "every run, or only in each trial's first repeat (EXP-11's first cut)")
+    parser.add_argument('--probackup-wal-ticker', type=float, default=0.1, metavar='SECONDS',
+                        help='T2: during probackup* runs, emit one empty WAL message on the source every SECONDS '
+                             "(pg_logical_emit_message), so pg_probackup's stream sees WAL arrive as on a live "
+                             'primary; 0 turns it off (added after EXP-11\'s smoke run)')
     parser.add_argument('--syscall-audit', action='store_true',
                         help="T2: EXP-11's syscall audit: every command of every timed phase on dest runs under "
                              'strace -f -tt -y -e trace=%%file,%%desc, and each record holds the audit of its '

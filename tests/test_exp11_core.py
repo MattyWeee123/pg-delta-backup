@@ -140,6 +140,19 @@ class T2Stub(StubOrchestrator):
         self.window_writes = 0  # dest's md array writes per window, bytes
         self.snapshots = {'source': 0, 'dest': 0}
 
+    def start_wal_ticker(self, method):
+        """No psql here: the ticker is recorded, as its own tests (test_exp11_probackup) check it."""
+        if not self.args.probackup_wal_ticker:
+            return None
+        self.events.append(('wal_ticker', 'start', method))
+        return {'interval_s': self.args.probackup_wal_ticker}
+
+    def stop_wal_ticker(self, ticker):
+        if ticker is None:
+            return None
+        self.events.append(('wal_ticker', 'stop'))
+        return {'interval_s': ticker['interval_s'], 'seconds': 0.0, 'exited_early': False, 'exit_code': None}
+
     def _snap(self, host):
         value = super()._snap(host)
         self.snapshots[host] += 1

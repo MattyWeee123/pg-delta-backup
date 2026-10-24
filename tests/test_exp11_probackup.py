@@ -187,6 +187,49 @@ class Probackup(core.T2Stub):
 
 
 class Runs(core.Clocked):
+    def test_the_wal_ticker_runs_around_the_window_not_inside_it(self):
+        orchestrator = self.orchestrator(Probackup)
+        record = self.run_method(orchestrator, 'probackup8')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        phase = record['phases']['catchup_sync']
+        self.assertEqual(phase['wal_ticker']['interval_s'], 0.1)
+        events = [event for event in orchestrator.events if isinstance(event, tuple)]
+        start = events.index(('wal_ticker', 'start', 'probackup8'))
+        stop = events.index(('wal_ticker', 'stop'))
+        catchup = next(i for i, event in enumerate(events)
+                       if event[0] == 'dest' and Path(event[1][0]).name.startswith('pg_probackup'))
+        self.assertLess(start, catchup)
+        self.assertLess(catchup, stop)
+        flags = orchestrator.method_flags('probackup8')['wal_ticker']
+        self.assertEqual(flags['interval_s'], 0.1)
+        self.assertIn('pg_logical_emit_message(false', flags['sql'])
+        self.assertNotIn('-c', flags['argv'])
+
+    def test_the_wal_ticker_can_be_turned_off(self):
+        orchestrator = self.orchestrator(Probackup, ['--probackup-wal-ticker', '0'])
+        record = self.run_method(orchestrator, 'probackup8')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        self.assertIsNone(record['phases']['catchup_sync']['wal_ticker'])
+        self.assertNotIn(('wal_ticker', 'stop'), orchestrator.events)
+        self.assertIsNone(orchestrator.method_flags('probackup8')['wal_ticker'])
+
+    def test_the_real_ticker_feeds_psql_a_watch_and_stops_it(self):
+        orchestrator = self.orchestrator(Probackup)
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / 'psql'
+            seen = Path(tmp) / 'stdin'
+            fake.write_text(f'#!/bin/sh\ncat > {seen}\n')
+            fake.chmod(0o755)
+            with mock.patch.object(run_exp04.Orchestrator, 'wal_ticker_argv', return_value=[str(fake)]):
+                ticker = run_exp04.Orchestrator.start_wal_ticker(orchestrator, 'probackup8')
+                ticker['process'].stdin.close()  # the stand-in's cat ends at EOF, as psql's \watch never does
+                ticker['process'].wait(timeout=10)
+                stopped = run_exp04.Orchestrator.stop_wal_ticker(orchestrator, ticker)
+            self.assertEqual(stopped['interval_s'], 0.1)
+            self.assertTrue(stopped['exited_early'])  # here, because the stand-in ended; reported, not fatal
+            self.assertIn("SELECT pg_logical_emit_message(false, 'pgd-tick', '', true) \\watch 0.1",
+                          seen.read_text())
+
     def test_catchup_then_its_sync_f_in_one_window(self):
         orchestrator = self.orchestrator(Probackup)
         record = self.run_method(orchestrator, 'probackup8')
