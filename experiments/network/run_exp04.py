@@ -57,6 +57,29 @@ Optional methods for T3, T8a and T11 (named in --methods; see the README):
                    repositories, archiving and one full backup each are set up per
                    trial, untimed, and only when one of them is selected
 
+Optional methods for T2 (EXP-11, the fastest durable full copy; they need
+--manifest-checksums CRC32C):
+
+    full_nosync, full_syncfs, full_wb
+                   full with --no-sync, with --sync-method=syncfs, and on a dest whose
+                   vm.dirty_background_bytes is 64 MiB for the run. Every pg_basebackup arm,
+                   full included, runs with --verbose, its lines timestamped as they arrive,
+                   and its output is started on dest after pg_verifybackup
+    probackup8, probackup4
+                   pg_probackup catchup -b FULL --stream -j 8 or 4 on dest from the live
+                   source over SSH, then sync -f of the output, in one timed phase
+    parcopy8, parcopy4
+                   a range-parallel copier built in the harness, 8 or 4 TCP streams, from
+                   the cleanly stopped source, in pgdelta_direct*'s frame
+    pgdelta_direct_inplace_j8
+                   v1's path, pgdelta_direct_inplace, with --jobs 8 on both ends
+
+A run that selects any of them also takes, in each trial, reference digests of the
+stopped source before and after the methods, and untimed probes (the durable write
+floor, the read floors, the backup-mode bracket, an 8-stream link test). Its
+extension and warm-source blocks (--extension-*, --warm-source-*) follow the main
+block, unthrottled.
+
 The end-to-end total is every timed phase, rsync's prep included. The prep
 and the capture run on different VMs with the link idle, so a real
 cp-then-rsync refresh overlaps them: rsync's total is max(prep, capture) +
@@ -120,6 +143,7 @@ OUTPUT_START_TIMEOUT = 1800  # seconds; a pgBackRest copy replays the archive be
 OUTPUT_QUERY = 'SELECT count(*) FROM pgbench_branches;'
 PGDELTA_PORT = 7000
 BLAST_PORT = 7100
+PARCOPY_PORT = 7200
 RSYNC_PORT = 8730
 RSYNC_MODULE = 'exp04'
 AGENT = 'experiments/network/agent.py'
@@ -149,7 +173,30 @@ CACHE_POLICY = ("sync; echo 3 > /proc/sys/vm/drop_caches on both VMs, once, befo
                 'pgBackRest patch B, a copy of B0 made (cp -a --reflink=never; sync -f) before the '
                 'drop, so B starts cold and shares no block with B0; pgdelta_direct* stops the '
                 "source cluster cleanly before the drop, so the sender reads the source's data "
-                'directory cold')
+                'directory cold. T2 (EXP-11): parcopy* stops the source as pgdelta_direct* does; '
+                "full_wb's dest write-back setting is set before the drop. In the warm-source block "
+                "only dest's cache is dropped: the source runs sync and reads its data directory "
+                'without pg_wal once instead, untimed, so the copy reads it warm')
+# T2 (EXP-11), rule 7: every pg_basebackup's manifest has CRC32C checksums, B0's included.
+T2_MANIFEST_CHECKSUMS = 'CRC32C'
+LINK_TEST_STREAMS = 8  # T2: the multi-stream link test, source to dest, at each speed's first visit
+WRITE_FLOOR_WRITERS = 4  # T2: the durable write floor's writers on dest
+READ_FLOOR_READERS = 4  # T2: the cold read floor's readers on the source (EXP-07's C4)
+BRACKET_REPEATS = 10  # T2: backup-mode pairs on the idle source
+# T2: the file the single-reader probe reads, pgbench_accounts's, found from the catalog only (no
+# user table is read), after the workload and before the start reference digest.
+PROBE_RELATION = 'pgbench_accounts'
+PROBE_RELATION_SQL = f"SELECT pg_relation_filepath('{PROBE_RELATION}');"
+# T2: the blocks of a trial, in order. The source's cache is dropped before each run in the first
+# two and read, warm, in the third.
+BLOCKS = ('main', 'extension', 'warm_source')
+DURABILITY_POLICY = (
+    "EXP-11's checks, in every run's record (durability) and the CSV: (a) dest's Dirty + Writeback "
+    '(/proc/meminfo), read just before the clock starts and first after it stops, grows by at most '
+    '4 MiB or the idle noise (run.json dirty_idle_noise, --dirty-noise-mib), whichever is larger; '
+    "(b) for a full copy, dest's md array writes (/proc/diskstats) in the window are at least 0.98 x "
+    "the output's bytes. full_nosync is the negative control. A run's status is its verification's; "
+    'durability_ok is apart')
 os.environ['PATH'] = os.environ.get('PATH', '/usr/bin:/bin') + ':/usr/sbin:/sbin'
 
 
@@ -258,6 +305,46 @@ def server_env(**extra) -> dict:
     """This environment without libpq's PG* settings, with LC_ALL=C (as run_study's clusters run)."""
     env = {key: value for key, value in os.environ.items() if not key.startswith('PG')}
     return {**env, 'LC_ALL': 'C', **extra}
+
+
+def messages_env() -> dict:
+    """This environment with untranslated messages (LC_MESSAGES=C), for tools whose lines are parsed."""
+    env = {key: value for key, value in os.environ.items() if key != 'LC_ALL'}
+    return {**env, 'LC_MESSAGES': 'C'}
+
+
+def checksum_problem(methods, checksums: str) -> str | None:
+    """Why the selected methods can't run with these manifest checksums, or None.
+
+    EXP-11's rule 7: CRC32C for every pg_basebackup, B0 included. --manifest-checksums still defaults
+    to SHA256, EXP-04's setting, so T2's methods refuse to run without CRC32C.
+    """
+    t2 = [method for method in methods if method in measure.T2_METHODS]
+    if t2 and checksums != T2_MANIFEST_CHECKSUMS:
+        return (f'{", ".join(t2)} need --manifest-checksums {T2_MANIFEST_CHECKSUMS} (EXP-11, rule 7), '
+                f'not {checksums}')
+    return None
+
+
+def method_list(text: str) -> list[str]:
+    return [method.strip() for method in (text or '').split(',') if method.strip()]
+
+
+def block_problems(args, methods) -> list[str]:
+    """What is wrong with the extension and warm-source options for these --methods."""
+    problems = []
+    for block in BLOCKS[1:]:
+        flag = block.replace('_', '-')
+        repeats, chosen = getattr(args, f'{block}_repeats'), method_list(getattr(args, f'{block}_methods'))
+        if repeats < 0:
+            problems.append(f'--{flag}-repeats must be 0 or more')
+        if bool(repeats) != bool(chosen):
+            problems.append(f'--{flag}-repeats and --{flag}-methods go together')
+        unknown = [method for method in chosen if method not in methods]
+        if unknown or len(set(chosen)) != len(chosen):
+            problems.append(f'--{flag}-methods must be distinct names from --methods, not {", ".join(unknown)}'
+                            if unknown else f'--{flag}-methods names a method twice')
+    return problems
 
 
 def pgdelta_supports(help_text: str, options=('--jobs',)) -> bool:
@@ -456,6 +543,20 @@ class Orchestrator:
         # An output started on dest for its verification that pg_ctl could not stop: its data
         # directory is never removed, and no other output is started while it holds the port.
         self.output_stuck: dict | None = None
+        # T2 (EXP-11). The blocks after the main one, run unthrottled: method lists.
+        self.extension_methods = method_list(args.extension_methods)
+        self.warm_source_methods = method_list(args.warm_source_methods)
+        # dest's vm.dirty_background_ratio and _bytes as found at the start (execute), which every
+        # run's guard requires and full_wb's reset restores; None outside T2 runs.
+        self.writeback_defaults: dict | None = None
+        # Check (a)'s idle noise in bytes: --dirty-noise-mib, or what the start-up windows measured.
+        self.idle_noise_bytes: int | None = None
+        # This trial's 8-stream link test per speed label (taken at each speed's first visit).
+        self.multi_stream_links: dict = {}
+        # This trial's reference digests of the stopped source ('start', 'end'): reference_view()s.
+        self.reference_digests: dict = {}
+        # The file the single-reader probe reads, relative to the source's data directory.
+        self.probe_relation_path: str | None = None
 
     # --- paths -------------------------------------------------------------
 
@@ -488,6 +589,11 @@ class Orchestrator:
     @property
     def pgbackrest_exe(self) -> str:
         return self.args.pgbackrest
+
+    @property
+    def t2(self) -> bool:
+        """Whether this run selects any of EXP-11's arms (measure.T2_METHODS)."""
+        return any(method in measure.T2_METHODS for method in self.methods)
 
     def dest_log(self, name: str) -> Path:
         return self.out / 'logs' / self.trial_id / 'dest' / (self.log_prefix + name)
@@ -576,13 +682,19 @@ class Orchestrator:
         after_source = self.snapshot_source()
         source = measure.snapshot_delta(before_source, after_source)
         dest = measure.snapshot_delta(before_dest, after_dest)
-        return {'name': name, 'wall_seconds': round(wall, 3), 'started_utc': started_utc,
-                'ended_utc': ended_utc, 'commands': commands,
-                'net': {'source': source['net'], 'dest': dest['net']},
-                'cpu': {'source': source['cpu'], 'dest': dest['cpu']},
-                'counter_window_seconds': {'source': source['interval_seconds'],
-                                           'dest': dest['interval_seconds']},
-                'failures': failed(commands)}
+        phase = {'name': name, 'wall_seconds': round(wall, 3), 'started_utc': started_utc,
+                 'ended_utc': ended_utc, 'commands': commands,
+                 'net': {'source': source['net'], 'dest': dest['net']},
+                 'cpu': {'source': source['cpu'], 'dest': dest['cpu']},
+                 'counter_window_seconds': {'source': source['interval_seconds'],
+                                            'dest': dest['interval_seconds']},
+                 'failures': failed(commands)}
+        # Dirty and Writeback at each end of the window, and each disk's bytes (EXP-11's checks). dest's
+        # are read just before the clock starts and first after it stops.
+        for key in ('memory', 'disk'):
+            if key in source or key in dest:
+                phase[key] = {'source': source.get(key), 'dest': dest.get(key)}
+        return phase
 
     def concurrent_phase(self, name: str, dest_part: tuple, source_part: tuple) -> dict:
         """One timed phase whose dest part and source part run at the same time.
@@ -619,10 +731,23 @@ class Orchestrator:
         phase['parts'] = {part: parts[part] for part in (dest_part[0], source_part[0])}
         return phase
 
-    def drop_caches(self) -> dict:
+    def drop_caches(self, source: bool = True) -> dict:
+        """sync; echo 3 > drop_caches on both VMs, or with source=False on dest only (the warm-source block)."""
+        if not source:
+            return {'source': None, 'dest': self.local_agent('drop-caches')}
         source, dest = self.both(lambda: self.local_agent('drop-caches'),
                                  lambda: self.source.agent('drop-caches'))
         return {'source': source, 'dest': dest}
+
+    def warm_source(self) -> dict:
+        """The warm-source block's stand-in for the source's cache drop (untimed, before dest's drop).
+
+        sync, then one read of the data directory without pg_wal, with the read floor's readers, so
+        the copy finds the source's files in its page cache. A stopped source (v1, parcopy) is read
+        after its clean stop.
+        """
+        return self.source.agent('read-test', self.source_data, '--readers', str(READ_FLOOR_READERS),
+                                 '--exclude', 'pg_wal', '--sync', timeout=3600)
 
     def remove_dest(self, *paths) -> None:
         self.local_agent('remove', '--under', str(self.work), *map(str, paths))
@@ -638,25 +763,27 @@ class Orchestrator:
             lambda: self.source.agent('throttle', rate, '--iface', self.source_iface))
         return {'source': source, 'dest': dest}
 
-    def blast(self, direction: str) -> dict:
+    def blast(self, direction: str, streams: int = 1) -> dict:
+        """The link test in one direction: one bulk TCP stream, or `streams` at once (T2's 8)."""
         seconds = str(self.args.link_test_seconds)
+        many = ['--streams', str(streams)] if streams > 1 else []
         if direction == 'source_to_dest':
             receiver = subprocess.Popen(
                 [sys.executable, str(REPO_ROOT / AGENT), 'blast-recv', '--listen',
-                 f'{self.dest_ip}:{BLAST_PORT}', '--timeout', '120'],
+                 f'{self.dest_ip}:{BLAST_PORT}', '--timeout', '120', *many],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             sender = lambda: self.source.agent('blast-send', '--connect',  # noqa: E731
                                                f'{self.dest_ip}:{BLAST_PORT}',
-                                               '--seconds', seconds, timeout=300)
+                                               '--seconds', seconds, *many, timeout=300)
         else:
             receiver = subprocess.Popen(
                 self.source.agent_argv('blast-recv', '--listen', f'{self.source.ip}:{BLAST_PORT}',
-                                       '--timeout', '120'),
+                                       '--timeout', '120', *many),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                 stdin=subprocess.DEVNULL)
             sender = lambda: self.local_agent('blast-send', '--connect',  # noqa: E731
                                               f'{self.source.ip}:{BLAST_PORT}',
-                                              '--seconds', seconds, timeout=300)
+                                              '--seconds', seconds, *many, timeout=300)
         try:
             ready = receiver.stdout.readline()
             if 'LISTENING' not in ready:
@@ -685,8 +812,33 @@ class Orchestrator:
                     'steady_gbit')}
         log(f'link {speed["label"]}: measured {link["source_to_dest_gbit"]} Gbit/s source->dest, '
             f'{link["dest_to_source_gbit"]} Gbit/s dest->source')
+        if self.t2:
+            link.update(self.multi_stream_link(speed))
         self.current_speed = speed
         return link
+
+    def multi_stream_link(self, speed: dict) -> dict:
+        """T2: the 8-stream link test from source to dest at this speed, under keys ending in gbit.
+
+        Run at the speed's first visit in the trial (each trial's first repeat; the extension's and
+        the warm-source block's unthrottled visits reuse it); later visits carry that measurement,
+        so each record's link time can use it. One tbf caps the sum of all streams.
+        """
+        label = speed['label']
+        measured = label not in self.multi_stream_links
+        if measured:
+            test = self.blast('source_to_dest', streams=LINK_TEST_STREAMS)
+            self.multi_stream_links[label] = {
+                'streams': LINK_TEST_STREAMS, 'utc': utc_now(), 'test': test,
+                'source_to_dest_8streams_gbit': test['receiver']['gbit'],
+                'source_to_dest_8streams_steady_gbit': test['receiver'].get('steady_gbit')}
+            log(f'link {label}: {LINK_TEST_STREAMS} streams {test["receiver"]["gbit"]} Gbit/s source->dest')
+        multi = self.multi_stream_links[label]
+        result = {key: multi[key] for key in ('source_to_dest_8streams_gbit',
+                                              'source_to_dest_8streams_steady_gbit')}
+        result['multi_stream'] = {'streams': multi['streams'], 'utc': multi['utc'], 'measured_here': measured,
+                                  **({'test': multi['test']} if measured else {})}
+        return result
 
     def qdisc_stats(self) -> dict:
         source, dest = self.both(
@@ -696,9 +848,10 @@ class Orchestrator:
 
     # --- methods -----------------------------------------------------------
 
-    def basebackup(self, output, *, host, basis=None) -> list[str]:
+    def basebackup(self, output, *, host, basis=None, extra=()) -> list[str]:
         return basebackup_command(self.bin / 'pg_basebackup', output, host=host, port=PG_PORT,
-                                  user=PG_USER, basis=basis, checksum=self.args.manifest_checksums)
+                                  user=PG_USER, basis=basis, checksum=self.args.manifest_checksums,
+                                  extra=extra)
 
     def capture_commands(self, method: str) -> list[dict]:
         """Local pg_basebackup S on the source (the staged methods' capture).
@@ -722,20 +875,92 @@ class Orchestrator:
             # In place, the receipt is beside B, which is this same path.
             paths['receipt'] = self.outputs / f'{method}.pgdelta-receipt.json'
             paths['stats'] = f'{self.work}/stats/{method}-send.json'
+        if method in measure.PARCOPY_METHODS:
+            # T2's bound reads the stopped source in place, as pgdelta_direct* does. Its sender's
+            # --stats-json is on the source (stats), its receiver's on dest (receive_stats).
+            paths['source_data'] = self.source_data
+            paths['stats'] = f'{self.work}/stats/{method}-send.json'
+            paths['receive_stats'] = self.work / 'stats' / f'{method}-receive.json'
+        if method in measure.PROBACKUP_METHODS:
+            # pg_probackup on dest reads the live source's data directory over SSH, with its own SSH
+            # configuration (setup_probackup_ssh writes it) and file logs, on dest.
+            probackup = measure.probackup_paths(self.work)
+            paths.update(source_data=self.source_data, ssh_config=probackup['ssh_config'],
+                         probackup_log_dir=probackup['log_dir'])
         return paths
 
     def clean_method(self, paths: dict) -> None:
         stuck = (self.output_stuck or {}).get('data')
-        self.remove_dest(*[paths[key] for key in ('output', 'increment', 'receipt')
+        self.remove_dest(*[paths[key] for key in ('output', 'increment', 'receipt', 'receive_stats')
                            if key in paths and str(paths[key]) != stuck])
         remote = [paths[key] for key in ('capture', 'stats') if key in paths]
         if remote:
             self.remove_source(*remote)
 
-    def run_full(self, paths) -> dict:
-        argv = self.basebackup(paths['output'], host=self.source.ip)
-        return {'transfer': self.timed_phase(
-            'transfer', lambda: [self.local_command(argv, 'full.log')])}
+    def full_argv(self, method, paths) -> list[str]:
+        """A pg_basebackup arm's command line: the full copy, then its options (measure.FULL_VARIANTS)."""
+        return self.basebackup(paths['output'], host=self.source.ip, extra=measure.FULL_VARIANTS[method])
+
+    def run_full(self, method, paths) -> dict:
+        """A pg_basebackup arm (full and T2's variants): one timed phase, one counter window.
+
+        pg_basebackup's flush (or, with --no-sync, its absence) is inside it. Its --verbose lines
+        come through a pipe that a thread of this process timestamps as they arrive (Child
+        stamp_lines), untranslated, so basebackup_phases can split the run.
+        """
+        argv = self.full_argv(method, paths)
+        return {measure.FULL_PHASE: self.timed_phase(measure.FULL_PHASE, lambda: [self.local_command(
+            argv, f'{method}.log', env=messages_env(), stamp_lines=True)])}
+
+    # --- T2's other copies: their blocks fill these in ---------------------------
+
+    def probackup_argv(self, method, paths) -> list[str]:
+        """pg_probackup catchup on dest for probackup8 and probackup4 (measure.probackup_catchup_argv)."""
+        return measure.probackup_catchup_argv(
+            self.args.pg_probackup, method, source_pgdata=paths['source_data'], dest_pgdata=paths['output'],
+            source_ip=self.source.ip, port=PG_PORT, user=PG_USER, database=PG_DATABASE,
+            ssh_user=self.args.ssh_user, ssh_config=paths['ssh_config'])
+
+    def probackup_sync_argv(self, paths) -> list[str]:
+        """The timed flush after pg_probackup catchup: syncfs(2) of the output's filesystem."""
+        return ['sync', '-f', str(paths['output'])]
+
+    def run_probackup(self, method, paths) -> dict:
+        """probackup*: one timed phase, measure.PROBACKUP_PHASE, whose steps (measure.PROBACKUP_STEPS) are
+        probackup_argv's catchup, run with stamp_lines, then probackup_sync_argv. Built on
+        build/exp11-probackup."""
+        raise NotImplementedError('built on build/exp11-probackup')
+
+    def verify_probackup(self, method, paths) -> dict:
+        """probackup*'s verification (untimed): the byte diagnostic, the start, the logical digest pending
+        until the trial's step 8. Built on build/exp11-probackup."""
+        raise NotImplementedError('built on build/exp11-probackup')
+
+    def check_probackup(self) -> dict:
+        """execute()'s preflight for probackup*: the same pg_probackup on both VMs. Built on
+        build/exp11-probackup."""
+        raise NotImplementedError('built on build/exp11-probackup')
+
+    def parcopy_receive_argv(self, method, paths) -> list:
+        """parcopy's receiver on dest: listens, then writes O from the sender's streams."""
+        return [sys.executable, '-m', measure.PARCOPY_MODULE, 'receive', '--output', paths['output'],
+                '--listen', f'{self.dest_ip}:{PARCOPY_PORT}', '--stats-json', paths['receive_stats'],
+                *measure.parcopy_args(method)['receive']]
+
+    def parcopy_send_argv(self, method, paths) -> list:
+        """parcopy's sender on the source: pgdelta.datadir's selection of the stopped data directory."""
+        return [self.source.python, '-m', measure.PARCOPY_MODULE, 'send', '--source', paths['source_data'],
+                '--pg-controldata', self.bin / 'pg_controldata', '--connect', f'{self.dest_ip}:{PARCOPY_PORT}',
+                '--stats-json', paths['stats'], *measure.parcopy_args(method)['send']]
+
+    def run_parcopy(self, method, paths) -> dict:
+        """parcopy*: one timed phase in pgdelta_direct*'s frame (measure.PARCOPY_PHASE, steps receiver_start
+        and transfer), from parcopy_receive_argv and parcopy_send_argv. Built on build/exp11-parcopy."""
+        raise NotImplementedError('built on build/exp11-parcopy')
+
+    def check_parcopy(self) -> dict:
+        """execute()'s preflight for parcopy*. Built on build/exp11-parcopy."""
+        raise NotImplementedError('built on build/exp11-parcopy')
 
     def run_incremental(self, method, paths) -> dict:
         phases = {}
@@ -965,26 +1190,38 @@ class Orchestrator:
     def prepare(self, method, paths, daemon_holder: dict) -> dict | None:
         """Untimed set-up before the cache drop.
 
-        pgdelta's stats directory; rsync's daemon; for the in-place methods and pgBackRest,
-        B, a copy of B0 (B already exists in a real refresh, and B0 must stay unchanged for
-        the next method); for pgdelta_direct*, a clean stop of the source cluster, recorded
-        in daemon_holder so that run_method restarts it whatever happens next.
+        pgdelta's and parcopy's stats directories; rsync's daemon; for the in-place methods and
+        pgBackRest, B, a copy of B0 (B already exists in a real refresh, and B0 must stay
+        unchanged for the next method); for pgdelta_direct* and parcopy* (SOURCE_STOP_METHODS),
+        a clean stop of the source cluster, recorded in daemon_holder so that run_method restarts
+        it whatever happens next; for full_wb (HOST_TUNED_METHODS), dest's write-back setting,
+        recorded there too so that run_method resets it whatever happens next.
         """
         started = time.perf_counter()
         steps = []
-        if method in measure.PGDELTA_METHODS:
+        if method in measure.PGDELTA_METHODS or method in measure.PARCOPY_METHODS:
             self.source.agent('run', '--log', self.source_log(f'{method}-mkdir-stats.log'), '--',
                               'mkdir', '-p', f'{self.work}/stats')
+        if method in measure.PARCOPY_METHODS:
+            Path(paths['receive_stats']).parent.mkdir(parents=True, exist_ok=True)
         if method in measure.BASIS_COPY_METHODS:
             steps.append(self.copy_basis(method, paths))
         if method in measure.PGBACKREST_METHODS:
             # pgBackRest appends to its file log; start each run's afresh (tool_reported keeps it).
             Path(self.pgbackrest_file_log(method)).unlink(missing_ok=True)
-        if method in measure.PGDELTA_DIRECT_METHODS:
+        if method in measure.SOURCE_STOP_METHODS:
             daemon_holder['source_stopped'] = True  # set first: a failed stop is still restarted
             steps.append({'what': 'stop the source cluster cleanly (pg_ctl stop -m fast)',
                           **self.source.script(SOURCE_CLUSTER, 'stop-clean', '--root', self.source_root,
                                                '--bin-dir', str(self.bin))})
+        if method in measure.HOST_TUNED_METHODS:
+            if self.writeback_defaults is None:
+                raise CommandError(f"{method}: dest's write-back defaults were not recorded, so they could "
+                                   'not be reset')
+            daemon_holder['dirty_writeback'] = None  # set first: a failed set is still reset
+            daemon_holder['dirty_writeback'] = self.set_dirty_writeback(method)
+            steps.append({'what': "set dest's write-back for the run (reset after it)",
+                          **daemon_holder['dirty_writeback']})
         if steps:
             return {'what': 'untimed set-up before the cache drop', 'steps': steps,
                     'wall_seconds': round(time.perf_counter() - started, 3)}
@@ -1025,9 +1262,62 @@ class Orchestrator:
         return self.source.script(SOURCE_CLUSTER, 'start', '--root', self.source_root, '--bin-dir',
                                   str(self.bin), '--log-dir', self.source_log('cluster'))
 
+    # --- dest's write-back settings (T2's full_wb) --------------------------------
+
+    def dirty_writeback(self) -> dict:
+        """dest's vm.dirty_background_ratio and vm.dirty_background_bytes now."""
+        return self.local_agent('sysctl', 'get', measure.DIRTY_BACKGROUND_RATIO,
+                                measure.DIRTY_BACKGROUND_BYTES)['values']
+
+    def record_writeback_defaults(self) -> dict:
+        """At the start of a T2 run: dest's write-back settings, which every run then requires.
+
+        The bytes setting must be 0 (the ratio in effect), or there is no ratio to reset to.
+        """
+        values = self.dirty_writeback()
+        if values.get(measure.DIRTY_BACKGROUND_BYTES) != 0:
+            raise SystemExit(f'{measure.DIRTY_BACKGROUND_BYTES} is not 0 on dest ({values}): set '
+                             f'{measure.DIRTY_BACKGROUND_RATIO} back to its default first')
+        self.writeback_defaults = values
+        return values
+
+    def writeback_at_defaults(self, values: dict) -> bool:
+        """Whether the ratio is at its recorded default and the bytes setting at 0."""
+        default = self.writeback_defaults[measure.DIRTY_BACKGROUND_RATIO]
+        return (values.get(measure.DIRTY_BACKGROUND_RATIO) == default
+                and values.get(measure.DIRTY_BACKGROUND_BYTES) == 0)
+
+    def check_dirty_writeback(self) -> dict:
+        """The guard before every T2 run: the ratio at its recorded default and the bytes setting at 0."""
+        values = self.dirty_writeback()
+        if not self.writeback_at_defaults(values):
+            raise CommandError(f"dest's write-back settings are not at their defaults ({values}; want "
+                               f'{measure.DIRTY_BACKGROUND_RATIO}='
+                               f'{self.writeback_defaults[measure.DIRTY_BACKGROUND_RATIO]}, '
+                               f'{measure.DIRTY_BACKGROUND_BYTES}=0)')
+        return values
+
+    def set_dirty_writeback(self, method) -> dict:
+        """full_wb's setting on dest (measure.HOST_TUNED_METHODS), set before the cache drop."""
+        settings = measure.HOST_TUNED_METHODS[method]
+        return self.local_agent('sysctl', 'set', *(f'{name}={value}' for name, value in settings.items()))
+
+    def reset_dirty_writeback(self) -> dict:
+        """Back to the defaults: the ratio written to its recorded default, which sets the bytes setting to 0.
+
+        Linux refuses 0 written to vm.dirty_background_bytes. Checked after: CommandError unless both
+        are at their defaults.
+        """
+        default = self.writeback_defaults[measure.DIRTY_BACKGROUND_RATIO]
+        result = self.local_agent('sysctl', 'set', f'{measure.DIRTY_BACKGROUND_RATIO}={default}')
+        values = self.dirty_writeback()
+        if not self.writeback_at_defaults(values):
+            raise CommandError(f"dest's write-back settings did not return to their defaults: {values}")
+        return {**result, 'values': values}
+
     def run_phases(self, method, paths, daemon_holder: dict) -> dict:
-        if method == 'full':
-            return self.run_full(paths)
+        if method in measure.FULL_VARIANTS:
+            return self.run_full(method, paths)
         if method in measure.INCREMENTAL_METHODS:
             return self.run_incremental(method, paths)
         if method in measure.PGDELTA_DIRECT_METHODS:
@@ -1038,13 +1328,20 @@ class Orchestrator:
             return self.run_rsync(method, paths, daemon_holder)
         if method in measure.PGBACKREST_METHODS:
             return self.run_pgbackrest(method, paths)
+        if method in measure.PROBACKUP_METHODS:
+            return self.run_probackup(method, paths)
+        if method in measure.PARCOPY_METHODS:
+            return self.run_parcopy(method, paths)
         raise CommandError(f'unknown method {method}')
 
     def verify(self, method, paths, phases) -> dict:
-        if method in measure.PGDELTA_DIRECT_METHODS:
+        if method in measure.PGDELTA_DIRECT_METHODS or method in measure.PARCOPY_METHODS:
+            # parcopy* copies v1's selection of the stopped source: checked as pgdelta_direct* is.
             return self.verify_direct(method, paths)
         if method in measure.PGBACKREST_METHODS:
             return self.verify_pgbackrest(method, paths)
+        if method in measure.PROBACKUP_METHODS:
+            return self.verify_probackup(method, paths)
         output = Path(paths['output'])
         check = self.local_command([self.bin / 'pg_verifybackup', output],
                                    f'{method}-verify.log')
@@ -1080,12 +1377,17 @@ class Orchestrator:
             result['wal'] = {'wal_bytes': sum(wal_files.values()), 'error': str(exc)}
         # Which kind of copy O is: on XFS, rsync's cp -a and pgdelta's copy_file_range clone B0.
         result['shared_extents'] = measure.shared_extents(output)
+        if method in measure.FULL_VARIANTS:
+            # T2: only now, with its bytes counted: O is started on dest, recovers from its backup_label
+            # to consistency, answers a query, and is stopped (time until usable).
+            result['output_start'] = self.check_output(method, output, recovery=True)
         after = measure.tree_stat(self.b0)
         result['basis_changes'] = measure.stat_changes(self.b0_stat, after)
         result['verified'] = (check['exit_code'] == 0 and not result['basis_changes']
                               and result.get('identical_to_capture', True)
                               and result.get('independent_of_basis', True)
-                              and not result.get('in_place_leftovers'))
+                              and not result.get('in_place_leftovers')
+                              and (result['output_start']['ok'] if 'output_start' in result else True))
         return result
 
     def verify_direct(self, method, paths) -> dict:
@@ -1324,8 +1626,64 @@ class Orchestrator:
                                       'no TCP/IP overhead)'}
         if method in measure.PGBACKREST_METHODS:
             return self.pgbackrest_reported(method, phases)
+        if method in measure.FULL_VARIANTS:
+            return self.basebackup_reported(method, phases)
+        if method in measure.PROBACKUP_METHODS:
+            return self.probackup_reported(method, phases)
+        if method in measure.PARCOPY_METHODS:
+            return self.parcopy_reported(method, paths)
         return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None,
                 'scope': FULL_BYTES_SCOPE}
+
+    @staticmethod
+    def stamped_command(phases: dict, phase: str, tool: str) -> tuple[dict | None, list]:
+        """The first command of `phase` whose program name starts with `tool`, and its stamped lines."""
+        commands = (phases.get(phase) or {}).get('commands') or []
+        command = next((command for command in commands
+                        if Path(str(command['argv'][0])).name.startswith(tool)), None)
+        if command is None:
+            return None, []
+        try:
+            text = Path(command['log']).read_text(errors='replace')
+        except (OSError, KeyError, TypeError):
+            return command, []
+        return command, measure.parse_stamped_lines(text)
+
+    def basebackup_reported(self, method, phases) -> dict:
+        """A pg_basebackup arm: its phases from its timestamped --verbose lines (measure.basebackup_phases)."""
+        command, lines = self.stamped_command(phases, measure.FULL_PHASE, 'pg_basebackup')
+        return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None, 'scope': FULL_BYTES_SCOPE,
+                'flags': self.method_flags(method),
+                'basebackup_phases': measure.basebackup_phases(lines, (command or {}).get('wall_seconds')),
+                'lines': [[seconds, text] for seconds, text in lines]}
+
+    def probackup_reported(self, method, phases) -> dict:
+        """probackup*: its catchup's phases from its timestamped console lines (measure.probackup_phases)."""
+        command, lines = self.stamped_command(phases, measure.PROBACKUP_PHASE, 'pg_probackup')
+        return {'bytes_source_to_dest': None, 'bytes_dest_to_source': None,
+                'scope': 'pg_probackup reports no network byte counts; the wire columns are the only byte '
+                         'measure (its SSH is encrypted)',
+                'flags': self.method_flags(method),
+                'probackup_phases': measure.probackup_phases(lines, (command or {}).get('wall_seconds')),
+                'lines': [[seconds, text] for seconds, text in lines]}
+
+    def parcopy_reported(self, method, paths) -> dict:
+        """parcopy*: its receiver's --stats-json (dest) and its sender's (the source), and their summary."""
+        try:
+            received = json.loads(Path(paths['receive_stats']).read_text())
+        except (OSError, ValueError):
+            received = None
+        try:
+            text = self.source.agent('run', '--log', self.source_log(f'{method}-stats.json.log'), '--',
+                                     'cat', paths['stats'])['log_tail']
+            sent = json.loads(text)
+        except (CommandError, ValueError, KeyError, TypeError):
+            sent = None
+        summary = measure.parcopy_summary(received)
+        return {'bytes_source_to_dest': summary['bytes'], 'bytes_dest_to_source': None,
+                'scope': "parcopy's receiver: payload bytes over its streams (no framing or TCP/IP overhead)",
+                'flags': self.method_flags(method), 'parcopy_summary': summary,
+                'receive_stats': received, 'send_stats': sent}
 
     def run_method(self, trial: dict, repeat: int, speed: dict, link: dict, method: str,
                    order_index: int, order: list[str]) -> dict:
@@ -1338,8 +1696,11 @@ class Orchestrator:
                   'order_index': order_index, 'method_order': order,
                   'link': {key: link[key] for key in link if key.endswith('gbit')},
                   'paths': {key: str(value) for key, value in paths.items()},
+                  # T2: the trial's block (main, extension, warm_source) and the source's cache state.
+                  'block': link.get('block', 'main'), 'source_cache': link.get('source_cache', 'cold'),
                   'started_utc': utc_now(), 'status': 'running', 'error': None}
-        log(f'{self.trial_id} r{repeat} {speed["label"]} [{order_index + 1}/{len(order)}] {method}')
+        log(f'{self.trial_id} r{repeat} {speed["label"]} [{order_index + 1}/{len(order)}] {method}'
+            + ('' if record['block'] == 'main' else f' ({record["block"]})'))
         daemon_holder: dict = {}
         self.log_prefix = f'r{repeat}-{speed["label"]}-'
         try:
@@ -1351,12 +1712,24 @@ class Orchestrator:
             self.clean_method(paths)
             phases: dict = {}
             record['phases'] = phases
+            if self.writeback_defaults is not None:
+                # T2: dest's write-back settings at their defaults before every run (full_wb's are
+                # reset after its own); both recorded, and those in effect during the run.
+                record['sysctl'] = {'before': self.check_dirty_writeback()}
             record['preparation'] = self.prepare(method, paths, daemon_holder)
-            # One drop on both VMs: every method's timed phases start from cold
-            # caches. rsync's copy of B0 (in its end-to-end time, EXP-04's design)
-            # runs after it, beside the capture, and is synced inside its timer.
-            record['cache_drop'] = self.drop_caches()
-            record['caches_dropped'] = True
+            if daemon_holder.get('dirty_writeback'):
+                record.setdefault('sysctl', {})['during'] = daemon_holder['dirty_writeback']['values']
+            if record['source_cache'] == 'warm':
+                # T2's warm-source block: the source is read instead of dropped; dest is dropped.
+                record['warm_source'] = self.warm_source()
+                record['cache_drop'] = self.drop_caches(source=False)
+                record['caches_dropped'] = 'dest'
+            else:
+                # One drop on both VMs: every method's timed phases start from cold
+                # caches. rsync's copy of B0 (in its end-to-end time, EXP-04's design)
+                # runs after it, beside the capture, and is synced inside its timer.
+                record['cache_drop'] = self.drop_caches()
+                record['caches_dropped'] = True
             phases.update(self.run_phases(method, paths, daemon_holder))
             record['totals'] = measure.phase_totals(phases)
             if method in measure.RSYNC_METHODS:
@@ -1388,6 +1761,9 @@ class Orchestrator:
             record['output_minus_wal_padding_bytes'] = (
                 None if record['output_bytes'] is None or padding is None
                 else record['output_bytes'] - padding)
+            # T2's checks (a) and (b) on the run's one counter window; durability_ok, apart from status.
+            record['durability'] = measure.durability_check(record, record['output_bytes'],
+                                                            self.idle_noise_bytes)
             if verification['basis_changes']:
                 raise CommandError('B0 changed: ' + '; '.join(verification['basis_changes']))
             record['status'] = 'pass' if verification['verified'] else 'fail'
@@ -1403,11 +1779,23 @@ class Orchestrator:
             record['traceback'] = traceback.format_exc()
             log(f'  ERROR {record["error"]}')
         finally:
+            if 'dirty_writeback' in daemon_holder:
+                # full_wb: dest's write-back settings back to their defaults, whatever happened.
+                del daemon_holder['dirty_writeback']
+                try:
+                    record.setdefault('sysctl', {})['reset'] = self.reset_dirty_writeback()
+                except Exception as exc:
+                    problem = f'{type(exc).__name__}: {exc}'
+                    record['sysctl']['reset'] = {'error': problem}
+                    record['status'] = 'error'
+                    record['error'] = (record['error'] + '; ' if record['error'] else '') + \
+                        f"dest's write-back settings could not be reset: {problem}"
+                    log(f"  ERROR dest's write-back settings could not be reset: {problem}")
             daemon = daemon_holder.pop('daemon', None)
             if daemon is not None:
                 self.stop_rsyncd(daemon)
             if daemon_holder.pop('source_stopped', False):
-                # pgdelta_direct*: the source runs again for the next method, whatever happened.
+                # pgdelta_direct* and parcopy*: the source runs again for the next method, whatever happened.
                 try:
                     record['source_restart'] = self.restart_source()
                 except Exception as exc:
@@ -1624,6 +2012,31 @@ class Orchestrator:
                                f'process-max={measure.PGBACKREST_PROCESS_MAX}']}
         if method in measure.RSYNC_METHODS:
             return {'rsync': self.rsync_argv(method)[1:-2]}
+        if method in measure.FULL_VARIANTS:
+            # The pg_basebackup arms: the variant's options (--verbose, --no-sync, --sync-method) and
+            # the whole command line; full_wb its kernel setting and how it is reset.
+            flags = {'pg_basebackup': ['--manifest-checksums', self.args.manifest_checksums,
+                                       *measure.FULL_VARIANTS[method]],
+                     'argv': [str(part) for part in self.full_argv(method, self.method_paths(method))],
+                     'output': 'stdout and stderr timestamped line by line as they arrive (LC_MESSAGES=C)'}
+            if method in measure.HOST_TUNED_METHODS:
+                flags['sysctl'] = dict(measure.HOST_TUNED_METHODS[method])
+                flags['sysctl_reset'] = (f'{measure.DIRTY_BACKGROUND_RATIO}=<its recorded default>, which '
+                                         f'returns {measure.DIRTY_BACKGROUND_BYTES} to 0')
+            return flags
+        if method in measure.PROBACKUP_METHODS:
+            paths = self.method_paths(method)
+            return {'pg_probackup': [str(part) for part in self.probackup_argv(method, paths)],
+                    'catchup': list(measure.probackup_args(method)),
+                    'ssh_options': [f'{option}={value}' for option, value in measure.PROBACKUP_SSH_OPTIONS],
+                    'ssh_config': measure.probackup_ssh_config(self.source.ip, self.args.ssh_user,
+                                                               self.args.ssh_key),
+                    'sync': self.probackup_sync_argv(paths)}
+        if method in measure.PARCOPY_METHODS:
+            paths = self.method_paths(method)
+            return {'receive_argv': [str(part) for part in self.parcopy_receive_argv(method, paths)],
+                    'send_argv': [str(part) for part in self.parcopy_send_argv(method, paths)],
+                    **{command: list(args) for command, args in measure.parcopy_args(method).items()}}
         flags = {'pg_basebackup': ['--manifest-checksums', self.args.manifest_checksums]}
         if method in measure.INCREMENTAL_METHODS:
             flags['pg_combinebackup'] = [measure.COMBINE_MODES[method],
@@ -1662,10 +2075,27 @@ class Orchestrator:
                        'digest': measure.digest_summary(self.b0_digest)}
 
     def run_trial(self, index: int, pattern: str, fraction: float) -> dict:
+        """One trial. In a T2 run, EXP-11's order within a trial:
+
+        1. the cluster and dataset, B0, the workload and its CHECKPOINT;
+        2. the start reference digest (a clean stop, the selected files hashed, a restart);
+        3. the probes: the durable write floor (dest), the cold read floor and the single reader
+           (source), the backup-mode bracket;
+        4. the main block; 5. the extension, then the warm-source block (when asked for);
+        6. the durable write floor again; 7. the end reference digest;
+        8. the source's logical digest (the pending logical checks); 9. EXP-01's row-level ground
+           truth; 10. B0's full digest.
+
+        Outside T2 runs, steps 2, 3, 6 and 7 are left out. Between steps 2 and 7 no SQL reads a
+        user table on the source.
+        """
         args = self.args
         # A source that could not be restarted stops its own trial; this one builds a new cluster.
         self.source_down = None
         self.trial_id = f'{index:02d}-{pattern}-f{fraction:g}-s{args.scale}'
+        self.multi_stream_links = {}
+        self.reference_digests = {}
+        self.probe_relation_path = None
         trial = {'schema': SCHEMA_TRIAL, 'trial_id': self.trial_id, 'pattern': pattern,
                  'fraction': fraction, 'scale': args.scale, 'seed': args.seed,
                  'started_utc': utc_now(), 'status': 'running', 'links': [], 'runs': []}
@@ -1693,6 +2123,13 @@ class Orchestrator:
                 # The repository is counted as already paid: one full backup per variant, untimed.
                 self.pgbackrest['backups'] = self.pgbackrest_backups()
             save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
+            if self.t2:
+                # The single reader's file, from the catalog, before the start reference digest.
+                trial['probe_relation'] = self.probe('the probe relation', self.probe_relation)
+                log(f'{self.trial_id}: the start reference digest')
+                trial['reference_digests'] = {'start': self.reference_digest('start')}
+                trial['probes'] = self.trial_probes()
+                save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
             trial['speed_orders'] = []
             for repeat in range(args.repeats):
                 speeds = measure.order_speeds(self.speeds, self.speed_rng, args.speed_order,
@@ -1703,31 +2140,33 @@ class Orchestrator:
                     labels)
                 log(f'{self.trial_id} r{repeat}: speed order {", ".join(labels)}')
                 for speed_index, speed in enumerate(speeds):
-                    link = self.set_speed(speed)
-                    link.update(repeat=repeat, speed_index=speed_index, speed_order=labels)
                     here = measure.methods_at(self.methods, self.method_speeds, speed['label'])
-                    order = measure.method_orders(here, self.rng, 1)[0]
-                    link['method_order'] = order
-                    for order_index, method in enumerate(order):
-                        record = self.run_method(trial, repeat, speed, link, method,
-                                                 order_index, order)
-                        trial['runs'].append({'repeat': repeat, 'speed': speed['label'],
-                                              'method': method, 'status': record['status']})
-                        if self.source_down:
-                            raise CommandError(f'the source cluster is down after {method}: '
-                                               f'{self.source_down}')
-                        if record['status'] not in ('pass', 'pending') and args.stop_on_error:
-                            raise CommandError(f'{method} at {speed["label"]}: {record["error"]}')
-                    link['qdisc_after'] = self.qdisc_stats()
-                    trial['links'].append(link)
-                    self.run.setdefault('links', []).append(
-                        {'trial_id': self.trial_id, 'repeat': repeat, 'speed': speed['label'],
-                         'speed_index': speed_index,
-                         **{key: link[key] for key in link if key.endswith('gbit')}})
-                    save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
-                    if self.out.joinpath('run.json').exists():
-                        save_json(self.out / 'run.json', self.run)
+                    self.run_cell(trial, 'main', repeat, speed, here,
+                                  {'speed_index': speed_index, 'speed_order': labels})
+            # T2: the extension, then the warm-source block, unthrottled, each repeat in its own order.
+            # Their repeats are numbered on from the main block's, so each (repeat, speed, method) is one run.
+            unthrottled = measure.parse_speed(measure.UNTHROTTLED)
+            repeat = args.repeats
+            for block, repeats, methods in (('extension', args.extension_repeats, self.extension_methods),
+                                            ('warm_source', args.warm_source_repeats, self.warm_source_methods)):
+                for block_repeat in range(repeats):
+                    log(f'{self.trial_id} r{repeat}: {block} repeat {block_repeat + 1} of {repeats}')
+                    self.run_cell(trial, block, repeat, unthrottled, methods,
+                                  {'speed_index': 0, 'speed_order': [unthrottled['label']],
+                                   'block_repeat': block_repeat})
+                    repeat += 1
             self.throttle('off')
+            if self.t2:
+                trial['probes']['durable_write_floor'].append(
+                    self.probe('the durable write floor', self.durable_write_floor))
+                log(f'{self.trial_id}: the end reference digest')
+                trial['reference_digests']['end'] = self.reference_digest('end')
+                same, differences = measure.compare_digests(self.reference_digests['start'],
+                                                            self.reference_digests['end'])
+                # If they differ, the source changed during the trial: a probackup* logical difference is void.
+                trial['reference_match'] = same
+                trial['reference_differences'] = differences
+                save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
             # pgBackRest's restored copies against the source, now that no method is left to run.
             logical_check = self.finish_logical_checks(trial)
             if logical_check is not None:
@@ -1751,6 +2190,118 @@ class Orchestrator:
         trial['finished_utc'] = utc_now()
         save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
         return trial
+
+    def run_cell(self, trial: dict, block: str, repeat: int, speed: dict, methods, extra: dict) -> None:
+        """One (block, repeat, speed): the link set and tested, then each method once, in a new random order."""
+        args = self.args
+        link = self.set_speed(speed)
+        link.update(repeat=repeat, block=block, source_cache='warm' if block == 'warm_source' else 'cold',
+                    **extra)
+        order = measure.method_orders(methods, self.rng, 1)[0]
+        link['method_order'] = order
+        for order_index, method in enumerate(order):
+            record = self.run_method(trial, repeat, speed, link, method, order_index, order)
+            trial['runs'].append({'repeat': repeat, 'speed': speed['label'], 'method': method,
+                                  'status': record['status'], 'block': block})
+            if self.source_down:
+                raise CommandError(f'the source cluster is down after {method}: '
+                                   f'{self.source_down}')
+            if record['status'] not in ('pass', 'pending') and args.stop_on_error:
+                raise CommandError(f'{method} at {speed["label"]}: {record["error"]}')
+        link['qdisc_after'] = self.qdisc_stats()
+        trial['links'].append(link)
+        self.run.setdefault('links', []).append(
+            {'trial_id': self.trial_id, 'repeat': repeat, 'speed': speed['label'],
+             'speed_index': link.get('speed_index'), 'block': block,
+             **{key: link[key] for key in link if key.endswith('gbit')}})
+        save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
+        if self.out.joinpath('run.json').exists():
+            save_json(self.out / 'run.json', self.run)
+
+    # --- T2's per-trial steps: reference digests and probes (untimed) --------------
+
+    def reference_digest(self, when: str) -> dict:
+        """Steps 2 and 7: the source stopped cleanly, the files pgdelta.datadir selects hashed, restarted.
+
+        The digest leaves out what every clean stop rewrites (measure.reference_view: global/pg_control,
+        pg_wal/ and pg_stat/). It is kept whole in reference_digests[when] for the comparisons; the
+        trial's record holds its summary. The source is restarted whatever happened; if it can't be,
+        the trial stops.
+        """
+        started = time.perf_counter()
+        result: dict = {'when': when}
+        try:
+            result['stop'] = self.source.script(SOURCE_CLUSTER, 'stop-clean', '--root', self.source_root,
+                                                '--bin-dir', str(self.bin))
+            listing = self.source.agent('datadir-digest', self.source_data, '--pg-controldata',
+                                        str(self.bin / 'pg_controldata'), timeout=3600)
+        finally:
+            try:
+                result['restart'] = self.restart_source()
+            except Exception as exc:
+                self.source_down = f'{type(exc).__name__}: {exc}'
+                raise CommandError(f'the source cluster could not be restarted after the {when} reference '
+                                   f'digest: {self.source_down}') from exc
+        view = measure.reference_view(listing['digest'])
+        self.reference_digests[when] = view
+        return {**result, 'summary': measure.digest_summary(view), 'excluded': view['excluded'],
+                'missing': view['missing'], 'read_from': listing.get('read_from'),
+                'wall_seconds': round(time.perf_counter() - started, 3)}
+
+    def probe(self, name: str, body) -> dict:
+        """One untimed probe: its error is recorded and the trial goes on (no probe decides a run)."""
+        try:
+            return body()
+        except Exception as exc:
+            log(f'{self.trial_id}: {name} failed: {exc}')
+            return {'error': f'{type(exc).__name__}: {exc}'}
+
+    def trial_probes(self) -> dict:
+        """Step 3: the durable write floor (dest), the cold read floor and the single reader (source; they
+        read files only), and the backup-mode bracket. The write floor runs again at step 6."""
+        return {'durable_write_floor': [self.probe('the durable write floor', self.durable_write_floor)],
+                'read_floor': self.probe('the read floor', self.read_floor),
+                'single_read': self.probe('the single reader', self.single_read_probe),
+                'bracket': self.probe('the bracket probe', self.bracket_probe)}
+
+    def probe_relation(self) -> dict:
+        """pgbench_accounts's file, the largest relation, relative to the data directory (from the catalog)."""
+        path = self.query(PROBE_RELATION_SQL, host=self.source.ip, port=PG_PORT, log_name='probe-relation.log')
+        self.probe_relation_path = path
+        return {'relation': PROBE_RELATION, 'path': path}
+
+    def durable_write_floor(self) -> dict:
+        """dest: as many bytes as B0 holds, by WRITE_FLOOR_WRITERS writers, buffered, with write-back every
+        8 MiB, then an fsync of each (agent durable-write-test), after a drop of dest's cache."""
+        size = (getattr(self, 'b0_digest', None) or {}).get('bytes')
+        if not size:
+            raise CommandError("B0's size is unknown")
+        drop = self.local_agent('drop-caches')
+        result = self.local_agent('durable-write-test', str(self.work / 'write-floor'), '--writers',
+                                  str(WRITE_FLOOR_WRITERS), '--bytes', str(size), '--writeback-bytes',
+                                  str(measure.PARCOPY_WRITEBACK_BYTES), timeout=3600)
+        return {**result, 'drop': drop, 'utc': utc_now()}
+
+    def read_floor(self) -> dict:
+        """The source: its data directory without pg_wal, by READ_FLOOR_READERS readers, cold (EXP-07's C4)."""
+        drop = self.source.agent('drop-caches')
+        result = self.source.agent('read-test', self.source_data, '--readers', str(READ_FLOOR_READERS),
+                                   '--exclude', 'pg_wal', timeout=3600)
+        return {**result, 'drop': drop}
+
+    def single_read_probe(self) -> dict:
+        """The source: one reader of pgbench_accounts's file (with any further segments), cold."""
+        if not self.probe_relation_path:
+            raise CommandError(f"{PROBE_RELATION}'s file is unknown")
+        drop = self.source.agent('drop-caches')
+        result = self.source.agent('read-test', f'{self.source_data}/{self.probe_relation_path}',
+                                   '--readers', '1', timeout=3600)
+        return {**result, 'relation': PROBE_RELATION, 'drop': drop}
+
+    def bracket_probe(self) -> dict:
+        """The idle source: BRACKET_REPEATS x (drop its cache; backup start; backup stop), a cross-check."""
+        return self.source.script(SOURCE_CLUSTER, 'backup-mode-probe', '--root', self.source_root,
+                                  '--bin-dir', str(self.bin), '--repeats', str(BRACKET_REPEATS), timeout=3600)
 
     def cleanup_trial(self, trial: dict) -> None:
         steps = (('throttle off', lambda: self.throttle('off')),
@@ -1794,10 +2345,11 @@ class Orchestrator:
     # --- run ---------------------------------------------------------------
 
     def environment(self) -> dict:
+        probackup = ('--pg-probackup', self.args.pg_probackup)
         source, dest = self.both(
-            lambda: self.local_agent('env', '--iface', self.dest_iface, '--bin-dir', str(self.bin)),
+            lambda: self.local_agent('env', '--iface', self.dest_iface, '--bin-dir', str(self.bin), *probackup),
             lambda: self.source.agent('env', '--iface', self.source_iface, '--bin-dir',
-                                      str(self.bin)))
+                                      str(self.bin), *probackup))
         return {'source': source, 'dest': dest}
 
     def rss_probe(self) -> dict:
@@ -1844,6 +2396,7 @@ class Orchestrator:
         The default methods need `send --jobs` and `receive --jobs --rebuild --verify
         --prefetch-basis`; T3's add the receiver's --fsync and --in-place, T8a's the
         sender's --source-kind and the pgdelta.datadir module that their verification runs.
+        T2 runs need that module too: parcopy* and the reference digests use its selection.
         """
         required = measure.pgdelta_required_options(self.methods)
         found = {}
@@ -1855,7 +2408,7 @@ class Orchestrator:
                 self.remote_repo, '--', self.source.python, '-m', 'pgdelta', command, '--help')
             found[command] = {'dest': pgdelta_supports(local.stdout, options),
                               'source': pgdelta_supports(remote.get('log_tail', ''), options)}
-        if any(method in measure.PGDELTA_DIRECT_METHODS for method in self.methods):
+        if self.t2 or any(method in measure.PGDELTA_DIRECT_METHODS for method in self.methods):
             module = measure.PGDELTA_DATADIR_MODULE
             local = subprocess.run([sys.executable, '-c', f'import {module}'], cwd=self.repo,
                                    capture_output=True, text=True, timeout=120)
@@ -1883,6 +2436,41 @@ class Orchestrator:
             result[host] = {**delta, 'rx_bytes_per_second': round(delta['net']['rx_bytes'] / window),
                             'tx_bytes_per_second': round(delta['net']['tx_bytes'] / window),
                             'busy_cpu_fraction': round(delta['cpu']['busy_seconds'] / window, 4)}
+        return result
+
+    def dirty_idle_noise(self, windows: int) -> dict:
+        """Check (a)'s idle noise: dest's Dirty + Writeback increase over idle windows of --idle-seconds."""
+        seconds = self.args.idle_seconds or 5.0
+        increases = []
+        for _ in range(windows):
+            before = self.snapshot_dest()
+            time.sleep(seconds)
+            after = self.snapshot_dest()
+            increases.append(measure.memory_delta(before['meminfo'], after['meminfo'])
+                             ['dirty_writeback_increase_bytes'])
+        return {'windows': windows, 'window_seconds': seconds, 'increases_bytes': increases,
+                'max_increase_bytes': max(increases)}
+
+    def preflight_t2(self) -> dict:
+        """What a T2 run checks before its first trial, and dest's write-back defaults.
+
+        strace on dest (EXP-11's syscall audit); pg_basebackup's --sync-method on dest where
+        full_syncfs runs; the pg_probackup and parcopy blocks' own checks where those arms run;
+        dest's vm.dirty_background_* (record_writeback_defaults), which every run's guard requires.
+        """
+        dest = self.run['environment']['dest']
+        if not dest.get('strace'):
+            raise SystemExit("strace is not installed on dest (infra/gcp/startup.sh installs it); EXP-11's "
+                             'syscall audit needs it')
+        result = {'strace': dest['strace']}
+        if 'full_syncfs' in self.methods and not dest.get('pg_basebackup_sync_method'):
+            raise SystemExit("pg_basebackup on dest has no --sync-method (PostgreSQL 17's), which full_syncfs "
+                             'needs')
+        if any(method in measure.PROBACKUP_METHODS for method in self.methods):
+            result['probackup'] = self.check_probackup()
+        if any(method in measure.PARCOPY_METHODS for method in self.methods):
+            result['parcopy'] = self.check_parcopy()
+        result['writeback_defaults'] = self.record_writeback_defaults()
         return result
 
     def phase_floor(self, repeats: int) -> dict:
@@ -1916,6 +2504,10 @@ class Orchestrator:
             self.method_speeds = measure.parse_method_speeds(args.method_speeds, self.methods, self.speeds)
         except ValueError as exc:
             raise SystemExit(str(exc))
+        problems = block_problems(args, self.methods) + [
+            problem for problem in [checksum_problem(self.methods, args.manifest_checksums)] if problem]
+        if problems:
+            raise SystemExit('; '.join(problems))
         # A speed at which --method-speeds leaves no method is not visited at all.
         self.speeds = [speed for speed in self.speeds
                        if measure.methods_at(self.methods, self.method_speeds, speed['label'])]
@@ -1978,7 +2570,12 @@ class Orchestrator:
                           'phase, receiver_transfer, whose steps receiver_start and transfer follow '
                           'each other with no untimed gap, after a clean stop of the source that is '
                           'not timed; pgbackrest_* is the restore alone, its backup counted as '
-                          'already paid',
+                          'already paid. T2 (EXP-11): every arm is one timed phase, one counter '
+                          'window: the pg_basebackup arms transfer (their --verbose lines '
+                          'timestamped as they arrive split it: pbb_*_s), probackup* catchup_sync '
+                          '(steps catchup, then sync -f of the output), parcopy* receiver_transfer '
+                          "as pgdelta_direct*; starting the copy is outside, and usable_s adds the "
+                          "start's time to consistency",
                 'wire_bytes': '/proc/net/dev of the internal interface on both VMs, read just '
                               'before and after each phase; source->dest is the source tx '
                               'counter, dest->source the dest tx counter. pgbackrest_* add the '
@@ -1995,6 +2592,15 @@ class Orchestrator:
                                      for speed in self.speeds},
                 'method_flags': {method: self.method_flags(method) for method in self.methods},
                 'pgbackrest': self.pgbackrest_run_record(),
+                # T2 (EXP-11): whether this run is one, and its blocks after the main one (unthrottled).
+                't2': self.t2,
+                'blocks': {'main': {'repeats': args.repeats},
+                           'extension': {'repeats': args.extension_repeats, 'methods': self.extension_methods,
+                                         'speed': measure.UNTHROTTLED, 'source_cache': 'cold'},
+                           'warm_source': {'repeats': args.warm_source_repeats,
+                                          'methods': self.warm_source_methods, 'speed': measure.UNTHROTTLED,
+                                          'source_cache': 'warm'}},
+                'durability': DURABILITY_POLICY,
                 'trials': {}, 'status': 'running'}
             self.throttle('off')
             self.run['environment'] = self.environment()
@@ -2015,9 +2621,11 @@ class Orchestrator:
                 if missing:
                     raise SystemExit(f'pgbackrest is not installed on {", ".join(missing)} '
                                      '(infra/gcp/startup.sh installs it)')
+            if self.t2:
+                self.run['t2_preflight'] = self.preflight_t2()
             if self.gnu_time:
                 self.run['rss_probe'] = self.rss_probe()
-            if any(method in measure.PGDELTA_METHODS for method in self.methods):
+            if self.t2 or any(method in measure.PGDELTA_METHODS for method in self.methods):
                 self.run['pgdelta_required_options'] = measure.pgdelta_required_options(self.methods)
                 self.run['pgdelta_jobs_check'] = self.check_pgdelta_jobs()
             if args.disk_test_mib:
@@ -2028,6 +2636,13 @@ class Orchestrator:
                                               str(args.disk_test_mib)))))
             if args.idle_seconds:
                 self.run['background'] = self.background()
+            if self.t2:
+                # Check (a)'s idle noise: given (the smoke run's), or measured now, or 0 (the 4 MiB floor).
+                if args.idle_noise_windows:
+                    self.run['dirty_idle_noise'] = self.dirty_idle_noise(args.idle_noise_windows)
+                measured = (self.run.get('dirty_idle_noise') or {}).get('max_increase_bytes') or 0
+                self.idle_noise_bytes = max(int(args.dirty_noise_mib * (1 << 20)), measured, 0)
+                self.run['idle_noise_bytes'] = self.idle_noise_bytes
             if args.phase_floor_repeats:
                 self.run['phase_floor'] = self.phase_floor(args.phase_floor_repeats)
             save_json(self.out / 'run.json', self.run)
@@ -2078,14 +2693,28 @@ def parse_args(argv=None):
                         help='comma list from ' + ', '.join(measure.ALL_METHODS) +
                              f' (default: {",".join(measure.METHODS)}; pgdelta_1thread is '
                              "EXP-02's single-threaded engine, --jobs 1 --rebuild gap-fill "
-                             '--verify sequential; the T3, T8a and T11 methods are in the README)')
+                             '--verify sequential; the T2, T3, T8a and T11 methods are in the README)')
     parser.add_argument('--method-speeds', action='append', default=[], metavar='METHODS=SPEEDS',
                         help="run some methods at some of --speeds only, e.g. "
                              "'pgdelta_seq+pgdelta_inplace=unthrottled' (methods joined with +, speeds "
                              'as in --speeds); repeatable. Methods not named run at every speed')
     parser.add_argument('--pgbackrest', default='/usr/bin/pgbackrest',
                         help='pgBackRest on both VMs (pgbackrest_* methods)')
+    parser.add_argument('--pg-probackup', default=measure.PROBACKUP_EXE,
+                        help='pg_probackup on both VMs (probackup* methods; its remote mode runs it on the '
+                             'source from the same directory)')
     parser.add_argument('--repeats', type=int, default=1)
+    parser.add_argument('--extension-repeats', type=int, default=0,
+                        help='T2: after the main block, this many more unthrottled repeats of '
+                             '--extension-methods in each trial, each repeat in its own random order')
+    parser.add_argument('--extension-methods', default='', metavar='METHODS',
+                        help='T2: comma list from --methods for the extension')
+    parser.add_argument('--warm-source-repeats', type=int, default=0,
+                        help="T2: after the extension, this many unthrottled repeats of --warm-source-methods "
+                             "with the source's page cache warm: no drop there, one untimed read of its data "
+                             "directory without pg_wal instead; dest's cache is dropped as usual")
+    parser.add_argument('--warm-source-methods', default='', metavar='METHODS',
+                        help='T2: comma list from --methods for the warm-source block')
     parser.add_argument('--order-seed', type=int, default=4,
                         help='seed for the per-speed random method order and the per-repeat '
                              'speed order')
@@ -2097,12 +2726,20 @@ def parse_args(argv=None):
                         choices=('NONE', 'CRC32C', 'SHA224', 'SHA256', 'SHA384', 'SHA512'),
                         help="backup manifest checksums for every pg_basebackup and pg_combinebackup "
                              "(B0, the full copy, incremental, the staged captures). Default SHA256, as "
-                             "EXP-04's sweep ran; PostgreSQL's own default is CRC32C (EXP-07)")
+                             "EXP-04's sweep ran; PostgreSQL's own default is CRC32C (EXP-07), which "
+                             "T2's methods require")
     parser.add_argument('--gnu-time', default='/usr/bin/time',
                         help="GNU time, for each tool's own peak RSS ('none' to skip)")
     parser.add_argument('--link-test-seconds', type=float, default=3.0)
     parser.add_argument('--idle-seconds', type=float, default=5.0,
                         help='idle window to measure background traffic (0 to skip)')
+    parser.add_argument('--idle-noise-windows', type=int, default=0,
+                        help="T2: measure dest's Dirty + Writeback increase over this many idle windows of "
+                             "--idle-seconds at the start (the smoke run's 20); its largest is check (a)'s "
+                             'noise')
+    parser.add_argument('--dirty-noise-mib', type=float, default=0.0,
+                        help="T2: check (a)'s idle noise in MiB, as the smoke run measured it (the limit is "
+                             'the larger of 4 MiB, this and --idle-noise-windows')
     parser.add_argument('--phase-floor-repeats', type=int, default=3,
                         help='empty timed phases at the start, to measure the CPU each '
                              "phase's counter snapshots add (0 to skip)")
@@ -2118,12 +2755,18 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.scale < 1 or args.repeats < 1:
         parser.error('--scale and --repeats must be at least 1')
+    if args.idle_noise_windows < 0 or args.dirty_noise_mib < 0:
+        parser.error('--idle-noise-windows and --dirty-noise-mib must be 0 or more')
     try:
         speeds = measure.parse_speeds(args.speeds)
-        methods = [method.strip() for method in args.methods.split(',') if method.strip()]
+        methods = method_list(args.methods)
         measure.parse_method_speeds(args.method_speeds, methods, speeds)
     except ValueError as exc:
         parser.error(str(exc))
+    problems = block_problems(args, methods) + [
+        problem for problem in [checksum_problem(methods, args.manifest_checksums)] if problem]
+    if problems:
+        parser.error('; '.join(problems))
     return args
 
 

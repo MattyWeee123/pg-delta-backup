@@ -642,7 +642,7 @@ class StubOrchestrator(run_exp04.Orchestrator):
     def snapshot_dest(self):
         return self._snap('dest')
 
-    def drop_caches(self):
+    def drop_caches(self, source=True):
         self.events.append('drop_caches')
         return {'source': {'dropped': True}, 'dest': {'dropped': True}}
 
@@ -2689,7 +2689,10 @@ class NewMethodRuns(unittest.TestCase):
         self.assertEqual(orchestrator.method_flags('pgbackrest_none')['dest_stanza'], {'compress-level-network': '0'})
         self.assertEqual(orchestrator.method_flags('pgbackrest_none')['restore'], ['--delta', '--process-max=4'])
         self.assertIn('--fsync', orchestrator.method_flags('rsync_8k')['rsync'])
-        self.assertEqual(orchestrator.method_flags('full'), {'pg_basebackup': ['--manifest-checksums', 'SHA256']})
+        # full runs with --verbose since T2 (EXP-11), whose lines are timestamped; incremental is as before.
+        self.assertEqual(orchestrator.method_flags('full')['pg_basebackup'],
+                         ['--manifest-checksums', 'SHA256', '--verbose'])
+        self.assertEqual(orchestrator.method_flags('incremental')['pg_basebackup'], ['--manifest-checksums', 'SHA256'])
         orchestrator.methods = ['pgbackrest_zst']
         record = orchestrator.pgbackrest_run_record()
         self.assertIn('archive_mode = on', record['archiving'])

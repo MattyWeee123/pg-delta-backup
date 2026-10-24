@@ -101,6 +101,108 @@ SOURCE_DIGEST = {'root': '/data/exp04/src/data', 'device': 1, 'files': 5, 'bytes
                  'missing': [], 'read_from': {}}
 
 
+class Kernel:
+    """vm.dirty_background_ratio and _bytes as Linux keeps them: setting one zeroes the other, and
+    0 written to the bytes setting is refused."""
+
+    def __init__(self, ratio=10, size=0):
+        self.values = {measure.DIRTY_BACKGROUND_RATIO: ratio, measure.DIRTY_BACKGROUND_BYTES: size}
+        self.writes = []
+
+    def set(self, name, value):
+        value = int(value)
+        self.writes.append((name, value))
+        if name == measure.DIRTY_BACKGROUND_BYTES:
+            if value < 1:
+                raise run_exp04.CommandError('sysctl: setting key "vm.dirty_background_bytes": Invalid argument')
+            self.values.update({name: value, measure.DIRTY_BACKGROUND_RATIO: 0})
+        else:
+            self.values.update({name: value, measure.DIRTY_BACKGROUND_BYTES: 0})
+
+
+class T2Stub(StubOrchestrator):
+    """StubOrchestrator with dest's kernel settings, Dirty/Writeback and disk counters in its snapshots,
+    and pg_basebackup outputs whose stamped logs say what PostgreSQL 17 says."""
+
+    def __init__(self, tmp, clock, extra_args=()):
+        super().__init__(tmp, clock, ['--manifest-checksums', 'CRC32C', *extra_args])
+        self.kernel = Kernel()
+        self.writeback_defaults = {measure.DIRTY_BACKGROUND_RATIO: 10, measure.DIRTY_BACKGROUND_BYTES: 0}
+        self.dirty_kb = 1000  # dest's Dirty after the next window, in kB
+        self.window_writes = 0  # dest's md array writes per window, bytes
+        self.snapshots = {'source': 0, 'dest': 0}
+
+    def _snap(self, host):
+        value = super()._snap(host)
+        self.snapshots[host] += 1
+        before = self.snapshots[host] % 2 == 1  # snapshots come in pairs around each window
+        value['meminfo'] = {'Dirty': 1000 if before or host == 'source' else self.dirty_kb, 'Writeback': 0,
+                            'Cached': 0}
+        sectors = (self.snapshots[host] // 2) * (self.window_writes // 512) if host == 'dest' else 0
+        value['disks'] = {'md127': {'reads': 0, 'sectors_read': 0, 'writes': 0, 'sectors_written': sectors}}
+        return value
+
+    def local_agent(self, *args, timeout=600):
+        self.events.append(('local_agent', args))
+        if args[:2] == ('sysctl', 'get'):
+            return {'values': {name: self.kernel.values[name] for name in args[2:]}}
+        if args[:2] == ('sysctl', 'set'):
+            for item in args[2:]:
+                self.kernel.set(*item.split('='))
+            return {'set': dict(item.split('=') for item in args[2:]), 'values': dict(self.kernel.values)}
+        return {}
+
+    def tool_reported(self, method, paths, phases):
+        # The real account for T2's own arms; the stub's for pgdelta, whose statistics it doesn't write.
+        if method in measure.FULL_VARIANTS or method in measure.PROBACKUP_METHODS:
+            return run_exp04.Orchestrator.tool_reported(self, method, paths, phases)
+        return super().tool_reported(method, paths, phases)
+
+    def local_command(self, argv, log_name, *, timeout=None, cwd=None, env=None, stamp_lines=False):
+        result = super().local_command(argv, log_name, timeout=timeout, cwd=cwd, env=env, stamp_lines=stamp_lines)
+        if Path(argv[0]).name == 'pg_basebackup':
+            log = self.dest_log(log_name)
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text(BASEBACKUP_NOSYNC_LOG if '--no-sync' in argv else BASEBACKUP_LOG)
+            result.update(log=str(log), stamped_lines=stamp_lines, env=env)
+        return result
+
+
+class Clocked(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.clock = FakeClock()
+        for patcher in (mock.patch.object(run_exp04.time, 'perf_counter', self.clock),
+                        mock.patch.object(run_exp04, 'log')):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        FakeChild.started.clear()
+
+    def orchestrator(self, cls=T2Stub, extra_args=()):
+        orchestrator = cls(self.tmp.name, self.clock, extra_args)
+        self.addCleanup(orchestrator.pool.shutdown)
+        return orchestrator
+
+    def run_method(self, orchestrator, method, link=None, speed=SPEED):
+        with mock.patch.object(run_exp04, 'Child', FakeChild):
+            return orchestrator.run_method(TRIAL, 0, speed, dict(link or LINK), method, 0, [method])
+
+    @staticmethod
+    def kinds(orchestrator):
+        kinds = []
+        for event in orchestrator.events:
+            if isinstance(event, str):
+                kinds.append(event)
+            elif event[0] in ('dest', 'source'):
+                kinds.append((event[0], Path(event[1][0]).name))
+            elif event[0] in ('source_script', 'local_agent', 'source_agent'):
+                kinds.append((event[0], event[1][0] if isinstance(event[1], tuple) else event[1]))
+            else:
+                kinds.append(event[0])
+        return kinds
+
+
 # --- the method tables and command lines ---------------------------------------------
 
 class MethodTables(unittest.TestCase):
@@ -189,6 +291,236 @@ class MethodTables(unittest.TestCase):
         self.assertEqual(measure.parcopy_args('parcopy4'),
                          {'send': ('--streams', '4', '--chunk-bytes', str(64 * MIB)),
                           'receive': ('--streams', '4', '--writeback-bytes', str(8 * MIB))})
+
+
+class CommandLines(Clocked):
+    def test_each_full_variant_is_full_with_its_options(self):
+        orchestrator = self.orchestrator()
+        output = orchestrator.outputs
+        for method, extra in measure.FULL_VARIANTS.items():
+            with self.subTest(method=method):
+                argv = orchestrator.full_argv(method, orchestrator.method_paths(method))
+                self.assertEqual([str(part) for part in argv],
+                                 [str(part) for part in orchestrator.basebackup(output / method, host='10.0.0.12')]
+                                 + list(extra))
+                self.assertIn('--verbose', argv)
+                self.assertNotIn('--progress', argv)
+                self.assertEqual(argv[argv.index('--manifest-checksums') + 1], 'CRC32C')
+
+    def test_run_json_method_flags_carry_each_new_arms_full_command_line(self):
+        orchestrator = self.orchestrator()
+        flags = {method: orchestrator.method_flags(method) for method in T2_ARMS}
+        for method in measure.FULL_VARIANTS:
+            self.assertEqual(flags[method]['argv'],
+                             [str(part) for part in orchestrator.full_argv(method, orchestrator.method_paths(method))])
+            self.assertEqual(flags[method]['pg_basebackup'], [*CRC32C, *measure.FULL_VARIANTS[method]])
+        self.assertIn('--no-sync', flags['full_nosync']['argv'])
+        self.assertIn('--sync-method=syncfs', flags['full_syncfs']['argv'])
+        self.assertEqual(flags['full_wb']['sysctl'], {'vm.dirty_background_bytes': 64 * MIB})
+        self.assertIn('vm.dirty_background_ratio', flags['full_wb']['sysctl_reset'])
+        # No new arm falls through to pg_basebackup's flags.
+        for method in ('probackup8', 'probackup4', 'parcopy8', 'parcopy4', 'pgdelta_direct_inplace_j8'):
+            self.assertNotIn('pg_basebackup', flags[method])
+        for method in measure.PROBACKUP_METHODS:
+            paths = orchestrator.method_paths(method)
+            self.assertEqual(flags[method]['pg_probackup'], orchestrator.probackup_argv(method, paths))
+            self.assertEqual(flags[method]['pg_probackup'][:2], ['/usr/local/bin/pg_probackup-17', 'catchup'])
+            self.assertIn(f'--destination-pgdata={orchestrator.outputs / method}', flags[method]['pg_probackup'])
+            self.assertEqual(flags[method]['sync'], ['sync', '-f', str(orchestrator.outputs / method)])
+            self.assertIn('Ciphers=aes128-gcm@openssh.com', flags[method]['ssh_options'])
+            self.assertIn('IdentityFile /nonexistent', flags[method]['ssh_config'])
+        for method in measure.PARCOPY_METHODS:
+            streams = str(measure.PARCOPY_VARIANTS[method]['streams'])
+            receive, send = flags[method]['receive_argv'], flags[method]['send_argv']
+            self.assertEqual(receive[1:4], ['-m', 'experiments.network.parcopy', 'receive'])
+            self.assertEqual(receive[receive.index('--output') + 1], str(orchestrator.outputs / method))
+            self.assertEqual(receive[receive.index('--listen') + 1], '10.0.0.13:7200')
+            self.assertEqual(send[1:4], ['-m', 'experiments.network.parcopy', 'send'])
+            self.assertEqual(send[send.index('--source') + 1], orchestrator.source_data)
+            self.assertEqual(send[send.index('--connect') + 1], '10.0.0.13:7200')
+            self.assertEqual(receive[receive.index('--streams') + 1], streams)
+            self.assertEqual(send[send.index('--streams') + 1], streams)
+            self.assertEqual(flags[method]['send'], list(measure.parcopy_args(method)['send']))
+        self.assertEqual(flags['pgdelta_direct_inplace_j8'],
+                         {command: list(args) for command, args in
+                          measure.PGDELTA_ARGS['pgdelta_direct_inplace_j8'].items()})
+
+    def test_method_paths_of_the_new_arms(self):
+        orchestrator = self.orchestrator()
+        paths = orchestrator.method_paths('parcopy8')
+        self.assertEqual(paths['source_data'], orchestrator.source_data)
+        self.assertEqual(paths['stats'], f'{orchestrator.work}/stats/parcopy8-send.json')
+        self.assertEqual(paths['receive_stats'], orchestrator.work / 'stats' / 'parcopy8-receive.json')
+        paths = orchestrator.method_paths('probackup4')
+        self.assertEqual((paths['source_data'], paths['ssh_config'], paths['probackup_log_dir']),
+                         (orchestrator.source_data, f'{orchestrator.work}/probackup/ssh_config',
+                          f'{orchestrator.work}/probackup/log'))
+        self.assertEqual(orchestrator.method_paths('full_syncfs'), {'output': orchestrator.outputs / 'full_syncfs'})
+
+
+class RunJson(Clocked):
+    """execute() with its VM steps stubbed: the guard, the preflight and what run.json holds."""
+
+    class Executing(T2Stub):
+        def _source_agent(self, *args, timeout=600):
+            self.events.append(('source_agent', args))
+            if args[0] == 'iface':
+                return {'iface': 'ens4'}
+            return {'exit_code': 0, 'log_tail': ''}
+
+        def throttle(self, rate):
+            return {}
+
+        def environment(self):
+            env = {'deployed': {'tree_sha256': 'x'}, 'strace': 'strace -- version 6.1',
+                   'pg_basebackup_sync_method': True, 'pg_probackup': 'pg_probackup-17 2.5.16'}
+            return {'source': dict(env), 'dest': dict(self.dest_env, **{'deployed': {'tree_sha256': 'x'}})}
+
+        dest_env = {'strace': 'strace -- version 6.1', 'pg_basebackup_sync_method': True}
+
+        def check_pgdelta_jobs(self):
+            return {}
+
+        def check_probackup(self):
+            self.events.append('check_probackup')
+            return {'version': '2.5.16'}
+
+        def check_parcopy(self):
+            self.events.append('check_parcopy')
+            return {}
+
+        def run_trial(self, index, pattern, fraction):
+            self.events.append(('trial', pattern))
+            return {'trial_id': f'{index:02d}-{pattern}', 'status': 'pass'}
+
+    def execute(self, methods, extra=(), cls=None):
+        args = ['--methods', ','.join(methods), '--speeds', '2,unthrottled', '--patterns', 'hot',
+                '--gnu-time', 'none', '--disk-test-mib', '0', '--idle-seconds', '0', '--phase-floor-repeats', '0',
+                *extra]
+        orchestrator = self.orchestrator(cls or self.Executing, args)
+        route = mock.Mock(stdout='10.0.0.12 dev ens4 src 10.0.0.13 uid 1000\n', returncode=0)
+        with mock.patch.object(run_exp04.subprocess, 'run', return_value=route), \
+                mock.patch.object(orchestrator.source, 'open'), mock.patch.object(orchestrator.source, 'close'):
+            code = orchestrator.execute()
+        return orchestrator, code, json.loads((orchestrator.out / 'run.json').read_text())
+
+    def test_run_json_holds_every_new_arms_command_line_and_the_blocks(self):
+        methods = list(T2_ARMS)
+        orchestrator, code, run = self.execute(methods, [
+            '--extension-repeats', '5', '--extension-methods', 'full,probackup8,pgdelta_direct_inplace',
+            '--warm-source-repeats', '3', '--warm-source-methods', 'full,probackup8,pgdelta_direct_inplace'])
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(run['method_flags']), sorted(methods))
+        self.assertEqual(run['method_flags']['full_nosync']['argv'][-2:], ['--verbose', '--no-sync'])
+        self.assertEqual(run['method_flags']['probackup8']['pg_probackup'][1:8],
+                         ['catchup', '-b', 'FULL', '--stream', '--temp-slot', '-j', '8'])
+        self.assertIn('--streams', run['method_flags']['parcopy4']['send_argv'])
+        self.assertEqual(run['method_flags']['pgdelta_direct_inplace_j8']['send'], ['--jobs', '8', '--source-kind',
+                                                                                     'datadir'])
+        self.assertTrue(run['t2'])
+        self.assertEqual(run['blocks']['extension'], {'repeats': 5, 'methods': ['full', 'probackup8',
+                                                                               'pgdelta_direct_inplace'],
+                                                      'speed': 'unthrottled', 'source_cache': 'cold'})
+        self.assertEqual(run['blocks']['warm_source']['source_cache'], 'warm')
+        # The preflight: strace, the two blocks' hooks and dest's write-back defaults.
+        self.assertEqual(run['t2_preflight']['writeback_defaults'],
+                         {'vm.dirty_background_ratio': 10, 'vm.dirty_background_bytes': 0})
+        self.assertEqual(run['t2_preflight']['strace'], 'strace -- version 6.1')
+        self.assertIn('check_probackup', orchestrator.events)
+        self.assertIn('check_parcopy', orchestrator.events)
+        self.assertEqual(orchestrator.writeback_defaults, run['t2_preflight']['writeback_defaults'])
+        self.assertEqual(run['idle_noise_bytes'], 0)
+        self.assertIn('4 MiB', run['durability'])
+
+    def test_a_t2_run_refuses_without_strace_or_with_write_back_changed(self):
+        class NoStrace(self.Executing):
+            dest_env = {'strace': None, 'pg_basebackup_sync_method': True}
+
+        with self.assertRaises(SystemExit) as refused:
+            self.execute(['full', 'full_nosync'], cls=NoStrace)
+        self.assertIn('strace', str(refused.exception))
+
+        class Tuned(self.Executing):
+            def __init__(self, *args):
+                super().__init__(*args)
+                self.kernel = Kernel(ratio=0, size=64 * MIB)
+
+        with self.assertRaises(SystemExit) as refused:
+            self.execute(['full', 'full_wb'], cls=Tuned)
+        self.assertIn('vm.dirty_background_bytes is not 0', str(refused.exception))
+
+    def test_without_the_probackup_block_its_preflight_hook_refuses(self):
+        class Unbuilt(self.Executing):
+            check_probackup = run_exp04.Orchestrator.check_probackup
+
+        with self.assertRaises(NotImplementedError) as refused:
+            self.execute(['full', 'probackup8'], cls=Unbuilt)
+        self.assertIn('build/exp11-probackup', str(refused.exception))
+
+    def test_a_run_without_t2_arms_does_none_of_it(self):
+        orchestrator, code, run = self.execute(['full', 'pgdelta_direct_inplace'], ['--manifest-checksums', 'SHA256'])
+        self.assertEqual(code, 0)
+        self.assertFalse(run['t2'])
+        self.assertNotIn('t2_preflight', run)
+        self.assertNotIn(('sysctl', 'get'), [event[1][:2] for event in orchestrator.events
+                                             if isinstance(event, tuple) and event[0] == 'local_agent'])
+        self.assertNotIn('idle_noise_bytes', run)
+
+
+# --- the CRC32C guard and the new options -----------------------------------------------
+
+class Guards(unittest.TestCase):
+    base = ['--source-ip', 'x', '--out', 'y', '--speeds', '2,unthrottled']
+
+    def parse(self, *args):
+        return run_exp04.parse_args([*self.base, *args])
+
+    def refused(self, *args) -> str:
+        stderr = io.StringIO()
+        with redirect_stdout(io.StringIO()), mock.patch('sys.stderr', stderr), self.assertRaises(SystemExit):
+            self.parse(*args)
+        return stderr.getvalue()
+
+    def test_t2_arms_need_crc32c_manifests(self):
+        for method in measure.T2_METHODS:
+            with self.subTest(method=method):
+                self.assertIn('need --manifest-checksums CRC32C', self.refused('--methods', f'full,{method}'))
+                self.parse('--methods', f'full,{method}', '--manifest-checksums', 'CRC32C')
+        # EXP-04's methods keep their default.
+        self.assertEqual(self.parse('--methods', 'full,pgdelta_direct_inplace').manifest_checksums, 'SHA256')
+        self.assertIsNone(run_exp04.checksum_problem(['full', 'pgdelta'], 'SHA256'))
+        self.assertIn('full_wb', run_exp04.checksum_problem(['full', 'full_wb'], 'SHA256'))
+
+    def test_execute_applies_the_guard_too(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            args = run_exp04.parse_args(['--source-ip', 'x', '--out', f'{tmp}/out', '--work-dir', f'{tmp}/work',
+                                         '--methods', 'full,full_syncfs', '--manifest-checksums', 'CRC32C'])
+            args.manifest_checksums = 'SHA256'
+            orchestrator = run_exp04.Orchestrator(args)
+            self.addCleanup(orchestrator.pool.shutdown)
+            with self.assertRaises(SystemExit) as refused:
+                orchestrator.execute()
+            self.assertIn('CRC32C', str(refused.exception))
+            self.assertFalse(Path(f'{tmp}/out').exists())
+
+    def test_the_block_options(self):
+        crc = ('--manifest-checksums', 'CRC32C')
+        args = self.parse('--methods', 'full,full_nosync,probackup8', *crc, '--extension-repeats', '5',
+                          '--extension-methods', 'full,probackup8', '--warm-source-repeats', '3',
+                          '--warm-source-methods', 'full')
+        self.assertEqual((args.extension_repeats, args.extension_methods), (5, 'full,probackup8'))
+        self.assertEqual((args.warm_source_repeats, args.warm_source_methods), (3, 'full'))
+        defaults = self.parse()
+        self.assertEqual((defaults.extension_repeats, defaults.warm_source_repeats), (0, 0))
+        self.assertEqual(defaults.pg_probackup, '/usr/local/bin/pg_probackup-17')
+        for bad, message in (
+                (('--extension-repeats', '5'), 'go together'),
+                (('--extension-methods', 'full'), 'go together'),
+                (('--extension-repeats', '5', '--extension-methods', 'full,pgdelta'), 'from --methods'),
+                (('--warm-source-repeats', '2', '--warm-source-methods', 'full,full'), 'twice'),
+                (('--warm-source-repeats', '-1', '--warm-source-methods', 'full'), '0 or more')):
+            with self.subTest(bad=bad):
+                self.assertIn(message, self.refused('--methods', 'full,full_nosync', *crc, *bad))
 
 
 # --- timestamped lines and the phase parsers ------------------------------------------------
@@ -391,6 +723,485 @@ class ParcopySummary(unittest.TestCase):
         self.assertFalse(measure.parcopy_summary({**PARCOPY_STATS, 'fsync_calls': 11})['fsync_ok'])
         empty = measure.parcopy_summary(None)
         self.assertEqual((empty['streams'], empty['balance'], empty['fsync_ok']), (None, None, None))
+
+    def test_tool_reported_reads_both_ends(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = T2Stub(tmp, FakeClock())
+            self.addCleanup(orchestrator.pool.shutdown)
+            paths = orchestrator.method_paths('parcopy8')
+            Path(paths['receive_stats']).parent.mkdir(parents=True)
+            Path(paths['receive_stats']).write_text(json.dumps(PARCOPY_STATS))
+            sent = {'streams': [{'bytes': 1_100_000_000, 'sendfile_s': 1.5}]}
+            orchestrator.source.agent = lambda *args, **kwargs: {'exit_code': 0, 'log_tail': json.dumps(sent)}
+            reported = run_exp04.Orchestrator.tool_reported(orchestrator, 'parcopy8', paths, {})
+        self.assertEqual(reported['parcopy_summary']['fsync_calls'], 12)
+        self.assertEqual(reported['bytes_source_to_dest'], 2_108_000_000)
+        self.assertEqual(reported['send_stats'], sent)
+        self.assertEqual(reported['flags']['send'], list(measure.parcopy_args('parcopy8')['send']))
+
+
+# --- the runs: one counter window, the flush inside it, the sysctl reset ----------------------
+
+class Runs(Clocked):
+    def test_each_pg_basebackup_arm_is_one_window_with_its_flush_inside(self):
+        for method in measure.FULL_VARIANTS:
+            with self.subTest(method=method):
+                orchestrator = self.orchestrator()
+                orchestrator.window_writes = 2_200_000_000
+                record = self.run_method(orchestrator, method)
+                self.assertEqual(record['status'], 'pass', record.get('traceback'))
+                self.assertEqual(list(record['phases']), ['transfer'])
+                row = measure.summary_row(record)
+                self.assertEqual(row['counter_windows'], 1)
+                [command] = record['phases']['transfer']['commands']
+                self.assertEqual(Path(command['argv'][0]).name, 'pg_basebackup')
+                self.assertEqual(command['argv'][-len(measure.FULL_VARIANTS[method]):],
+                                 list(measure.FULL_VARIANTS[method]))
+                # Its lines were stamped, untranslated, and split into its phases.
+                self.assertTrue(command['stamped_lines'])
+                self.assertEqual(command['env']['LC_MESSAGES'], 'C')
+                self.assertEqual(row['pbb_checkpoint_s'], 0.090358 if method != 'full_nosync' else 0.0771)
+                self.assertEqual(row['pbb_sync_s'], None if method == 'full_nosync' else 1.299211)
+                self.assertIsNotNone(row['backup_mode_adder_s'])
+                self.assertEqual((row['tier'], row['block'], row['source_cache']),
+                                 (measure.TIERS[method], 'main', 'cold'))
+                kinds = self.kinds(orchestrator)
+                self.assertEqual(kinds.count('drop_caches'), 1)
+                self.assertLess(kinds.index('drop_caches'), kinds.index(('dest', 'pg_basebackup')))
+
+    def test_v1_at_8_jobs_runs_in_one_window_after_a_clean_stop(self):
+        orchestrator = self.orchestrator()
+        record = self.run_method(orchestrator, 'pgdelta_direct_inplace_j8')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        self.assertEqual(list(record['phases']), ['receiver_transfer'])
+        receive = FakeChild.started[0].argv
+        self.assertEqual(receive[receive.index('--jobs') + 1], '8')
+        self.assertIn('--in-place', receive)
+        kinds = self.kinds(orchestrator)
+        self.assertLess(kinds.index(('source_script', 'stop-clean')), kinds.index('drop_caches'))
+        self.assertIn(('source_script', 'start'), kinds)
+        self.assertEqual(measure.summary_row(record)['tier'], 'v1_8_jobs')
+
+    def test_the_durability_checks_land_in_each_record(self):
+        orchestrator = self.orchestrator()
+        orchestrator.window_writes = 2_200_000_000  # each window's writes to the md array
+        record = self.run_method(orchestrator, 'full')
+        self.assertEqual(record['durability']['ok'], True, record['durability'])
+        self.assertEqual(record['durability']['disk_write_bytes'], 2_200_000_000 // 512 * 512)
+        self.assertEqual(record['durability']['output_bytes'], 189_244_280)
+        self.assertEqual(record['phases']['transfer']['memory']['dest']['dirty_writeback_increase_bytes'], 0)
+        orchestrator.dirty_kb = 1000 + 1_700_000  # about 1.7 GB left dirty, as --no-sync leaves it
+        control = self.run_method(orchestrator, 'full_nosync')
+        self.assertEqual(control['status'], 'pass')  # its status is its verification's
+        row = measure.summary_row(control)
+        self.assertEqual((row['durable'], row['durability_ok']), (False, False))
+        self.assertEqual(row['dirty_increase_mb'], round(1_700_000 * 1024 / 1e6, 3))
+        self.assertEqual(row['disk_write_dest_bytes'], 2_200_000_000 // 512 * 512)
+
+    def test_probackup_and_parcopy_are_dispatched_to_their_blocks(self):
+        orchestrator = self.orchestrator()
+        for method, branch in (('probackup8', 'build/exp11-probackup'), ('parcopy4', 'build/exp11-parcopy')):
+            with self.subTest(method=method):
+                record = self.run_method(orchestrator, method)
+                self.assertEqual(record['status'], 'error')
+                self.assertIn(f'NotImplementedError: built on {branch}', record['error'])
+        # parcopy stops the source first and restarts it, as v1 does.
+        scripts = [kind[1] for kind in self.kinds(orchestrator) if kind[0] == 'source_script']
+        self.assertEqual(scripts, ['stop-clean', 'start'])
+
+    def test_a_probackup_run_is_one_window_with_its_sync_f_inside(self):
+        clock = self.clock
+
+        class Probackup(T2Stub):
+            # What the pg_probackup block's run_probackup must do: one timed phase, catchup then sync -f.
+            def run_probackup(self, method, paths):
+                steps = {}
+
+                def body():
+                    started = clock.now
+                    catchup = self.local_command(self.probackup_argv(method, paths), f'{method}.log', stamp_lines=True)
+                    log = self.dest_log(f'{method}.log')
+                    log.parent.mkdir(parents=True, exist_ok=True)
+                    log.write_text(PROBACKUP_LOG)
+                    catchup['log'] = str(log)
+                    steps['catchup'] = {'wall_seconds': round(clock.now - started, 3)}
+                    started = clock.now
+                    sync = self.local_command(self.probackup_sync_argv(paths), f'{method}-sync.log')
+                    steps['sync'] = {'wall_seconds': round(clock.now - started, 3)}
+                    return [catchup, sync]
+
+                phase = self.timed_phase(measure.PROBACKUP_PHASE, body)
+                phase['steps'] = steps
+                return {measure.PROBACKUP_PHASE: phase}
+
+            def verify_probackup(self, method, paths):
+                return {'verified': True, 'basis_changes': [], 'output_bytes': 2_100_000_000}
+
+        orchestrator = self.orchestrator(Probackup)
+        record = self.run_method(orchestrator, 'probackup8')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        row = measure.summary_row(record)
+        self.assertEqual(row['counter_windows'], 1)
+        self.assertEqual((row['probackup_sync_s'], row['total_s']), (0.5, 1.5))
+        self.assertEqual((row['probackup_copy_s'], row['probackup_files_sync_s']), (2.4, 0.695))
+        commands = record['phases']['catchup_sync']['commands']
+        self.assertEqual([command['argv'][:2] for command in commands],
+                         [['/usr/local/bin/pg_probackup-17', 'catchup'], ['sync', '-f']])
+
+    def test_full_wb_sets_and_resets_dests_write_back(self):
+        orchestrator = self.orchestrator()
+        record = self.run_method(orchestrator, 'full_wb')
+        self.assertEqual(record['status'], 'pass', record.get('traceback'))
+        kinds = self.kinds(orchestrator)
+        sysctl = [event[1] for event in orchestrator.events if isinstance(event, tuple) and event[0] == 'local_agent'
+                  and event[1][0] == 'sysctl']
+        self.assertEqual([call[:2] for call in sysctl],
+                         [('sysctl', 'get'), ('sysctl', 'set'), ('sysctl', 'set'), ('sysctl', 'get')])
+        # Set before the cache drop; reset by writing the ratio, never 0 to the bytes setting.
+        self.assertEqual(sysctl[1][2:], ('vm.dirty_background_bytes=67108864',))
+        self.assertEqual(sysctl[2][2:], ('vm.dirty_background_ratio=10',))
+        self.assertLess([index for index, kind in enumerate(kinds) if kind == ('local_agent', 'sysctl')][1],
+                        kinds.index('drop_caches'))
+        self.assertEqual(orchestrator.kernel.values, {'vm.dirty_background_ratio': 10, 'vm.dirty_background_bytes': 0})
+        self.assertNotIn(('vm.dirty_background_bytes', 0), orchestrator.kernel.writes)
+        row = measure.summary_row(record)
+        self.assertEqual((row['sysctl_dirty_background_bytes'], row['sysctl_dirty_background_ratio']), (64 * MIB, 0))
+        self.assertEqual(record['sysctl']['reset']['values'],
+                         {'vm.dirty_background_ratio': 10, 'vm.dirty_background_bytes': 0})
+        # Every other run records the defaults it found.
+        other = measure.summary_row(self.run_method(orchestrator, 'full'))
+        self.assertEqual((other['sysctl_dirty_background_bytes'], other['sysctl_dirty_background_ratio']), (0, 10))
+
+    def test_the_reset_follows_an_exception_and_the_guard_then_passes(self):
+        class Failing(T2Stub):
+            def run_full(self, method, paths):
+                if method == 'full_wb':
+                    raise run_exp04.CommandError('the copy failed midway')
+                return super().run_full(method, paths)
+
+        orchestrator = self.orchestrator(Failing)
+        record = self.run_method(orchestrator, 'full_wb')
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('the copy failed midway', record['error'])
+        self.assertEqual(orchestrator.kernel.values[measure.DIRTY_BACKGROUND_RATIO], 10)
+        self.assertEqual(orchestrator.kernel.values[measure.DIRTY_BACKGROUND_BYTES], 0)
+        self.assertEqual(orchestrator.check_dirty_writeback(),
+                         {'vm.dirty_background_ratio': 10, 'vm.dirty_background_bytes': 0})
+        # The next run's guard passes.
+        self.assertEqual(self.run_method(orchestrator, 'full')['status'], 'pass')
+
+    def test_a_reset_that_does_not_take_fails_the_run_and_the_guard_stops_the_next(self):
+        class Stuck(T2Stub):
+            def local_agent(self, *args, timeout=600):
+                if args[:2] == ('sysctl', 'set') and args[2].startswith(measure.DIRTY_BACKGROUND_RATIO):
+                    self.events.append(('local_agent', args))
+                    return {'set': {}, 'values': dict(self.kernel.values)}  # it did not take
+                return super().local_agent(*args, timeout=timeout)
+
+        orchestrator = self.orchestrator(Stuck)
+        record = self.run_method(orchestrator, 'full_wb')
+        self.assertEqual(record['status'], 'error')
+        self.assertIn('could not be reset', record['error'])
+        later = self.run_method(orchestrator, 'full')
+        self.assertEqual(later['status'], 'error')
+        self.assertIn('not at their defaults', later['error'])
+        self.assertNotIn('drop_caches', self.kinds(orchestrator)[-3:])
+
+    def test_full_outputs_are_started_after_their_bytes_are_counted(self):
+        class Verifying(T2Stub):
+            verify = run_exp04.Orchestrator.verify
+
+            def check_output(self, method, data, *, recovery, query=run_exp04.OUTPUT_QUERY):
+                self.events.append(('check_output', recovery, query))
+                return {'ok': self.start_ok, 'ready_seconds': 1.4}
+
+            start_ok = True
+
+        orchestrator = self.orchestrator(Verifying)
+        orchestrator.b0_stat = {}
+        output = orchestrator.outputs / 'full_syncfs'
+        (output / 'pg_wal').mkdir(parents=True)
+        (output / 'base').mkdir()
+        (output / 'base' / '1').write_bytes(b'x' * 100)
+        with mock.patch.object(run_exp04.measure, 'tree_stat', return_value={}):
+            result = orchestrator.verify('full_syncfs', orchestrator.method_paths('full_syncfs'), {})
+            self.assertEqual(result['output_bytes'], 100)
+            self.assertTrue(result['verified'])
+            self.assertIn(('check_output', True, run_exp04.OUTPUT_QUERY), orchestrator.events)
+            kinds = self.kinds(orchestrator)
+            self.assertLess(kinds.index(('dest', 'pg_verifybackup')), kinds.index('check_output'))
+            # An output that doesn't start fails its verification.
+            (orchestrator.outputs / 'full').mkdir()
+            orchestrator.start_ok = False
+            self.assertFalse(orchestrator.verify('full', orchestrator.method_paths('full'), {})['verified'])
+        # incremental's output is not started.
+        events = len(orchestrator.events)
+        (orchestrator.outputs / 'incremental').mkdir()
+        with mock.patch.object(run_exp04.measure, 'tree_stat', return_value={}):
+            orchestrator.verify('incremental', orchestrator.method_paths('incremental'), {})
+        self.assertNotIn('check_output', [kind for kind in self.kinds(orchestrator)[events:]])
+
+    def test_parcopy_is_verified_as_v1_and_probackup_by_its_block(self):
+        orchestrator = self.orchestrator()
+        orchestrator.verify = run_exp04.Orchestrator.verify.__get__(orchestrator)
+        with mock.patch.object(orchestrator, 'verify_direct', return_value={'verified': True}) as direct:
+            orchestrator.verify('parcopy8', orchestrator.method_paths('parcopy8'), {})
+        direct.assert_called_once()
+        with self.assertRaises(NotImplementedError):
+            orchestrator.verify('probackup4', orchestrator.method_paths('probackup4'), {})
+
+    def test_the_warm_source_block_reads_the_source_instead_of_dropping_it(self):
+        class Warm(T2Stub):
+            def drop_caches(self, source=True):
+                self.events.append('drop_caches' if source else 'drop_dest_caches')
+                return {'source': None if not source else {}, 'dest': {}}
+
+        for method in ('full', 'pgdelta_direct_inplace'):
+            with self.subTest(method=method):
+                orchestrator = self.orchestrator(Warm)
+                record = self.run_method(orchestrator, method, link={**LINK, 'block': 'warm_source',
+                                                                     'source_cache': 'warm'}, speed=UNTHROTTLED)
+                self.assertEqual(record['status'], 'pass', record.get('traceback'))
+                kinds = self.kinds(orchestrator)
+                self.assertNotIn('drop_caches', kinds)
+                warm = kinds.index(('source_agent', 'read-test'))
+                self.assertLess(warm, kinds.index('drop_dest_caches'))
+                read = [event[1] for event in orchestrator.events if isinstance(event, tuple)
+                        and event[0] == 'source_agent' and event[1][0] == 'read-test'][0]
+                self.assertEqual(read, ('read-test', orchestrator.source_data, '--readers', '4', '--exclude', 'pg_wal',
+                                        '--sync'))
+                if method == 'pgdelta_direct_inplace':  # stopped first, then read
+                    self.assertLess(kinds.index(('source_script', 'stop-clean')), warm)
+                row = measure.summary_row(record)
+                self.assertEqual((row['block'], row['source_cache'], row['caches_dropped']),
+                                 ('warm_source', 'warm', 'dest'))
+
+
+# --- the trial: its order, the blocks, reference digests and probes ---------------------------
+
+class Trials(Clocked):
+    class Ordered(TrialStub):
+        """run_trial with the T2 steps recorded as events."""
+
+        def __init__(self, tmp, clock, extra_args=()):
+            super().__init__(tmp, clock, ['--manifest-checksums', 'CRC32C', *extra_args])
+            self.end_digest = SOURCE_DIGEST
+            self.digests = 0
+
+        def _source_agent(self, *args, timeout=600):
+            self.events.append(('source_agent', args))
+            if args[0] == 'datadir-digest':
+                self.digests += 1
+                return {'digest': SOURCE_DIGEST if self.digests == 1 else self.end_digest, 'read_from': {}}
+            return {'exit_code': 0, 'log_tail': ''}
+
+        def set_speed(self, speed):
+            self.events.append(('link', speed['label']))
+            return {'speed': speed, 'source_to_dest_gbit': 1.0, 'dest_to_source_gbit': 1.0}
+
+        def probe_relation(self):
+            self.events.append('probe_relation')
+            return {'path': 'base/5/16397'}
+
+        def durable_write_floor(self):
+            self.events.append('durable_write_floor')
+            return {'seconds': 1.4}
+
+        def read_floor(self):
+            self.events.append('read_floor')
+            return {'seconds': 0.7}
+
+        def single_read_probe(self):
+            self.events.append('single_read')
+            return {'seconds': 0.6}
+
+        def bracket_probe(self):
+            self.events.append('bracket')
+            return {'median_pair_s': 0.08}
+
+        def finish_logical_checks(self, trial):
+            self.events.append('finish_logical_checks')
+            return None
+
+        def run_method(self, trial, repeat, speed, link, method, order_index, order):
+            self.events.append(('run', link['block'], repeat, speed['label'], method, link['source_cache']))
+            record = {'status': 'pass', 'method': method}
+            self.records.append(record)
+            return record
+
+    def trial(self, methods, speeds='2,unthrottled', extra=(), cls=None):
+        orchestrator = self.orchestrator(cls or self.Ordered, ['--repeats', '2', '--methods', ','.join(methods),
+                                                               *extra])
+        orchestrator.speeds = measure.parse_speeds(speeds)
+        orchestrator.methods = methods
+        with mock.patch.object(run_exp04.measure, 'tree_digest',
+                               side_effect=lambda root: orchestrator.events.append('b0_digest')
+                               or {'entries': {}, 'device': 1}):
+            trial = orchestrator.run_trial(0, 'hot', 0.01)
+        return orchestrator, trial
+
+    def steps(self, orchestrator):
+        steps = []
+        for kind in self.kinds(orchestrator):
+            if isinstance(kind, tuple) and kind[0] == 'run':
+                continue
+            if kind in ('take_b0', 'probe_relation', 'durable_write_floor', 'read_floor', 'single_read', 'bracket',
+                        'finish_logical_checks', 'b0_digest', 'cleanup_trial'):
+                steps.append(kind)
+            elif isinstance(kind, tuple) and kind[0] in ('source_script', 'source_agent') \
+                    and kind[1] in ('setup', 'workload', 'stop-clean', 'datadir-digest', 'start', 'verify'):
+                steps.append(kind[1])
+        return steps
+
+    def test_the_end_of_trial_order(self):
+        methods = ['full', 'full_nosync', 'probackup8', 'pgdelta_direct_inplace']
+        orchestrator, trial = self.trial(methods, extra=[
+            '--extension-repeats', '2', '--extension-methods', 'full,probackup8,pgdelta_direct_inplace',
+            '--warm-source-repeats', '1', '--warm-source-methods', 'full,pgdelta_direct_inplace'])
+        self.assertEqual(trial['status'], 'pass', trial.get('traceback'))
+        reference = ['stop-clean', 'datadir-digest', 'start']
+        self.assertEqual(self.steps(orchestrator),
+                         ['setup', 'take_b0', 'workload', 'probe_relation', *reference,
+                          'durable_write_floor', 'read_floor', 'single_read', 'bracket',
+                          'durable_write_floor', *reference, 'finish_logical_checks', 'verify', 'b0_digest',
+                          'cleanup_trial'])
+        events = orchestrator.events
+        runs = [event for event in events if isinstance(event, tuple) and event[0] == 'run']
+        # The main block, then the extension, then the warm-source block, all before the end steps.
+        blocks = [run[1] for run in runs]
+        self.assertEqual(blocks, ['main'] * 16 + ['extension'] * 6 + ['warm_source'] * 2)
+        last_run = max(index for index, event in enumerate(events) if isinstance(event, tuple) and event[0] == 'run')
+        bracket = events.index('bracket')
+        first_run = min(index for index, event in enumerate(events) if isinstance(event, tuple) and event[0] == 'run')
+        self.assertLess(bracket, first_run)
+        self.assertLess(last_run, len(events) - events[::-1].index('durable_write_floor') - 1)
+        # The extension and the warm-source block run unthrottled, their repeats numbered on.
+        self.assertEqual({(run[2], run[3]) for run in runs if run[1] == 'extension'},
+                         {(2, 'unthrottled'), (3, 'unthrottled')})
+        self.assertEqual({(run[2], run[3], run[5]) for run in runs if run[1] == 'warm_source'},
+                         {(4, 'unthrottled', 'warm')})
+        self.assertEqual({run[5] for run in runs if run[1] != 'warm_source'}, {'cold'})
+        for repeat in (2, 3):
+            self.assertEqual(sorted(run[4] for run in runs if run[2] == repeat),
+                             ['full', 'pgdelta_direct_inplace', 'probackup8'])
+        self.assertEqual(sum(1 for run in trial['runs'] if run['block'] == 'extension'), 6)
+        # The reference digests matched, leaving out what a clean stop rewrites.
+        self.assertTrue(trial['reference_match'])
+        self.assertEqual(trial['reference_digests']['start']['excluded'],
+                         ['global/pg_control', 'pg_stat/pgstat.stat', 'pg_wal/000000010000000000000003'])
+        self.assertEqual(trial['reference_digests']['start']['summary']['files'], 2)
+        self.assertEqual(sorted(trial['probes']), ['bracket', 'durable_write_floor', 'read_floor', 'single_read'])
+        self.assertEqual(len(trial['probes']['durable_write_floor']), 2)
+
+    def test_a_source_that_changed_is_recorded(self):
+        class Changed(self.Ordered):
+            def __init__(self, *args):
+                super().__init__(*args)
+                entries = dict(SOURCE_DIGEST['entries'])
+                entries['base/5/16397'] = ['file', 8, 'f' * 64, 0o600, 1, 1]
+                entries['pg_wal/000000010000000000000004'] = ['file', 8, '0' * 64, 0o600, 6, 1]  # left out
+                self.end_digest = {**SOURCE_DIGEST, 'entries': entries}
+
+        orchestrator, trial = self.trial(['full', 'full_syncfs'], cls=Changed)
+        self.assertEqual(trial['status'], 'pass', trial.get('traceback'))
+        self.assertFalse(trial['reference_match'])
+        self.assertEqual(len(trial['reference_differences']), 1)
+        self.assertIn('base/5/16397', trial['reference_differences'][0])
+        self.assertEqual(sorted(orchestrator.reference_digests), ['end', 'start'])
+
+    def test_a_run_without_t2_arms_keeps_exp04s_trial(self):
+        orchestrator, trial = self.trial(['full', 'pgdelta_direct_inplace'])
+        self.assertEqual(self.steps(orchestrator),
+                         ['setup', 'take_b0', 'workload', 'finish_logical_checks', 'verify', 'b0_digest',
+                          'cleanup_trial'])
+        self.assertNotIn('reference_digests', trial)
+        self.assertNotIn('probes', trial)
+
+    def test_a_failed_probe_is_recorded_and_the_trial_goes_on(self):
+        class Failing(self.Ordered):
+            def read_floor(self):
+                raise run_exp04.CommandError('read-test failed')
+
+        orchestrator, trial = self.trial(['full', 'full_nosync'], cls=Failing)
+        self.assertEqual(trial['status'], 'pass', trial.get('traceback'))
+        self.assertEqual(trial['probes']['read_floor'], {'error': 'CommandError: read-test failed'})
+
+    def test_the_reference_digest_restarts_the_source_whatever_happens(self):
+        orchestrator = self.orchestrator(self.Ordered)
+
+        def failing(*args, timeout=600):
+            orchestrator.events.append(('source_agent', args))
+            raise run_exp04.CommandError('datadir-digest failed')
+
+        orchestrator.source.agent = failing
+        with self.assertRaises(run_exp04.CommandError):
+            orchestrator.reference_digest('start')
+        self.assertEqual([kind[1] for kind in self.kinds(orchestrator) if kind[0] in ('source_script', 'source_agent')],
+                         ['stop-clean', 'datadir-digest', 'start'])
+        self.assertIsNone(orchestrator.source_down)
+
+        class NoRestart(self.Ordered):
+            def _source_script(self, script, *args, timeout=7200):
+                if args[0] == 'start':
+                    raise run_exp04.CommandError('the source did not start')
+                return super()._source_script(script, *args)
+
+        orchestrator = self.orchestrator(NoRestart)
+        with self.assertRaises(run_exp04.CommandError) as failed:
+            orchestrator.reference_digest('end')
+        self.assertIn('could not be restarted', str(failed.exception))
+        self.assertIn('did not start', orchestrator.source_down)
+
+
+class LinkTests(Clocked):
+    def test_the_8_stream_test_runs_at_each_speeds_first_visit(self):
+        class Linked(T2Stub):
+            def throttle(self, rate):
+                return {}
+
+            def blast(self, direction, streams=1):
+                self.events.append(('blast', direction, streams))
+                gbit = 15.5 if streams > 1 else 14.9
+                return {'sender': {}, 'receiver': {'gbit': gbit, 'steady_gbit': gbit}}
+
+        orchestrator = self.orchestrator(Linked)
+        orchestrator.methods = ['full', 'parcopy8']
+        first = orchestrator.set_speed(UNTHROTTLED)
+        again = orchestrator.set_speed(UNTHROTTLED)
+        blasts = [event[1:] for event in orchestrator.events if event[0] == 'blast']
+        self.assertEqual(blasts, [('source_to_dest', 1), ('dest_to_source', 1), ('source_to_dest', 8),
+                                  ('source_to_dest', 1), ('dest_to_source', 1)])
+        for link in (first, again):
+            self.assertEqual(link['source_to_dest_8streams_gbit'], 15.5)
+        self.assertTrue(first['multi_stream']['measured_here'])
+        self.assertFalse(again['multi_stream']['measured_here'])
+        # run_method copies it into the record (a key ending in gbit), so each row has it.
+        record = self.run_method(orchestrator, 'full', link=again, speed=UNTHROTTLED)
+        self.assertEqual(measure.summary_row(record)['measured_s2d_gbit_8streams'], 15.5)
+        # Outside T2 runs there is no 8-stream test.
+        orchestrator = self.orchestrator(Linked)
+        orchestrator.methods = ['full']
+        orchestrator.set_speed(UNTHROTTLED)
+        self.assertEqual([event[2] for event in orchestrator.events if event[0] == 'blast'], [1, 1])
+
+    def test_blast_passes_the_streams_to_both_ends(self):
+        orchestrator = self.orchestrator()
+        receiver = mock.Mock()
+        receiver.stdout.readline.return_value = 'LISTENING\n'
+        receiver.communicate.return_value = (agent.RESULT_PREFIX + json.dumps({'gbit': 15.5}), '')
+        receiver.returncode = 0
+        receiver.poll.return_value = 0
+        calls = []
+        orchestrator.source.agent = lambda *args, timeout=600: calls.append(args) or {'gbit': 15.4}
+        with mock.patch.object(run_exp04.subprocess, 'Popen', return_value=receiver) as popen:
+            result = orchestrator.blast('source_to_dest', streams=8)
+        self.assertEqual(popen.call_args.args[0][-2:], ['--streams', '8'])
+        self.assertEqual(calls[0][-2:], ('--streams', '8'))
+        self.assertEqual(result['receiver'], {'gbit': 15.5})
+        with mock.patch.object(run_exp04.subprocess, 'Popen', return_value=receiver) as popen:
+            orchestrator.blast('source_to_dest')
+        self.assertNotIn('--streams', popen.call_args.args[0])
+
 
 # --- the agent's and the source's probes --------------------------------------------------------
 
