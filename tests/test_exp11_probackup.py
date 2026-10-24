@@ -573,6 +573,57 @@ class Preflight(core.Clocked):
         self.assertTrue(Path(probackup['ssh_config']).is_file())
 
 
+class InstallLink(unittest.TestCase):
+    """infra/gcp/install_incumbents.sh puts pg_probackup-17 where the harness runs it on both VMs, whichever
+    way each got it: Postgres Pro's package (/usr/bin, on PATH) or the source build (/usr/local/bin)."""
+
+    SCRIPT = Path(__file__).resolve().parents[1] / 'infra' / 'gcp' / 'install_incumbents.sh'
+
+    def link(self, binary: Path, link: Path):
+        """The script's link_probackup on `binary`, with its link at `link` (bash; nothing else of the script)."""
+        text = self.SCRIPT.read_text()
+        start = text.index('link_probackup() {')
+        function = text[start:text.index('\n}\n', start) + 3]
+        script = ('set -euo pipefail\nfail() { echo "install_incumbents: $*" >&2; exit 1; }\n'
+                  f'PROBACKUP_LINK={link}\n{function}link_probackup "$1"\n')
+        return subprocess.run(['bash', '-c', script, 'bash', str(binary)], capture_output=True, text=True, timeout=60)
+
+    @staticmethod
+    def binary(path: Path, body='echo "pg_probackup-17 2.5.16 (PostgreSQL 17)"') -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'#!/bin/sh\n{body}\n')
+        path.chmod(0o755)
+        return path
+
+    def test_the_harnesss_path_runs_pg_probackup_whichever_way_it_came(self):
+        self.assertEqual(measure.PROBACKUP_EXE, '/usr/local/bin/pg_probackup-17')
+        text = self.SCRIPT.read_text()
+        self.assertIn('PROBACKUP_LINK=/usr/local/bin/pg_probackup-$PG_MAJOR', text)
+        # Called whatever PATH finds: before, the package's binary, already on PATH, got no link.
+        self.assertIn('\nlink_probackup "$PROBACKUP"\n', text)
+        self.assertNotIn('!= "$(command -v', text)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            link = root / 'usr/local/bin/pg_probackup-17'
+            link.parent.mkdir(parents=True)
+            package = self.binary(root / 'usr/bin/pg_probackup-17')
+            result = self.link(package, link)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(os.readlink(link), str(package))
+            self.assertEqual(self.link(package, link).returncode, 0)  # again: idempotent
+            # The source build installs at the link's path itself: left as it is.
+            link.unlink()
+            built = self.binary(link)
+            self.assertEqual(self.link(built, link).returncode, 0)
+            self.assertFalse(link.is_symlink())
+            # A binary that doesn't run fails the install.
+            link.unlink()
+            broken = self.binary(root / 'opt/pg_probackup-17', 'exit 127')
+            result = self.link(broken, link)
+            self.assertEqual(result.returncode, 1)
+            self.assertIn(f'{link} does not run pg_probackup', result.stderr)
+
+
 # --- the syscall audit in the orchestrator -------------------------------------------------------
 
 # strace stand-in: writes a trace line naming the command to its -o file, then runs the command.

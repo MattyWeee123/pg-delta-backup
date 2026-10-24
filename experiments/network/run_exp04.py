@@ -1087,7 +1087,9 @@ class Orchestrator:
         missing = [host for host, version in versions.items() if version is None]
         if missing:
             raise SystemExit(f'pg_probackup ({self.args.pg_probackup}) is not installed on {", ".join(missing)} '
-                             f'({texts}); remote.py provision runs infra/gcp/install_incumbents.sh on both VMs')
+                             f'({texts}); remote.py provision runs infra/gcp/install_incumbents.sh on both VMs, '
+                             f'which links {measure.PROBACKUP_EXE} to the binary whether the package or the source '
+                             'build installed it; or pass --pg-probackup with a path that runs it on both VMs')
         if versions['source'] != versions['dest']:
             raise SystemExit(f'pg_probackup differs between the VMs ({texts}); its remote mode needs the same '
                              'release on both')

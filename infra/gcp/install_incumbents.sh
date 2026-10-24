@@ -19,6 +19,9 @@ PROBACKUP_KEY_URL=https://repo.postgrespro.ru/pg_probackup/keys/GPG-KEY-PG-PROBA
 PROBACKUP_REPO=https://repo.postgrespro.ru/pg_probackup/deb
 PROBACKUP_KEYRING=/etc/apt/keyrings/pg_probackup.asc
 PROBACKUP_SOURCE=https://github.com/postgrespro/pg_probackup
+# Where EXP-11's harness runs pg_probackup on both VMs (experiments/network/measure.py PROBACKUP_EXE,
+# run_exp04.py --pg-probackup), and catchup's --remote-path: linked to the binary whichever way it came.
+PROBACKUP_LINK=/usr/local/bin/pg_probackup-$PG_MAJOR
 WALG_VERSION=${WALG_VERSION:-v3.0.9}
 # The Ubuntu 22.04 build needs glibc 2.35 and Debian 12 has 2.36; the 24.04 build needs 2.39.
 WALG_ASSET=${WALG_ASSET:-wal-g-pg-22.04-amd64.tar.gz}
@@ -105,11 +108,17 @@ elif [ -z "$(probackup_path)" ]; then
     build_probackup "the repository had no pg-probackup-$PG_MAJOR for $VERSION_CODENAME"
   fi
 fi
+link_probackup() {
+  # The package installs /usr/bin/pg_probackup-17, the source build $PROBACKUP_LINK: link the first there
+  # too, so the same path runs it on both VMs whichever way each was installed, and check that it does.
+  [ "$1" = "$PROBACKUP_LINK" ] || ln -sf "$1" "$PROBACKUP_LINK"
+  [ -x "$PROBACKUP_LINK" ] && "$PROBACKUP_LINK" --version >/dev/null ||
+    fail "$PROBACKUP_LINK does not run pg_probackup ($1)"
+}
+
 PROBACKUP=$(probackup_path)
 [ -n "$PROBACKUP" ] || fail "pg_probackup-$PG_MAJOR was not installed"
-if [ "$PROBACKUP" != "$(command -v "pg_probackup-$PG_MAJOR" 2>/dev/null || true)" ]; then
-  ln -sf "$PROBACKUP" "/usr/local/bin/pg_probackup-$PG_MAJOR"
-fi
+link_probackup "$PROBACKUP"
 
 # ---------------------------------------------------------------------------
 # WAL-G
