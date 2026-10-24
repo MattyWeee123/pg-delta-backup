@@ -2914,23 +2914,43 @@ def smoke_lines(S, cells, ctx):
         f'beyond the arms\' own {extra}; autovacuum on loaddb in '
         f'{sum(bool((r.get("sampler") or {}).get("autovacuum_loaddb")) for r in S.runs)} windows; the benchmark '
         f'database\'s logical digest at the end equal to the start\'s {word(every(logical))}')
-    durations = {}
-    for r in S.runs:
-        if r['started_utc'] is not None and r['finished_utc'] is not None:
-            durations.setdefault((r['block'], r['method']), []).append(r['finished_utc'] - r['started_utc'])
-    plan = {('busy', 'full'): 15, ('busy', 'pgdelta'): 15, ('busy', PROXY): 15, ('busy', PROXY_S1): 10,
-            ('busy', 'none'): 5, ('busy', 'capture'): 5, ('busy', 'bracket'): 5, ('warm', 'full'): 5,
-            ('warm', PROXY): 5, ('moderate', 'full'): 6, ('moderate', PROXY): 6, ('moderate', 'none'): 3,
-            ('moderate', PROXY_S1): 3, ('busy', 'pause2'): 2, ('busy', 'burn4'): 2, ('moderate', 'pause2'): 1,
-            **{('calibration', arm): 2 for arm in CALIBRATION_ARMS}}
-    projected = [(count, median(durations.get(key, []))) for key, count in plan.items()]
-    known = [count * value for count, value in projected if value is not None]
-    say(f'15. **The time projection**: the registered {sum(plan.values())} runs at this session\'s median run times '
-        f'(each run from its start to its record): {fmt(sum(known) / 60 if known else None, 1)} minutes for the '
-        f'{sum(count for count, value in projected if value is not None)} runs whose kind ran here, set-up and the '
-        f'trial\'s end not included')
+    projection = time_projection(S.runs)
+    say(f'15. **The time projection**: the registered {projection["planned"]} runs at this session\'s median run times '
+        f'(each run from its start to its record): {fmt(projection["minutes"], 1)} minutes for the '
+        f'{projection["runs"]} runs whose kind ran here, {projection["borrowed"]} of them warm or moderate runs at the '
+        f'busy block\'s median for their arm (the smoke run\'s pass is busy only); set-up and the trial\'s end not '
+        f'included')
     say('16. **analysis/exp12.py** ran end to end on these records: this output')
     return lines
+
+
+# Smoke item 15: the registered session's runs by (block, arm), the controls in their slots.
+PLANNED_RUNS = {('busy', 'full'): 15, ('busy', 'pgdelta'): 15, ('busy', PROXY): 15, ('busy', PROXY_S1): 10,
+                ('busy', 'none'): 5, ('busy', 'capture'): 5, ('busy', 'bracket'): 5, ('warm', 'full'): 5,
+                ('warm', PROXY): 5, ('moderate', 'full'): 6, ('moderate', PROXY): 6, ('moderate', 'none'): 3,
+                ('moderate', PROXY_S1): 3, ('busy', 'pause2'): 2, ('busy', 'burn4'): 2, ('moderate', 'pause2'): 1,
+                **{('calibration', arm): 2 for arm in CALIBRATION_ARMS}}
+
+
+def time_projection(runs, plan=PLANNED_RUNS) -> dict:
+    """Smoke item 15: the registered runs at this session's median run times (each run from its start to its record),
+    by (block, arm). The smoke run makes one busy pass and one calibration pass, so a warm or moderate kind that
+    didn't run here takes the busy block's median for its arm (`borrowed`); a kind with neither is left out."""
+    durations = {}
+    for r in runs:
+        if r['started_utc'] is not None and r['finished_utc'] is not None:
+            durations.setdefault((r['block'], r['method']), []).append(r['finished_utc'] - r['started_utc'])
+    known, counted, borrowed = 0.0, 0, 0
+    for (block, arm), count in plan.items():
+        value = median(durations.get((block, arm), []))
+        if value is None and block in ('warm', 'moderate'):
+            value = median(durations.get(('busy', arm), []))
+            borrowed += count if value is not None else 0
+        if value is not None:
+            known += count * value
+            counted += count
+    return {'planned': sum(plan.values()), 'runs': counted, 'borrowed': borrowed,
+            'minutes': known / 60 if counted else None}
 
 
 def verdicts(S):

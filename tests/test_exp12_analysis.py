@@ -993,6 +993,29 @@ class DryRun(unittest.TestCase):
 
 
 @needs_venv
+class TimeProjection(unittest.TestCase):
+    """Smoke item 15: the smoke run's one busy pass stands for the warm and moderate blocks it doesn't run."""
+
+    def test_a_busy_pass_stands_for_the_warm_and_moderate_blocks(self):
+        def run(block, method, seconds):
+            return {'block': block, 'method': method, 'started_utc': 100.0,
+                    'finished_utc': None if seconds is None else 100.0 + seconds}
+
+        # A run without its end (the last) counts for nothing.
+        runs = [run('busy', 'full', 60), run('busy', 'full', 80), run('busy', PROXY, 30), run('busy', 'none', 90),
+                run('moderate', 'none', 120), run('calibration', 'full', 20), run('busy', 'capture', None)]
+        found = exp12.time_projection(runs)
+        self.assertEqual(found['planned'], 117)
+        # Borrowed from the busy block: warm full and v1proxy (5 each), moderate full and v1proxy (6 each). Moderate
+        # none has its own runs; nothing ran for v1proxy_s1, pgdelta, capture or bracket, or the controls.
+        self.assertEqual(found['borrowed'], 22)
+        self.assertEqual(found['runs'], 15 + 15 + 5 + 22 + 3 + 2)
+        self.assertAlmostEqual(found['minutes'] * 60, 15 * 70 + 15 * 30 + 5 * 90 + 5 * 70 + 5 * 30 + 6 * 70 + 6 * 30
+                               + 3 * 120 + 2 * 20)
+        self.assertEqual(exp12.time_projection([]), {'planned': 117, 'runs': 0, 'borrowed': 0, 'minutes': None})
+
+
+@needs_venv
 class StubbedHarness(unittest.TestCase):
     """The stubbed harness's whole trial (test_exp12_load's LoadStub), its records and logs read by the analysis."""
 
