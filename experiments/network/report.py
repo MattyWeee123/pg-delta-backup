@@ -45,6 +45,16 @@ of the bytes; their `total_s` can understate by about that time.
 pgdelta_direct* has no such gap: its receiver start and transfer are one
 timed phase.
 
+T2's arms (EXP-11) are in the same tables: the pg_basebackup arms (full_*),
+probackup* (catchup, then a timed sync -f of the output) and parcopy*, each one
+timed phase. The extension's runs count with the main block's at the
+unthrottled link, as EXP-11 compares them; the warm-source block's runs, whose
+source cache was not dropped, are rows of their own, 'METHOD (warm source)'.
+The phase table adds their own timers (pg_basebackup's --verbose lines,
+pg_probackup's, parcopy's) and the time above link time. Runs that failed
+EXP-11's durability checks are listed; their status is their verification's.
+analysis/exp11.py judges EXP-11's predictions and rules.
+
 Ratios are computed from the medians and rounded only for display; "faster"
 compares the medians themselves.
 """
@@ -64,17 +74,31 @@ NUMERIC = ('fraction', 'target_gbit', 'measured_s2d_gbit', 'measured_d2s_gbit', 
            'hash_basis_s', 'wire_s2d_bytes', 'wire_d2s_bytes', 'cpu_source_s', 'cpu_dest_s',
            'combine_s', 'restore_s', 'untimed_setup_s', 'rebuild_s', 'fsync_s', 'fsync_wait_s',
            'verify_wait_s', 'output_start_s', 'recovery_wire_s2d_bytes', 'recovery_wire_d2s_bytes',
-           'recovery_wal_files', 'output_shared_bytes')
+           'recovery_wal_files', 'output_shared_bytes',
+           # T2 (EXP-11)
+           'measured_s2d_gbit_8streams', 'dirty_increase_mb', 'disk_write_dest_bytes', 'disk_read_dest_bytes',
+           'pbb_checkpoint_s', 'pbb_stream_s', 'pbb_wal_end_s', 'pbb_sync_s', 'pbb_manifest_s',
+           'backup_mode_adder_s', 'probackup_sync_s', 'probackup_copy_s', 'probackup_stop_s',
+           'probackup_files_sync_s', 'parcopy_streams', 'parcopy_max_stream_bytes', 'parcopy_balance',
+           'parcopy_first_byte_s', 'parcopy_last_byte_s', 'parcopy_write_s', 'parcopy_fsync_s',
+           'parcopy_fsync_calls', 'parcopy_fsync_expected', 'usable_s', 'link_time_s', 'above_link_s',
+           'sysctl_dirty_background_bytes', 'sysctl_dirty_background_ratio')
 DELTA_METHODS = ('incremental', 'pgdelta', 'pgdelta_1thread', 'rsync_8k', 'rsync_default',
                  'pgdelta_gapfill_seq', 'pgdelta_seq', 'pgdelta_fsync_wb', 'pgdelta_fsync_worker',
                  'pgdelta_inplace', 'incremental_cfr', 'pgdelta_direct', 'pgdelta_direct_inplace',
-                 'pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
+                 'pgdelta_direct_inplace_j8', 'pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
 # The median phase table: timed phases (and parts) in the order they run, then pgdelta's own
-# timers for its write phase, which lie inside its transfer, then the total.
+# timers for its write phase, which lie inside its transfer, then T2's tools' own timers inside
+# their one phase (pg_basebackup's --verbose lines, pg_probackup's lines and its timed sync -f,
+# parcopy's receiver), then the total and, for T2, its part above link time.
 PHASE_COLUMNS = ('receiver_start_s', 'capture_s', 'prep_s', 'transfer_s', 'combine_s', 'restore_s',
-                 'rebuild_s', 'fsync_s', 'fsync_wait_s', 'verify_wait_s', 'total_s')
+                 'rebuild_s', 'fsync_s', 'fsync_wait_s', 'verify_wait_s',
+                 'pbb_checkpoint_s', 'pbb_stream_s', 'pbb_wal_end_s', 'pbb_sync_s', 'pbb_manifest_s',
+                 'probackup_copy_s', 'probackup_stop_s', 'probackup_files_sync_s', 'probackup_sync_s',
+                 'parcopy_last_byte_s', 'parcopy_fsync_s', 'total_s', 'above_link_s')
 IN_PLACE = ' (in place)'
 SERIAL = ' (serial)'
+WARM_SOURCE = ' (warm source)'  # T2's warm-source block: rows of their own
 # (column, heading)
 VIEWS = (
     ('total_s',
@@ -190,7 +214,19 @@ def _tables(table, speeds, trial_id, methods) -> list[str]:
     return lines
 
 
+def with_blocks(rows) -> list[dict]:
+    """rows with T2's warm-source runs as 'METHOD (warm source)' rows, apart from the cold ones.
+
+    The source's cache was read, not dropped, before those runs (EXP-11's warm-source block), so they
+    are not pooled with the same arm's unthrottled runs. The extension's runs stay pooled with the
+    main block's, as EXP-11 compares them outside the warm-source block.
+    """
+    return [{**row, 'method': row['method'] + WARM_SOURCE} if row.get('block') == 'warm_source' else row
+            for row in rows]
+
+
 def render(rows: list[dict]) -> str:
+    rows = with_blocks(rows)
     expanded = with_in_place(rows)
     speeds = speed_order(rows)
     methods = sorted({row['method'] for row in expanded})
@@ -203,7 +239,10 @@ def render(rows: list[dict]) -> str:
              "'(in place)' rows are rsync without its copy of B0 (`inplace_total_s`), a lower "
              'bound for patching B0 directly. pgdelta_inplace and pgbackrest_* patch B, a copy of '
              'B0 made before the timers; pgdelta_direct* is receiver start + transfer, with no '
-             'capture; pgbackrest_* is the restore alone, its backup counted as already paid.', '']
+             'capture; pgbackrest_* is the restore alone, its backup counted as already paid.'
+             + (" T2's arms are one timed phase each; '(warm source)' rows are EXP-11's warm-source "
+                'block, whose source cache was read rather than dropped.'
+                if any(row.get('block') for row in rows) else ''), '']
     for trial_id in sorted({row['trial_id'] for row in rows}):
         lines += [f'## {trial_id}', '']
         for index, (column, heading) in enumerate(VIEWS):
@@ -217,6 +256,7 @@ def render(rows: list[dict]) -> str:
             lines.append('')
         lines += phase_table(rows, speeds, trial_id)
     lines += untimed_prefetch(rows)
+    lines += durability(rows)
     failed = [row for row in rows if row.get('status') != 'pass']
     if failed:
         lines += [f'{len(failed)} run(s) did not pass and are left out:', '']
@@ -230,13 +270,19 @@ def phase_table(rows, speeds, trial_id) -> list[str]:
     passing = [row for row in rows if row['trial_id'] == trial_id and row.get('status') == 'pass']
     columns = [column for column in PHASE_COLUMNS
                if any(row.get(column) is not None for row in passing)]
-    if not passing or columns == ['total_s']:
+    if not passing or set(columns) <= {'total_s', 'above_link_s'}:
         return []
     groups: dict = {}
     for row in passing:
         groups.setdefault((row['method'], row['speed']), []).append(row)
+    t2 = any(column.startswith(('pbb_', 'probackup_', 'parcopy_')) or column == 'above_link_s'
+             for column in columns)
     lines = ['Median timed phases, seconds (passing runs). `rebuild_s`, `fsync_s`, `fsync_wait_s` and '
-             "`verify_wait_s` are pgdelta's own timers, inside its transfer:", '',
+             "`verify_wait_s` are pgdelta's own timers, inside its transfer"
+             + ("; `pbb_*`, `probackup_*` and `parcopy_*` are T2's tools' own, inside their one phase "
+                '(`probackup_sync_s` is its timed sync -f of the output, a step of that phase); '
+                '`above_link_s` is `total_s` minus the wire bytes at the measured rate (8 streams for the '
+                'parallel arms)' if t2 else '') + ':', '',
              '| method | speed | runs | ' + ' | '.join(columns) + ' |',
              '|---|---|---|' + '---|' * len(columns)]
     order = {speed: index for index, speed in enumerate(speeds)}
@@ -247,6 +293,34 @@ def phase_table(rows, speeds, trial_id) -> list[str]:
             values = [row[column] for row in group if row.get(column) is not None]
             cells.append(f'{statistics.median(values):.2f}' if values else '')
         lines.append(f'| {method} | {speed} | {len(group)} | ' + ' | '.join(cells) + ' |')
+    return lines + ['']
+
+
+def durability(rows) -> list[str]:
+    """T2 (EXP-11): runs whose durability checks (a) and (b) failed; their status is their verification's.
+
+    The negative control (full_nosync, not durable) is meant to fail them, and is counted apart.
+    """
+    checked = [row for row in rows if row.get('durability_ok') not in (None, '')]
+    if not checked:
+        return []
+    control = [row for row in checked if str(row.get('durable')) == 'False']
+    failed = [row for row in checked if str(row['durability_ok']) == 'False' and str(row.get('durable')) != 'False']
+    lines = []
+    if control:
+        lines.append(f'The negative control ({", ".join(sorted({row["method"] for row in control}))}, not '
+                     "durable) failed EXP-11's durability checks in "
+                     f'{sum(str(row["durability_ok"]) == "False" for row in control)} of {len(control)} runs.')
+    if not failed:
+        return lines + [f"Every durable arm's run passed EXP-11's durability checks "
+                        f'({len(checked) - len(control)} runs checked).', '']
+    lines += [f"{len(failed)} run(s) of durable arms failed EXP-11's durability checks ((a): dest's Dirty + "
+              "Writeback increase; (b): dest's disk writes against the output); their status is their "
+              "verification's, and analysis/exp11.py leaves them out (A5):", '']
+    for row in failed:
+        increase = row.get('dirty_increase_mb')
+        lines.append(f'- {row["trial_id"]} r{row.get("repeat", "?")} {row["speed"]} {row["method"]}'
+                     + ('' if increase is None else f': Dirty + Writeback up {increase:.1f} MB'))
     return lines + ['']
 
 
