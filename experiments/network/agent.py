@@ -323,7 +323,7 @@ def cmd_run(args) -> dict:
         process = subprocess.Popen(launch, stdout=subprocess.PIPE if tee else stream, stderr=subprocess.STDOUT,
                                    stdin=subprocess.DEVNULL, cwd=args.cwd or None, env=env,
                                    start_new_session=bool(timeout))
-        timer = None
+        timer, done = None, threading.Event()
         if timeout:
             def expire():
                 expired.append(time.monotonic() - started)
@@ -335,7 +335,6 @@ def cmd_run(args) -> dict:
                     if grace and done.wait(grace):
                         return
 
-            done = threading.Event()
             timer = threading.Timer(timeout, expire)
             timer.daemon = True
             timer.start()

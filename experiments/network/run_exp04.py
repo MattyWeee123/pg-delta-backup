@@ -3006,6 +3006,7 @@ class Orchestrator:
             record['traceback'] = traceback.format_exc()
             log(f'  ERROR {record["error"]}')
         finally:
+            self.run_limit_s = self.run_deadline = None  # A15's bound ends with the run's clock, whatever happened
             if self.t12:
                 # EXP-13: samplers and stunnels a failure left running are stopped, and the run's network checks
                 # recorded whatever happened (A11 (ii)).
@@ -3052,7 +3053,6 @@ class Orchestrator:
                     record['cleanup_error'] = str(exc)
         self.log_prefix = ''
         self.current_run = None
-        self.run_limit_s = self.run_deadline = None
         record['finished_utc'] = utc_now()
         totals = record.get('totals') or {}
         log(f'  {record["status"]}: {totals.get("wall_seconds")} s, '
@@ -5506,7 +5506,7 @@ class Orchestrator:
                     for vm, values in found.items()}
         if any(problems.values()):
             raise SystemExit("EXP-13's default host setting is Debian's TCP settings, and these VMs have others: "
-                             + '; '.join(f'{vm}: {", ".join(found)}' for vm, found in problems.items() if found)
+                             + '; '.join(f'{vm}: {", ".join(items)}' for vm, items in problems.items() if items)
                              + '. Set them back first (sudo sysctl -w '
                              + ' '.join(f"{name}='{' '.join(map(str, values))}'"
                                         for name, values in measure.DEBIAN_TCP_MEM.items()) + ' on both VMs)')
