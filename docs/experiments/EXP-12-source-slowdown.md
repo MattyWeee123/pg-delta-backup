@@ -581,6 +581,16 @@ Five invocations on two new VMs (`us-central1-a`, PostgreSQL 17.11 on both, crea
 15. **The time projection:** 96 minutes for the 117 runs at this session's median run times, and with the budget's fixed parts, 3.45 hours against the 3.5-hour cut line, so **no cut** (as the dated readings above define the projection, with the budget's 60 minutes for the smoke run). The smoke run itself took about 81 minutes, with the chrony and sampler repeats, so the session will run about 20 minutes over that projection.
 16. **`analysis/exp12.py`** ran end to end on every smoke sweep, writing only to a scratch directory.
 
+**Drift over the session (October 24, 19:46 UTC: written during the sweep, before its logs were fetched or any of its numbers read)**
+
+Smoke item 14's registered action wasn't taken. What it guards, a load that behaves the same all session, is judged on the sweep by this check, fixed before the sweep's data is read. Until now only the harness's progress lines had been seen: run names and times, block boundaries, and the busy load's commit count at its end.
+
+- **What it reads.** Each loaded run's settle, the load-only span before its window, as `analysis/exp12.py` reports it: its p50 and p99. The busy load is one load run across the busy and warm blocks; the moderate load spans the moderate block.
+- **The comparison.** For the busy load, the median p50 and the median p99 over the busy block's first repeat's 14 settles (its earliest load-only time) against those over the warm block's 10 settles (its latest). For the moderate load, its first repeat's 6 settles against its third repeat's 6.
+- **Drift,** in a load, if the later median p50 is more than 10% above the earlier, or the later median p99 more than twice the earlier. The 10%: the smoke's copy-free minutes held their p50 at 0.69–0.75 ms, within ±4%. The factor 2 is the settle gate's own (a settle's p99 at most twice its warm-up's).
+- **Reported beside, not judged:** the same two medians for every repeat; a per-minute view over each whole load (completions, p50 and p99, the copy windows marked); `load_progress`'s and `pgbench_accounts`' sizes at the trial's start and end; the settle gate's passes per repeat.
+- **What follows.** No drift: the session stands, and smoke item 14's deviation is reported as it is. A load that drifted: comparisons within a block stand, flagged, since each repeat visits the speeds in a shuffled order and runs the arms at each speed in a shuffled order. Comparisons that span the drift (busy against warm if the busy load drifted; busy against moderate if either did) are reported as "not judged: drift". A rerun would then be proposed, with a fix aimed at `load_progress` registered before it, for the project owner to decide. Nothing is rerun in this session (A11).
+
 ## How the two drafts were merged
 
 The first version's choices. Where the review changed one, the row says so.
