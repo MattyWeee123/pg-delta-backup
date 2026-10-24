@@ -1534,9 +1534,10 @@ def parcopy_args(method: str) -> dict:
 def parcopy_summary(stats) -> dict:
     """The CSV's parcopy_* columns from the receiver's --stats-json.
 
-    Expected shape: {'streams': [{'bytes', 'first_byte_s', 'last_byte_s', 'write_s'}, ...],
+    Expected shape: {'listening_s', 'streams': [{'bytes', 'first_byte_s', 'last_byte_s', 'write_s'}, ...],
     'fsync_s' (the fsync tail), 'fsync_calls', 'fsync_expected'}; missing keys leave columns None.
-    balance is the busiest stream's bytes over the mean (EXP-11's A3: at most 1.1).
+    Times are seconds since the receiver started; the transfer step starts once it is listening
+    (listening_s). balance is the busiest stream's bytes over the mean (EXP-11's A3: at most 1.1).
     """
     stats = stats if isinstance(stats, dict) else {}
     streams = [stream for stream in stats.get('streams') or () if isinstance(stream, dict)]
@@ -1551,6 +1552,7 @@ def parcopy_summary(stats) -> dict:
     return {'streams': len(streams) or None, 'bytes': sum(sizes) if sizes else None,
             'max_stream_bytes': max(sizes) if sizes else None,
             'balance': round(max(sizes) / mean, 4) if sizes and mean else None,
+            'listening_s': stats.get('listening_s'),
             'first_byte_s': extreme('first_byte_s', min), 'last_byte_s': extreme('last_byte_s', max),
             'write_s': extreme('write_s', max), 'fsync_s': stats.get('fsync_s'),
             'fsync_calls': calls, 'fsync_expected': expected,
@@ -1724,7 +1726,7 @@ CSV_FIELDS = (
     'disk_write_dest_bytes', 'disk_read_dest_bytes',
     'pbb_checkpoint_s', 'pbb_stream_s', 'pbb_wal_end_s', 'pbb_sync_s', 'pbb_manifest_s', 'backup_mode_adder_s',
     'probackup_sync_s', 'probackup_copy_s', 'probackup_stop_s', 'probackup_files_sync_s',
-    'parcopy_streams', 'parcopy_max_stream_bytes', 'parcopy_balance', 'parcopy_first_byte_s',
+    'parcopy_streams', 'parcopy_max_stream_bytes', 'parcopy_balance', 'parcopy_listening_s', 'parcopy_first_byte_s',
     'parcopy_last_byte_s', 'parcopy_write_s', 'parcopy_fsync_s', 'parcopy_fsync_calls', 'parcopy_fsync_expected',
     'usable_s', 'void', 'bytes_identical', 'measured_s2d_gbit_8streams', 'link_time_s', 'above_link_s',
     'sysctl_dirty_background_bytes', 'sysctl_dirty_background_ratio',
@@ -1925,10 +1927,12 @@ def summary_row(record: dict) -> dict:
         'probackup_copy_s': probackup.get('copy_s'),
         'probackup_stop_s': probackup.get('stop_s'),
         'probackup_files_sync_s': probackup.get('files_sync_s'),
-        # parcopy*: its receiver's own timers (parcopy_summary).
+        # parcopy*: its receiver's own timers (parcopy_summary), in seconds since it started; the
+        # transfer step starts once it listens (parcopy_listening_s).
         'parcopy_streams': parcopy.get('streams'),
         'parcopy_max_stream_bytes': parcopy.get('max_stream_bytes'),
         'parcopy_balance': parcopy.get('balance'),
+        'parcopy_listening_s': parcopy.get('listening_s'),
         'parcopy_first_byte_s': parcopy.get('first_byte_s'),
         'parcopy_last_byte_s': parcopy.get('last_byte_s'),
         'parcopy_write_s': parcopy.get('write_s'),

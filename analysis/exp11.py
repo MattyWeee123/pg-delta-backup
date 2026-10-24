@@ -94,8 +94,8 @@ NUMERIC = ('order_index', 'target_gbit', 'measured_s2d_gbit', 'measured_s2d_gbit
            'dirty_increase_mb', 'disk_write_dest_bytes', 'disk_read_dest_bytes', 'pbb_checkpoint_s',
            'pbb_stream_s', 'pbb_wal_end_s', 'pbb_sync_s', 'pbb_manifest_s', 'backup_mode_adder_s',
            'probackup_sync_s', 'probackup_copy_s', 'probackup_stop_s', 'probackup_files_sync_s',
-           'parcopy_streams', 'parcopy_max_stream_bytes', 'parcopy_balance', 'parcopy_first_byte_s',
-           'parcopy_last_byte_s', 'parcopy_write_s', 'parcopy_fsync_s', 'parcopy_fsync_calls',
+           'parcopy_streams', 'parcopy_max_stream_bytes', 'parcopy_balance', 'parcopy_listening_s',
+           'parcopy_first_byte_s', 'parcopy_last_byte_s', 'parcopy_write_s', 'parcopy_fsync_s', 'parcopy_fsync_calls',
            'parcopy_fsync_expected', 'usable_s', 'output_start_s', 'link_time_s', 'above_link_s',
            'sysctl_dirty_background_bytes', 'sysctl_dirty_background_ratio')
 KEEP = ['sweep', 'trial_id', 'pattern', 'speed', 'method', 'repeat', 'block', 'source_cache', 'tier', 'status',
@@ -105,8 +105,8 @@ KEEP = ['sweep', 'trial_id', 'pattern', 'speed', 'method', 'repeat', 'block', 's
         'dirty_limit_bytes', 'disk_write_dest_bytes', 'pbb_start_s', 'pbb_checkpoint_s', 'pbb_stream_s',
         'pbb_wal_end_s', 'pbb_sync_s', 'pbb_manifest_s', 'backup_mode_adder_s', 'probackup_start_s',
         'probackup_copy_s', 'probackup_stop_s', 'probackup_files_sync_s', 'probackup_sync_s', 'parcopy_streams',
-        'parcopy_balance', 'parcopy_first_byte_s', 'parcopy_last_byte_s', 'parcopy_write_s', 'parcopy_fsync_s',
-        'parcopy_fsync_calls', 'parcopy_fsync_expected', 'receiver_start_s', 'transfer_s', 'rebuild_s', 'fsync_s',
+        'parcopy_balance', 'parcopy_listening_s', 'parcopy_first_byte_s', 'parcopy_last_byte_s', 'parcopy_write_s',
+        'parcopy_fsync_s', 'parcopy_fsync_calls', 'parcopy_fsync_expected', 'fsync_ok', 'receiver_start_s', 'transfer_s', 'rebuild_s', 'fsync_s',
         'verify_wait_s', 'logical_match', 'bytes_identical', 'sysctl_dirty_background_bytes',
         'sysctl_dirty_background_ratio', 'error']
 CELL_COLUMNS = ('total_s', 'total_no_ssh_s', 'usable_s', 'above_link_s', 'link_time_s', 'measured_s2d_gbit',
@@ -206,8 +206,9 @@ def b_check(row):
 
 def from_record(record, row, run):
     """What a run's record adds to its summary row: checks (a) and (b) apart, the raw Dirty +
-    Writeback increase and its limit (both recomputed from the summary without a record), and the
-    launch and exit of pg_basebackup's and pg_probackup's own phases."""
+    Writeback increase and its limit (both recomputed from the summary without a record), parcopy's
+    fsync count (A5) apart from check (a), and the launch and exit of pg_basebackup's and
+    pg_probackup's own phases."""
     durability = record.get('durability') or {}
     reported = record.get('tool_reported') or {}
     pbb = reported.get('basebackup_phases') or {}
@@ -218,8 +219,15 @@ def from_record(record, row, run):
     limit = durability.get('limit_bytes')
     if limit is None:
         limit = max(measure.DIRTY_LIMIT_BYTES, int(run.get('idle_noise_bytes') or 0))
-    a_ok = durability['a_ok'] if 'a_ok' in durability else (None if increase is None else increase <= limit)
+    # measure.durability_check folds a parcopy run's fsync count into its a_ok; check (a) here is the
+    # Dirty + Writeback increase alone, and the count (the receiver's and the output's) is A5's own.
+    fsync_count = durability.get('fsync_count')
+    if 'a_ok' in durability and fsync_count is None:
+        a_ok = durability['a_ok']
+    else:
+        a_ok = None if increase is None else increase <= limit
     return {'a_ok': a_ok, 'b_ok': durability['b_ok'] if 'b_ok' in durability else b_check(row),
+            'fsync_ok': (fsync_count or {}).get('ok'),
             'dirty_increase_bytes': increase, 'dirty_limit_bytes': limit,
             'pbb_start_s': pbb.get('start_s'), 'probackup_start_s': probackup.get('start_s')}
 
@@ -283,8 +291,10 @@ class Session:
             if r['method'] in measure.FULL_COPY_METHODS:
                 checks['b'] = r['b_ok']
             if r['method'] in measure.PARCOPY_METHODS:
+                # The record's count also checks the output's own (verify_direct); the summary's alone doesn't.
                 calls, expected = r['parcopy_fsync_calls'], r['parcopy_fsync_expected']
-                checks['fsync count'] = None if calls is None or expected is None else calls == expected
+                checks['fsync count'] = (r['fsync_ok'] if r.get('fsync_ok') is not None
+                                         else None if calls is None or expected is None else calls == expected)
             r['durability_failures'] = [name for name, ok in checks.items() if durable and ok is False]
             r['durability_unchecked'] = [name for name, ok in checks.items() if durable and ok is None]
             # Void: the source changed during the trial (its reference digests differ), so a pg_probackup
@@ -1516,8 +1526,9 @@ def phase_parts(run):
     else:  # parcopy* and v1: receiver start, then the transfer split by the tool's own timers
         transfer = z(run['transfer_s'])
         flush = min(z(run['parcopy_fsync_s'] if method in measure.PARCOPY_METHODS else run['fsync_s']), transfer)
-        copy = (min(z(run['parcopy_last_byte_s']), transfer - flush) if method in measure.PARCOPY_METHODS
-                else transfer - flush)
+        # parcopy's times count from its receiver's start; the transfer step starts once it listens.
+        copy = (min(max(0.0, z(run['parcopy_last_byte_s']) - z(run.get('parcopy_listening_s'))), transfer - flush)
+                if method in measure.PARCOPY_METHODS else transfer - flush)
         parts = [z(run['receiver_start_s']), 0.0, copy, flush]
     return parts + [max(0.0, z(run['total_s']) - sum(parts))]
 

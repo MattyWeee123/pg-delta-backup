@@ -713,14 +713,15 @@ class Durability(unittest.TestCase):
 
 PARCOPY_STATS = {'streams': [{'bytes': 1_100_000_000, 'first_byte_s': 0.08, 'last_byte_s': 1.71, 'write_s': 1.2},
                              {'bytes': 1_008_000_000, 'first_byte_s': 0.07, 'last_byte_s': 1.69, 'write_s': 1.1}],
-                 'fsync_s': 0.21, 'fsync_calls': 12, 'fsync_expected': 12}
+                 'fsync_s': 0.21, 'fsync_calls': 12, 'fsync_expected': 12, 'listening_s': 0.05}
 
 
 class ParcopySummary(unittest.TestCase):
     def test_summary_of_the_receivers_stats(self):
         summary = measure.parcopy_summary(PARCOPY_STATS)
         self.assertEqual(summary, {'streams': 2, 'bytes': 2_108_000_000, 'max_stream_bytes': 1_100_000_000,
-                                   'balance': round(1_100_000_000 / 1_054_000_000, 4), 'first_byte_s': 0.07,
+                                   'balance': round(1_100_000_000 / 1_054_000_000, 4), 'listening_s': 0.05,
+                                   'first_byte_s': 0.07,
                                    'last_byte_s': 1.71, 'write_s': 1.2, 'fsync_s': 0.21, 'fsync_calls': 12,
                                    'fsync_expected': 12, 'fsync_ok': True})
         self.assertFalse(measure.parcopy_summary({**PARCOPY_STATS, 'fsync_calls': 11})['fsync_ok'])
