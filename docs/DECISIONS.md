@@ -406,7 +406,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 | done | T11 Incumbents where pgdelta claims its edge | done October 24 ([EXP-08](experiments/EXP-08-incumbent-tools.md)) | about 2 VM hours |
 | done | T8a Cold direct read without a capture | done October 23 ([EXP-09](experiments/EXP-09-direct-read.md)) | shared with T3 |
 | done | T3 Destination write path on Linux | done October 24 ([EXP-10](experiments/EXP-10-write-path.md)) | about 2 VM hours |
-| 1 | T2 Fastest durable full copy (v1's baseline) | what v1 must beat. EXP-09's HA verdict depends on it: against a parallel copy of 2.0-3.0 s, v1's ratio would be 0.90-1.35 | 1 day, about 2 VM hours |
+| 1 | T2 Fastest durable full copy (v1's baseline), pre-registered as [EXP-11](experiments/EXP-11-full-copy-baseline.md) | what v1 must beat. EXP-09's HA verdict depends on it: against a parallel copy of 2.0-3.0 s, v1's ratio would be 0.90-1.35 | about 2.75 days of harness work, about 3.35 VM hours |
 | 2 | T10a Source slowdown, minimal, plus G4 correctness | the owner's bar is `pg_basebackup`'s slowdown (O4): slowdown per source CPU-second, measured on staged pgdelta and projected to v1's 5.3-6.0 CPU-s (against the full copy's 1.6-1.9); v1 gets its own arm once T8 exists | 1 day, about 3 VM hours |
 | 3 | T8 v1 prototype: correctness under load, then speed | v1's design rests on backup-mode reads of a live source: correctness under writes, WAL streaming, real speed | 1-2 weeks, about 4 VM hours |
 | 4 | T13 Verification by fault class | the new bottleneck is the destination's two passes over B; the re-read is one of them | 2-3 days, about 2 VM hours |
@@ -465,6 +465,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 - **Proves it wrong:** if it is slower than the full copy at 5 Gbit/s in all three workloads, fix the write path (T3) before building backup-mode reads.
 
 ### T2 Fastest durable full copy, as v1's baseline
+- **Pre-registered in full as [EXP-11](experiments/EXP-11-full-copy-baseline.md)** (October 24, 2026), revised after two independent reviews and a check of the revision, before any code for it exists. The 4 and 8 streams became `pg_probackup catchup -j 4/8` (a released tool) and a parallel copier built as a bound; the zstd part, with its prediction and rule, moved to T4.
 - **Question:** how fast can a durable full copy go on the same VMs? Arms: single-stream `pg_basebackup` (already measured); the same with `--no-sync`; 4 and 8 parallel flushed streams; and server-side zstd on realistic data (HammerDB TPROC-C, not pgbench, whose padded filler compresses unrealistically).
 - **Predictions:**
   - `--no-sync` removes most of the 1.39-1.55 s the copy spends above link time.
@@ -549,6 +550,7 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 
 ### T4 Offline bytes: units smaller than a page, and compression
 - **Added October 23, 2026 (from EXP-08's pre-registration):** also measure zstd on the changed files of the TPROC-C pairs. pgBackRest restores whole changed files, and EXP-08's I8b expects its zstd variant to send fewer bytes than pgdelta only because pgbench's rows compress unusually well.
+- **Added October 24, 2026 (from EXP-11):** T2's zstd part moved here: T2's prediction "zstd shrinks TPROC-C by at most 1.6 times" and its rule "zstd gives 2 times or more: compression must be added to both sides before claiming slow-link wins" are judged in T4, from offline ratios.
 - **Question:** how many bytes would 512 B to 4 KiB units and zstd save, on pgbench pairs and HammerDB TPROC-C pairs?
 - **Prediction:** 1 KiB units cut bytes at least 2 times for scattered changes. zstd gives at most 1.6 times on TPROC-C.
 - **Proves it wrong:** under 1.5 times for scattered changes stops work on smaller units. Under 1.3 times for zstd keeps compression off.

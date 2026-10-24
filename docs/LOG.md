@@ -3,11 +3,26 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24 (later): T2 pre-registered as EXP-11
+
+**Why T2 next:** EXP-09's HA verdict (v1 at 0.86 of one `pg_basebackup` stream) rests on a single-stream baseline, and rule 3 asks for the fastest durable full copy. T2 measures it.
+
+**How it was designed:** three independent drafts, each from one angle (deployable tools, measurement, risk and scope), merged into one, then reviewed for feasibility and for fairness before any code exists. The reviews found 6 major problems and 15 minor; a check of the revision found 8 more, 2 major. All are answered in [EXP-11](experiments/EXP-11-full-copy-baseline.md)'s "Revisions before running". The ones that change what it can conclude:
+- **`pg_probackup catchup` never flushes its streamed WAL or any directory** (from its source code), so its arm ends with a timed `sync -f`, and a syscall audit checks every arm's flushes.
+- **"Out" is judged against the fastest copy measured,** as EXP-09 registered, not against released tools only, which would have favoured v1.
+- **The HA verdict stays on v1's registered 4-job arm;** v1 at 8 jobs is reported beside it, since the baselines get their best stream count.
+- **The deciding unthrottled cells get 10 runs each.**
+- **The zstd part moves to T4,** offline; it answers a bytes question on another dataset.
+
+**Expected verdict, written down before running:** Out on fast links against the parallel copier built as a bound, with v1 near the 0.9 line against the released tools. Confirmed is out of reach by arithmetic unless the hardware floor is far higher than probed.
+
+**Cost if run:** about 2.75 days of harness work, then about 3.35 hours of the VM pair. Nothing is built or run yet.
+
 ## 2026-10-24 (later): commit history rewritten so the commits link to Matt's GitHub account
 
 **Why:** GitHub showed "Matthew Wei authored and Matthew Wei committed" on most commits, linked to no account. This repository had no `user.email` set, so git used a made-up address from the laptop's hostname, and GitHub can't link an address it can't verify.
 
-**What changed:** the 65 commits with that address (or a second hostname address) now carry Matt's GitHub noreply address, as author and committer, with the committer date set to the author date. Nothing else changed: every commit's files are identical, and teammates' commits keep their own names and addresses. But a commit's ID covers its parents, so 86 of the 91 commits on `main` have new IDs, back to October 9. This repository's git identity is now set, so new commits link too.
+**What changed:** the 65 commits with that address (or a second hostname address) now carry Matt's GitHub noreply address, as author and committer, with the committer date set to the author date. Nothing else changed: every commit's files are identical, and teammates' commits keep their own names and addresses. But a commit's ID covers its parents, so 86 of the 91 commits on `main` have new IDs, back to October 9. This repository's git identity is now set, so new commits link too. At Matt's request, `main` was force-pushed on October 24; GitHub now links every commit on it to an account.
 
 **Where old IDs are quoted:** this log, EXP-08 and EXP-10 now cite the new IDs. Teammates' specs, VALIDATION.md's CI records, the benchmark provenance files and the runs' `run.json` keep the IDs they recorded, since those record what actually ran; [the hash map](archive/2026-10-24-commit-hash-map.csv) gives the new ID for each.
 
