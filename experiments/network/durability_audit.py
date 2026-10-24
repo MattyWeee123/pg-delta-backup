@@ -354,7 +354,9 @@ class Auditor:
             number, _, _ = self.descriptor(call.pid, call.args[0])
             fd = int(call.args[0].split('<', 1)[0])
             self.descriptors.get(call.pid, {}).pop(fd, None)
-            if self.latest.get(fd) == number:
+            # A descriptor the trace never saw opened (inherited from the traced command's parent) has
+            # no number: nothing of ours to forget (found in EXP-11's smoke run on real strace output).
+            if number is not None and self.latest.get(fd) == number:
                 self.latest.pop(fd)
         elif name in OPENS:
             self.open(call)

@@ -230,6 +230,18 @@ class Descriptors(unittest.TestCase):
         self.assertEqual(result['uncovered_directory_change_count'], 0)
         self.assertEqual(result['unmapped_write_count'], 0)
 
+    def test_closing_a_descriptor_the_trace_never_saw_opened(self):
+        # From EXP-11's smoke run: real strace output closes descriptors inherited from the traced
+        # command's parent (here 4 and 7, with and without -y paths), which once raised KeyError.
+        a = f'{OUT}/a'
+        text = trace('close(4</etc/ld.so.cache>) = 0', 'close(7) = 0',
+                     f'openat(AT_FDCWD, "{a}", O_WRONLY|O_CREAT|O_TRUNC, 0600) = 4',
+                     'write(4, "x", 1) = 1', 'fsync(4) = 0', 'close(4) = 0', *directory_fsync(OUT, 5))
+        result = check(text)
+        self.assertTrue(result['ok'], result)
+        self.assertEqual(result['files_written'], 1)
+        self.assertEqual(result['unmapped_write_count'], 0)
+
     def test_a_thread_writes_through_a_descriptor_another_opened(self):
         path = f'{OUT}/base/1/1259'
         text = trace((4242, f'openat(AT_FDCWD, "{path}", O_WRONLY|O_CREAT, 0600) = 5'),
