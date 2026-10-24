@@ -3,26 +3,31 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
-## 2026-10-24 (later): two more rechecks; EXP-10's verdict on (b) corrected
+## 2026-10-24 (later): four more rechecks; EXP-10's verdict on (b) corrected
 
-**Why:** the first rechecks ran before EXP-10's XFS arm and the write-back rerun existed, and before the ledger, README and index were updated. So a second independent recheck covered those, against the raw sweeps and the write-ups.
+**Why:** the first rechecks ran before EXP-10's XFS arm and the write-back rerun existed, and before the ledger, README and index were updated. So a second independent recheck covered those, against the raw sweeps and the write-ups. Each round of corrections was then checked again, because a correction can itself be wrong, and twice one was.
 
-**Found:** 21 problems, 4 major, corrected in commit bdd61c9:
+**Second recheck:** 21 problems, 4 major, corrected in commit bdd61c9:
 - **(b) was judged against its registration.** I had compared the rerun's fsync thread with the rerun's baseline and called (b) held for local changes. The dated note allowed the rerun to replace only the write-back measurement. Judged that way, (b) failed in all three workloads (the better alternative saves 0.68, 0.99 and 0.996 s). The rule's outcome is unchanged: the fsync moves to a thread. For local changes the saving sits on the 1.0 s line in every way of counting it (0.99–1.04 s).
 - **The summaries had dropped caveats** that the write-ups keep: pgdelta ran in staged mode in T11, so its edge over `pg_probackup` is not yet shown from a live server; v1's 2.7 s was on a stopped source, and T2's registered prediction would reverse it.
 - **Two grades:** D53 (copy-then-patch) goes from A to B, since it ties gap-fill and its XFS advantage is inferred; D87 duplicated D58 and is folded into it. The October 24 scorecard is now 6 A, 6 B, 5 C, 12 D, 3 X and 3 moot.
 - **EXP-10 now reports the verifier's wait,** as its revision required.
 - **One queue,** not two that disagreed, and a section for T11b.
 
-**Then a third check, of those corrections themselves,** found that one of them was wrong (2 major, 15 minor, all now corrected):
-- **My explanation of the clone result was wrong.** I had written that about half of the write phase's saving on XFS comes back as the verifier reading cloned pages from disk. For local changes the write phase falls 2.8 s and the transfer only 1.4 s. Of the 1.4 s that doesn't reach the transfer, about half is the main loop's final wait for the verifier and half is untimed waiting for the sender.
+**Third check, of those corrections** (2 major, 15 minor; commit 49e0102):
+- **My first explanation of the clone result was wrong.** I had written that about half of the write phase's saving on XFS comes back as the verifier reading cloned pages from disk. For local changes the write phase falls 2.8 s and the transfer only 1.4 s; the final wait for the verifier is only about half of the 1.4 s that doesn't reach the transfer. I replaced it with an explanation the fourth check then rejected (below).
 - **The README listed two risks to v1's HA result** where EXP-09 names four (T2, T8, beyond RAM, persistent disks).
-- **D01 goes back to C:** its positioning against the incumbents was never measured from a live server, which is T8's. D02's pg_rewind half is split off as D02b (C).
-- Also: the figure now compares the ext4 new-copy arms within one sweep; the summaries give pgBackRest's registered time-rule outcome; stale passages in the ledger carry dated notes; T10a, T9 and T11b say what they can and can't measure.
+- **D01 goes back to C:** its positioning against the incumbents was never measured from a live server, which is T8's. D02's A was scoped to the incremental hand-off.
+- Also: the figure compares the ext4 new-copy arms within one sweep; the summaries give pgBackRest's registered time-rule outcome; stale passages in the ledger carry dated notes.
 
-**And a fourth check, of the third round's fixes,** found my replacement explanation still claimed more than the timers show (2 major in EXP-10, 4 in the ledger, 11 minor; all now corrected):
-- **The timers can't say why the main loop waits.** No timer counts disk reads, and the untimed part has no breakdown. EXP-10 now reports what they do show: the final wait for the verifier and the untimed wait both grow, the background hashing and verifying take longer, and in place on ext4, with no clones, shows most of the same growth. Against in place on XFS, a new copy's final wait is 0.13–0.18 s longer, which bounds what verifying uncached cloned pages could cost.
-- **Ledger:** D02's pg_rewind half becomes its own row, D02b (C); the T9 persistent-disk note predicted the wrong direction (both methods move 2.1 GB through the disk, so the ratio should rise toward 1.0); T11b's arms now bracket the crossing it reports; T10a judges slowdown per source CPU-second; three dates corrected (arm (e) ran October 23).
+**Fourth check, of the third round's fixes** (6 major, 11 minor; commit 7c33cfc):
+- **My second explanation still claimed more than the timers show.** It said the extra waiting was mostly hashing B, and that in place's similar wait showed reading cloned pages adds only 0.13–0.18 s. No timer counts disk reads, and the untimed part has no breakdown. EXP-10 now reports only what the timers show: the final wait for the verifier and the untimed time both grow, the background hashing and verifying take longer, and in place on ext4, with no clones, shows most of the same growth.
+- **Ledger:** D02's pg_rewind half becomes its own row, D02b; the T9 persistent-disk note predicted the wrong direction (both methods move 2.1 GB through the disk, so the ratio should rise toward 1.0); T10a judges slowdown per source CPU-second; three dates corrected (arm (e) ran October 23).
+
+**Fifth check, of the fourth round's fixes** (2 major, 12 minor; corrected in the next commit):
+- **T9's new rule had dropped EXP-09's undecided band** (0.9–1.0) and its "both hot and append" condition; it now uses EXP-09's bands.
+- **This log entry had again presented the 0.12–0.18 s difference in the final wait as a bound** on verifying uncached clones. The final wait only measures the verifier's backlog at the end; its busy time rose 0.20–0.27 s against in place. EXP-10 now says the comparison doesn't measure that cost and suggests a few tenths of a second.
+- Also: D02b graded C for correctness and D for speed; T11b's ages, WAL rate and every outcome made explicit; T10a's "tracks" given a tolerance and its rule a threshold; two ranges re-rounded from raw values (0.12–0.18 s, 0.24–0.25 s); the README's block-incremental tie now notes its recovery time; pgdelta's README separates skipping fsyncs from skipping re-reads.
 
 **Added:** the figure [exp10-xfs-and-rerun](figures/exp10-xfs-and-rerun.svg); the later sweeps' runs as [exp10-later-runs.csv](experiments/data/exp10-later-runs.csv); `exp10_later` now prints the tables and every derived figure EXP-10's later sections cite, with maxima and ranges.
 

@@ -2,7 +2,7 @@
 
 `pgdelta` rebuilds a new copy O of a fresh physical backup S at a destination that already holds an older copy B. Only pages whose keyed hash differs cross the link. Every output file is re-hashed and checked against the source digest before O is published by a single rename.
 
-Three switches added for T3 and T8a change that, each off by default: `--in-place` refreshes B itself instead of building O, `--fsync` moves where files are flushed, and `--source-kind datadir` reads a stopped data directory instead of a backup. See [Switches for T3 and T8a](#switches-for-t3-and-t8a-added-not-yet-measured).
+Three switches added for T3 and T8a change that, each off by default: `--in-place` refreshes B itself instead of building O, `--fsync` moves where files are flushed, and `--source-kind datadir` reads a stopped data directory instead of a backup. See [Switches for T3 and T8a](#switches-for-t3-and-t8a-measured-in-exp-09-and-exp-10).
 
 Python 3.10+, standard library only, POSIX (Linux, macOS). Design: [docs/SPEC.md](../docs/SPEC.md) sections 2 and 4 to 7.
 
@@ -92,7 +92,7 @@ Each switch below can be turned on or off on its own, for [EXP-06](../docs/exper
   - Each worker also exits on its own as soon as its parent process is gone, even after SIGKILL.
 - **Calling pgdelta from Python** with `jobs` above 1 (`run_sender`, `run_receiver`) needs the usual multiprocessing guard in the main module, `if __name__ == '__main__':`. `spawn` and `forkserver` import the main module in every worker. `python -m pgdelta` and `python -m unittest` are already safe.
 
-### Switches for T3 and T8a (measured October 23–24)
+### Switches for T3 and T8a (measured in EXP-09 and EXP-10)
 
 Added for [T3](../docs/DECISIONS.md) arms (b) and (e) and for T8a, after the owner's decisions of October 23, 2026 (O5: B may be patched in place). They were measured in [EXP-09](../docs/experiments/EXP-09-direct-read.md) and [EXP-10](../docs/experiments/EXP-10-write-path.md): in place is v1's chosen default, and the new-copy mode's fsync moves to a thread (D85, D86). The code's defaults still keep v0's behaviour until v1 is built. `local` passes the receiver's switches on to its child receiver.
 
@@ -403,8 +403,8 @@ Byte counts include the 5-byte frame headers, but not TCP/IP overhead. The categ
   - No cross-file matching.
   - No timeouts on a peer that stalls without closing.
 - The HELLO inventory must fit in one 64 MiB frame, which is roughly 700,000 files.
-- By default the fsync of each output file stays in the receiver's main loop, before the file goes to verification. On Linux, flushing a large file can cost more than writing it; `timings_seconds.fsync` shows how much. `--fsync writeback` and `--fsync worker` move it. In EXP-10 the worker saved 0.68–1.00 s and the fixed write-back 0.43–0.98 s; the default stays `main` until v1 is built.
-- In place, every file of S is fsynced and verified, including files no page of which changed. On ext4 an fsync of a clean file can still flush the device's cache; in EXP-10 (e) the whole write phase, fsyncs included, took 0.14 s for local changes, so skipping unchanged files would save little there.
+- By default the fsync of each output file stays in the receiver's main loop, before the file goes to verification. On Linux, flushing a large file can cost more than writing it; `timings_seconds.fsync` shows how much. `--fsync writeback` and `--fsync worker` move it. In the same EXP-10 sweep the worker saved 0.69–1.04 s and the fixed write-back 0.43–0.98 s (the worker saved 0.68–1.00 s in an earlier sweep); the default stays `main` until v1 is built.
+- In place, every file of S is fsynced and verified, including files no page of which changed. On ext4 an fsync of a clean file can still flush the device's cache; in EXP-10 (e) the whole write phase, fsyncs included, took 0.14 s for local changes, so skipping the fsync of unchanged files would save at most about 0.08 s there. Skipping their re-read would change what verification guarantees (ledger D41), and could save up to the 0.65 s final wait for the verifier.
 - `--source-kind datadir` reads only stopped clusters (T8a). Backup mode on a running server, WAL streaming and a `backup_manifest` are v1's (T8).
 - `--source-kind datadir` sends one WAL segment, the one where the shutdown checkpoint record starts. A record that starts in the last hundred or so bytes of a segment continues in the next one, which isn't sent, and that copy would not start (a chance of about 1 in 100,000 per shutdown; never seen in the tests, each of which starts its copy).
 - Verification re-reads O through the page cache, as it always has, so it checks what the kernel will write, not the medium itself.

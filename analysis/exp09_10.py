@@ -460,7 +460,7 @@ def fig_exp10_later(before, xfs, after):
     parts = [('copy from B', COLORS['orange']), ('fsync (incl. waiting for the thread)', COLORS['red']),
              ('other writing (incl. write-back calls), publish or commit', COLORS['purple']),
              ('waiting for verification', COLORS['yellow']),
-             ('untimed: waiting for the sender, start-up', COLORS['sky'])]
+             ('untimed: mostly waiting for the sender', COLORS['sky'])]
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.2), sharex=True)
     seen = set()
     for ax, pattern in zip(axes, PATTERNS):
