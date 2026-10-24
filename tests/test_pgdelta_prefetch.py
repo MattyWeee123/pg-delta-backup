@@ -300,6 +300,7 @@ class ListenerPrefetchTests(unittest.TestCase):
         """Everything but timings, paths and the prefetch's own statistics."""
         stats = copy.deepcopy(stats)
         stats.pop('timings_seconds')
+        stats.pop('protocol_timers')  # EXP-13's, which vary like timings
         receiver = stats.pop('receiver')
         # The final COMPLETE carries the receiver's statistics, whose length varies.
         down = stats['bytes_dest_to_source']
@@ -309,7 +310,8 @@ class ListenerPrefetchTests(unittest.TestCase):
         # files_digest covers the keyed file digests, and the key is new in every run.
         stats.pop('files_digest')
         kept = {key: value for key, value in receiver.items()
-                if not key.endswith('_seconds') and key not in ('prefetch', 'output', 'receipt', 'files_digest')}
+                if not key.endswith('_seconds')
+                and key not in ('prefetch', 'output', 'receipt', 'files_digest', 'protocol_timers')}
         return stats, kept
 
     def test_listen_prefetches_b_and_changes_nothing_but_its_own_statistics(self):

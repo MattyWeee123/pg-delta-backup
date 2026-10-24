@@ -236,13 +236,15 @@ class MethodTables(unittest.TestCase):
         self.assertEqual(measure.HOST_TUNED_METHODS, {'full_wb': {'vm.dirty_background_bytes': 64 * MIB}})
         self.assertEqual(measure.NON_DURABLE_METHODS, ('full_nosync',))
         self.assertEqual(measure.PROBACKUP_VARIANTS, {'probackup8': {'jobs': 8}, 'probackup4': {'jobs': 4}})
-        self.assertEqual(measure.PARCOPY_VARIANTS, {'parcopy8': {'streams': 8}, 'parcopy4': {'streams': 4}})
-        # EXP-12's arms have tiers of their own, in none of EXP-11's envelopes (test_exp12_load).
-        self.assertEqual(set(measure.TIERS) - {'pgdelta', *measure.T10A_METHODS}, set(T2_ARMS))
+        # EXP-13 adds the bound over 16 streams (test_exp13_core).
+        self.assertEqual(measure.PARCOPY_VARIANTS, {'parcopy8': {'streams': 8}, 'parcopy4': {'streams': 4},
+                                                    'parcopy16': {'streams': 16}})
+        # EXP-12's arms have tiers of their own, in none of EXP-11's envelopes (test_exp12_load); so do EXP-13's.
+        self.assertEqual(set(measure.TIERS) - {'pgdelta', *measure.T10A_METHODS, *measure.T12_METHODS}, set(T2_ARMS))
         self.assertEqual({method for method, tier in measure.TIERS.items() if tier in ('omni_today', 'released')},
                          {'full', 'full_syncfs', 'probackup8', 'probackup4'})
         self.assertEqual({method for method, tier in measure.TIERS.items() if tier == 'bound'},
-                         {'parcopy8', 'parcopy4'})
+                         {'parcopy8', 'parcopy4', 'parcopy16'})
         self.assertEqual(measure.TIERS['full_wb'], 'host_tuned')
         self.assertEqual(measure.TIERS['full_nosync'], 'diagnostic')
         # Every new arm is optional; the default sweep is as before.
@@ -254,17 +256,19 @@ class MethodTables(unittest.TestCase):
         self.assertEqual(set(measure.T2_METHODS), set(T2_ARMS) - {'full', 'pgdelta_direct_inplace'})
 
     def test_the_arms_fall_into_their_groups(self):
+        # EXP-13's arms (measure.T12_METHODS: v1's side arms and parcopy16) stop the source as v1 and parcopy do.
         self.assertEqual(set(measure.SOURCE_STOP_METHODS),
                          {'pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', 'parcopy8',
-                          'parcopy4'})
+                          'parcopy4', *measure.T12_METHODS})
         for method in ('full', 'full_nosync', 'full_syncfs', 'full_wb', 'probackup8', 'probackup4', 'parcopy8',
                        'parcopy4', 'pgdelta_direct_inplace_j8'):
             self.assertIn(method, measure.OUTPUT_START_METHODS)
         self.assertNotIn('incremental', measure.OUTPUT_START_METHODS)
         self.assertEqual(set(measure.FULL_COPY_METHODS),
                          {'full', 'full_nosync', 'full_syncfs', 'full_wb', 'probackup8', 'probackup4', 'parcopy8',
-                          'parcopy4'})
-        self.assertEqual(set(measure.MULTI_STREAM_METHODS), {'probackup8', 'probackup4', 'parcopy8', 'parcopy4'})
+                          'parcopy4', 'parcopy16'})
+        self.assertEqual(set(measure.MULTI_STREAM_METHODS), {'probackup8', 'probackup4', 'parcopy8', 'parcopy4',
+                                                             'parcopy16'})
         for method in measure.FULL_VARIANTS:
             self.assertEqual(measure.PROC_SCOPE[method], measure.PROC_SCOPE['full'])
         for method in (*measure.PROBACKUP_METHODS, *measure.PARCOPY_METHODS):
@@ -278,8 +282,9 @@ class MethodTables(unittest.TestCase):
         engines = measure.PGDELTA_ENGINES
         four, eight = engines['pgdelta_direct_inplace'], engines['pgdelta_direct_inplace_j8']
         self.assertEqual(eight, {**four, 'jobs': 8})
+        # EXP-13 pins the request window both have always had (--window 4, today's default).
         self.assertEqual(measure.PGDELTA_ARGS['pgdelta_direct_inplace_j8'],
-                         {'send': ('--jobs', '8', '--source-kind', 'datadir'),
+                         {'send': ('--jobs', '8', '--source-kind', 'datadir', '--window', '4'),
                           'receive': ('--jobs', '8', '--verify', 'pipelined', '--prefetch-basis', 'on', '--fsync',
                                       'main', '--in-place')})
         self.assertEqual(measure.pgdelta_switches(eight)['receiver']['jobs'], 8)
@@ -333,7 +338,8 @@ class CommandLines(Clocked):
 
     def test_run_json_method_flags_carry_each_new_arms_full_command_line(self):
         orchestrator = self.orchestrator()
-        flags = {method: orchestrator.method_flags(method) for method in T2_ARMS}
+        # EXP-13's parcopy16 among the parcopy arms below.
+        flags = {method: orchestrator.method_flags(method) for method in (*T2_ARMS, 'parcopy16')}
         for method in measure.FULL_VARIANTS:
             self.assertEqual(flags[method]['argv'],
                              [str(part) for part in orchestrator.full_argv(method, orchestrator.method_paths(method))])
@@ -443,7 +449,7 @@ class RunJson(Clocked):
                          ['catchup', '-b', 'FULL', '--stream', '--temp-slot', '-j', '8'])
         self.assertIn('--streams', run['method_flags']['parcopy4']['send_argv'])
         self.assertEqual(run['method_flags']['pgdelta_direct_inplace_j8']['send'], ['--jobs', '8', '--source-kind',
-                                                                                     'datadir'])
+                                                                                     'datadir', '--window', '4'])
         self.assertTrue(run['t2'])
         self.assertEqual(run['blocks']['extension'], {'repeats': 5, 'methods': ['full', 'probackup8',
                                                                                'pgdelta_direct_inplace'],

@@ -128,8 +128,9 @@ class BaselineChoice(unittest.TestCase):
     def test_the_envelopes_admit_arms_by_tier(self):
         self.assertEqual(set(exp11.envelope_arms('B_rel')),
                          {'full', 'full_syncfs', 'probackup8', 'probackup4'})
+        # EXP-13's parcopy16 is a bound too; no EXP-11 run has it.
         self.assertEqual(set(exp11.envelope_arms('B_fast')),
-                         {'full', 'full_syncfs', 'probackup8', 'probackup4', 'parcopy8', 'parcopy4'})
+                         {'full', 'full_syncfs', 'probackup8', 'probackup4', 'parcopy8', 'parcopy4', 'parcopy16'})
         self.assertEqual(set(exp11.envelope_arms('B_tuned')) - set(exp11.envelope_arms('B_fast')), {'full_wb'})
         self.assertEqual(exp11.envelope_arms('F0'), ['full'])
         # Matched parallelism: at most 4 streams, as v1 at 4 jobs.

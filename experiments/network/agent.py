@@ -49,6 +49,28 @@ EXP-12 (T10a), the source's slowdown under a fixed-rate load:
     agent.py compress DIR                  zstd of every file below DIR (the load's logs)
     agent.py run --tee ...                 the command's output copied to stdout as it arrives
 
+EXP-13 (T12), latency and transport:
+
+    agent.py wan apply 2000mbit 30 --peer IP --control-port 2222 --iface ens4
+                                           infra/gcp/wan.sh (sudo), then the tree as tc shows it;
+                                           wan off | show | commands (its tc lines, a dry run)
+    agent.py ping-check IP --count 20 --interval 0.05
+                                           pings as root: each round trip, the minimum and median
+    agent.py tcp-metrics-flush             ip tcp_metrics flush all (sudo), then what is still listed
+    agent.py net-sampler start|stop|run --out DIR [--peer IP --exclude-port 2222] [--qdisc-iface ens4]
+                                           every 0.5 s, `ss -tin` of the sockets to the peer and the
+                                           tree's qdisc counters; stop summarises them
+    agent.py ssh-probe --host IP --user U --key K --port 22
+                                           one SSH channel carrying cat /dev/zero for 6 s: its rate
+    agent.py tls-material --dir DIR        a per-session CA and the stunnel pair's certificates
+    agent.py stunnel start|stop --name N --dir DIR --log FILE [--config FILE --port P]
+                                           one end of the stunnel pair; stop reads its log
+    agent.py stale-processes --kill        network samplers and stunnels an interrupted run left
+    agent.py run --timeout SECONDS ...     the command stopped once it has run that long (A15)
+    agent.py snapshot --tcp --qdisc        and nstat's TCP counters and the tree's qdisc counters
+    agent.py blast-recv/blast-send         each records per-second byte counts and each stream's
+                                           TCP connect time (--after-connect: seconds from it)
+
 Standard library only; runs with the system python3 on Debian 12.
 """
 from __future__ import annotations
@@ -56,10 +78,13 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import json
+import math
 import os
 from pathlib import Path
 import platform
+import re
 import resource
+import select
 import shutil
 import signal
 import socket
@@ -98,6 +123,15 @@ SAMPLER_RESCAN = 1.0
 SAMPLER_FLUSH = 1.0
 SAMPLER_FILES = {'samples': 'sampler.jsonl', 'sql': 'sampler-sql.jsonl', 'pid': 'sampler.pid',
                  'final': 'sampler-final.json', 'log': 'sampler.log'}
+# EXP-13 (T12): the emulated WAN (infra/gcp/wan.sh), the network sampler's files, and stunnel (Debian's
+# stunnel4 package).
+WAN_SCRIPT = REPO_ROOT / 'infra' / 'gcp' / 'wan.sh'
+NET_SAMPLER_FILES = {'samples': 'net-samples.jsonl', 'pid': 'net-sampler.pid', 'final': 'net-sampler-final.json',
+                     'log': 'net-sampler.log'}
+STUNNEL = '/usr/bin/stunnel4'
+STUNNEL_START_TIMEOUT = 15
+RUN_KILL_GRACE = 10  # run --timeout: seconds from SIGTERM to SIGKILL
+SSH_PROBE_CIPHER = 'aes128-gcm@openssh.com'  # EXP-11's pg_probackup's (measure.PROBACKUP_SSH_OPTIONS)
 
 
 def emit(value) -> None:
@@ -130,7 +164,12 @@ def metadata(key: str) -> str | None:
 
 
 def cmd_snapshot(args) -> dict:
-    return measure.snapshot(args.iface)
+    """measure.snapshot; T12 (EXP-13) adds nstat's TCP counters (--tcp) and the emulated WAN's qdisc counters
+    from the same `tc -s -j` reading (--qdisc; qdisc_counters)."""
+    result = measure.snapshot(args.iface, tcp=getattr(args, 'tcp', False))
+    if getattr(args, 'qdisc', False):
+        result['qdisc'] = qdisc_counters(args.iface)
+    return result
 
 
 def cmd_iface(args) -> dict:
@@ -202,7 +241,30 @@ def cmd_env(args) -> dict:
         'zstd': (text_of(['zstd', '--version']) or '').split('\n')[0] or None,
         'fincore': (text_of(['fincore', '--version']) or '').split('\n')[0] or None,
         'shm': text_of(['findmnt', '-n', '-o', 'SOURCE,FSTYPE,OPTIONS,SIZE', '/dev/shm']),
+        # EXP-13 (T12): every TCP setting a condition leaves alone, the default qdisc, and the transports' tools
+        # (ssh -V and stunnel -version print to stderr).
+        'tcp_adv_win_scale': read('/proc/sys/net/ipv4/tcp_adv_win_scale'),
+        'tcp_slow_start_after_idle': read('/proc/sys/net/ipv4/tcp_slow_start_after_idle'),
+        'tcp_sysctls': {name: read(sysctl_path(name)) for name in measure.TCP_SYSCTLS},
+        'default_qdisc': read('/proc/sys/net/core/default_qdisc'),
+        'openssh': first_line(['ssh', '-V']),
+        'openssl': first_line(['openssl', 'version']),
+        'stunnel': first_line([getattr(args, 'stunnel', STUNNEL), '-version'], marker='stunnel '),
+        'ping': first_line(['ping', '-V']),
     }
+
+
+def first_line(argv, marker: str | None = None) -> str | None:
+    """The first line of a command's output, stdout and stderr together (with `marker`, the first line holding it);
+    None if it can't run."""
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    lines = [line.strip() for line in (result.stdout + '\n' + result.stderr).splitlines() if line.strip()]
+    if marker is not None:
+        lines = [line for line in lines if marker in line]
+    return lines[0] if lines else None
 
 
 def xfs_reflink(text: str | None) -> bool | None:
@@ -253,9 +315,29 @@ def cmd_run(args) -> dict:
     started_utc = time.time()
     started = time.monotonic()
     tee = getattr(args, 'tee', False)
+    timeout = getattr(args, 'timeout', None)
+    expired: list = []
     with open(log, 'wb') as stream:
+        # With --timeout (EXP-13's bound on a run, A15), the command runs in its own session, and the whole session
+        # is stopped once the timeout passes (SIGTERM, then SIGKILL after RUN_KILL_GRACE).
         process = subprocess.Popen(launch, stdout=subprocess.PIPE if tee else stream, stderr=subprocess.STDOUT,
-                                   stdin=subprocess.DEVNULL, cwd=args.cwd or None, env=env)
+                                   stdin=subprocess.DEVNULL, cwd=args.cwd or None, env=env,
+                                   start_new_session=bool(timeout))
+        timer, done = None, threading.Event()
+        if timeout:
+            def expire():
+                expired.append(time.monotonic() - started)
+                for signum, grace in ((signal.SIGTERM, RUN_KILL_GRACE), (signal.SIGKILL, 0)):
+                    try:
+                        os.killpg(process.pid, signum)
+                    except (ProcessLookupError, PermissionError):
+                        return
+                    if grace and done.wait(grace):
+                        return
+
+            timer = threading.Timer(timeout, expire)
+            timer.daemon = True
+            timer.start()
         if tee:
             # EXP-12: each line to this agent's stdout too, as it arrives, so the orchestrator can stamp it on
             # arrival over SSH (the staged capture's --verbose lines).
@@ -267,6 +349,9 @@ def cmd_run(args) -> dict:
             process.stdout.close()
         _, status, usage = os.wait4(process.pid, 0)
         process.returncode = os.waitstatus_to_exitcode(status)
+        if timer is not None:
+            done.set()
+            timer.cancel()
     wall = time.monotonic() - started
     with open(log, 'rb') as stream:
         size = stream.seek(0, os.SEEK_END)
@@ -277,7 +362,7 @@ def cmd_run(args) -> dict:
             'started_utc': started_utc, 'rusage': measure.rusage_record(usage),
             'peak_rss_kb': timing['maxrss_kb'] if timing else None, 'gnu_time': timing,
             'launcher': launch[:5] if gnu_time else None,
-            'log': str(log), 'log_tail': tail}
+            'log': str(log), 'log_tail': tail, 'timeout_s': timeout, 'timed_out': bool(expired)}
 
 
 def _hostport(text: str) -> tuple[str, int]:
@@ -306,6 +391,7 @@ def cmd_blast_recv(args) -> dict:
     # Rate over the stream, and over the part after the first warmup seconds
     # (TCP slow start and the token bucket's initial burst).
     warm_at = warm_bytes = None
+    seconds_bytes = PerSecond()
     while True:
         count = conn.recv_into(view)
         now = time.monotonic()
@@ -315,16 +401,40 @@ def cmd_blast_recv(args) -> dict:
             first = now
         received += count
         last = now
+        seconds_bytes.add(now - first, count)
         if warm_at is None and now - first >= args.warmup:
             warm_at, warm_bytes = now, received
     conn.close()
     seconds = (last - first) if first is not None else 0.0
     result = {'bytes': received, 'seconds': round(seconds, 6),
               'gbit': measure.gbit_per_second(received, seconds), 'peer': peer[0],
-              'warmup_seconds': args.warmup}
+              'warmup_seconds': args.warmup, **seconds_bytes.result(seconds, args.warmup)}
     if warm_at is not None and last > warm_at:
         result['steady_gbit'] = measure.gbit_per_second(received - warm_bytes, last - warm_at)
     return result
+
+
+class PerSecond:
+    """EXP-13's per-second link rates: bytes received in each whole second after the first byte (of any stream),
+    and the steady rate, the median of the last 3 one-second rates after the warmup (measure.steady_last)."""
+
+    def __init__(self):
+        self.buckets: list[int] = []
+        self.lock = threading.Lock()
+
+    def add(self, offset: float, count: int) -> None:
+        index = int(offset)
+        with self.lock:
+            if index >= len(self.buckets):
+                self.buckets.extend([0] * (index + 1 - len(self.buckets)))
+            self.buckets[index] += count
+
+    def result(self, span: float, warmup: float) -> dict:
+        """Only seconds wholly inside the span from the first byte to the last count."""
+        whole = self.buckets[:int(span)]
+        steady = measure.steady_last(whole, warmup)
+        return {'per_second_bytes': whole, 'per_second_gbit': [round(value * 8 / 1e9, 4) for value in whole],
+                'steady_last3_gbit': steady['gbit'], 'steady_last3_seconds': steady['seconds']}
 
 
 def blast_recv_streams(listener, streams: int, args) -> dict:
@@ -340,6 +450,7 @@ def blast_recv_streams(listener, streams: int, args) -> dict:
     first_byte: list = []  # the first byte of any stream, set once
     results: list = [None] * streams
     errors: list = []
+    seconds_bytes = PerSecond()  # all streams together, by the second after the first byte of any
 
     def receive(index, conn, peer):
         try:
@@ -360,6 +471,7 @@ def blast_recv_streams(listener, streams: int, args) -> dict:
                     warm_bytes = received
                 received += count
                 last = now
+                seconds_bytes.add(now - first_byte[0], count)
             results[index] = {'bytes': received, 'first': first, 'last': last, 'warm_bytes': warm_bytes,
                               'peer': peer[0]}
         except Exception as exc:
@@ -396,12 +508,20 @@ def blast_recv_streams(listener, streams: int, args) -> dict:
     if done and end > warm_at and all(item['warm_bytes'] is not None for item in done):
         steady = sum(item['bytes'] - item['warm_bytes'] for item in done)
         result['steady_gbit'] = measure.gbit_per_second(steady, end - warm_at)
+    if done:
+        result.update(seconds_bytes.result(end - start, args.warmup))
     return result
 
 
-def blast_send_one(host: str, port: int, deadline: float, payload) -> int:
-    """One bulk TCP stream until `deadline` (time.monotonic()); the bytes it sent."""
+def blast_send_one(host: str, port: int, deadline: float, payload, after_connect: float | None = None) -> dict:
+    """One bulk TCP stream until `deadline` (time.monotonic()), or for `after_connect` seconds from its connect
+    (EXP-13: so a connect that takes a round trip at DR latency doesn't shorten the stream); the bytes it sent
+    and its TCP connect time (connect_s)."""
+    started = time.monotonic()
     sock = socket.create_connection((host, port), timeout=30)
+    connected = time.monotonic()
+    if after_connect is not None:
+        deadline = connected + after_connect
     sock.settimeout(None)
     sent = 0
     while time.monotonic() < deadline:
@@ -410,25 +530,32 @@ def blast_send_one(host: str, port: int, deadline: float, payload) -> int:
     sock.shutdown(socket.SHUT_WR)
     sock.recv(1)  # wait for the receiver to close
     sock.close()
-    return sent
+    return {'bytes': sent, 'connect_s': round(connected - started, 6)}
 
 
 def cmd_blast_send(args) -> dict:
     host, port = _hostport(args.connect)
     payload = memoryview(os.urandom(BLAST_CHUNK))
     streams = getattr(args, 'streams', 1) or 1
+    after_connect = args.seconds if getattr(args, 'after_connect', False) else None
     started = time.monotonic()
     deadline = started + args.seconds
     if streams == 1:
-        sent = blast_send_one(host, port, deadline, payload)
-        per_stream = None
+        one = blast_send_one(host, port, deadline, payload, after_connect)
+        sent, per_stream, connects = one['bytes'], None, [one['connect_s']]
     else:
         with ThreadPoolExecutor(max_workers=streams) as pool:
-            per_stream = list(pool.map(lambda _: blast_send_one(host, port, deadline, payload), range(streams)))
+            each = list(pool.map(lambda _: blast_send_one(host, port, deadline, payload, after_connect),
+                                 range(streams)))
+        per_stream = [item['bytes'] for item in each]
+        connects = [item['connect_s'] for item in each]
         sent = sum(per_stream)
     seconds = time.monotonic() - started
     result = {'bytes': sent, 'seconds': round(seconds, 6),
-              'gbit': measure.gbit_per_second(sent, seconds)}
+              'gbit': measure.gbit_per_second(sent, seconds),
+              # EXP-13: each stream's TCP connect, one round trip on the delayed path (smoke item 3).
+              'connect_s': max(connects), 'per_stream_connect_s': connects,
+              'after_connect': after_connect is not None}
     if per_stream is not None:
         result.update(streams=streams, per_stream_bytes=per_stream)
     return result
@@ -1051,12 +1178,408 @@ def cmd_sampler(args) -> dict:
     return {'pid': pid, 'final': final, 'stopped_utc': time.time()}
 
 
+# --- the emulated WAN, its checks and the TLS stand-in (EXP-13) ------------------------------------------------
+
+def qdisc_tree(iface: str) -> dict:
+    """The interface's qdiscs as wan.sh's tree (measure.wan_tree), from one `tc -s -j qdisc show`."""
+    text = text_of(['tc', '-s', '-j', 'qdisc', 'show', 'dev', iface])
+    return measure.wan_tree(measure.parse_qdisc_json(text) if text else [])
+
+
+def qdisc_counters(iface: str) -> dict:
+    """The counters a snapshot keeps of the tree (measure.qdisc_counters), from one reading."""
+    return measure.qdisc_counters(qdisc_tree(iface))
+
+
+def wan_show(iface: str) -> dict:
+    """What the visit's tree check reads: `tc -s -j qdisc show` (raw and as wan.sh's tree) and the u32 filters
+    (`tc filter show`, iproute2's text: its JSON has no u32 keys to rely on)."""
+    text = text_of(['tc', '-s', '-j', 'qdisc', 'show', 'dev', iface]) or '[]'
+    filters = text_of(['tc', 'filter', 'show', 'dev', iface]) or ''
+    raw = json.loads(text)
+    return {'iface': iface, 'qdiscs': raw, 'tree': measure.wan_tree(measure.parse_qdisc_json(raw)),
+            'filters_text': filters, 'filters': measure.parse_u32_filters(filters), 'utc': time.time()}
+
+
+def cmd_wan(args) -> dict:
+    """apply RATE DELAY_ONE_WAY_MS --peer IP --control-port PORT: infra/gcp/wan.sh on this VM (sudo), then the tree
+    as tc shows it (wan_show). off: wan.sh off. show: wan_show. commands: the tc lines wan.sh would run (DRY_RUN=1,
+    no sudo), for run.json."""
+    if args.action == 'show':
+        return wan_show(args.iface)
+    if args.action == 'off':
+        script = [str(WAN_SCRIPT), 'off', args.iface]
+    else:
+        if not args.rate or args.delay_ms is None or not args.peer or not args.control_port:
+            raise SystemExit(f'wan {args.action} needs RATE DELAY_ONE_WAY_MS --peer --control-port')
+        script = [str(WAN_SCRIPT), args.rate, f'{args.delay_ms:g}', args.peer, str(args.control_port), args.iface]
+    if args.action == 'commands':
+        result = subprocess.run(['bash', *script], capture_output=True, text=True,
+                                env={**os.environ, 'DRY_RUN': '1'})
+        if result.returncode != 0:
+            raise SystemExit(f'wan.sh (dry run) failed: {result.stderr.strip()}')
+        return {'commands': [line for line in result.stdout.splitlines() if line.strip()]}
+    result = subprocess.run(['sudo', '-n', 'bash', *script], capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SystemExit(f'wan.sh {args.action} failed: {result.stderr.strip()}')
+    return {'action': args.action, 'argv': script, **wan_show(args.iface)}
+
+
+def cmd_ping_check(args) -> dict:
+    """--count pings to the peer --interval apart, as root (iputils refuses short intervals to others): each
+    reply's round trip, and their minimum and median (measure.parse_ping)."""
+    argv = ['sudo', '-n', 'ping', '-n', '-c', str(args.count), '-i', f'{args.interval:g}', '-W', '2', args.peer]
+    started = time.time()
+    result = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    return {**measure.parse_ping(result.stdout, args.count), 'peer': args.peer, 'interval_s': args.interval,
+            'exit_code': result.returncode, 'argv': argv, 'utc': started, 'summary': lines[-2:],
+            'stderr': result.stderr.strip()[-500:]}
+
+
+def cmd_tcp_metrics_flush(args) -> dict:
+    """ip tcp_metrics flush all (sudo), so no connection starts from a slow-start threshold cached from the last one
+    to the same host; then what `ip tcp_metrics show` still lists (smoke item 9: nothing)."""
+    flush = subprocess.run(['sudo', '-n', 'ip', 'tcp_metrics', 'flush', 'all'], capture_output=True, text=True)
+    if flush.returncode != 0:
+        raise SystemExit(f'ip tcp_metrics flush all failed: {flush.stderr.strip()}')
+    shown = text_of(['ip', 'tcp_metrics', 'show']) or ''
+    return {'flushed': True, 'utc': time.time(), 'show': shown,
+            'entries': sum(1 for line in shown.splitlines() if line.strip())}
+
+
+def net_sampler_paths(out) -> dict:
+    return {key: Path(out) / name for key, name in NET_SAMPLER_FILES.items()}
+
+
+def net_sample(args) -> dict:
+    """One reading: the sockets to the peer (`ss -tin dst PEER`, the control port left out), and the tree's qdisc
+    counters (one `tc -s -j` reading); each only when asked for."""
+    sample: dict = {'t': round(time.time(), 6)}
+    if args.peer:
+        text = text_of(['ss', '-tinH', 'dst', args.peer]) or ''
+        sample['ss'] = measure.parse_ss(text, exclude_ports=tuple(args.exclude_port))
+    if args.qdisc_iface:
+        sample['qdisc'] = qdisc_counters(args.qdisc_iface)
+    return sample
+
+
+def net_sampler_run(args) -> dict:
+    """The network sampler's loop, until SIGTERM: a reading every --interval, one JSON line each; then its count
+    and its own CPU, to net-sampler-final.json."""
+    paths = net_sampler_paths(args.out)
+    stopping = threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stopping.set())
+    started, count, late = time.monotonic(), 0, 0
+    with open(paths['samples'], 'w') as stream:
+        due = time.monotonic()
+        while not stopping.is_set():
+            stream.write(json.dumps(net_sample(args), separators=(',', ':')) + '\n')
+            stream.flush()
+            count += 1
+            due += args.interval
+            wait = due - time.monotonic()
+            if wait < 0:  # a reading that overran: the schedule restarts from now
+                late += 1
+                due = time.monotonic()
+            stopping.wait(max(0.0, wait))
+        # One more reading at the stop, after the clock: every connection's last counters.
+        stream.write(json.dumps(net_sample(args), separators=(',', ':')) + '\n')
+        count += 1
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    final = {'pid': os.getpid(), 'samples': count, 'late': late, 'interval_s': args.interval,
+             'seconds': round(time.monotonic() - started, 3),
+             'cpu_seconds': round(usage.ru_utime + usage.ru_stime, 3), 'ended_utc': time.time()}
+    paths['final'].write_text(json.dumps(final))
+    return final
+
+
+def net_sampler_summary(out) -> dict:
+    """The sampler's readings summarised: per connection (measure.ss_connections) and for the run (ss_summary), and
+    netem's largest sampled backlog (qdisc_samples_summary)."""
+    samples = []
+    try:
+        with open(net_sampler_paths(out)['samples']) as stream:
+            for line in stream:
+                try:
+                    samples.append(json.loads(line))
+                except ValueError:  # a line cut short at the stop
+                    pass
+    except OSError:
+        return {'samples': 0}
+    result: dict = {'samples': len(samples)}
+    with_ss = [sample for sample in samples if 'ss' in sample]
+    if with_ss:
+        connections = measure.ss_connections(with_ss)
+        result['ss'] = measure.ss_summary(connections)
+        result['ss_connections'] = connections
+    with_qdisc = [{**sample['qdisc'], 't': sample['t']} for sample in samples if 'qdisc' in sample]
+    if with_qdisc:
+        result['qdisc'] = measure.qdisc_samples_summary(with_qdisc)
+    return result
+
+
+def net_sampler_final(path, pid: int) -> dict | None:
+    """The sampler's final record, if it is the one process `pid` wrote."""
+    try:
+        final = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return None
+    return final if isinstance(final, dict) and final.get('pid') == pid else None
+
+
+def cmd_net_sampler(args) -> dict:
+    """start: the network sampler under setsid (`net-sampler run`), its PID in DIR, an earlier sampler's final
+    record removed. stop: SIGTERM, then, once this sampler has written its final record (the reading after the
+    clock) or has gone, that record and the summary of its readings (net_sampler_summary). run: the loop itself."""
+    paths = net_sampler_paths(args.out)
+    if args.action == 'run':
+        return net_sampler_run(args)
+    if args.action == 'start':
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        paths['final'].unlink(missing_ok=True)
+        argv = [sys.executable, str(Path(__file__).resolve()), 'net-sampler', 'run', '--out', str(args.out),
+                '--interval', str(args.interval)]
+        if args.peer:
+            argv += ['--peer', args.peer, *[item for port in args.exclude_port for item in ('--exclude-port', str(port))]]
+        if args.qdisc_iface:
+            argv += ['--qdisc-iface', args.qdisc_iface]
+        with open(paths['log'], 'w') as log:
+            process = subprocess.Popen(argv, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                       start_new_session=True)
+        paths['pid'].write_text(str(process.pid))
+        return {'pid': process.pid, 'argv': argv, 'started_utc': time.time(), 'out': str(args.out)}
+    try:
+        pid = int(paths['pid'].read_text())
+    except (OSError, ValueError):
+        raise SystemExit(f'no network sampler runs ({paths["pid"]})')
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 30
+    final = net_sampler_final(paths['final'], pid)
+    while final is None and not process_gone(pid) and time.monotonic() < deadline:
+        time.sleep(0.05)
+        final = net_sampler_final(paths['final'], pid)
+    final = final or net_sampler_final(paths['final'], pid)
+    return {'pid': pid, 'final': final, 'stopped_utc': time.time(), **net_sampler_summary(args.out)}
+
+
+def cmd_ssh_probe(args) -> dict:
+    """EXP-13's SSH probe, on dest: one SSH session channel from the source's sshd on --port, carrying `cat
+    /dev/zero` to here for --seconds after its first byte (aes128-gcm, no compression, no connection sharing); the
+    bytes of each whole second, and the rate over the last --seconds minus --warmup seconds."""
+    argv = ['ssh', '-p', str(args.port), '-i', args.key, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+            '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ControlMaster=no', '-o', 'ControlPath=none',
+            '-o', 'Compression=no', '-o', f'Ciphers={args.cipher}', '-T', f'{args.user}@{args.host}',
+            'exec cat /dev/zero']
+    started = time.monotonic()
+    process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    per_second, first, total = PerSecond(), None, 0
+    fd = process.stdout.fileno()
+    try:
+        while True:
+            limit = args.timeout if first is None else first + args.seconds - time.monotonic()
+            if limit <= 0 or not select.select([fd], [], [], limit)[0]:
+                break
+            chunk = os.read(fd, 1 << 20)
+            now = time.monotonic()
+            if not chunk:
+                break
+            if first is None:
+                first = now
+            if now - first >= args.seconds:
+                break
+            per_second.add(now - first, len(chunk))
+            total += len(chunk)
+    finally:
+        process.kill()
+        _, stderr = process.communicate()
+    if first is None:
+        raise SystemExit(f'the SSH probe received nothing: {stderr.decode(errors="replace").strip()[-1000:]}')
+    seconds = per_second.buckets[:int(args.seconds)]
+    last = seconds[math.ceil(args.warmup):]
+    return {'argv': argv, 'port': args.port, 'cipher': args.cipher, 'bytes': total, 'per_second_bytes': seconds,
+            'per_second_gbit': [round(value * 8 / 1e9, 4) for value in seconds],
+            'first_byte_s': round(first - started, 6), 'warmup_seconds': args.warmup,
+            'last_gbit': round(sum(last) * 8 / 1e9 / len(last), 4) if last else None,
+            'last_seconds': len(last)}
+
+
+def openssl(*argv, cwd) -> None:
+    result = subprocess.run(['openssl', *argv], capture_output=True, text=True, cwd=cwd)
+    if result.returncode != 0:
+        raise SystemExit(f'openssl {argv[0]} failed: {result.stderr.strip()[-1000:]}')
+
+
+def cmd_tls_material(args) -> dict:
+    """The per-session CA and certificates for v1_tls's stunnel pair, made with openssl in --dir (keys 0600): a CA,
+    the server's certificate (CN measure.STUNNEL_SERVER_NAME, for dest) and the client's (for the source), all EC
+    P-256; and, for smoke item 12's refusal with a wrong CA, a second CA with a client certificate from it. No key
+    leaves --dir here; the orchestrator copies the client's to the source over the control path."""
+    directory = Path(args.dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
+    curve = ['-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1', '-nodes']
+    for ca in ('ca', 'wrong-ca'):
+        openssl('req', '-x509', *curve, '-keyout', f'{ca}.key', '-out', f'{ca}.crt', '-days', str(args.days),
+                '-subj', f'/CN=pgd-exp13-{ca}', cwd=directory)
+    for name, ca, usage, common in (('server', 'ca', 'serverAuth', measure.STUNNEL_SERVER_NAME),
+                                    ('client', 'ca', 'clientAuth', 'pgd-exp13-client'),
+                                    ('wrong-client', 'wrong-ca', 'clientAuth', 'pgd-exp13-wrong-client')):
+        (directory / f'{name}.ext').write_text(f'basicConstraints = CA:FALSE\nkeyUsage = digitalSignature\n'
+                                               f'extendedKeyUsage = {usage}\nsubjectAltName = DNS:{common}\n')
+        openssl('req', *curve, '-keyout', f'{name}.key', '-out', f'{name}.csr', '-subj', f'/CN={common}',
+                cwd=directory)
+        openssl('x509', '-req', '-in', f'{name}.csr', '-CA', f'{ca}.crt', '-CAkey', f'{ca}.key', '-CAcreateserial',
+                '-out', f'{name}.crt', '-days', str(args.days), '-extfile', f'{name}.ext', cwd=directory)
+    for key in directory.glob('*.key'):
+        os.chmod(key, 0o600)
+    files = {path.name: str(path) for path in sorted(directory.iterdir()) if path.suffix in ('.crt', '.key')}
+    subjects = {name: text_of(['openssl', 'x509', '-in', path, '-noout', '-subject', '-issuer', '-fingerprint',
+                               '-sha256']) for name, path in files.items() if name.endswith('.crt')}
+    return {'dir': str(directory), 'files': files, 'certificates': subjects, 'days': args.days}
+
+
+def stunnel_paths(directory, name: str) -> dict:
+    return {key: Path(directory) / f'stunnel-{name}.{suffix}' for key, suffix in (('pid', 'pid'), ('stderr', 'stderr'))}
+
+
+def listening(port: int) -> bool:
+    return bool((text_of(['ss', '-Hltn', f'sport = :{port}']) or '').strip())
+
+
+# strace for smoke item 12's TCP_NODELAY check: with --seccomp-bpf (strace 5.3 and later, with -f) the kernel stops
+# stunnel only at setsockopt, not at every system call, so its 16 KB read and write loop runs at its own pace.
+STRACE_SETSOCKOPT = ('strace', '-f', '--seccomp-bpf', '-tt', '-e', 'trace=setsockopt')
+
+
+def process_gone(pid: int) -> bool:
+    """Whether a process has exited. This process's own child is reaped here (a zombie keeps /proc/<pid> until its
+    parent waits for it, as a stunnel started in-process does in the tests); another parent's zombie counts as gone;
+    without /proc (macOS), whether it can still be signalled."""
+    try:
+        if os.waitpid(pid, os.WNOHANG)[0]:
+            return True
+    except ChildProcessError:  # not this process's child (or already reaped)
+        pass
+    if Path('/proc/self').exists():
+        stat = read(f'/proc/{pid}/stat')
+        return stat is None or stat[stat.rindex(')') + 2:].split()[:1] == ['Z']
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    return False
+
+
+def stop_process(pid: int, grace: float) -> bool:
+    """SIGTERM, then SIGKILL after `grace` seconds if it is still there; whether it had to be killed."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + grace
+    while not process_gone(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    if process_gone(pid):
+        return False
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + 5
+    while not process_gone(pid) and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return True
+
+
+def cmd_stunnel(args) -> dict:
+    """start: stunnel with --config, in its own session, until it listens on --port (it starts before the clock);
+    refused if something listens there already (a stunnel an interrupted run left, with an earlier session's CA),
+    and failed if stunnel itself has exited once something listens; with --strace-log, under strace -e
+    trace=setsockopt (STRACE_SETSOCKOPT; smoke item 12: TCP_NODELAY on each of its sockets). stop: SIGTERM (SIGKILL
+    after 10 s), its own CPU from /proc first, then its log (--log) read: connections, protocol and suite
+    (measure.parse_stunnel_log)."""
+    paths = stunnel_paths(args.dir, args.name)
+    if args.action == 'start':
+        Path(args.dir).mkdir(parents=True, exist_ok=True)
+        if listening(args.port):
+            raise SystemExit(f'stunnel {args.name}: something already listens on port {args.port}, perhaps a stunnel '
+                             'an earlier run left (agent.py stale-processes --kill stops those)')
+        argv = [args.stunnel, args.config]
+        if args.strace_log:
+            argv = [*STRACE_SETSOCKOPT, '-o', args.strace_log, *argv]
+        started = time.monotonic()
+        with open(paths['stderr'], 'w') as stream:
+            process = subprocess.Popen(argv, stdout=stream, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                       start_new_session=True)
+        paths['pid'].write_text(str(process.pid))
+        while not listening(args.port) or process.poll() is not None:
+            if process.poll() is not None or time.monotonic() - started > STUNNEL_START_TIMEOUT:
+                process.kill()
+                process.wait()
+                raise SystemExit(f'stunnel {args.name} did not listen on port {args.port} '
+                                 f'(exit {process.returncode}): {(read(paths["stderr"]) or "")[-2000:]} '
+                                 f'{(read(args.log) or "")[-2000:]}')
+            time.sleep(0.02)
+        return {'name': args.name, 'pid': process.pid, 'argv': argv, 'port': args.port,
+                'seconds': round(time.monotonic() - started, 3), 'utc': time.time()}
+    try:
+        pid = int(paths['pid'].read_text())
+    except (OSError, ValueError):
+        raise SystemExit(f'no stunnel {args.name} runs ({paths["pid"]})')
+    ticks = proc_ticks(pid)
+    killed = stop_process(pid, 10)
+    text = read(args.log) or ''
+    return {'name': args.name, 'pid': pid, 'utc': time.time(), 'killed': killed,
+            'cpu_seconds': None if ticks is None else round(ticks[0] / os.sysconf('SC_CLK_TCK'), 3),
+            'log': measure.parse_stunnel_log(text), 'log_tail': text[-4000:],
+            'stderr_tail': (read(paths['stderr']) or '')[-2000:]}
+
+
+# The harness's own background processes an interrupted run can leave (EXP-13): the network sampler, and a stunnel
+# (or the strace around one) with one of start_stunnels' configurations.
+STALE_PATTERNS = {'net-sampler': re.compile(r'\bagent\.py net-sampler run\b'),
+                  'stunnel': re.compile(r'(^|/)stunnel4?\s.*stunnel-(server|client)\.conf(\s|$)')}
+
+
+def stale_processes(ps_text: str, own_pid: int) -> list[dict]:
+    """The lines of `ps -eo pid=,args=` that are a STALE_PATTERNS process, this one left out."""
+    found = []
+    for line in ps_text.splitlines():
+        pid, _, command = line.strip().partition(' ')
+        if not pid.isdigit() or int(pid) == own_pid:
+            continue
+        for what, pattern in STALE_PATTERNS.items():
+            if pattern.search(command.strip()):
+                found.append({'pid': int(pid), 'what': what, 'args': command.strip()[:500]})
+                break
+    return found
+
+
+def cmd_stale_processes(args) -> dict:
+    """EXP-13's preflight: the network samplers and stunnels an earlier, interrupted run left (stale_processes);
+    with --kill, each stopped (SIGTERM, SIGKILL after 5 s). None of this run's can be running yet."""
+    text = text_of(['ps', '-eo', 'pid=,args=']) or ''
+    found = stale_processes(text, os.getpid())
+    if args.kill:
+        for item in found:
+            item['killed'] = stop_process(item['pid'], 5)
+    return {'found': found, 'utc': time.time()}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest='command', required=True)
     sub = commands.add_parser('snapshot')
     sub.add_argument('--iface', required=True)
+    sub.add_argument('--tcp', action='store_true', help="EXP-13: nstat's TCP counters too")
+    sub.add_argument('--qdisc', action='store_true', help="EXP-13: the emulated WAN's qdisc counters too")
     sub.set_defaults(func=cmd_snapshot)
     sub = commands.add_parser('iface')
     sub.add_argument('--peer', required=True)
@@ -1065,6 +1588,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('--iface', required=True)
     sub.add_argument('--bin-dir', default='/usr/lib/postgresql/17/bin')
     sub.add_argument('--pg-probackup', default=measure.PROBACKUP_EXE)
+    sub.add_argument('--stunnel', default=STUNNEL)
     sub.set_defaults(func=cmd_env)
     sub = commands.add_parser('drop-caches')
     sub.set_defaults(func=cmd_drop_caches)
@@ -1080,6 +1604,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="run the command under GNU time and report its own peak RSS")
     sub.add_argument('--tee', action='store_true',
                      help="copy the command's output to stdout as it arrives, and exit with its exit code")
+    sub.add_argument('--timeout', type=float, metavar='SECONDS',
+                     help='EXP-13: stop the command (its whole session) once it has run this long; timed_out says so')
     sub.add_argument('argv', nargs=argparse.REMAINDER)
     sub.set_defaults(func=cmd_run)
     sub = commands.add_parser('blast-recv')
@@ -1092,6 +1618,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('--connect', required=True)
     sub.add_argument('--seconds', type=float, default=3)
     sub.add_argument('--streams', type=positive_int, default=1)
+    sub.add_argument('--after-connect', action='store_true',
+                     help='EXP-13: each stream sends for --seconds from its own connect')
     sub.set_defaults(func=cmd_blast_send)
     sub = commands.add_parser('digest')
     sub.add_argument('root')
@@ -1178,6 +1706,57 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('--user', default='study')
     sub.add_argument('--database', default='postgres')
     sub.set_defaults(func=cmd_sampler)
+    # EXP-13 (T12).
+    sub = commands.add_parser('wan')
+    sub.add_argument('action', choices=('apply', 'off', 'show', 'commands'))
+    sub.add_argument('rate', nargs='?', help='a tc rate, e.g. 2000mbit (apply, commands)')
+    sub.add_argument('delay_ms', nargs='?', type=float, help='the one-way delay, r/2 (apply, commands)')
+    sub.add_argument('--peer', help='the other VM: the only destination delayed')
+    sub.add_argument('--control-port', type=int, help="the harness's SSH port, left undelayed")
+    sub.add_argument('--iface', required=True)
+    sub.set_defaults(func=cmd_wan)
+    sub = commands.add_parser('ping-check')
+    sub.add_argument('peer')
+    sub.add_argument('--count', type=positive_int, default=measure.PING_COUNT)
+    sub.add_argument('--interval', type=float, default=measure.PING_INTERVAL_S)
+    sub.set_defaults(func=cmd_ping_check)
+    sub = commands.add_parser('tcp-metrics-flush')
+    sub.set_defaults(func=cmd_tcp_metrics_flush)
+    sub = commands.add_parser('net-sampler')
+    sub.add_argument('action', choices=('start', 'stop', 'run'))
+    sub.add_argument('--out', required=True)
+    sub.add_argument('--peer', help='sample `ss -tin` of the sockets to this address')
+    sub.add_argument('--exclude-port', type=int, action='append', default=[], help="leave out (the control path)")
+    sub.add_argument('--qdisc-iface', help="sample the emulated WAN's qdisc counters on this interface")
+    sub.add_argument('--interval', type=float, default=0.5)
+    sub.set_defaults(func=cmd_net_sampler)
+    sub = commands.add_parser('ssh-probe')
+    sub.add_argument('--host', required=True)
+    sub.add_argument('--user', required=True)
+    sub.add_argument('--key', required=True)
+    sub.add_argument('--port', type=int, default=22)
+    sub.add_argument('--seconds', type=float, default=6)
+    sub.add_argument('--warmup', type=float, default=3)
+    sub.add_argument('--cipher', default=SSH_PROBE_CIPHER)
+    sub.add_argument('--timeout', type=float, default=60, help='for the first byte')
+    sub.set_defaults(func=cmd_ssh_probe)
+    sub = commands.add_parser('tls-material')
+    sub.add_argument('--dir', required=True)
+    sub.add_argument('--days', type=positive_int, default=7)
+    sub.set_defaults(func=cmd_tls_material)
+    sub = commands.add_parser('stunnel')
+    sub.add_argument('action', choices=('start', 'stop'))
+    sub.add_argument('--name', required=True, help='client or server')
+    sub.add_argument('--dir', required=True, help='its pid and stderr files')
+    sub.add_argument('--config', help='start: its configuration (measure.stunnel_config)')
+    sub.add_argument('--port', type=int, help='start: the port it listens on')
+    sub.add_argument('--log', required=True, help="its log (the configuration's output)")
+    sub.add_argument('--stunnel', default=STUNNEL)
+    sub.add_argument('--strace-log', help='start: run it under strace -e trace=setsockopt into this file')
+    sub.set_defaults(func=cmd_stunnel)
+    sub = commands.add_parser('stale-processes')
+    sub.add_argument('--kill', action='store_true', help='stop each one found')
+    sub.set_defaults(func=cmd_stale_processes)
     return parser
 
 

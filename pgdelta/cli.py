@@ -8,6 +8,7 @@ from pathlib import Path
 import signal
 import sys
 import tempfile
+import time
 import traceback
 
 from pgdelta import datadir, flush, inplace, placement, prefetch, receiver, sender, transport
@@ -221,6 +222,11 @@ def _sender_options(parser):
     parser.add_argument('--high-churn-node-fraction', type=_fraction, metavar='F',
                         help='send a file\'s mismatched nodes whole, without leaf digests, '
                              'when more than this fraction of its nodes differ')
+    # Experiment switch (EXP-13, D29): the request window.
+    parser.add_argument('--window', type=_positive_int, default=sender.DEFAULT_WINDOW, metavar='N',
+                        help='hash up to N files ahead of the one being sent, so their leaf-digest round '
+                             'trips overlap hashing. It changes the order of the frames on the wire, not '
+                             'what is sent (default: %(default)s)')
 
 
 def _reuse_any_basis_option(parser):
@@ -269,6 +275,12 @@ def build_parser():
     send.add_argument('--source', required=True, type=Path, help='new backup S (read-only)')
     send.add_argument('--connect', required=True, metavar='HOST:PORT')
     _sender_options(send)
+    # Experiment switch (EXP-13): the threshold of the busy and idle parts of the sender's waits.
+    send.add_argument('--busy-inflight-bytes', type=_byte_count, metavar='BYTES',
+                      help='statistics only: while the sender waits for the receiver, a moment counts as busy '
+                           'when some of its bytes are unsent, or more than BYTES are in flight (what the path '
+                           'holds without queueing), and idle otherwise; read from the TCP socket\'s send queue, '
+                           'on Linux. Without it only unsent bytes count as busy')
     _source_kind_option(send)
     _jobs_option(send, 'S')
     send.set_defaults(func=cmd_send)
@@ -315,6 +327,7 @@ def cmd_receive(args):
 
 
 def _receive(args):
+    launched = getattr(args, 'launched', None)
     if args.stdio:
         channel = transport.stdio_channel()
         prefetched = prefetch.not_run(args.prefetch_basis, 'stdio: the sender is connected from the start')
@@ -323,7 +336,7 @@ def _receive(args):
                                          pg_controldata=_basis_controldata(args),
                                          reuse_any_basis=args.reuse_any_basis,
                                          local_source=args.local_source, prefetch=prefetched,
-                                         in_place=args.in_place, **_receiver_engine(args))
+                                         in_place=args.in_place, launched=launched, **_receiver_engine(args))
         finally:
             channel.close()
     else:
@@ -335,6 +348,7 @@ def _receive(args):
             log('warning: the TCP transport is neither authenticated nor encrypted; '
                 'use it only on a trusted network')
         listener = transport.listen(host, port)
+        listening = time.perf_counter()
 
         def wait():
             log(f'listening on {_format_address(listener.getsockname())}')
@@ -349,7 +363,8 @@ def _receive(args):
             channel, prefetched = wait(), prefetch.not_run('off', 'switched off (--prefetch-basis off)')
         log(prefetch.describe(prefetched))
         try:
-            return receiver.run_receiver(channel, setup=setup, prefetch=prefetched, **_receiver_engine(args))
+            return receiver.run_receiver(channel, setup=setup, prefetch=prefetched, launched=launched,
+                                         listening=listening, **_receiver_engine(args))
         finally:
             channel.close()
 
@@ -369,7 +384,7 @@ def _identity(source, pg_controldata):
 
 def _sender_kwargs(args, identity):
     return {'identity': identity, 'block': args.block, 'node_blocks': args.node_blocks,
-            'high_churn_node_fraction': args.high_churn_node_fraction, 'jobs': args.jobs,
+            'high_churn_node_fraction': args.high_churn_node_fraction, 'window': args.window, 'jobs': args.jobs,
             'hash_backend': args.hash_backend, 'source_kind': args.source_kind,
             'pg_controldata': args.pg_controldata}
 
@@ -421,7 +436,8 @@ def cmd_send(args):
         identity = _source_identity(args)
         channel = transport.connect_channel(host, port)
         try:
-            return sender.run_sender(channel, args.source, **_sender_kwargs(args, identity))
+            return sender.run_sender(channel, args.source, busy_inflight_bytes=args.busy_inflight_bytes,
+                                     **_sender_kwargs(args, identity))
         finally:
             channel.close()
 
@@ -451,8 +467,12 @@ def _terminate(signum, frame):
     raise KeyboardInterrupt(f'signal {signum}')
 
 
-def main(argv=None):
+def main(argv=None, launched=None):
+    """Run one command. `launched`: time.perf_counter() when the process started its pgdelta part
+    (`python -m pgdelta` passes it); the receiver's publish_s counts from it, else from here (EXP-13)."""
+    launched = time.perf_counter() if launched is None else launched
     args = build_parser().parse_args(argv)
+    args.launched = launched
     signal.signal(signal.SIGTERM, _terminate)
     try:
         return args.func(args)

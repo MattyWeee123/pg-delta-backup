@@ -139,9 +139,11 @@ VOLATILE_RECEIVER_KEYS = frozenset((
     # where files are fsynced (pgdelta.flush): the switch, and what it did and cost
     'fsync', 'fsync_effective', 'fsync_mode', 'writeback_calls', 'fsync_wait_seconds', 'writeback_seconds',
     # how O was built, which depends on the rebuild switch, unlike pages_copied and bytes_copied
-    'basis_copy_bytes', 'basis_copies'))
+    'basis_copy_bytes', 'basis_copies',
+    # EXP-13's protocol timers (pgdelta.waits), which vary like timings
+    'protocol_timers'))
 VOLATILE_SENDER_KEYS = frozenset(('timings_seconds', 'jobs', 'hash_backend', 'worker_start_method', 'switches',
-                                  'receiver'))
+                                  'receiver', 'protocol_timers'))
 
 
 def comparable(outcome):

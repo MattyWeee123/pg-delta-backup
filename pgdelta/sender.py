@@ -3,9 +3,11 @@
 A reader thread drains everything the receiver sends (all of it small:
 digests and acknowledgements), so neither side can block the other while
 page data is in flight. Files are processed in inventory order with up to
-`window` files hashed ahead, so leaf-digest round trips overlap hashing.
-Each file's nodes are hashed on a pool of `jobs` worker processes (or
-threads, for comparison), or in the main thread when jobs is 1.
+`window` files hashed ahead (DEFAULT_WINDOW, or `--window`), so leaf-digest
+round trips overlap hashing. Each file's nodes are hashed on a pool of
+`jobs` worker processes (or threads, for comparison), or in the main thread
+when jobs is 1. The waits for the receiver, and the time blocked sending,
+are timed for EXP-13 (pgdelta.waits).
 
 The source is a finished backup S (`source_kind` "backup", default), or a
 cleanly stopped data directory read directly ("datadir", pgdelta.datadir),
@@ -21,7 +23,7 @@ import os
 import threading
 import time
 
-from pgdelta import __version__, datadir, matching, protocol
+from pgdelta import __version__, datadir, matching, protocol, waits
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
 from pgdelta.hashing import BLOCK, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key
@@ -48,12 +50,14 @@ def prepare_source(source):
 class Inbox:
     """Reader thread for receiver -> sender messages."""
 
-    def __init__(self, channel):
+    def __init__(self, channel, timers=None):
         self.channel = channel
         self.cond = threading.Condition()
         self.accept = self.complete = self.error = None
         self.basis, self.leaves = {}, {}
         self.closed = False
+        # The sender's protocol timers (pgdelta.waits.WaitTimers); without them waits aren't timed.
+        self.timers = timers
         self.thread = threading.Thread(target=self._run, name='pgdelta-inbox', daemon=True)
 
     def start(self):
@@ -122,17 +126,32 @@ class Inbox:
         else:
             raise ProtocolError(f'unexpected {protocol.name(code)} from the receiver')
 
-    def wait(self, ready, what):
-        with self.cond:
-            while True:
-                if self.error is not None:
-                    raise self.error
-                value = ready()
-                if value is not None:
-                    return value
-                if self.closed:
-                    raise ChannelClosed(f'receiver closed the connection while the sender waited for {what}')
-                self.cond.wait()
+    def wait(self, ready, what, kind=None):
+        """ready()'s first value that isn't None. If it has to block for it, the wait is timed under
+        `kind` (pgdelta.waits.KINDS), waking every poll interval to read the send queue."""
+        timers = self.timers if kind is not None else None
+        blocked = False
+        try:
+            with self.cond:
+                while True:
+                    if self.error is not None:
+                        raise self.error
+                    value = ready()
+                    if value is not None:
+                        return value
+                    if self.closed:
+                        raise ChannelClosed(f'receiver closed the connection while the sender waited for {what}')
+                    if timers is None:
+                        self.cond.wait()
+                        continue
+                    if not blocked:
+                        timers.begin(kind)
+                        blocked = True
+                    self.cond.wait(timers.poll)
+                    timers.tick()
+        finally:
+            if blocked:
+                timers.end()
 
     def check(self):
         if self.error is not None:
@@ -170,7 +189,8 @@ def _parse_accept(accept, file_count):
 
 class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
-                 window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None):
+                 window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
+                 busy_inflight_bytes=None):
         self.started = time.perf_counter()
         self.channel, self.source, self.identity = channel, Path(source), identity
         self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
@@ -182,7 +202,12 @@ class _Sender:
         self.key = key
         self.jobs, self.pool, self.hash_backend = jobs, None, hash_backend
         self.pool_start_seconds = 0.0
-        self.inbox = Inbox(channel)
+        # EXP-13: the waits for the receiver, each split by the socket's send queue against
+        # busy_inflight_bytes, and the time blocked sending (pgdelta.waits).
+        self.busy_inflight_bytes = busy_inflight_bytes
+        self.waits = waits.WaitTimers(waits.SendQueue(getattr(channel, 'sock', None)), busy_inflight_bytes)
+        self.inbox = Inbox(channel, self.waits)
+        self.leaf_requests = 0
         self.mode = self.reason = self.policy = self.basis_identity = self.receiver_stats = None
         self.directory_count = 0
         self.files = dict.fromkeys(('total', 'unchanged', 'changed', 'new', 'size_mismatch'), 0)
@@ -256,6 +281,10 @@ class _Sender:
             raise InvalidInput('high_churn_node_fraction must be between 0 and 1')
         if type(self.jobs) is not int or self.jobs < 1:
             raise InvalidInput(f'jobs must be a positive integer, not {self.jobs!r}')
+        if self.busy_inflight_bytes is not None and (type(self.busy_inflight_bytes) is not int
+                                                     or self.busy_inflight_bytes < 0):
+            raise InvalidInput(f'busy_inflight_bytes must be a whole number of bytes, '
+                               f'not {self.busy_inflight_bytes!r}')
         if self.hash_backend not in BACKENDS:
             raise InvalidInput(f'hash backend must be one of {", ".join(BACKENDS)}, not {self.hash_backend!r}')
         inventory = prepare_source(self.source) if self.selection is None else self.selection.inventory
@@ -270,7 +299,7 @@ class _Sender:
         self.pool_start_seconds = time.perf_counter() - started
         self.protocol_started = time.perf_counter()
         self.inbox.start()
-        self.channel.send_json(protocol.HELLO, {
+        self._send_json(protocol.HELLO, {
             'protocol_version': protocol.PROTOCOL_VERSION,
             'block': self.block,
             'node_blocks': self.node_blocks,
@@ -280,7 +309,7 @@ class _Sender:
             'directories': [[entry.path, entry.mode] for entry in inventory.directories],
             'files': [[entry.path, entry.size, entry.mode] for entry in inventory.files],
         })
-        accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT')
+        accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
         self.reuse, self.reason, self.policy, self.basis_identity, self.basis_sizes = _parse_accept(
             accept, len(inventory.files))
         self.in_place = accept.get('in_place', False)
@@ -300,10 +329,9 @@ class _Sender:
         if self.selection is not None:
             # A server started on the data directory meanwhile: fail before the receiver publishes.
             datadir.check_unchanged(self.source, self.pg_controldata, self.selection)
-        self.channel.send_json(protocol.COMPLETE, {'files': len(inventory.files),
-                                                   'directories': self.directory_count})
+        self._send_json(protocol.COMPLETE, {'files': len(inventory.files), 'directories': self.directory_count})
         try:
-            final = self.inbox.wait(lambda: self.inbox.complete, 'COMPLETE')
+            final = self.inbox.wait(lambda: self.inbox.complete, 'COMPLETE', 'complete')
         except ChannelClosed as exc:
             raise ChannelClosed(f'{exc}. Every file was sent, so the receiver may have published the output '
                                 f'anyway: check its log and the receipt beside the output '
@@ -337,13 +365,14 @@ class _Sender:
             job.plan.whole = list(range(tree.node_count))
             return job
         size, nodes = self.inbox.wait(lambda: self.inbox.basis.pop(index, None),
-                                      f'basis digests of {entry.path}')
+                                      f'basis digests of {entry.path}', 'basis')
         if size != job.basis_size or len(nodes) != node_count(size, self.block, self.node_blocks) * DIGEST_SIZE:
             raise ProtocolError(f'BASIS_NODES for {entry.path} disagrees with the announced basis size')
         job.plan = matching.classify_nodes(tree, size, nodes, self.high_churn)
         for start in range(0, len(job.plan.descend), self.max_request):
             chunk = job.plan.descend[start:start + self.max_request]
-            self.channel.send(protocol.LEAF_REQUEST, protocol.encode_leaf_request(index, chunk))
+            self._send(protocol.LEAF_REQUEST, protocol.encode_leaf_request(index, chunk))
+            self.leaf_requests += 1
         return job
 
     def _finish(self, job):
@@ -351,7 +380,7 @@ class _Sender:
         pages = []
         for node in plan.descend:
             blob = self.inbox.wait(lambda: self.inbox.leaves.pop((job.index, node), None),
-                                   f'leaf digests of {job.path}')
+                                   f'leaf digests of {job.path}', 'leaf')
             expected = matching.basis_leaf_count(node, job.basis_size, self.block, self.node_blocks)
             if len(blob) != expected * DIGEST_SIZE:
                 raise ProtocolError(f'LEAF_DIGESTS for {job.path} node {node} has the wrong length')
@@ -360,7 +389,7 @@ class _Sender:
             pages += matching.node_pages(tree, node)
         pages.sort()
         sent_bytes = self._send_pages(job, pages) if pages else 0
-        self.channel.send(protocol.FILE_DONE, protocol.encode_file_done(job.index, tree.size, tree.digest))
+        self._send(protocol.FILE_DONE, protocol.encode_file_done(job.index, tree.size, tree.digest))
         self.files_digest.add(job.path, tree.size, tree.digest)
         self._count(job, len(pages), sent_bytes)
 
@@ -379,11 +408,22 @@ class _Sender:
                 except OSError as exc:
                     raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
                 self.inbox.check()
-                self.channel.send(protocol.PAGE_DATA, protocol.page_data_head(job.index, first), data)
+                self._send(protocol.PAGE_DATA, protocol.page_data_head(job.index, first), data)
                 sent += length
         finally:
             os.close(fd)
         return sent
+
+    def _send(self, code, *parts):
+        """Send one frame, counting the time send() blocked: page_send_s for page data, other_send_s else."""
+        started = time.perf_counter()
+        self.channel.send(code, *parts)
+        self.waits.sent(code == protocol.PAGE_DATA, time.perf_counter() - started)
+
+    def _send_json(self, code, value):
+        started = time.perf_counter()
+        self.channel.send_json(code, value)
+        self.waits.sent(False, time.perf_counter() - started)
 
     def _count(self, job, pages_sent, sent_bytes):
         tree, plan, files = job.tree, job.plan, self.files
@@ -470,6 +510,11 @@ class _Sender:
             'pages': dict(self.pages),
             'nodes': dict(self.nodes),
             'high_churn_files': self.high_churn_files,
+            # LEAF_REQUEST frames sent: the leaf round trips a window may hide (EXP-13).
+            'leaf_requests': self.leaf_requests,
+            # EXP-13: the connect, the waits for the receiver (each split into busy and idle by the send
+            # queue), and the time blocked sending (pgdelta.waits). Like timings, they vary from run to run.
+            'protocol_timers': self.waits.summary(getattr(self.channel, 'connect_seconds', None)),
             'bytes_source_to_dest': self.channel.sent.summary(),
             'bytes_dest_to_source': self.channel.received.summary(),
             'timings_seconds': {key: None if value is None else round(value, 6)
@@ -480,7 +525,8 @@ class _Sender:
 
 def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_BLOCKS,
                high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
-               hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None):
+               hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
+               busy_inflight_bytes=None):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -493,6 +539,12 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     `source_kind` "datadir" reads a cleanly stopped data directory directly
     (pgdelta.datadir) and needs `pg_controldata`; its identity is then read
     from it unless `identity` is given.
+    `window` files are hashed ahead of the one being sent (at least 1): it
+    changes the order of the frames on the wire, never what they hold.
+    `busy_inflight_bytes` (EXP-13): over TCP on Linux, a wait counts as busy
+    while bytes are unsent, or while more than this many are in flight;
+    without it, only unsent bytes do (pgdelta.waits). Only the statistics
+    change.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
-                   window, key, jobs, hash_backend, source_kind, pg_controldata).run()
+                   window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes).run()

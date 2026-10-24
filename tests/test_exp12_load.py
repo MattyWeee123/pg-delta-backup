@@ -413,14 +413,17 @@ class Arms(unittest.TestCase):
                 self.assertIn(method, measure.OUTPUT_START_METHODS)
                 self.assertNotIn(method, measure.SOURCE_STOP_METHODS)
                 self.assertNotIn(method, measure.DISK_WRITE_CHECK_METHODS)
+        # EXP-13's arms (v1's side arms and parcopy16) stop the source as v1 and parcopy do (test_exp13_core).
         self.assertEqual(set(measure.SOURCE_STOP_METHODS), {'pgdelta_direct', 'pgdelta_direct_inplace',
-                                                            'pgdelta_direct_inplace_j8', 'parcopy8', 'parcopy4'})
+                                                            'pgdelta_direct_inplace_j8', 'parcopy8', 'parcopy4',
+                                                            *measure.T12_METHODS})
 
     def test_per_end_jobs(self):
         self.assertEqual(measure.PGDELTA_ENGINES['v1proxy'], measure.PGDELTA_ENGINES['pgdelta_direct_inplace'])
         self.assertEqual(measure.PGDELTA_ARGS['v1proxy'], measure.PGDELTA_ARGS['pgdelta_direct_inplace'])
+        # EXP-13 pins v1's request window, 4, today's default, on every arm that runs v1's engine.
         self.assertEqual(measure.PGDELTA_ARGS['v1proxy_s1'],
-                         {'send': ('--jobs', '1', '--source-kind', 'datadir'),
+                         {'send': ('--jobs', '1', '--source-kind', 'datadir', '--window', '4'),
                           'receive': ('--jobs', '4', '--verify', 'pipelined', '--prefetch-basis', 'on', '--fsync',
                                       'main', '--in-place')})
         self.assertEqual(measure.pgdelta_switches(measure.PGDELTA_ENGINES['v1proxy_s1']),
@@ -1407,7 +1410,9 @@ class CommandLines(Stubbed):
         self.assertEqual(code, 0)
         self.assertEqual(set(run['method_flags']), {'none', 'capture', 'bracket', 'full', 'pgdelta', 'v1proxy',
                                                     'v1proxy_s1', 'pgdelta_direct_inplace', 'burn4', 'pause2'})
-        self.assertEqual(run['method_flags']['v1proxy_s1']['send'], ['--jobs', '1', '--source-kind', 'datadir'])
+        # EXP-13 pins v1's request window, 4, today's default, on every arm that runs v1's engine.
+        self.assertEqual(run['method_flags']['v1proxy_s1']['send'], ['--jobs', '1', '--source-kind', 'datadir',
+                                                                     '--window', '4'])
         self.assertEqual(run['t10a']['rates']['busy'], 6000)
         self.assertEqual(run['t10a']['controls'], ['pause2', 'burn4'])
         self.assertIn('settle', run['t10a']['timeline'])

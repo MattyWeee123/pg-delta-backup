@@ -20,8 +20,10 @@ import random
 import stat
 import subprocess
 import sys
+import socket
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -309,6 +311,47 @@ class Copies(unittest.TestCase):
                 self.assertIsNotNone(summary['fsync_s'])
                 self.assertEqual(outcome['sender']['receiver']['fsync_calls'], expected)
                 self.assertEqual(outcome['sender']['plan']['streams'], streams)
+
+    def test_the_sender_opens_every_connection_at_once(self):
+        # Each connect takes a round trip (here 0.2 s): one after another, the control connection and 8 data
+        # connections would take 9 of them before any byte moved (about 1 s at 120 ms); at once, about one.
+        real = socket.create_connection
+
+        def slow(address, *args, **kwargs):
+            time.sleep(0.2)
+            return real(address, *args, **kwargs)
+
+        with mock.patch.object(parcopy.socket, 'create_connection', slow):
+            output, _, _, _, outcome = self.copy(8)
+        self.assertNotIn('sender_error', outcome)
+        self.assertNotIn('receiver_error', outcome)
+        self.assert_holds_the_selection(output)
+        sent = outcome['sender']
+        connect = sent['connected_s'] - sent['connect_start_s']
+        self.assertGreaterEqual(connect, 0.2)
+        self.assertLess(connect, 3 * 0.2)
+        self.assertEqual(measure.parcopy_connect_s(sent), round(connect, 6))
+
+    def test_a_connection_that_fails_closes_the_others(self):
+        opened, real = [], socket.create_connection
+
+        def flaky(address, *args, **kwargs):
+            sock = real(address, *args, **kwargs)
+            opened.append(sock)
+            if len(opened) == 3:
+                sock.close()
+                raise ConnectionRefusedError('refused')
+            return sock
+
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(16)
+        self.addCleanup(listener.close)
+        with mock.patch.object(parcopy.socket, 'create_connection', flaky), \
+                self.assertRaises(ConnectionRefusedError):
+            parcopy.connect_all('127.0.0.1', listener.getsockname()[1], 4)
+        self.assertEqual(len(opened), 5)
+        self.assertTrue(all(sock.fileno() == -1 for sock in opened))  # none left open
 
     def test_files_are_split_across_streams(self):
         lists = parcopy.plan(self.selection, 4, MIB)

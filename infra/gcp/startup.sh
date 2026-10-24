@@ -61,6 +61,23 @@ if ! command -v chronyc >/dev/null; then
   echo 'server metadata.google.internal prefer iburst' > /etc/chrony/sources.d/gce.sources
   systemctl restart chrony
 fi
+# EXP-13 (T12): stunnel4 and openssl for v1_tls's proxy pair and its per-session CA; ping for each visit's
+# round-trip check (as root, 0.05 s apart).
+if ! command -v stunnel4 >/dev/null || ! command -v openssl >/dev/null || ! command -v ping >/dev/null; then
+  "${APT[@]}" update
+  "${APT[@]}" install --no-install-recommends stunnel4 openssl iputils-ping
+fi
+# EXP-13: sshd also listens on the harness's control port, which the emulated WAN (wan.sh) leaves neither
+# delayed nor shaped; port 22 stays as it is, for the Mac, pg_probackup and the SSH probe, all delayed.
+# The zone's default-allow-internal firewall rule lets the other VM reach it on the internal address.
+CONTROL_PORT=2222
+control_conf=/etc/ssh/sshd_config.d/pgd-control-port.conf
+if ! grep -qx "Port $CONTROL_PORT" "$control_conf" 2>/dev/null; then
+  printf '# EXP-13 (T12): the harness control path, outside the emulated WAN (infra/gcp/wan.sh)\nPort 22\nPort %s\n' \
+    "$CONTROL_PORT" > "$control_conf"
+  sshd -t
+  systemctl reload ssh
+fi
 # VMs provisioned before pgbackrest and xfsprogs were (PGDG is configured above by then).
 if [ ! -x /usr/bin/pgbackrest ] || [ ! -x /usr/sbin/mkfs.xfs ]; then
   "${APT[@]}" update

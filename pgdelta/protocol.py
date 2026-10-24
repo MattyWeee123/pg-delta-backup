@@ -71,11 +71,18 @@ class Counter:
 
 
 class Channel:
-    """One bidirectional session stream. send() is thread-safe; recv() has one caller."""
+    """One bidirectional session stream. send() is thread-safe; recv() has one caller.
 
-    def __init__(self, reader, writer, *, closer=None, max_frame=MAX_FRAME):
+    `sock` is the TCP socket under the stream (None over pipes), whose send
+    queue the sender reads while it waits (pgdelta.waits); `connect_seconds`
+    is how long connecting it took, when this end connected.
+    """
+    connect_seconds = None
+
+    def __init__(self, reader, writer, *, closer=None, max_frame=MAX_FRAME, sock=None):
         self._reader, self._writer, self._closer = reader, writer, closer
         self.max_frame = max_frame
+        self.sock = sock
         self.sent, self.received = Counter(), Counter()
         self._lock = threading.Lock()
         self._closed = self._broken = False
