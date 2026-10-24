@@ -1,6 +1,6 @@
 # EXP-08: How do the incumbent refresh tools compare where pgdelta claims its edge?
 
-Status: **pre-registered October 23, 2026**, before the tooling for it ran. It was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026), and the first version is in git (commit 4cda743). This is test T11 of the [decision ledger](../DECISIONS.md#t11-incumbent-tools-where-pgdelta-claims-its-edge), whose registered predictions are marked "ledger" below.
+Status: **part B done** (results below, October 23–24, 2026); part A running. Pre-registered October 23, 2026, before the tooling for it ran. It was **revised the same day, still before running,** after an independent review; see [Revisions before running](#revisions-before-running-october-23-2026), and the first version is in git (commit 4cda743). This is test T11 of the [decision ledger](../DECISIONS.md#t11-incumbent-tools-where-pgdelta-claims-its-edge), whose registered predictions are marked "ledger" below.
 
 ## Question
 
@@ -126,3 +126,83 @@ An independent reviewer checked the first version against the ledger and EXP-04b
 - **The repository sits on the source's local NVMe.** Omni's repositories can be a local disk, Cloud Storage or S3.
 - **SSH encrypts pgBackRest's traffic; pgdelta's is unencrypted,** although owner decision O6 requires TLS. The cipher's cost counts against pgBackRest. It could matter for the "clear edge" rule's 20% margin.
 - **pgbench's padded rows compress unrealistically,** which helps the zstd variants (I8b).
+
+## Results, part B: pgBackRest delta restore
+
+**Run:** October 23–24, 2026, 22:23–23:58 UTC, sweep `exp08-pgbackrest`, on the VMs of [EXP-09](EXP-09-direct-read.md).
+- **Runs:** 162, every one verified. Every pgBackRest restore was started, recovered through `archive-get`, and matched the source's per-table row counts and md5s.
+- **Versions:** pgBackRest 2.59.3 (PGDG); the configuration is recorded in the sweep's `run.json`.
+- **Data:** [exp08-runs.csv](data/exp08-runs.csv), [exp08-cells.csv](data/exp08-cells.csv).
+- **Analysis:** [analysis/exp08.py](../../analysis/exp08.py), written and dry-run before these results existed.
+
+![EXP-08: time](../figures/exp08-time.svg)
+
+**End-to-end time** (median of 3, seconds). For pgBackRest this is the restore alone: the backup it restores was taken just before, untimed.
+
+| Workload | Link | Full copy | pgdelta v0 | pgdelta v1 path | pgBackRest zstd | pgBackRest none | pgBackRest block |
+|---|---|---:|---:|---:|---:|---:|---:|
+| uniform | 0.5 Gbit/s | 36.57 | 16.66 | 12.33 | **3.52** | 20.19 | 4.00 |
+| | 2 Gbit/s | 10.27 | 9.08 | 4.91 | **3.48** | 6.28 | 3.86 |
+| | unthrottled | 3.29 | 7.67 | **3.16** | 3.52 | 4.77 | 3.88 |
+| hot | 0.5 Gbit/s | 36.44 | 7.51 | **2.73** | 3.50 | 20.05 | 2.82 |
+| | 2 Gbit/s | 10.25 | 7.23 | **2.71** | 3.52 | 6.26 | 2.83 |
+| | unthrottled | 3.14 | 7.31 | **2.71** | 3.47 | 4.64 | 2.82 |
+| append | 0.5 Gbit/s | 35.95 | 7.43 | 2.69 | 7.90 | 18.13 | **2.68** |
+| | 2 Gbit/s | 10.29 | 7.21 | 2.69 | 4.06 | 5.69 | **2.62** |
+| | unthrottled | 3.11 | 7.27 | 2.70 | 4.10 | 4.44 | **2.64** |
+
+![EXP-08: bytes](../figures/exp08-bytes.svg)
+
+**Bytes from source to destination** (median, unthrottled, MB). For pgBackRest this includes the WAL its recovery fetched afterwards; that part is in brackets.
+
+| Workload | Full copy | pgdelta v1 path | pgBackRest zstd | pgBackRest none | pgBackRest block |
+|---|---:|---:|---:|---:|---:|
+| uniform | 2,111 | 611 | 55 (0.4) | 1,497 (387) | 55 (0.3) |
+| hot | 2,104 | 29 | 51 (0.4) | 1,406 (303) | **1.9** (0.4) |
+| append | 2,113 | 28 | 379 (0.5) | 1,412 (421) | **5.3** (0.4) |
+
+pgdelta's 28–29 MB for local changes is mostly the one 16 MiB WAL segment it always sends. The pages themselves are 12–13 MB.
+
+### Verdict on each prediction
+
+| ID | Prediction | Result |
+|---|---|---|
+| I7 | `pgbackrest_zst` beats staged pgdelta on time for local changes | **Held in 5 of 6 cells; failed for append at 0.5 Gbit/s** (7.90 against 7.43 s): file-level restore sends 379 MB for append |
+| I8 | pgBackRest sends more bytes than pgdelta for uniform, judged on `pgbackrest_zst` | **Failed: 55 against 611 MB. The registered rule fires: on bytes, the pitch to Omni users must be "no repository needed".** Part of this is pgbench's padded rows compressing unusually well, which T4 will check on realistic data |
+| I8a | Without compression, pgBackRest sends more than pgdelta for uniform (about 1.05 GB) | **Held:** 1,109 MB restored plus 387 MB of WAL, against 611 MB |
+| I8b | With zstd, fewer bytes than pgdelta for uniform | **Held** (55 against 611 MB) |
+| I9 | Block incremental sends at most half of zstd's bytes for local changes | **Held:** 1.9 against 51 MB (hot), 5.3 against 379 MB (append) |
+| I10 | Uniform: `pgbackrest_zst` faster than pgdelta's v1 path at 0.5 Gbit/s | **Held:** 3.52 against 12.33 s |
+| I10b | Local changes: v1 path faster than `pgbackrest_zst` at 0.5 and 2 Gbit/s | **Held:** 2.69–2.73 against 3.50–7.90 s |
+| I11 | `pgbackrest_zst` beats the full copy at every speed for local changes | **Failed unthrottled** (3.47 against 3.14 s; 4.10 against 3.11 s); held at 0.5 and 2 Gbit/s |
+
+**The registered rules, on `pgbackrest_zst` against pgdelta's v1 path: mixed.** The ratios (v1 ÷ zstd) are:
+- 0.34–0.78 for local changes at every speed;
+- 3.51 (0.5 Gbit/s), 1.41 (2 Gbit/s) and 0.90 (unthrottled) for uniform.
+
+As registered for a mixed outcome, the crossing speeds are:
+- **Local changes (hot, append):** pgdelta's v1 path is faster at every link speed tested.
+- **Scattered changes (uniform):** pgBackRest with zstd is faster below about 9 Gbit/s; v1 is faster above it.
+
+**Not in the registered rules, but it matters most: block incremental.** `pgbackrest_block`, the newest repository format, ties pgdelta's v1 path for local changes at every speed:
+- hot: 2.82 against 2.71 s;
+- append: 2.62–2.68 against 2.69–2.70 s.
+
+It is faster for scattered changes on slower links, and it sends the fewest bytes of anything measured (1.9–5.3 MB for local changes). Its restore barely loads the source (0.3–0.5 CPU-s, against 5.4–6.0 for pgdelta), because the repository serves files it has already compressed.
+
+### What this means
+
+**Where a current pgBackRest backup already exists, pgBackRest's delta restore is as good as pgdelta's v1 path for local changes, and better for scattered changes on slower links.** That is especially true with block incremental. pgdelta's case therefore rests on what this experiment deliberately gave pgBackRest for free: **a backup taken just before the restore.**
+
+In Omni:
+- The newest BackupPlan backup is up to a day old (a daily full by default). A delta restore from it must then replay up to a day of WAL, which wasn't measured here.
+- HA and DR seeding don't use the repository at all.
+- pgdelta needs no repository and no recent backup. It refreshes straight from the live server.
+
+So the pitch to Omni users, by I8's registered rule and by these times, is **"no repository needed"**. The comparison worth running next is pgBackRest with a realistically old backup plus WAL replay, against pgdelta from the live server.
+
+**Caveats from the pre-registration, unchanged:**
+- pgdelta's v1 path read a stopped source.
+- pgBackRest's traffic was encrypted by SSH; pgdelta's wasn't.
+- pgbench compresses unrealistically well, which helps every zstd variant.
+- Each pgBackRest restore's recovery fetched 18–29 WAL files: the later in a trial a restore ran, the more WAL earlier methods had added. That is counted in its bytes, not its time.

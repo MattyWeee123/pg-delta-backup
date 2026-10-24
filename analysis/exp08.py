@@ -224,8 +224,10 @@ def fig_time(table, tag):
                 ax.bar(x, value, width, color=color, hatch=hatch, edgecolor='white', label=label if method not in seen else None)
                 seen.add(method)
                 ax.plot([x, x], [value, top], color='black', linewidth=0.8)
+                ax.text(x, top * 1.05, f'{value:.1f}', ha='center', va='bottom', fontsize=6, rotation=90)
         ax.set_xticks(range(len(SPEEDS)), [SPEED_LABEL[s] for s in SPEEDS])
         ax.set_yscale('log')
+        ax.set_ylim(1.5, 80)
         from exp04 import plain_log
         plain_log(ax)
         ax.set_title(f'{pattern} 1%')
