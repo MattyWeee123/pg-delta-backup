@@ -3,6 +3,37 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24 (06:27–09:34 UTC): EXP-11 ran; T2 done; VMs deleted
+
+**Ran** on two new `n2-standard-8` VMs in `us-central1-a`, created at 06:27 UTC and deleted at 09:34 UTC:
+
+| Invocation | UTC | Runs | For |
+|---|---|---:|---|
+| smoke: `exp11-smoke`, `exp11-smoke70`, `exp11-audit`, `exp11-audit2` | 06:32–07:03 | 89 | EXP-11's twelve smoke items, recorded in its write-up before the sweep |
+| `exp11-local` | 07:04–08:53 | 348 | hot, then append: the main block, the extension and the warm-source block |
+| `exp11-uniform` | 08:53–09:32 | 120 | uniform: the main block |
+
+Every run of the sweep was verified, and every durable run passed the durability checks. The two invocations took 108 and 39 minutes, against 108 and 38 projected.
+
+**The smoke run's two fixes,** both made before the sweep and recorded in EXP-11:
+- **A WAL ticker for `pg_probackup`** (commit 288e26b). On the idle source, `pg_probackup catchup`'s WAL stream noticed the stop point only at its next timer tick, so each catchup idled 2–8 s after `pg_backup_stop`. During `probackup*` runs only, the source now gets one empty WAL message every 0.1 s, as a live primary's WAL would arrive. It changes no table or data file.
+- **The syscall audit** stopped on real `strace` output: a `close()` of a descriptor inherited from the parent raised `KeyError`. Fixed with a regression test from the real trace line (commit 43da18c); the rerun audited every arm.
+
+Also from the smoke run: the idle noise of dirty memory was 0.44 MiB, so check (a)'s limit stayed at 4 MiB; and the projection put the session at the 3.5-hour line, so cut 1 applied (`pg_probackup`'s byte diagnostic only in each trial's first repeat).
+
+**Result** (details in [EXP-11](experiments/EXP-11-full-copy-baseline.md), summary in [What T2 settled](DECISIONS.md#what-t2-settled-october-24-2026)):
+- **The fastest durable full copy** was the parallel copier built as a bound: 1.88 s unthrottled. One `pg_basebackup` stream took 3.8–4.1 s (fsync or syncfs alike), and `pg_probackup catchup -j 4/8`, the only released parallel tool found, 5.8–6.1 s.
+- **EXP-09's HA verdict reverses: out on fast links.** v1's path (stopped source, 4 jobs) takes 1.64–1.65 times as long as the bound for local changes, with no robustness flag. It is faster than the released copiers tested (0.77–0.78 of one stream with syncfs). The cut it would need, 1.40–1.42 s, is more than T5 and T13 can give together, so the queue is re-ranked: T12 (DR's links) up to second, T5 and T13 down.
+- **Crossovers:** v1's path beats the bound below 6.5 Gbit/s for local changes and 5.0 for scattered ones, and every released copier at every speed measured.
+- **The session is shifted against EXP-09:** v1 took 14–18% longer and one stream 22–30% longer unthrottled, so every ratio is within the session.
+
+**Found while writing it up,** and stated in EXP-11 beside the analysis's verdicts, which are unchanged:
+- **The start and end reference digests differed in every trial,** in `template1`'s and `postgres`'s statistics catalogs and the commit log (most likely autovacuum; not confirmed), smoke trials included. Smoke item 12 had recorded them as matching. So a `pg_probackup` logical difference would have counted as void, not failed; none occurred.
+- **The time until usable can't show where `--no-sync`'s flush goes:** the harness's verification maps every output file with `FIEMAP_FLAG_SYNC`, which writes it back, before starting it.
+- **The analysis's E13 counts the negative control:** its "every arm passes the audit" includes `full_nosync`, which must fail. Every durable arm passed.
+
+**Cost:** about 3.1 hours of the pair, at about 1 USD per hour for the two VMs together, so about 3 USD. Both VMs were deleted at 09:34 UTC.
+
 ## 2026-10-24 (night): EXP-11's harness built and reviewed
 
 **Built** on local branches, each part by one agent in its own worktree: the core (the method tables, the `pg_basebackup` variants with timestamped phases, the durability checks (a) and (b), the probes, the trial's order with the extension and warm-source blocks, the write-back sysctl and its guard), the parallel copier `parcopy`, the `pg_probackup` arms with the syscall audit, and `analysis/exp11.py`. Then merged, with every test run.

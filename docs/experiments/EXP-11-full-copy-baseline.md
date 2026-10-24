@@ -545,6 +545,8 @@ Docs: a "Methods for T2" section in `experiments/network/README.md`, and this wr
 | Invocation 1, `exp11-local`: hot, then append | 07:04–08:53 | 348 | 108 min (99–119) |
 | Invocation 2, `exp11-uniform` | 08:53–09:32 | 120 | 38 min (34–42) |
 
+The smoke run took 31 minutes, its two fixes included; the two invocations took 108 and 39 minutes.
+
 - **Runs:** 468 in the sweep: 370 in the main block, 80 in the extension and 18 in the warm-source block, as planned. Every one passed verification, and none was left out of a median.
 - **Software:** PostgreSQL 17.11, EXP-09's minor version, and `pg_probackup` 2.5.16, on both VMs. pgdelta differs from EXP-09's deployed commit only in the write-back mode (`pgdelta/receiver.py` +19 −11, and its README), which v1's arms don't use.
 - **Data:** [exp11-runs.csv](data/exp11-runs.csv) (one row per run, with each arm's own phase timers and the durability checks) and [exp11-cells.csv](data/exp11-cells.csv) (medians and maxima per workload, speed and arm, in the main-block, HA and warm-source views).
@@ -728,7 +730,7 @@ What the medians show:
 **Question 2: where one stream's time above link time goes.**
 - **At 2 Gbit/s it is the final flush, as the working hypothesis said.** The sync phase takes 1.33–1.34 s of the 1.50–1.51 s above link time, and `full_nosync` runs only 0.16–0.18 s above link time. At 5 Gbit/s, `full`'s time above link time is about the same (1.54–1.56 s).
 - **Unthrottled, the flush is only half of it.** `full` runs 2.58–2.84 s above link time. Its stream phase alone (2.41–2.69 s) takes about twice the link time of its bytes (1.22 s, recomputed: the median over `full`'s unthrottled runs, from the single-stream link test). One cold reader reads `pgbench_accounts` at 2.07–2.17 GB/s, so neither the link nor a cold read of the largest file sets the stream's pace. With the source's cache warm, append's streams still took 1.92–1.94 s (recomputed, 3 runs). The timers don't say what sets it.
-- **The flush variants** (recomputed from exp11-runs.csv, medians over the main block and the extension): `full_syncfs` spent 1.29–1.30 s in its sync, about as long as `full`'s fsync method (1.33–1.34 s), so the two tie (E4). `full_wb`, with write-back at 64 MiB on dest, spent 0.06 s: the kernel wrote the copy back during the stream. So `full_wb` took about `full_nosync`'s time (2.62–2.90 s against 2.64–2.80 s unthrottled). Every variant's stream phase took 2.47–2.63 s unthrottled (median over its runs).
+- **The flush variants** (recomputed from exp11-runs.csv, medians over each arm's main-block and extension runs): `full_syncfs` spent 1.29–1.30 s in its sync, about as long as `full`'s fsync method (1.33–1.34 s), so the two tie (E4). `full_wb`, with write-back at 64 MiB on dest, spent 0.06 s: the kernel wrote the copy back during the stream. So `full_wb` took about `full_nosync`'s time (2.62–2.90 s against 2.64–2.80 s unthrottled). Every variant's stream phase took 2.47–2.63 s unthrottled (median over its runs).
 
 **`pg_probackup`** (recomputed from exp11-runs.csv; unthrottled, range of the workloads' medians):
 - 0.46 s before its copy started: launch, SSH connections, backup start;
