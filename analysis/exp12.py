@@ -2091,7 +2091,9 @@ def g4_lines(S, ctx):
                '(max) |', '|---|---|---:|' + '---|' * 13]
     for block in BLOCKS:
         for arm in LIVE:
-            runs = [r for r in S.runs if r['block'] == block and r['method'] == arm and r['status'] != 'error']
+            # A copy its tool aborted has no checks (and no durability reads): R3's line lists it.
+            runs = [r for r in S.runs if r['block'] == block and r['method'] == arm and r['status'] != 'error'
+                    and not r['aborted']]
             if not runs:
                 continue
             counts = oracle_cells(runs)
@@ -2207,7 +2209,9 @@ def durability_lines(S, ctx):
               'smallest md writes ÷ output |', '|---|---|---:|---|---|---:|---:|']
     for block in BLOCKS:
         for arm in [*ARM_NAMES, V1, *measure.NON_DURABLE_METHODS]:
-            runs = [r for r in S.runs if r['block'] == block and r['method'] == arm and r['status'] != 'error']
+            # A copy its tool aborted has no checks (and no durability reads): R3's line lists it.
+            runs = [r for r in S.runs if r['block'] == block and r['method'] == arm and r['status'] != 'error'
+                    and not r['aborted']]
             if not runs or arm in measure.NO_DEST_WRITE_METHODS:
                 continue
             a = Counter(get(r['record'], 'durability', 'a_ok') for r in runs)

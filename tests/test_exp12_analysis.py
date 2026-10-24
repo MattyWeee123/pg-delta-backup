@@ -1060,6 +1060,7 @@ class DryRun(unittest.TestCase):
             self.assertIn('**L5** ("Every output is correct"', text)
             self.assertRegex(text, r'\*\*L5\*\*[^\n]*: failed: ')
             self.assertIn('left out of every median: wrong 3', text)
+            self.assertIn('| busy | pgdelta | 12 |', text)  # the oracle's table counts the outputs that exist
 
     def test_a_harness_error_around_an_output_is_unverified(self):
         def ssh(item):
