@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
 import math
 import statistics
@@ -689,21 +690,28 @@ def flip(value, kind, line):
 
 
 def near_line(r, bound, margin=NEAR):
-    """The deciding ratios within the margin of 0.90 or 1.00: those whose crossing to the line's other
-    side, alone, would change the row or its qualifier."""
+    """The deciding ratios within the margin of 0.90 or 1.00, in hot or append: each one whose crossing to
+    its line's other side, alone or together with other ratios within the margin, would change the row or
+    its qualifier (it is needed in some such set of crossings), whatever the other workload shows. So two
+    workloads both just above 1.00 are flagged, though neither alone decides Out, and so are R_rel and R_adj
+    against B_rel just above 0.90 in both, which together decide the qualifier."""
     base = verdict(r, bound)
-    found = []
-    for p in LOCAL:
-        for key, lines in THRESHOLDS.items():
-            value = (r.get(p) or {}).get(key)
-            for kind, line in lines:
-                if value is None or abs(value - line) > margin + 1e-9:
-                    continue
-                moved = {q: dict(v) for q, v in r.items()}
-                moved[p][key] = flip(value, kind, line)
-                if verdict(moved, bound) != base:
-                    found.append((p, key, value, line))
-    return found
+    near = [(p, key, value, kind, line) for p in LOCAL for key, lines in THRESHOLDS.items()
+            for kind, line in lines if (value := (r.get(p) or {}).get(key)) is not None
+            and abs(value - line) <= margin + 1e-9]
+
+    def changes(crossed):
+        moved = {q: dict(v or {}) for q, v in r.items()}
+        for p, key, value, kind, line in crossed:
+            moved[p][key] = flip(value, kind, line)
+        return verdict(moved, bound) != base
+
+    needed = set()
+    for size in range(1, len(near) + 1):
+        for crossed in itertools.combinations(range(len(near)), size):
+            if changes([near[i] for i in crossed]):
+                needed.update(i for i in crossed if not changes([near[j] for j in crossed if j != i]))
+    return [(p, key, value, line) for i, (p, key, value, kind, line) in enumerate(near) if i in needed]
 
 
 def fragile(ratios, bound, fast='B_fast'):

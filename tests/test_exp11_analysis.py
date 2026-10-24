@@ -295,6 +295,30 @@ class Verdict(unittest.TestCase):
         # 0.04 from the line is not near it.
         self.assertEqual(exp11.near_line(exp11.deciding(ratios((1.04, 0.80), (0.95, 0.95))), MEASURED), [])
 
+    def test_near_the_line_flags_ratios_that_decide_together(self):
+        # Both workloads just above 1.00: neither alone decides Out, both together do.
+        r = exp11.deciding(ratios((1.02, 1.01), (0.95, 0.95), adj_rel=(1.0, 1.0)))
+        self.assertEqual(exp11.verdict(r, MEASURED)['row'], 'Out on fast links')
+        self.assertEqual(exp11.near_line(r, MEASURED), [('hot', 'fast', 1.02, 1.00), ('append', 'fast', 1.01, 1.00)])
+        # R_rel and R_adj against B_rel just above 0.90 in both: together they decide the qualifier.
+        r = exp11.deciding(ratios((1.3, 1.3), (0.91, 0.91), adj_rel=(0.92, 0.92)))
+        self.assertEqual(exp11.verdict(r, MEASURED), {'row': 'Out on fast links', 'qualifier': False})
+        self.assertEqual([(p, k) for p, k, *_ in exp11.near_line(r, MEASURED)],
+                         [('hot', 'rel'), ('hot', 'adj_rel'), ('append', 'rel'), ('append', 'adj_rel')])
+        # One of them far from the line: the others can't decide the qualifier, whatever they do.
+        r = exp11.deciding(ratios((1.3, 1.3), (0.91, 0.91), adj_rel=(0.92, 0.99)))
+        self.assertEqual(exp11.near_line(r, MEASURED), [])
+        # Undecided with R_fast and R_adj just above 0.90 in both: all four together decide Confirmed.
+        r = exp11.deciding(ratios((0.92, 0.91), (0.85, 0.85)))
+        self.assertEqual(exp11.verdict(r, MEASURED)['row'], 'Undecided')
+        self.assertEqual([(p, k, line) for p, k, _, line in exp11.near_line(r, MEASURED)],
+                         [('hot', 'fast', 0.90), ('hot', 'adj_fast', 0.90), ('append', 'fast', 0.90),
+                          ('append', 'adj_fast', 0.90)])
+        # R_fast just under 1.00 in one and just above 0.90 in the other: only the first can change the row,
+        # since Confirmed needs the first at 0.90 too.
+        r = exp11.deciding(ratios((0.98, 0.92), (0.85, 0.85)))
+        self.assertEqual([(p, k, line) for p, k, _, line in exp11.near_line(r, MEASURED)], [('hot', 'fast', 1.00)])
+
     def test_fragile_when_a_robustness_view_changes_the_row(self):
         steady = ratios((0.95, 0.95), (0.95, 0.95), max=((0.97, 0.96), (0.97, 0.97)),
                         no_ssh=((0.94, 0.94), (0.94, 0.94)), paired=((0.95, 0.95), (0.95, 0.95)))
