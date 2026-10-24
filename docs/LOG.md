@@ -3,6 +3,22 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24 (night): EXP-11's harness built and reviewed
+
+**Built** on local branches, each part by one agent in its own worktree: the core (the method tables, the `pg_basebackup` variants with timestamped phases, the durability checks (a) and (b), the probes, the trial's order with the extension and warm-source blocks, the write-back sysctl and its guard), the parallel copier `parcopy`, the `pg_probackup` arms with the syscall audit, and `analysis/exp11.py`. Then merged, with every test run.
+
+**Reviewed** by three adversarial reviewers (fidelity to the pre-registration, measurement fairness, robustness on the real VMs): 16 findings, 4 major, all fixed with regression tests. The major ones:
+- a copy the tool itself aborted was recorded as an error and escaped A4, so a failing arm could still have set a baseline;
+- the "near the line" flag missed ratios that decide only together;
+- the `pg_probackup` arms depended on a path that exists only when it is built from source;
+- check (a) would have ignored the smoke run's idle noise.
+
+**Tests:** 1,067, all passing (6 skipped: Linux-only or binaries missing), up from 864.
+
+**Recorded in EXP-11 before running:** how the harness and the analysis read every rule where the text left a choice (its section "How the harness and the analysis read the rules").
+
+**Not testable on the Mac,** so first exercised by the smoke run: Linux's write-back and `sendfile`, `strace` on real output, and the exact log lines of `pg_basebackup --verbose` and `pg_probackup` 2.5.16, which the parsers were written against from their source code.
+
 ## 2026-10-24 (later): T2 pre-registered as EXP-11
 
 **Why T2 next:** EXP-09's HA verdict (v1 at 0.86 of one `pg_basebackup` stream) rests on a single-stream baseline, and rule 3 asks for the fastest durable full copy. T2 measures it.

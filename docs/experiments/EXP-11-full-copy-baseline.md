@@ -1,6 +1,6 @@
 # EXP-11: How fast can a durable full copy go, and does v1's path still beat it?
 
-Status: **pre-registered October 24, 2026, revised after two independent reviews and a check of the revision; not yet run; the harness code is not built.** This is test T2 of the [decision ledger](../DECISIONS.md#t2-fastest-durable-full-copy-as-v1s-baseline). It merges three independent drafts. The ledger's registered predictions and rules are kept word for word and judged as registered, except the zstd part, which moves to T4 (change 3). Everything marked "added here" is new. Where the arms depart from the ledger's, the reason is under [Changes from the ledger](#changes-from-the-ledger-rule-8), as rule 8 asks. A feasibility review and a fairness review checked the first version before anything ran. Every change they led to, and the changes from the check of the revision, are listed under [Revisions before running](#revisions-before-running-october-24-2026).
+Status: **pre-registered October 24, 2026, revised after two independent reviews and a check of the revision; the harness is built and reviewed (see the end of the revisions); not yet run.** This is test T2 of the [decision ledger](../DECISIONS.md#t2-fastest-durable-full-copy-as-v1s-baseline). It merges three independent drafts. The ledger's registered predictions and rules are kept word for word and judged as registered, except the zstd part, which moves to T4 (change 3). Everything marked "added here" is new. Where the arms depart from the ledger's, the reason is under [Changes from the ledger](#changes-from-the-ledger-rule-8), as rule 8 asks. A feasibility review and a fairness review checked the first version before anything ran. Every change they led to, and the changes from the check of the revision, are listed under [Revisions before running](#revisions-before-running-october-24-2026).
 
 ## Question
 
@@ -389,6 +389,37 @@ An independent check of the revised version found 8 more problems, 2 major, and 
 
 **After a review of the harness build (October 24, before running)**
 - **The run lines carry check (a)'s idle noise** (`--dirty-noise-mib $NOISE`, from smoke item 5). Without it, both sweeps would have judged check (a) against 4 MiB alone, not the registered limit. No rule changes.
+
+**How the harness and the analysis read the rules (October 24, before running)**
+
+The harness was built after the revisions above, then reviewed adversarially (16 findings, 4 major, all fixed with regression tests). Where the text above left a choice, the code makes the one below. Each is recorded here before anything runs, because each could change how a result is judged.
+
+*Verification and A4*
+- **A copy the tool itself aborts fails A4.** A run counts as a tool failure when any command of the arm's own timed phase exits non-zero or times out, `probackup*`'s `sync -f` and a `parcopy` refusal included. A failure of the harness around the copy doesn't count. Where the analysis can't tell which it was, A4 is reported as undecided beside the verdict.
+- **A void `probackup*` run gets its own status, "void",** so no baseline counts it as a pass.
+- **A `probackup*` output that doesn't start fails A4 whether or not the source changed.** If the trial's reference digests couldn't be compared, a logical difference counts as a failure, not as void.
+- **A `probackup*` output whose start had to fetch WAL from an archive fails verification:** "no WAL fetched after the clock stops".
+- **Runs whose durability couldn't be checked** (check (a) or (b) missing) are left out of the baselines and of v1's medians, as "durability unchecked". Only real failures count toward A5's reclassification.
+- **Check (a) and A5 are judged apart.** A6 voids check (a) only; a `parcopy` run's `fsync` count still decides A5.
+
+*The verdict*
+- **"Near the line" flags a ratio within ±0.03 of 0.90 or 1.00** whose crossing, alone or together with other ratios within that margin, would change the row or its qualifier.
+- **"Fragile" compares the whole row** that `R_max`, `R_noSSH` and `R_paired` would give with the row the medians give.
+- **"Fails its gate while slower than B_rel"** means B_fast's chosen arm unthrottled is a released arm. A gate that can't be judged is not a pass, so it blocks Confirmed.
+- **A "Not judged" row is added** for when hot's or append's `R_fast` is missing and the other workload doesn't already decide Out.
+- **A crossover is provisional** when an arm of its envelope, missing at a speed the crossover rests on, beat or tied (within 0.05 s) the chosen arm wherever both ran.
+- **Crossovers use each workload's median single-stream rate** in the main block as x. "None" in E10 means v1 was faster than that baseline at every measured speed.
+
+*Rules A2 and A7*
+- **A2's first clause** is `full_wb` minus B_fast at most 0.15 s, on main-block medians in hot and append.
+- **A7's measured link for EXP-09** is the median over EXP-09's runs in that cell; wire bytes are gated for `full` and v1. A session where no gate could be checked counts as shifted.
+
+*Arms and checks*
+- **The runs refuse to start unless `/data` on both VMs is ext4 in ordered mode with barriers,** since the directory rule depends on it.
+- **`parcopy`** fsyncs with 16 threads in both arms, so `parcopy4` and `parcopy8` differ only in their streams. Its receiver also fails a copy in which any file didn't get exactly its bytes. Its preflight requires early write-back on dest and `os.sendfile` on the source, without which it wouldn't be the arm registered.
+- **The syscall audit** runs inside the harness (`--syscall-audit`) and traces every command of every timed phase. Only `fsync`, not `fdatasync`, covers a directory. An `open` with `O_CREAT` counts as a change of its directory. A write the trace can't map to a path fails the audit.
+- **The first cut** (`probackup*`'s byte diagnostic after each trial's first repeat) is a flag, `--probackup-byte-diagnostic first_repeat`, so applying it needs no code change.
+- **pgdelta's code since EXP-09** is recorded at deploy time: the diff of `pgdelta/` from EXP-09's deployed commit, `b77f33d`, goes into each VM's `DEPLOYED.json` and from there into `run.json`.
 
 ## Limitations, known before running
 
