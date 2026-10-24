@@ -295,6 +295,45 @@ def cmd_throttle(args) -> dict:
             'utc': time.time()}
 
 
+def run_group_signal(pgid: int, signum, spare_leader: bool = False) -> None:
+    """signum to process group pgid (run --timeout's session); with spare_leader (GNU time leads it) and a /proc, to
+    every member but the leader, so GNU time outlives the command and writes its report (SIGKILL goes to all)."""
+    if spare_leader and signum != signal.SIGKILL:
+        members = measure.group_members(pgid)
+        if members is not None:
+            for pid in members:
+                if pid != pgid:
+                    try:
+                        os.kill(pid, signum)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+            return
+    try:
+        os.killpg(pgid, signum)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def run_group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def run_group_stop(pgid: int, kill_at: float) -> None:
+    """After a run --timeout expiry, once the group's leader has been reaped: wait for the rest of the group (a
+    command GNU time ran, or children the command left) until the monotonic time kill_at, RUN_KILL_GRACE after the
+    SIGTERM, then SIGKILL whatever is left."""
+    while run_group_alive(pgid) and time.monotonic() < kill_at:
+        time.sleep(0.05)
+    if run_group_alive(pgid):
+        run_group_signal(pgid, signal.SIGKILL)
+
+
 def cmd_run(args) -> dict:
     argv = args.argv[1:] if args.argv[:1] == ['--'] else args.argv
     if not argv:
@@ -319,21 +358,21 @@ def cmd_run(args) -> dict:
     expired: list = []
     with open(log, 'wb') as stream:
         # With --timeout (EXP-13's bound on a run, A15), the command runs in its own session, and the whole session
-        # is stopped once the timeout passes (SIGTERM, then SIGKILL after RUN_KILL_GRACE).
+        # is stopped once the timeout passes (SIGTERM, then SIGKILL after RUN_KILL_GRACE). Under GNU time the SIGTERM
+        # spares GNU time where /proc lists the group (as run_exp04's Child.signal does), so it outlives the command
+        # and writes its report; GNU time ignores only SIGINT and SIGQUIT, so without /proc it dies at the SIGTERM
+        # and wait4 returns at once. Either way the SIGKILL goes to whatever of the group is left RUN_KILL_GRACE after
+        # the SIGTERM, not only while the group's leader runs (run_group_stop).
         process = subprocess.Popen(launch, stdout=subprocess.PIPE if tee else stream, stderr=subprocess.STDOUT,
                                    stdin=subprocess.DEVNULL, cwd=args.cwd or None, env=env,
                                    start_new_session=bool(timeout))
         timer, done = None, threading.Event()
         if timeout:
             def expire():
-                expired.append(time.monotonic() - started)
-                for signum, grace in ((signal.SIGTERM, RUN_KILL_GRACE), (signal.SIGKILL, 0)):
-                    try:
-                        os.killpg(process.pid, signum)
-                    except (ProcessLookupError, PermissionError):
-                        return
-                    if grace and done.wait(grace):
-                        return
+                expired.append(time.monotonic())
+                run_group_signal(process.pid, signal.SIGTERM, spare_leader=bool(gnu_time))
+                if not done.wait(RUN_KILL_GRACE):
+                    run_group_signal(process.pid, signal.SIGKILL)
 
             timer = threading.Timer(timeout, expire)
             timer.daemon = True
@@ -348,11 +387,14 @@ def cmd_run(args) -> dict:
                 sys.stdout.flush()
             process.stdout.close()
         _, status, usage = os.wait4(process.pid, 0)
+        wall = time.monotonic() - started
         process.returncode = os.waitstatus_to_exitcode(status)
         if timer is not None:
             done.set()
             timer.cancel()
-    wall = time.monotonic() - started
+            timer.join()  # an expiry under way returns at once now: `expired` is settled
+            if expired:
+                run_group_stop(process.pid, expired[0] + RUN_KILL_GRACE)
     with open(log, 'rb') as stream:
         size = stream.seek(0, os.SEEK_END)
         stream.seek(max(0, size - LOG_TAIL_BYTES))

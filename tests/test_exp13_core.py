@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import socket
 import ssl
 import shutil
@@ -49,6 +50,8 @@ BASE_ARGS = ['--conditions', CONDITIONS, '--control-port', '2222', '--repeats', 
              '--link-test-warmup', '3', '--methods', f'full,parcopy8,{V1},{TLS}',
              '--method-conditions', f'{TLS}=2:0:default,2:120:tuned', '--baseline-methods', 'full,parcopy8',
              '--baseline-repeats', '2', '--negative-control', 'full_nosync@2:0:default']
+
+NO_WARMUP = BASE_ARGS[:BASE_ARGS.index('--link-test-warmup')] + BASE_ARGS[BASE_ARGS.index('--link-test-warmup') + 2:]
 
 # `ss -tinH dst 10.0.0.13` on the source during a v1 run at 120 ms, in iproute2 6.1's format (ss.c tcp_show_info:
 # the info line after a tab; notsent and unacked only when not 0): pgdelta's sender, the control path (port 2222,
@@ -331,12 +334,20 @@ class Conditions(unittest.TestCase):
             "doesn't run with --load": [*BASE_ARGS, '--extension-repeats', '1', '--extension-methods', 'full'],
             '--negative-control': [*BASE_ARGS[:-2], '--negative-control', 'nothing@2:0:default'],
             '--link-test-warmup': [*BASE_ARGS, '--link-test-warmup', '6'],
+            # Every probe link test needs 3 whole seconds after the warmup (link_test's need_steady): refused before
+            # the VMs' time is spent. The defaults (3 s, blast-recv's 0.5 s warmup) give 2; 6 s after 4 s gives 2.
+            '--conditions needs --link-test-warmup': NO_WARMUP,
+            'at least ceil(--link-test-warmup) + 3': [*BASE_ARGS, '--link-test-warmup', '4'],
             '--dirty-noise-table': [*BASE_ARGS, '--dirty-noise-table', '5'],
         }
         for message, argv in refused.items():
             with self.subTest(message=message), redirect_stderr() as err, self.assertRaises(SystemExit):
                 parse(*argv)
             self.assertIn(message, err.getvalue())
+        self.assertEqual(parse(*BASE_ARGS, '--link-test-warmup', '2.5').link_test_warmup, 2.5)  # 6 s >= 3 + 3
+        with redirect_stderr() as err, self.assertRaises(SystemExit):
+            parse(*NO_WARMUP, '--link-test-seconds', '3')
+        self.assertIn('--conditions needs --link-test-warmup', err.getvalue())
         with redirect_stderr() as err, self.assertRaises(SystemExit):
             run_exp04.parse_args(['--source-ip', 'x', '--out', 'y', *BASE_ARGS])
         self.assertIn('need --manifest-checksums CRC32C', err.getvalue())
@@ -541,6 +552,46 @@ class SsAndNstat(unittest.TestCase):
         self.assertEqual(summary['samples'], 2)  # the line cut short at the stop is left out
         self.assertEqual(summary['ss']['minrtt_ms_min'], 120.105)
         self.assertEqual((summary['qdisc']['netem_qlen_max'], summary['qdisc']['at_limit']), (9, False))
+
+
+# GNU time 1.9's signal handling (time.c, run_command): the command it forks stays in its process group; while it
+# waits, it ignores SIGINT and SIGQUIT and nothing else; once the command has exited it writes its -f report to -o.
+GNU_TIME_LIKE = """\
+import signal, subprocess, sys
+args = sys.argv[1:]
+fmt, out = args[args.index('-f') + 1], args[args.index('-o') + 1]
+command = subprocess.Popen(args[args.index('-o') + 2:])
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGQUIT, signal.SIG_IGN)
+code = command.wait()
+with open(out, 'w') as stream:
+    stream.write(fmt.replace('%M', '4321').replace('%e', '1.0').replace('%U', '0').replace('%S', '0')
+                 .replace('%x', str(code)) + '\\n')
+sys.exit(code if code >= 0 else 128 - code)
+"""
+# A command that writes its PID to argv[1] and sleeps: STUBBORN ignores SIGTERM, POLITE ends at it.
+_PID = 'open(sys.argv[1] + ".tmp", "w").write(str(os.getpid())); os.replace(sys.argv[1] + ".tmp", sys.argv[1])\n'
+STUBBORN = 'import os, signal, sys, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\n' + _PID + 'time.sleep(60)\n'
+POLITE = 'import os, sys, time\n' + _PID + 'time.sleep(60)\n'
+
+
+def gone(pid: int, wait: float = 5.0) -> bool:
+    """Whether process pid has ended (and been reaped) within `wait` seconds."""
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def kill_quietly(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 class AgentProcesses(unittest.TestCase):
@@ -750,6 +801,47 @@ class AgentProcesses(unittest.TestCase):
             quick = agent.cmd_run(Namespace(log=f'{tmp}/y.log', cwd=None, env=None, gnu_time=None, tee=False,
                                             timeout=30, argv=['--', 'true']))
             self.assertEqual((quick['exit_code'], quick['timed_out']), (0, False))
+
+    def test_run_kills_a_command_that_outlives_sigterm_under_gnu_time(self):
+        # The run lines put GNU time in front of every command (--gnu-time). GNU time ignores only SIGINT and SIGQUIT,
+        # so a SIGTERM to the whole group ends it at once, wait4 returns, and the SIGKILL used to be skipped: a command
+        # that survived SIGTERM was left running. The agent now escalates on the group, not on its leader, and, with
+        # /proc, spares GNU time (as Child.signal does on dest), so GNU time outlives the command.
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp, 'time')
+            fake.write_text(f'#!{os.path.realpath(sys.executable)}\n' + GNU_TIME_LIKE)
+            fake.chmod(0o755)
+            for proc in (False, True):
+                with self.subTest(proc=proc):
+                    pid_file = Path(tmp, f'pid-{proc}')
+
+                    def members(pgid):
+                        return [pgid] + ([int(pid_file.read_text())] if pid_file.exists() else [])
+
+                    began = time.monotonic()
+                    with mock.patch.object(agent, 'RUN_KILL_GRACE', 1.0), \
+                            mock.patch.object(measure, 'group_members', members if proc else (lambda pgid: None)):
+                        result = agent.cmd_run(Namespace(
+                            log=f'{tmp}/stubborn-{proc}.log', cwd=None, env=None, gnu_time=str(fake), tee=False,
+                            timeout=1.0, argv=['--', sys.executable, '-c', STUBBORN, str(pid_file)]))
+                    elapsed = time.monotonic() - began
+                    pid = int(pid_file.read_text())
+                    self.addCleanup(kill_quietly, pid)
+                    self.assertTrue(result['timed_out'])
+                    self.assertTrue(gone(pid), 'the command outlived the run')
+                    self.assertGreaterEqual(elapsed, 1.9)  # the SIGTERM at 1 s, the SIGKILL RUN_KILL_GRACE later
+            # A command that stops at the SIGTERM: with /proc, GNU time is spared and writes its report.
+            with mock.patch.object(agent, 'RUN_KILL_GRACE', 5.0), \
+                    mock.patch.object(measure, 'group_members',
+                                      lambda pgid: [pgid] + [int(p.read_text()) for p in Path(tmp).glob('pid-polite')]):
+                began = time.monotonic()
+                result = agent.cmd_run(Namespace(
+                    log=f'{tmp}/polite.log', cwd=None, env=None, gnu_time=str(fake), tee=False, timeout=1.0,
+                    argv=['--', sys.executable, '-c', POLITE, str(Path(tmp, 'pid-polite'))]))
+            self.assertTrue(result['timed_out'])
+            self.assertLess(time.monotonic() - began, 4)  # no wait for the grace once the group is gone
+            self.assertIsNotNone(result['gnu_time'])
+            self.assertEqual(result['peak_rss_kb'], 4321)
 
     def test_tls_material_needs_openssl(self):
         with mock.patch.object(agent.subprocess, 'run', return_value=mock.Mock(returncode=1, stderr='no')), \
@@ -1390,9 +1482,41 @@ class Stalling(T12Stub):
         return super().local_command(argv, log_name, timeout=timeout, cwd=cwd, env=env, stamp_lines=stamp_lines)
 
 
+class NeverListening(T12Stub):
+    """T12Stub whose receiver is a real process that never listens (a hang before --listen); it ends at SIGTERM."""
+
+    def receive_argv(self, method, paths):
+        return [sys.executable, '-c', 'import time; time.sleep(60)']
+
+
 class RunLimits(Clocked13):
     """A15's timeout leg: a run that reaches four times its expected upper bound (at least 60 s; probackup8 240 s) is
     stopped there and is a tool failure, failure_reason 'timeout'."""
+
+    def test_a_receiver_not_listening_by_the_bound_is_a_timeout(self):
+        # start_receiver gives up at what is left of the run's bound and stops the receiver with SIGTERM, at which it
+        # exits: its record used to say timed_out False, so the run had failure_kind 'tool' and no failure_reason.
+        orchestrator = self.orchestrator(NeverListening)
+        orchestrator.gnu_time = None
+        condition, link, _ = self.visit(orchestrator, '2:60:default')
+        began = time.monotonic()
+        with mock.patch.object(measure, 't12_run_limit',
+                               return_value={'limit_s': 0.5, 'upper_s': None, 'from': 'a test'}):
+            record = orchestrator.run_method(TRIAL, 0, condition, dict(link), V1, 0, [V1])
+        self.assertLess(time.monotonic() - began, 10)
+        self.assertEqual((record['status'], record['failure_kind'], record.get('failure_reason')),
+                         ('error', 'tool', 'timeout'))
+        receiver = next(iter(record['phases'].values()))['commands'][0]
+        self.assertTrue(receiver['timed_out'])
+        self.assertIn('(timed out)', record['error'])
+        self.assertEqual(measure.summary_row(record)['failure_reason'], 'timeout')
+        # Outside a run's bound, giving up after --command-timeout (at most 600 s) is not A15's timeout.
+        orchestrator.args.command_timeout = 0.3
+        holder = {}
+        paths = orchestrator.method_paths(V1)
+        [result] = run_exp04.Orchestrator.start_receiver(orchestrator, V1, paths, holder)
+        self.assertFalse(result['timed_out'])
+        self.assertNotEqual(result['exit_code'], 0)
 
     def test_each_arms_bound_is_four_times_its_written_upper_bound(self):
         limit = measure.t12_run_limit
@@ -1645,10 +1769,15 @@ class Invocation(Clocked13):
             self.wan('apply', self.conditions[1])
             return {'trial_id': f'{index:02d}-{pattern}', 'status': 'pass'}
 
-    def execute(self, extra=()):
+    class Interrupted(Executing):
+        def run_trial(self, index, pattern, fraction):
+            super().run_trial(index, pattern, fraction)  # the tree on and the tuned settings, as a visit leaves them
+            raise KeyboardInterrupt  # remote.py stop's SIGTERM, which run_trial and run_method don't catch
+
+    def execute(self, extra=(), cls=None):
         args = ['--patterns', 'hot', '--gnu-time', 'none', '--disk-test-mib', '0', '--idle-seconds', '0',
                 '--phase-floor-repeats', '0', *BASE_ARGS, *extra]
-        orchestrator = self.orchestrator(self.Executing, args)
+        orchestrator = self.last = self.orchestrator(cls or self.Executing, args)
         route = mock.Mock(stdout='10.0.0.12 dev ens4 src 10.0.0.13 uid 1000\n', returncode=0)
         with mock.patch.object(run_exp04.subprocess, 'run', return_value=route), \
                 mock.patch.object(orchestrator.source, 'open'), mock.patch.object(orchestrator.source, 'close'):
@@ -1681,6 +1810,20 @@ class Invocation(Clocked13):
         self.assertFalse(run['teardown']['source']['tree_is_wan'])
         self.assertEqual(run['teardown']['dest']['qdiscs'][0]['kind'], 'mq')
         self.assertTrue(run['teardown']['tcp']['ok'])
+
+    def test_an_interrupted_invocation_writes_its_teardown(self):
+        # The teardown runs in execute's finally; the interrupt then goes past the save after it, so run.json kept
+        # the last per-trial save, with no teardown, and the analysis couldn't check it.
+        with self.assertRaises(KeyboardInterrupt):
+            self.execute(cls=self.Interrupted)
+        orchestrator = self.last
+        run = json.loads((orchestrator.out / 'run.json').read_text())
+        self.assertIsNone(orchestrator.applied)
+        self.assertEqual(orchestrator.kernel_tcp, orchestrator.tcp_defaults)
+        self.assertFalse(run['teardown']['source']['tree_is_wan'])
+        self.assertFalse(run['teardown']['dest']['tree_is_wan'])
+        self.assertTrue(run['teardown']['tcp']['ok'])
+        self.assertTrue(measure.teardown_ok(run['teardown']))
 
     def test_it_refuses_vms_that_do_not_have_debians_tcp_settings(self):
         # An interrupted run can leave the tuned maxima: taken as the defaults, every default visit would run tuned.

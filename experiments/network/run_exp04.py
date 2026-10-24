@@ -341,23 +341,7 @@ class Source:
                                f'{result.stderr.strip()[-2000:]}')
 
 
-def group_members(pgid: int, proc: Path = Path('/proc')) -> list[int] | None:
-    """PIDs in process group pgid, from /proc/*/stat; None without a /proc."""
-    if not (proc / 'self').exists():
-        return None
-    members = []
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            text = (entry / 'stat').read_text()
-        except OSError:
-            continue
-        # pid (comm) state ppid pgrp ...; comm may contain spaces and parentheses.
-        fields = text[text.rindex(')') + 2:].split()
-        if len(fields) > 2 and int(fields[2]) == pgid:
-            members.append(int(entry.name))
-    return members
+group_members = measure.group_members  # PIDs in a process group, from /proc (shared with agent.py run --timeout)
 
 
 def server_env(**extra) -> dict:
@@ -2089,7 +2073,12 @@ class Orchestrator:
         holder['receiver'] = receiver
         deadline = time.monotonic() + min(600, self.command_timeout())
         while 'listening on' not in receiver.log_text():
-            if receiver.poll() is not None or time.monotonic() > deadline:
+            exited = receiver.poll() is not None
+            if exited or time.monotonic() > deadline:
+                if not exited and self.run_deadline is not None and time.monotonic() >= self.run_deadline:
+                    # EXP-13's A15: the run reached its bound before the receiver listened. It is stopped there, as
+                    # Child.wait stops a command at its bound, and its record says so (failure_reason 'timeout').
+                    receiver.timed_out = True
                 receiver.signal()
                 return [receiver.wait(60)]
             time.sleep(0.005)
@@ -5845,6 +5834,12 @@ class Orchestrator:
                 except Exception as exc:
                     self.run['teardown'] = {'error': f'{type(exc).__name__}: {exc}'}
                     log(f'could not reset the network: {exc}')
+                # Saved now: an interrupt (remote.py stop's SIGTERM, a KeyboardInterrupt that run_trial and
+                # run_method don't catch) goes on past the save below, and run.json would keep no teardown.
+                try:
+                    save_json(self.out / 'run.json', self.run)
+                except Exception as exc:
+                    log(f'could not save run.json with the teardown: {exc}')
             try:
                 self.throttle('off')
             except Exception as exc:
@@ -6138,6 +6133,17 @@ def t12_problems(args, methods) -> list[str]:
         return problems
     if not args.control_port:
         problems.append("--conditions needs --control-port: the harness's SSH stays outside the emulated WAN")
+    # Every link test run as a probe fails unless its steady rate rests on measure.STEADY_SECONDS whole seconds after
+    # the warmup (link_test's need_steady), so options that leave fewer are refused here, before the VMs' time is spent.
+    # A necessary condition only: the receiver keeps the whole seconds from its first byte to its last.
+    if args.link_test_warmup is None:
+        problems.append("--conditions needs --link-test-warmup: each link test's steady rate is the median of the last "
+                        f'{measure.STEADY_SECONDS} whole seconds after it (the run lines pass 3)')
+    elif (0 <= args.link_test_warmup < args.link_test_seconds
+          and args.link_test_seconds < math.ceil(args.link_test_warmup) + measure.STEADY_SECONDS):
+        problems.append(f'--link-test-seconds must be at least ceil(--link-test-warmup) + {measure.STEADY_SECONDS}, or '
+                        f'no link test has {measure.STEADY_SECONDS} whole seconds after its warmup and every probe '
+                        'link test fails')
     if args.method_speeds:
         problems.append('--method-speeds is for --speeds; with --conditions, use --method-conditions')
     if getattr(args, 'load', None) is not None or args.extension_repeats or args.warm_source_repeats:

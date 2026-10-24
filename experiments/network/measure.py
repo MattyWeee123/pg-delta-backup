@@ -793,6 +793,27 @@ def gnu_time_argv(gnu_time, output, argv) -> list[str]:
     return [str(gnu_time), '-f', GNU_TIME_FORMAT, '-o', str(output), *map(str, argv)]
 
 
+def group_members(pgid: int, proc: Path = Path('/proc')) -> list[int] | None:
+    """PIDs in process group pgid, from /proc/*/stat; None without a /proc. A signal meant for a command run under GNU
+    time goes to these but GNU time itself (run_exp04's Child.signal, agent.py run --timeout), so GNU time outlives
+    the command and writes its report: GNU time ignores only SIGINT and SIGQUIT."""
+    if not (proc / 'self').exists():
+        return None
+    members = []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            text = (entry / 'stat').read_text()
+        except OSError:
+            continue
+        # pid (comm) state ppid pgrp ...; comm may contain spaces and parentheses.
+        fields = text[text.rindex(')') + 2:].split()
+        if len(fields) > 2 and int(fields[2]) == pgid:
+            members.append(int(entry.name))
+    return members
+
+
 def parse_gnu_time(text: str) -> dict | None:
     """The GNU_TIME_FORMAT line of a GNU time -o file, or None if it has none.
 
