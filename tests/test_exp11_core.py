@@ -370,6 +370,161 @@ class ParcopySummary(unittest.TestCase):
         empty = measure.parcopy_summary(None)
         self.assertEqual((empty['streams'], empty['balance'], empty['fsync_ok']), (None, None, None))
 
+# --- the agent's and the source's probes --------------------------------------------------------
+
+class HostProbes(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+
+    def test_a_multi_stream_blast_over_loopback(self):
+        probe = socket.socket()
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        results = {}
+
+        def receive():
+            with redirect_stdout(io.StringIO()):
+                results['recv'] = agent.cmd_blast_recv(Namespace(listen=f'127.0.0.1:{port}', timeout=30, warmup=0.1,
+                                                                 streams=3))
+
+        thread = threading.Thread(target=receive)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                socket.create_connection(('127.0.0.1', port), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.02)
+        # That probe connection was one of the three: the sender opens the other two.
+        sent = agent.cmd_blast_send(Namespace(connect=f'127.0.0.1:{port}', seconds=0.4, streams=2))
+        thread.join(30)
+        received = results['recv']
+        self.assertEqual(received['streams'], 3)
+        self.assertEqual(len(received['per_stream']), 3)
+        self.assertEqual(received['bytes'], sent['bytes'])
+        self.assertEqual(sum(sent['per_stream_bytes']), sent['bytes'])
+        self.assertGreater(received['gbit'], 0)
+
+    def test_the_durable_write_test(self):
+        target = self.root / 'floor'
+        synced = []
+        real = os.fsync
+        with mock.patch.object(agent.os, 'fsync', side_effect=lambda fd: synced.append(fd) or real(fd)):
+            result = agent.cmd_durable_write_test(Namespace(dir=str(target), writers=3, bytes=10 * MIB + 7,
+                                                            writeback_bytes=4 * MIB))
+        self.assertEqual(result['bytes'], 10 * MIB + 7)
+        self.assertEqual([writer['bytes'] for writer in result['per_writer']], [3495256, 3495256, 3495255])
+        self.assertEqual(len(synced), 4)  # each file, then the directory
+        self.assertEqual(list(target.iterdir()), [])  # removed afterwards
+        self.assertGreater(result['seconds'], 0)
+
+    def test_the_read_test_splits_files_and_leaves_out_pg_wal(self):
+        data = self.root / 'data'
+        for rel, size in (('base/5/16397', 3000), ('base/5/16397.1', 100), ('base/5/2600', 700),
+                          ('global/1262', 200), ('pg_wal/000000010000000000000001', 5000), ('PG_VERSION', 3)):
+            (data / rel).parent.mkdir(parents=True, exist_ok=True)
+            (data / rel).write_bytes(b'x' * size)
+        result = agent.cmd_read_test(Namespace(path=str(data), readers=2, exclude=['pg_wal'], sync=False))
+        self.assertEqual((result['files'], result['bytes'], result['readers']), (5, 4003, 2))
+        self.assertEqual(sorted(reader['bytes'] for reader in result['per_reader']), [1003, 3000])
+        self.assertEqual(result['largest_file']['path'], str(data / 'base/5/16397'))
+        # One reader for a file, with its further segments.
+        single = agent.cmd_read_test(Namespace(path=str(data / 'base/5/16397'), readers=4, exclude=[], sync=False))
+        self.assertEqual((single['readers'], single['files'], single['bytes']), (1, 2, 3100))
+        self.assertEqual(measure.split_files([(5, 'a'), (3, 'b'), (3, 'c'), (1, 'd')], 2),
+                         [[(5, 'a'), (1, 'd')], [(3, 'b'), (3, 'c')]])
+
+    def test_sysctl_get_and_set(self):
+        proc = self.root / 'sys'
+        (proc / 'vm').mkdir(parents=True)
+        (proc / 'vm' / 'dirty_background_ratio').write_text('10\n')
+        (proc / 'vm' / 'dirty_background_bytes').write_text('0\n')
+
+        def run(argv, **kwargs):
+            name, value = argv[-1].split('=')
+            (proc / name.replace('.', '/')).write_text(value + '\n')
+            if name.endswith('_bytes'):
+                (proc / 'vm' / 'dirty_background_ratio').write_text('0\n')
+            return mock.Mock(returncode=0, stderr='')
+
+        with mock.patch.object(agent, 'sysctl_path', lambda name: proc / name.replace('.', '/')), \
+                mock.patch.object(agent.subprocess, 'run', side_effect=run) as called:
+            got = agent.cmd_sysctl(Namespace(action='get', settings=['vm.dirty_background_ratio',
+                                                                     'vm.dirty_background_bytes']))
+            self.assertEqual(got['values'], {'vm.dirty_background_ratio': 10, 'vm.dirty_background_bytes': 0})
+            done = agent.cmd_sysctl(Namespace(action='set', settings=['vm.dirty_background_bytes=67108864']))
+        self.assertEqual(called.call_args.args[0],
+                         ['sudo', '-n', 'sysctl', '-q', '-w', 'vm.dirty_background_bytes=67108864'])
+        self.assertEqual(done['values'], {'vm.dirty_background_bytes': 67108864})
+        with self.assertRaises(SystemExit):
+            agent.cmd_sysctl(Namespace(action='set', settings=['vm.dirty_background_bytes']))
+        parser = agent.build_parser()
+        self.assertEqual(parser.parse_args(['sysctl', 'get', 'vm.dirty_ratio']).settings, ['vm.dirty_ratio'])
+
+    def test_env_records_write_back_and_tool_versions(self):
+        texts = {'strace': 'strace -- version 6.1\nCopyright', '/p/pg_probackup-17': 'pg_probackup 2.5.16',
+                 '/b/pg_basebackup': 'Usage:\n  --sync-method=METHOD\n'}
+
+        def text_of(argv, **kwargs):
+            return texts.get(argv[0])
+
+        with mock.patch.object(agent, 'text_of', side_effect=text_of), \
+                mock.patch.object(agent, 'metadata', return_value=None), \
+                mock.patch.object(agent, 'read', side_effect=lambda path: '10' if 'dirty' in str(path) else None):
+            env = agent.cmd_env(Namespace(iface='ens4', bin_dir='/b', pg_probackup='/p/pg_probackup-17'))
+        self.assertEqual(env['vm_dirty']['dirty_background_ratio'], '10')
+        self.assertEqual(set(env['vm_dirty']), set(agent.VM_DIRTY))
+        self.assertEqual((env['strace'], env['pg_probackup']), ('strace -- version 6.1', 'pg_probackup 2.5.16'))
+        self.assertTrue(env['pg_basebackup_sync_method'])
+        self.assertEqual(agent.build_parser().parse_args(['env', '--iface', 'x']).pg_probackup, measure.PROBACKUP_EXE)
+
+
+class BracketProbe(unittest.TestCase):
+    OUTPUT = 'Timing is on.\n2/A0000028\nTime: {start} ms\n2/A0000100\nTime: {stop} ms\n'
+
+    def test_the_pair_in_one_session(self):
+        argv = source_cluster.backup_mode_argv('/w/src', '/b')
+        self.assertEqual(argv[:12], ['/b/psql', '-X', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-h', '/w/src/s', '-p',
+                                     '5432', '-U', 'study'])
+        self.assertEqual(argv[-6:], ['-c', '\\timing on', '-c', "SELECT pg_backup_start('probe', true);", '-c',
+                                     'SELECT lsn FROM pg_backup_stop(false);'])
+        self.assertEqual(measure.psql_timings('Time: 12.5 ms\nTime: 1500.250 ms (00:01.500)\n'), [0.0125, 1.50025])
+
+    def test_each_pair_follows_a_cache_drop(self):
+        times = iter([(180.0, 20.0), (40.0, 10.0), (50.0, 12.0)])
+        events = []
+
+        def run(argv, **kwargs):
+            events.append('psql')
+            start, stop = next(times)
+            return mock.Mock(returncode=0, stdout=self.OUTPUT.format(start=start, stop=stop), stderr='')
+
+        def drop(args):
+            events.append('drop')
+            return {'seconds': 0.5}
+
+        with mock.patch.object(source_cluster.subprocess, 'run', side_effect=run), \
+                mock.patch.object(source_cluster.agent, 'cmd_drop_caches', side_effect=drop):
+            result = source_cluster.cmd_backup_mode_probe(Namespace(root='/w/src', bin_dir='/b', repeats=3))
+        self.assertEqual(events, ['drop', 'psql'] * 3)
+        self.assertEqual([pair['pair_s'] for pair in result['pairs']], [0.2, 0.05, 0.062])
+        self.assertEqual((result['first_pair_s'], result['median_pair_s'], result['median_after_first_s']),
+                         (0.2, 0.062, 0.056))
+        self.assertEqual(source_cluster.build_parser().parse_args(['backup-mode-probe', '--root', 'r']).repeats, 10)
+
+    def test_a_failed_pair_fails_the_probe(self):
+        with mock.patch.object(source_cluster.subprocess, 'run',
+                               return_value=mock.Mock(returncode=3, stdout='', stderr='ERROR: permission denied')), \
+                mock.patch.object(source_cluster.agent, 'cmd_drop_caches', return_value={'seconds': 0.1}), \
+                self.assertRaises(SystemExit) as failed:
+            source_cluster.cmd_backup_mode_probe(Namespace(root='/w/src', bin_dir='/b', repeats=2))
+        self.assertIn('permission denied', str(failed.exception))
+
+
 class ReferenceView(unittest.TestCase):
     def test_what_a_clean_stop_rewrites_is_left_out(self):
         view = measure.reference_view(SOURCE_DIGEST)

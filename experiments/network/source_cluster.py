@@ -25,6 +25,13 @@ and, between them, three that stop and start the running cluster:
                                                             archive_mode = on with CMD, then
                                                             restart (pgbackrest_* trials only)
 
+and one that times backup mode on the running, idle cluster (EXP-11's bracket probe):
+
+    source_cluster.py backup-mode-probe --root R --repeats N
+                                                            N x (drop the page cache;
+                                                            pg_backup_start('probe', true);
+                                                            pg_backup_stop(false))
+
 Each prints one RESULT_PREFIX JSON line (see agent.py). The trial options
 (--scale, --pattern, --fraction, --seed, --hot-percent, --events-rows,
 --batch-size) are EXP-01's, parsed by run_study's own parser.
@@ -37,6 +44,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import statistics
 import subprocess
 import sys
 import time
@@ -46,6 +54,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from experiments.change_patterns import run_study, workloads  # noqa: E402
+from experiments.network import agent, measure  # noqa: E402
 from experiments.network.agent import emit  # noqa: E402
 
 DEFAULT_BIN_DIR = '/usr/lib/postgresql/17/bin'
@@ -252,6 +261,47 @@ def cmd_archive(args) -> dict:
     return {'appended_postgresql_conf': lines, 'in_effect': in_effect, 'stop': stop, 'start': start}
 
 
+# One backup-mode pair in one session (a non-exclusive backup must start and stop in the same one),
+# timed by psql itself; the label and fast checkpoint are EXP-11's.
+BACKUP_MODE_PAIR = ("SELECT pg_backup_start('probe', true);", 'SELECT lsn FROM pg_backup_stop(false);')
+
+
+def backup_mode_argv(root, bin_dir) -> list[str]:
+    """psql on the source's socket: \\timing on, then pg_backup_start and pg_backup_stop in one session."""
+    root = Path(root)
+    return [str(Path(bin_dir) / 'psql'), '-X', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-h', str(root / 's'),
+            '-p', str(run_study.PORT), '-U', run_study.USER, '-d', run_study.DATABASE, '-c', '\\timing on',
+            *(part for statement in BACKUP_MODE_PAIR for part in ('-c', statement))]
+
+
+def cmd_backup_mode_probe(args) -> dict:
+    """EXP-11's bracket cross-check: --repeats x (drop the cache; backup start; backup stop), timed.
+
+    The source runs, idle. Before each pair the page cache is dropped (agent.py drop-caches: sync,
+    then echo 3 > drop_caches, through sudo -n). psql's \\timing gives each statement's time;
+    pair_s is their sum, wall_s the whole psql run, connection included. The first pair is
+    reported apart: its checkpoint may have more to write.
+    """
+    root, bin_dir = Path(args.root), Path(args.bin_dir)
+    argv = backup_mode_argv(root, bin_dir)
+    pairs = []
+    for _ in range(args.repeats):
+        drop = agent.cmd_drop_caches(args)
+        started = time.perf_counter()
+        result = subprocess.run(argv, capture_output=True, text=True, env=run_study.controlled_env())
+        wall = round(time.perf_counter() - started, 6)
+        timings = measure.psql_timings(result.stdout)
+        if result.returncode != 0 or len(timings) != len(BACKUP_MODE_PAIR):
+            raise SystemExit(f'backup mode on the source failed (psql exit {result.returncode}, timings '
+                             f'{timings}): {(result.stdout + result.stderr).strip()[-2000:]}')
+        pairs.append({'start_s': timings[0], 'stop_s': timings[1], 'pair_s': round(sum(timings), 6),
+                      'wall_s': wall, 'drop_seconds': drop['seconds']})
+    times = [pair['pair_s'] for pair in pairs]
+    return {'repeats': args.repeats, 'argv': argv, 'pairs': pairs, 'first_pair_s': times[0],
+            'median_pair_s': statistics.median(times),
+            'median_after_first_s': statistics.median(times[1:]) if len(times) > 1 else None}
+
+
 def cmd_stop(args) -> dict:
     root, bin_dir = Path(args.root), Path(args.bin_dir)
     stopped = False
@@ -312,6 +362,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('--log-dir', required=True)
     sub.add_argument('--command', required=True, help='archive_command (pgBackRest archive-push)')
     sub.set_defaults(func=cmd_archive)
+    sub = commands.add_parser('backup-mode-probe')
+    sub.add_argument('--root', required=True)
+    sub.add_argument('--bin-dir', default=DEFAULT_BIN_DIR)
+    sub.add_argument('--repeats', type=agent.positive_int, default=10)
+    sub.set_defaults(func=cmd_backup_mode_probe)
     return parser
 
 
