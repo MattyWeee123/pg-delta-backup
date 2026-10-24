@@ -32,6 +32,33 @@ and one that times backup mode on the running, idle cluster (EXP-11's bracket pr
                                                             pg_backup_start('probe', true);
                                                             pg_backup_stop(false))
 
+EXP-12 (T10a) adds the load, a fixed-rate pgbench on its own database, loaddb, and the
+proxy's backup mode and snapshot:
+
+    source_cluster.py loaddb-setup --root R --log-dir L --load-dir D --clients 32
+                                       loaddb (pgbench -i -s 2 -F 90, load_progress, amcheck),
+                                       autovacuum off on its tables, the added server settings,
+                                       a restart, VACUUM ANALYZE, CHECKPOINT; the registry emptied
+    source_cluster.py load-start --root R --load-dir D --run-id ID --rate R ...
+                                       each client's n and the sums recorded with the load
+                                       stopped, then pgbench under setsid; its PID recorded
+    source_cluster.py load-stop --root R --load-dir D
+                                       SIGALRM (as its own -T timer), the log counted per client,
+                                       then the counters again; the run complete if they agree
+    source_cluster.py load-capacity --root R --load-dir D --run-id ID [--warmup-s 30 --seconds 60 --runs 1]
+                                       closed-loop runs, each logged and offset the same way: C
+    source_cluster.py load-status --load-dir D
+                                       whether the current run's pgbench still runs
+    source_cluster.py load-check --root R --load-dir D
+                                       the sums against every logged run's commits, each run's
+                                       counts per client, and the runs chained without a gap
+    source_cluster.py backup-hold --root R --label L
+                                       pg_backup_start(L, true) in one psql session, the start LSN
+                                       printed; on a line or the end of stdin, pg_backup_stop(false)
+    source_cluster.py snapshot --root R --snapshot DIR --log-dir L
+                                       a clean stop, cp -a --reflink=never of the data directory,
+                                       sync -f, its selection's digest, a restart
+
 Each prints one RESULT_PREFIX JSON line (see agent.py). The trial options
 (--scale, --pattern, --fraction, --seed, --hot-percent, --events-rows,
 --batch-size) are EXP-01's, parsed by run_study's own parser.
@@ -40,10 +67,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import re
 import shlex
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -60,6 +89,13 @@ from experiments.network.agent import emit  # noqa: E402
 DEFAULT_BIN_DIR = '/usr/lib/postgresql/17/bin'
 TRIAL_OPTIONS = ('scale', 'pattern', 'fraction', 'seed', 'hot_percent', 'events_rows',
                  'batch_size')
+# EXP-12's load scripts (experiments/network/load/), read by pgbench on the source.
+LOAD_SCRIPT_DIR = REPO_ROOT / 'experiments' / 'network' / 'load'
+# How long load-stop waits for pgbench to end after its signal, and how often it looks.
+LOAD_STOP_TIMEOUT = 120
+LOAD_POLL = 0.05
+# The proxy's snapshot: a byte copy that shares no block with the live files.
+SNAPSHOT_COPY = ('cp', '-a', '--reflink=never')
 
 
 def hba_lines(client_ip: str) -> list[str]:
@@ -266,12 +302,16 @@ def cmd_archive(args) -> dict:
 BACKUP_MODE_PAIR = ("SELECT pg_backup_start('probe', true);", 'SELECT lsn FROM pg_backup_stop(false);')
 
 
-def backup_mode_argv(root, bin_dir) -> list[str]:
-    """psql on the source's socket: \\timing on, then pg_backup_start and pg_backup_stop in one session."""
+def backup_mode_argv(root, bin_dir, label: str = 'probe') -> list[str]:
+    """psql on the source's socket: \\timing on, then pg_backup_start and pg_backup_stop in one session.
+
+    EXP-12's bracket arm is the same pair with its own label ('t10a').
+    """
     root = Path(root)
+    pair = BACKUP_MODE_PAIR if label == 'probe' else backup_hold_statements(label)
     return [str(Path(bin_dir) / 'psql'), '-X', '-A', '-t', '-v', 'ON_ERROR_STOP=1', '-h', str(root / 's'),
             '-p', str(run_study.PORT), '-U', run_study.USER, '-d', run_study.DATABASE, '-c', '\\timing on',
-            *(part for statement in BACKUP_MODE_PAIR for part in ('-c', statement))]
+            *(part for statement in pair for part in ('-c', statement))]
 
 
 def cmd_backup_mode_probe(args) -> dict:
@@ -300,6 +340,360 @@ def cmd_backup_mode_probe(args) -> dict:
     return {'repeats': args.repeats, 'argv': argv, 'pairs': pairs, 'first_pair_s': times[0],
             'median_pair_s': statistics.median(times),
             'median_after_first_s': statistics.median(times[1:]) if len(times) > 1 else None}
+
+
+# --- EXP-12 (T10a): the load, the proxy's backup mode and the snapshot -----------------------
+
+def psql_argv(root, bin_dir, database: str, *statements) -> list[str]:
+    """psql on the cluster's socket, unaligned and quiet, stopping at the first error; each statement a -c."""
+    root = Path(root)
+    return [str(Path(bin_dir) / 'psql'), '-X', '-A', '-t', '-q', '-v', 'ON_ERROR_STOP=1', '-h', str(root / 's'),
+            '-p', str(run_study.PORT), '-U', run_study.USER, '-d', database,
+            *(part for statement in statements for part in ('-c', statement))]
+
+
+def sql(root, bin_dir, statement: str, database: str = measure.LOAD_DATABASE, timeout: float = 3600) -> str:
+    """One statement through psql; its output, or SystemExit with psql's error."""
+    result = subprocess.run(psql_argv(root, bin_dir, database, statement), capture_output=True, text=True,
+                            timeout=timeout, env=run_study.controlled_env())
+    if result.returncode != 0:
+        raise SystemExit(f'psql on {database} failed ({result.returncode}): {result.stderr.strip()[-2000:]}')
+    return result.stdout.strip()
+
+
+def load_counters(root, bin_dir) -> dict:
+    """Each client's n and the sums of n and abalance, read now (with the load stopped), and when."""
+    value = json.loads(sql(root, bin_dir, measure.LOAD_COUNTERS_SQL))
+    return {'utc': time.time(), 'n': {key: int(n) for key, n in (value.get('n') or {}).items()},
+            'sum_n': int(value.get('sum_n') or 0), 'sum_abalance': int(value.get('sum_abalance') or 0)}
+
+
+def loaddb_statements(clients: int) -> list[str]:
+    """load_progress with one row per client, each on its own page; amcheck, so every copy holds it; autovacuum
+    off for loaddb's tables and their TOAST tables, so no vacuum of them falls in a window."""
+    statements = [
+        f'CREATE TABLE load_progress (client int PRIMARY KEY, n bigint NOT NULL DEFAULT 0, '
+        f"filler char({measure.LOAD_FILLER_BYTES}) NOT NULL DEFAULT '') "
+        f'WITH (fillfactor = {measure.LOAD_PROGRESS_FILLFACTOR});',
+        f'INSERT INTO load_progress (client) SELECT generate_series(0, {clients - 1});',
+        'CREATE EXTENSION amcheck;']
+    statements += [f'ALTER TABLE {table} SET (autovacuum_enabled = false, toast.autovacuum_enabled = false);'
+                   for table in measure.LOAD_TABLES]
+    return statements
+
+
+LOAD_SETTINGS_SQL = ('SELECT json_object_agg(name, current_setting(name)) FROM unnest(ARRAY['
+                     + ', '.join(f"'{name}'" for name in measure.LOAD_SERVER_CONFIG) + ']) AS name;')
+DATABASES_SQL = 'SELECT json_object_agg(datname, oid::bigint) FROM pg_database;'
+LOAD_RELATIONS_SQL = ("SELECT json_object_agg(relname, json_build_object('pages', pg_relation_size(oid) / 8192, "
+                      "'path', pg_relation_filepath(oid), 'options', reloptions)) FROM pg_class WHERE relname IN ("
+                      + ', '.join(f"'{table}'" for table in measure.LOAD_TABLES)
+                      + ", 'pgbench_accounts_pkey', 'load_progress_pkey');")
+
+
+def cmd_loaddb_setup(args) -> dict:
+    """EXP-12's step 1 for the load: loaddb in the trial's cluster, the added settings, a restart.
+
+    pgbench -i -s 2 -F 90 loaddb (200,000 accounts, 10% free per page), load_progress (one row per client, each
+    on its own page), CREATE EXTENSION amcheck, autovacuum off on loaddb's tables; then the settings
+    (measure.LOAD_SERVER_CONFIG) appended to postgresql.conf, a clean restart, and each checked in effect;
+    then VACUUM ANALYZE of loaddb and a CHECKPOINT. The load's directory on the source is emptied, with its
+    registry, so the first run's counters are the trial's zero.
+    """
+    root, bin_dir = Path(args.root), Path(args.bin_dir)
+    started = time.perf_counter()
+    sql(root, bin_dir, f'CREATE DATABASE {measure.LOAD_DATABASE};', database=run_study.DATABASE)
+    init = subprocess.run([str(bin_dir / 'pgbench'), '-i', '-q', '-s', str(measure.LOAD_SCALE), '-F',
+                           str(measure.LOAD_FILLFACTOR), '-h', str(root / 's'), '-p', str(run_study.PORT), '-U',
+                           run_study.USER, measure.LOAD_DATABASE], capture_output=True, text=True,
+                          env=run_study.controlled_env(), timeout=3600)
+    if init.returncode != 0:
+        raise SystemExit(f'pgbench -i failed ({init.returncode}): {init.stderr.strip()[-2000:]}')
+    for statement in loaddb_statements(args.clients):
+        sql(root, bin_dir, statement)
+    lines = [f'{key} = {value}' for key, value in measure.LOAD_SERVER_CONFIG.items()]
+    with open(root / 'data' / 'postgresql.conf', 'a') as stream:
+        stream.write('# EXP-12 (T10a): every arm alike; no checkpoint inside a window but an arm\'s own\n'
+                     + '\n'.join(lines) + '\n')
+    stop = cmd_stop_clean(args)
+    start = cmd_start(args)
+    settings = json.loads(sql(root, bin_dir, LOAD_SETTINGS_SQL, database=run_study.DATABASE))
+    wrong = {name: value for name, value in settings.items() if value != measure.LOAD_SERVER_CONFIG[name]}
+    if wrong:
+        raise SystemExit(f'the load\'s settings are not in effect after the restart: {wrong}')
+    sql(root, bin_dir, 'VACUUM ANALYZE;')
+    sql(root, bin_dir, 'CHECKPOINT;', database=run_study.DATABASE)
+    load_dir = Path(args.load_dir)
+    if load_dir.exists():
+        shutil.rmtree(load_dir)
+    measure.write_load_state(load_dir, {'runs': [], 'current': None})
+    return {'clients': args.clients, 'appended_postgresql_conf': lines, 'settings': settings,
+            'pgbench_init': init.stderr.strip()[-2000:], 'statements': loaddb_statements(args.clients),
+            'databases': json.loads(sql(root, bin_dir, DATABASES_SQL, database=run_study.DATABASE)),
+            'relations': json.loads(sql(root, bin_dir, LOAD_RELATIONS_SQL)),
+            'counters': load_counters(root, bin_dir), 'stop': stop, 'start': start, 'load_dir': str(load_dir),
+            'seconds': round(time.perf_counter() - started, 3)}
+
+
+def process_alive(pid) -> bool:
+    """Whether the process runs (a zombie, which only waits to be reaped, doesn't).
+
+    pgbench is normally no child of the command that looks (load-start exits at once, so init reaps it); when it
+    is one (a capacity run, or the commands called in one process), it is reaped here.
+    """
+    try:
+        if os.waitpid(int(pid), os.WNOHANG)[0] == int(pid):
+            return False
+    except ChildProcessError:
+        pass
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    try:
+        stat = Path(f'/proc/{int(pid)}/stat').read_text()
+        return stat[stat.rindex(')') + 2:].split()[0] != 'Z'
+    except (OSError, ValueError, IndexError):
+        return True
+
+
+def wait_gone(pid, timeout: float) -> bool:
+    """Until the process has ended, at most `timeout` seconds; whether it did."""
+    deadline = time.monotonic() + timeout
+    while process_alive(pid):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(LOAD_POLL)
+    return True
+
+
+def start_load_run(args, run_id: str, rate, duration_s: int, kind: str):
+    """A pgbench run of the load under setsid, its counters recorded first; (its registry entry, Popen)."""
+    root, bin_dir, load_dir = Path(args.root), Path(args.bin_dir), Path(args.load_dir)
+    state = measure.read_load_state(load_dir)
+    current = measure.load_run(state)
+    if current is not None and process_alive(current['pid']):
+        raise SystemExit(f'the load run {current["run_id"]} still runs (PID {current["pid"]}); load-stop it first')
+    if any(run['run_id'] == run_id for run in state['runs']):
+        raise SystemExit(f'the load already had a run {run_id}')
+    load_dir.mkdir(parents=True, exist_ok=True)
+    counters = load_counters(root, bin_dir)
+    argv = measure.pgbench_load_argv(bin_dir / 'pgbench', rate=rate, clients=args.clients, threads=args.threads,
+                                     duration_s=duration_s, seed=args.seed, prefix=load_dir / run_id,
+                                     scripts=args.scripts, host=root / 's', port=run_study.PORT,
+                                     user=run_study.USER)
+    with open(measure.summary_path(load_dir, run_id), 'w') as out, \
+            open(measure.progress_path(load_dir, run_id), 'w') as err:
+        process = subprocess.Popen(argv, stdout=out, stderr=err, stdin=subprocess.DEVNULL, cwd=load_dir,
+                                   env=run_study.controlled_env(), start_new_session=True)
+    run = {'run_id': run_id, 'kind': kind, 'rate': rate or None, 'clients': args.clients, 'threads': args.threads,
+           'duration_s': duration_s, 'seed': args.seed, 'argv': argv, 'pid': process.pid,
+           'prefix': str(load_dir / run_id), 'started_utc': time.time(), 'start': counters, 'stop': None}
+    state['runs'].append(run)
+    state['current'] = run_id
+    measure.write_load_state(load_dir, state)
+    return run, process
+
+
+PGBENCH_TPS = re.compile(r'^tps = (\d+(?:\.\d+)?) \(without initial connection time\)', re.MULTILINE)
+PGBENCH_PROCESSED = re.compile(r'^number of transactions actually processed: (\d+)', re.MULTILINE)
+PGBENCH_FAILED = re.compile(r'^number of failed transactions: (\d+)', re.MULTILINE)
+
+
+def finish_load_run(args, run_id: str, how: str, signalled_utc=None) -> dict:
+    """A run that has ended: its log counted per client, the counters again, and whether they agree.
+
+    complete: for every client, n at the stop minus n at the start equals its log's committed transactions
+    (EXP-12's smoke item 1). pgbench's summary and the end of its progress output are kept.
+    """
+    root, bin_dir, load_dir = Path(args.root), Path(args.bin_dir), Path(args.load_dir)
+    state = measure.read_load_state(load_dir)
+    run = measure.load_run(state, run_id)
+    names = measure.pgbench_log_names(run)
+    counts = measure.count_commits([load_dir / name for name in names if (load_dir / name).exists()])
+    stop = load_counters(root, bin_dir)
+    deltas = {key: stop['n'].get(key, 0) - n for key, n in run['start']['n'].items()}
+    mismatched = {key: {'n_delta': delta, 'logged': counts.get(int(key), 0)} for key, delta in deltas.items()
+                  if delta != counts.get(int(key), 0)}
+    try:
+        summary = measure.summary_path(load_dir, run_id).read_text(errors='replace')
+        progress = measure.progress_path(load_dir, run_id).read_text(errors='replace')
+    except OSError:
+        summary, progress = '', ''
+    tps, processed, failed_count = (PGBENCH_TPS.search(summary), PGBENCH_PROCESSED.search(summary),
+                                    PGBENCH_FAILED.search(summary))
+    run.update(stop=stop, stopped_utc=time.time(), signalled_utc=signalled_utc, how=how,
+               log_files=[name for name in names if (load_dir / name).exists()],
+               commits={str(client): count for client, count in sorted(counts.items())},
+               commits_total=sum(counts.values()), complete=not mismatched, mismatched=mismatched,
+               tps=float(tps.group(1)) if tps else None, processed=int(processed.group(1)) if processed else None,
+               failed=int(failed_count.group(1)) if failed_count else None,
+               aborted='aborted' in (summary + progress).lower(),
+               errors=[line for line in progress.splitlines() if 'error' in line.lower()][-20:])
+    if state.get('current') == run_id:
+        state['current'] = None
+    measure.write_load_state(load_dir, state)
+    return run
+
+
+def cmd_load_start(args) -> dict:
+    """EXP-12's load: pgbench at --rate (open loop) for --duration-s, under setsid, its counters recorded first."""
+    run, _ = start_load_run(args, args.run_id, args.rate, args.duration_s, args.kind)
+    return run
+
+
+def cmd_load_stop(args) -> dict:
+    """The current run stopped with SIGALRM, the signal its own -T timer uses, so it ends as at -T's end and
+    writes out its logs (or --signal INT, EXP-12's fallback); then counted and its counters read.
+
+    If pgbench has already ended (-T, or it died), it is only counted: `how` says which. A pgbench that doesn't
+    end within LOAD_STOP_TIMEOUT is killed, and the run is incomplete.
+    """
+    state = measure.read_load_state(args.load_dir)
+    run = measure.load_run(state, args.run_id)
+    if run is None or run.get('stop') is not None:
+        raise SystemExit(f'no load run to stop ({args.run_id or "current"})')
+    signalled, how = None, 'ended'
+    if process_alive(run['pid']):
+        os.kill(run['pid'], getattr(signal, f'SIG{args.signal}'))
+        signalled, how = time.time(), f'SIG{args.signal}'
+        if not wait_gone(run['pid'], LOAD_STOP_TIMEOUT):
+            os.kill(run['pid'], signal.SIGKILL)
+            wait_gone(run['pid'], 30)
+            how = f'SIG{args.signal}, then SIGKILL after {LOAD_STOP_TIMEOUT} s'
+    return finish_load_run(args, run['run_id'], how, signalled)
+
+
+def cmd_load_capacity(args) -> dict:
+    """EXP-12's C: the same scripts and clients with no -R, closed loop, each run logged and offset as the load.
+
+    A --warmup-s run first (logged, left out of C), then --runs runs of --seconds, each ended by its own -T.
+    C is the median of their tps (pgbench's, without the initial connection time).
+    """
+    runs = []
+    plan = ([(f'{args.run_id}-warmup', args.warmup_s, 'capacity_warmup')] if args.warmup_s else []) + [
+        (f'{args.run_id}-{index + 1}', args.seconds, 'capacity') for index in range(args.runs)]
+    for run_id, seconds, kind in plan:
+        _, process = start_load_run(args, run_id, None, seconds, kind)
+        process.wait()
+        runs.append(finish_load_run(args, run_id, '-T'))
+    measured = [run['tps'] for run in runs if run['kind'] == 'capacity' and run['tps'] is not None]
+    return {'runs': runs, 'capacity_tps': statistics.median(measured) if measured else None,
+            'all_complete': all(run['complete'] for run in runs)}
+
+
+def cmd_load_status(args) -> dict:
+    """Whether the current run's pgbench still runs, with its last progress line."""
+    state = measure.read_load_state(args.load_dir)
+    run = measure.load_run(state)
+    if run is None:
+        return {'current': None, 'running': False}
+    lines = measure.parse_progress(measure.progress_path(args.load_dir, run['run_id']).read_text(errors='replace'))
+    return {'current': run['run_id'], 'pid': run['pid'], 'running': process_alive(run['pid']),
+            'last_progress': lines[-1] if lines else None}
+
+
+def cmd_load_check(args) -> dict:
+    """EXP-12's step 15, with the load stopped: the source against every logged run.
+
+    The sums of abalance and of n must both equal the sum of every logged run's committed transactions; each run
+    must be complete (its counters against its log, per client); and each run must start where the one before it
+    stopped, client by client, so no commit happened outside a logged run.
+    """
+    state = measure.read_load_state(args.load_dir)
+    runs = state.get('runs', [])
+    counters = load_counters(args.root, args.bin_dir)
+    expected = sum(run.get('commits_total') or 0 for run in runs)
+    unfinished = [run['run_id'] for run in runs if run.get('stop') is None]
+    incomplete = [run['run_id'] for run in runs if run.get('stop') is not None and not run.get('complete')]
+    gaps = [f'{before["run_id"]} -> {after["run_id"]}' for before, after in zip(runs, runs[1:])
+            if before.get('stop') is None or before['stop']['n'] != after['start']['n']]
+    sums = counters['sum_abalance'] == counters['sum_n'] == expected
+    return {'ok': sums and not unfinished and not incomplete and not gaps, 'sums_ok': sums,
+            'sum_abalance': counters['sum_abalance'], 'sum_n': counters['sum_n'], 'expected_commits': expected,
+            'unfinished': unfinished, 'incomplete': incomplete, 'gaps': gaps, 'counters': counters,
+            'runs': [{key: run.get(key) for key in ('run_id', 'kind', 'complete', 'commits_total', 'how')}
+                     for run in runs]}
+
+
+def backup_hold_statements(label: str) -> tuple[str, str]:
+    """The proxy's backup mode, in one session: a fast checkpoint at its start, no wait for archiving at its stop."""
+    return f"SELECT pg_backup_start('{label}', true);", 'SELECT lsn FROM pg_backup_stop(false);'
+
+
+BACKUP_STARTED = 'BACKUP-STARTED '
+
+
+def cmd_backup_hold(args) -> dict:
+    """pg_backup_start(label, true) in one psql session, held open: its start LSN printed (BACKUP_STARTED and
+    JSON, on a line of its own), then, on a line of stdin or its end, pg_backup_stop(false) in the same session.
+
+    A non-exclusive backup must start and stop in one session, so psql reads its statements from a pipe. The
+    end of stdin stops the backup too: the orchestrator's SSH session closing never leaves backup mode held.
+    """
+    start_sql, stop_sql = backup_hold_statements(args.label)
+    psql = subprocess.Popen(psql_argv(args.root, args.bin_dir, args.database), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env=run_study.controlled_env())
+    try:
+        started = time.perf_counter()
+        psql.stdin.write(start_sql + '\n')
+        psql.stdin.flush()
+        start_lsn = psql.stdout.readline().strip()
+        start = {'lsn': start_lsn, 'utc': time.time(), 'seconds': round(time.perf_counter() - started, 6)}
+        if not start_lsn:
+            raise SystemExit(f'pg_backup_start failed: {psql.stderr.read().strip()[-2000:]}')
+        print(BACKUP_STARTED + json.dumps(start), flush=True)
+        request = sys.stdin.readline()
+        requested = time.time()
+        started = time.perf_counter()
+        psql.stdin.write(stop_sql + '\n')
+        psql.stdin.flush()
+        stop_lsn = psql.stdout.readline().strip()
+        stop = {'lsn': stop_lsn, 'utc': time.time(), 'seconds': round(time.perf_counter() - started, 6),
+                'requested_utc': requested, 'by': 'line' if request else 'end of stdin'}
+        psql.stdin.close()
+        code = psql.wait(60)
+        if not stop_lsn or code != 0:
+            raise SystemExit(f'pg_backup_stop failed (psql exit {code}): {psql.stderr.read().strip()[-2000:]}')
+        return {'label': args.label, 'start': start, 'stop': stop, 'psql_exit_code': code, 'one_session': True}
+    finally:
+        if psql.poll() is None:
+            psql.kill()
+            psql.wait()
+
+
+def cmd_snapshot(args) -> dict:
+    """EXP-12's step 5, the proxy's source: a clean stop, a byte copy of the data directory, sync -f, its digest.
+
+    `cp -a --reflink=never data SNAP` on the source's /data, then `sync -f SNAP`; then what pgdelta's datadir mode
+    selects in it, hashed (agent.py datadir-digest's), which the proxies' verification uses instead of reading the
+    source; the source restarted whatever happened. The snapshot is cleanly stopped and has no postmaster.pid.
+    """
+    root, snapshot = Path(args.root), Path(args.snapshot)
+    result: dict = {'snapshot': str(snapshot)}
+    try:
+        result['stop'] = cmd_stop_clean(args)
+        if snapshot.exists():
+            shutil.rmtree(snapshot)
+        started = time.perf_counter()
+        copy = subprocess.run([*SNAPSHOT_COPY, str(root / 'data'), str(snapshot)], capture_output=True, text=True)
+        result['copy'] = {'argv': [*SNAPSHOT_COPY, str(root / 'data'), str(snapshot)], 'exit_code': copy.returncode,
+                          'seconds': round(time.perf_counter() - started, 3)}
+        if copy.returncode != 0:
+            raise SystemExit(f'the snapshot copy failed ({copy.returncode}): {copy.stderr.strip()[-2000:]}')
+        started = time.perf_counter()
+        synced = subprocess.run(['sync', '-f', str(snapshot)], capture_output=True, text=True)
+        result['sync'] = {'exit_code': synced.returncode, 'seconds': round(time.perf_counter() - started, 3)}
+        if synced.returncode != 0:
+            raise SystemExit(f'sync -f {snapshot} failed: {synced.stderr.strip()[-2000:]}')
+        result['digest'] = agent.cmd_datadir_digest(argparse.Namespace(
+            root=str(snapshot), pg_controldata=str(Path(args.bin_dir) / 'pg_controldata')))
+    finally:
+        result['restart'] = cmd_start(args)
+    return result
 
 
 def cmd_stop(args) -> dict:
@@ -367,6 +761,61 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('--bin-dir', default=DEFAULT_BIN_DIR)
     sub.add_argument('--repeats', type=agent.positive_int, default=10)
     sub.set_defaults(func=cmd_backup_mode_probe)
+
+    # EXP-12 (T10a).
+    def load_options(sub, *, pgbench=False):
+        sub.add_argument('--root', required=True)
+        sub.add_argument('--bin-dir', default=DEFAULT_BIN_DIR)
+        sub.add_argument('--load-dir', default=measure.LOAD_LOG_DIR,
+                         help="the load's logs and registry on the source (tmpfs)")
+        if pgbench:
+            sub.add_argument('--clients', type=agent.positive_int, default=32)
+            sub.add_argument('--threads', type=agent.positive_int, default=4)
+            sub.add_argument('--seed', type=int, required=True, help="pgbench's --random-seed")
+            sub.add_argument('--scripts', default=str(LOAD_SCRIPT_DIR), help='commit.sql and abort.sql')
+
+    sub = commands.add_parser('loaddb-setup')
+    load_options(sub)
+    sub.add_argument('--log-dir', required=True)
+    sub.add_argument('--clients', type=agent.positive_int, default=32, help="load_progress's rows: one per client")
+    sub.set_defaults(func=cmd_loaddb_setup)
+    sub = commands.add_parser('load-start')
+    load_options(sub, pgbench=True)
+    sub.add_argument('--run-id', required=True)
+    sub.add_argument('--rate', type=int, required=True, help='transactions per second (-R); 0 for a closed loop')
+    sub.add_argument('--duration-s', type=agent.positive_int, default=14400, help="pgbench's -T")
+    sub.add_argument('--kind', default='load', help='what the run is for, recorded (load, restart, smoke)')
+    sub.set_defaults(func=cmd_load_start)
+    sub = commands.add_parser('load-stop')
+    load_options(sub)
+    sub.add_argument('--run-id', help='the run to stop (default: the current one)')
+    sub.add_argument('--signal', choices=('ALRM', 'INT'), default='ALRM')
+    sub.set_defaults(func=cmd_load_stop)
+    sub = commands.add_parser('load-capacity')
+    load_options(sub, pgbench=True)
+    sub.add_argument('--run-id', required=True, help="the runs' ids: ID-warmup, ID-1, ID-2, ...")
+    sub.add_argument('--warmup-s', type=int, default=30)
+    sub.add_argument('--seconds', type=agent.positive_int, default=60)
+    sub.add_argument('--runs', type=agent.positive_int, default=1)
+    sub.set_defaults(func=cmd_load_capacity)
+    sub = commands.add_parser('load-status')
+    sub.add_argument('--load-dir', default=measure.LOAD_LOG_DIR)
+    sub.set_defaults(func=cmd_load_status)
+    sub = commands.add_parser('load-check')
+    load_options(sub)
+    sub.set_defaults(func=cmd_load_check)
+    sub = commands.add_parser('backup-hold')
+    sub.add_argument('--root', required=True)
+    sub.add_argument('--bin-dir', default=DEFAULT_BIN_DIR)
+    sub.add_argument('--label', default='t10a')
+    sub.add_argument('--database', default=run_study.DATABASE)
+    sub.set_defaults(func=cmd_backup_hold)
+    sub = commands.add_parser('snapshot')
+    sub.add_argument('--root', required=True)
+    sub.add_argument('--bin-dir', default=DEFAULT_BIN_DIR)
+    sub.add_argument('--log-dir', required=True)
+    sub.add_argument('--snapshot', required=True, help='the copy of the data directory, on the same disks')
+    sub.set_defaults(func=cmd_snapshot)
     return parser
 
 
