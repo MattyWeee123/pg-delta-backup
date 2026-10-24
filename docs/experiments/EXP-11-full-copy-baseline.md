@@ -421,6 +421,25 @@ The harness was built after the revisions above, then reviewed adversarially (16
 - **The first cut** (`probackup*`'s byte diagnostic after each trial's first repeat) is a flag, `--probackup-byte-diagnostic first_repeat`, so applying it needs no code change.
 - **pgdelta's code since EXP-09** is recorded at deploy time: the diff of `pgdelta/` from EXP-09's deployed commit, `b77f33d`, goes into each VM's `DEPLOYED.json` and from there into `run.json`.
 
+**The smoke run (October 24, 06:32–07:03 UTC, before the main sweep)**
+
+Four short invocations on the two new VMs (PostgreSQL 17.11, `pg_probackup` 2.5.16, strace 6.1; both on an Intel Xeon at 2.80 GHz), every run verified: `exp11-smoke` (64 runs: scale 5, hot and append, 2 and 10 Gbit/s and unthrottled, every arm, the extension and the warm-source block at 1 repeat), `exp11-smoke70` (10 runs: scale 70, hot, unthrottled, every arm once), and the syscall audit, `exp11-audit` and its rerun `exp11-audit2` (10 runs each, scale 5). The items:
+
+1. **`pg_probackup` (fixed before the sweep).** Its flags were accepted, its outputs started, and its `sync -f` ran inside the phase. But on the idle source its WAL stream noticed the stop LSN only at its next timer tick, about 10 s after the stream started: the catchups waited 2–8 s after `pg_backup_stop`, doing nothing, and took 5–11 s at scale 5 against 0.6 s for `full`. A live primary keeps WAL arriving, so this was an artifact of the idle source that would have kept `pg_probackup` out of every baseline. **The fix, under rule 8:** during `probackup*` runs only, the source emits one empty, non-transactional WAL message every 0.1 s (`pg_logical_emit_message(false, 'pgd-tick', '', true)`, from a `psql` on dest; `--probackup-wal-ticker`, commit 288e26b). It changes no table, data file or transaction status, only WAL, which every digest leaves out. It starts before the clock and stops after it; its small source CPU falls in `probackup*`'s counters. With it, the stream saw the stop LSN 0.09 s after `pg_backup_stop`. At scale 70 both `probackup4` and `probackup8` then took 6.16 s: 4.0 s copying over SSH (the largest file, about 0.94 GB, on one thread, so 8 threads gain nothing) and 1.6 s in its own sync, before the 0.02 s `sync -f`.
+2. **`pg_basebackup --sync-method`** is listed (PostgreSQL 17.11).
+3. **The syscall audit (fixed before the sweep).** Its first run stopped on real strace output: a `close()` of a descriptor the trace never saw opened (inherited from the parent) raised `KeyError`. Fixed with a regression test from the real trace line (commit 43da18c), and the rerun audited every arm: each durable arm had 0 uncovered files and 0 uncovered directory changes; `full_nosync` had all 992 files uncovered, as the negative control should. `pg_probackup`'s own flush, without its `sync -f`, left 2 streamed WAL segments, `backup_label` and 2 directory changes uncovered; with it, nothing (E13).
+4. **The 8-stream link:** 15.1 Gbit/s unthrottled and 9.5 Gbit/s at 10 Gbit/s. One stream measured 11.0 Gbit/s unthrottled at scale 70, against EXP-09's 15.06, so this session's single stream is slower than EXP-09's, and the drift gates (A7) will likely mark the session shifted. As registered, every verdict stays within the session.
+5. **Checks (a) and (b):** the idle noise of `Dirty + Writeback` on dest over 20 windows of 5 s was at most 0.44 MiB, so `NOISE` is 0.44 and check (a)'s limit stays at 4 MiB. Every durable arm stayed within it (at most 2.0 MiB at scale 70); `full_nosync` left 2,115 MB dirty at scale 70 (at least 1.5 GB). Check (b) passed in every durable run.
+6. **`parcopy`:** `verify_direct` passed, every output started, the `fsync` count matched the inventory in every run, and its streams were balanced to 1.015 × the mean bytes (A3 allows 1.1).
+7. **The `pg_basebackup --verbose` phases parse,** the adder's two intervals included (0.04 s and under 0.01 s at scale 70).
+8. **`full_wb`:** `vm.dirty_background_bytes` was 64 MiB during every `full_wb` run and back to 0 (the ratio at 10) before the next run. The reset after a forced exception is covered by the unit tests only.
+9. **The extension and the warm-source block** ran at 1 repeat each.
+10. **The time projection.** From `exp11-smoke70`'s per-run times, verification included: about 7.7 minutes per main-block (trial, repeat), 2.5 per extension repeat and 1.1 per warm-source repeat, so the two sweeps take about 157 minutes and the session, with the smoke run and its two fixes, about 3.5 hours. That is at the line, so **cut 1 applies:** `pg_probackup`'s byte diagnostic only in each trial's first repeat (`--probackup-byte-diagnostic first_repeat`). It decides no rule. No other cut.
+11. **`analysis/exp11.py`** ran end to end on `exp11-smoke`'s real CSV, writing only to a scratch directory.
+12. **The reference digests** matched in both trials, start and end, with `pg_wal/`, `global/pg_control` and `pg_stat/` left out; no run was void.
+
+**Seen, not acted on:** one `full_syncfs` run at scale 70 spent 3.6 s in its sync, against `full`'s 1.3 s for the same 2.1 GB. The sweep's 10 runs per trial will say whether that holds (E4).
+
 ## Limitations, known before running
 
 - **The data shape caps per-file parallelism.** Two heap files hold most of the 2.1 GB, and released tools split by file. At TB scale, tables split into 1 GiB segments that balance well, so a released parallel copy would gain more there. **This favours v1.**
@@ -468,17 +487,17 @@ If the projection is still over 3.5 h after all four, the session runs anyway an
 ```sh
 M=full,full_nosync,full_syncfs,full_wb,probackup4,probackup8,parcopy4,parcopy8,pgdelta_direct_inplace
 S="--method-speeds full_nosync=2,unthrottled --method-speeds full_syncfs+full_wb=10,unthrottled"
-NOISE=4
+NOISE=0.44  # the smoke run's idle noise, MiB (smoke item 5); check (a)'s limit stays max(4 MiB, NOISE)
 python3 experiments/network/remote.py start exp11-local -- --patterns hot,append \
     --speeds 2,5,10,unthrottled --repeats 5 --order-seed 11 --manifest-checksums CRC32C \
-    --dirty-noise-mib $NOISE --methods $M,pgdelta_direct_inplace_j8 $S \
+    --dirty-noise-mib $NOISE --probackup-byte-diagnostic first_repeat --methods $M,pgdelta_direct_inplace_j8 $S \
     --method-speeds probackup4+parcopy4+pgdelta_direct_inplace_j8=unthrottled \
     --extension-repeats 5 \
     --extension-methods full,full_syncfs,probackup8,probackup4,parcopy8,parcopy4,pgdelta_direct_inplace,pgdelta_direct_inplace_j8 \
     --warm-source-repeats 3 --warm-source-methods full,probackup8,pgdelta_direct_inplace
 python3 experiments/network/remote.py start exp11-uniform -- --patterns uniform \
     --speeds 2,5,10,unthrottled --repeats 5 --order-seed 12 --manifest-checksums CRC32C \
-    --dirty-noise-mib $NOISE --methods $M $S --method-speeds probackup4+parcopy4=unthrottled
+    --dirty-noise-mib $NOISE --probackup-byte-diagnostic first_repeat --methods $M $S --method-speeds probackup4+parcopy4=unthrottled
 ```
 
 The extension and the warm-source block always run unthrottled. `NOISE` carries check (a)'s idle noise into both sweeps: the smoke run's largest increase of `Dirty + Writeback` over its 20 idle windows, in MiB (smoke item 5), written here, dated, before the main sweep. Until then it is 4, which leaves the limit at 4 MiB. Without it, each sweep would judge check (a) against 4 MiB whatever the smoke run measured.
