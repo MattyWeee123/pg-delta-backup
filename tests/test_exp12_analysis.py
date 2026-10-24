@@ -984,6 +984,25 @@ class DryRun(unittest.TestCase):
         self.assertIn('**L5** ("Every output is correct"', text)
         self.assertIn('failed: 00-hot-f0.01-s70 r3 busy', text)
 
+    def test_the_main_sweep_takes_the_smoke_runs_c_and_busy_cpu_as_given(self):
+        # Without --busy-cpu, the main sweep's own settles select no prediction branch (they could select another than
+        # the one smoke item 2 registered); without --capacity-tps, A12 isn't judged.
+        with tempfile.TemporaryDirectory() as tmp:
+            sweep = exp12_smoke_data.write_session(Path(tmp) / 'results')
+            bare = self.run_script(tmp, [sweep])
+            given = self.run_script(tmp, [sweep], '--capacity-tps', '2400', '--busy-cpu', '0.62',
+                                    '--idle-noise-bytes', '458752')
+            with mock.patch('sys.stderr', io.StringIO()):
+                for option, value in (('--capacity-tps', '0'), ('--busy-cpu', '0'), ('--busy-cpu', '1.5')):
+                    with self.assertRaises(SystemExit) as refused:
+                        exp12.main(['--sweeps', str(sweep), option, value])
+                    self.assertEqual(refused.exception.code, 2)
+        self.assertIn("the busy CPU at R_busy is not selected (--busy-cpu, smoke item 2's value, not given)", bare)
+        self.assertIn("**A12** (capacity drift against the smoke run's C, --capacity-tps): not judged (the smoke run's "
+                      'C not given: --capacity-tps, as the registered command passes it)', bare)
+        self.assertIn('the busy CPU at R_busy is above 50%', given)
+        self.assertIn("**A12** (capacity drift against the smoke run's C, --capacity-tps): **flagged**", given)
+
     def test_a_copy_its_tool_aborted_is_wrong_and_stops_speed_work(self):
         # pgdelta's receiver finds a bad page and exits 3 in 3 of the 5 busy 2 Gbit/s runs: as the harness wrote it
         # before (status error, failure_kind tool) and as it writes it now (status fail). Either way the copy doesn't

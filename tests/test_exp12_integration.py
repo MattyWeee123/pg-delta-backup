@@ -78,7 +78,8 @@ class RunLines(unittest.TestCase):
 
     def test_the_block_has_one_harness_line_and_the_analysiss(self):
         variables, harness, scripts = spec_run_lines()
-        self.assertEqual(variables, {'R_BUSY': '0', 'R_MOD': '0', 'NOISE': '4', 'L_MS': '10'})
+        self.assertEqual(variables, {'R_BUSY': '0', 'R_MOD': '0', 'NOISE': '4', 'L_MS': '10', 'C': '0', 'BUSY_CPU': '0',
+                                     'NOISE_BYTES': '0'})
         self.assertEqual(sorted(harness), ['exp12-hot'])
         self.assertEqual(sorted(scripts), ['analysis/exp12.py'])
 
@@ -149,6 +150,12 @@ class RunLines(unittest.TestCase):
         found = exp12.build_parser().parse_args(scripts['analysis/exp12.py'])
         self.assertEqual((found.sweeps, found.late_limit_ms, found.null_resamples, found.null_seed,
                           found.client_wait_share), (['results/exp04/exp12-hot'], 10.0, 10_000, 121, 0.25))
+        # It carries smoke items 2 and 13 (A12, the busy CPU's ranges, check (a)); as written, with the placeholders,
+        # the analysis refuses to run.
+        self.assertEqual((found.capacity_tps, found.busy_cpu, found.idle_noise_bytes), (0.0, 0.0, 0))
+        with mock.patch('sys.stderr', io.StringIO()), self.assertRaises(SystemExit) as refused:
+            exp12.main(scripts['analysis/exp12.py'])
+        self.assertEqual(refused.exception.code, 2)
 
 
 def readme_section(title: str) -> str:

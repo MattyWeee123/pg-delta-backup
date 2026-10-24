@@ -592,6 +592,8 @@ If the projection is still over after all three, the session runs anyway and the
 R_BUSY=0; R_MOD=0  # smoke item 2: 0.6 and 0.3 x C, rounded down to 100 per second
 NOISE=4            # check (a)'s idle noise, MiB (smoke item 13); the limit is max(4 MiB, NOISE)
 L_MS=10            # the late limit for the late-count view (smoke item 3); the analysis's only
+C=0; BUSY_CPU=0    # smoke item 2: C, and the busy CPU at R_BUSY as a share of the source's CPUs (selects E4's, E7's ranges)
+NOISE_BYTES=0      # smoke item 13: check (a)'s idle noise in bytes (run.json's dirty_idle_noise.max_increase_bytes)
 python3 experiments/network/remote.py start exp12-hot -- --patterns hot \
     --speeds 0.5,2,unthrottled --repeats 5 --order-seed 121 --manifest-checksums CRC32C \
     --dirty-noise-mib $NOISE \
@@ -606,10 +608,11 @@ python3 experiments/network/remote.py start exp12-hot -- --patterns hot \
     --calibration-repeats 2 --calibration-speed 2 \
     --calibration-methods full,capture,pgdelta,v1proxy,v1proxy_s1,pgdelta_direct_inplace,burn4
 .venv/bin/python analysis/exp12.py --sweeps results/exp04/exp12-hot --late-limit-ms $L_MS \
-    --null-resamples 10000 --null-seed 121 --client-wait-share 0.25
+    --null-resamples 10000 --null-seed 121 --client-wait-share 0.25 \
+    --capacity-tps $C --busy-cpu $BUSY_CPU --idle-noise-bytes $NOISE_BYTES
 ```
 
-`--settle-max-s` caps the source's settle gate only; dest's work has no cap (revised).
+`--settle-max-s` caps the source's settle gate only; dest's work has no cap (revised). The analysis line's `C`, `BUSY_CPU` and `NOISE_BYTES` (added October 24, after the harness build's review) carry smoke items 2 and 13 into A12, the choice of E4's, E7's, E9's, E14's and E16's ranges, and check (a): on the main sweep, `analysis/exp12.py` selects no busy-CPU branch without `--busy-cpu`, and refuses a placeholder 0 for C or the busy CPU.
 
 ## What it needs built in the harness
 

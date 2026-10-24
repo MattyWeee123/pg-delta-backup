@@ -730,6 +730,8 @@ class Session:
         self._cells: dict = {}
         self._unsettled: dict = {}
         self.busy_cpu_given = busy_cpu
+        # The smoke run's sweep (its oracle controls ran): its own settles give the busy CPU smoke item 2 records.
+        self.smoke = any(get(trial, 'oracle_controls', 'controls') for trial in self.trials.values())
         self.read_logs()
         self.assess()
         self.client_wait_flags()
@@ -1062,7 +1064,11 @@ class Session:
         return None if value is None else value / self.cpus()
 
     def high_cpu(self):
-        """Which of E4's and E7's ranges apply: the busy CPU at R_busy above 50%."""
+        """Which of E4's and E7's ranges apply: the busy CPU at R_busy above 50%. On the main sweep only the value smoke
+        item 2 recorded before it (--busy-cpu) selects them, so its own settles can't pick another branch than the
+        registered one: None without it."""
+        if self.busy_cpu_given is None and not self.smoke:
+            return None
         share = self.busy_cpu('busy')
         return None if share is None else share > 0.5
 
@@ -2536,7 +2542,9 @@ def e_lines(S, cells, ctx, d1, d2, a5v, a6v, moderate, caveats, near):
     say = lines.append
     high = S.high_cpu()
     share = S.busy_cpu('busy')
-    side = ('above 50%' if high else '50% or less') if high is not None else 'unknown'
+    side = (('above 50%' if high else '50% or less') if high is not None
+            else 'not selected (--busy-cpu, smoke item 2\'s value, not given)' if S.busy_cpu_given is None and not S.smoke
+            else 'unknown')
     capacity = S.capacity()
     say(f'- **E1** (C 10,000-40,000; busy CPU at R_busy 40-75%, at R_mod 20-45%): C {word(within(capacity, 1e4, 4e4))} '
         f'({fmt(capacity, 0)}); at R_busy {word(within(share, 0.40, 0.75))} ({fmt(share, 3)}); at R_mod '
@@ -2788,7 +2796,8 @@ def a_lines(S, cells, ctx, a5v, a6v, weak, near, caveats):
     capacity, smoke = S.capacity(), S.capacity_tps_given
     drift = None if capacity is None or not smoke else capacity / smoke - 1
     say('- **A12** (capacity drift against the smoke run\'s C, --capacity-tps): '
-        + ('not judged (the smoke run\'s C not given)' if drift is None else
+        + ('not judged (the smoke run\'s C not given: --capacity-tps, as the registered command passes it)'
+           if drift is None else
            f'**flagged** ({drift:+.1%})' if abs(drift) > A12_DRIFT else f'within 10% ({drift:+.1%})')
         + f'; the trial\'s C {fmt(capacity, 0)}')
     say('- **A13** (durability): ' + ('; '.join(ctx['a13']) if ctx['a13'] else 'does not fire'))
@@ -3237,7 +3246,8 @@ def build_parser():
     parser.add_argument('--capacity-tps', type=float, help='the smoke run\'s C, for A12')
     parser.add_argument('--busy-cpu', type=float, metavar='SHARE',
                         help='the busy CPU at R_busy as smoke item 2 recorded it (a share of the source\'s CPUs); it '
-                             'selects E4\'s and E7\'s ranges (default: the busy settles\' median)')
+                             'selects E4\'s and E7\'s ranges (without it: the smoke run\'s busy settles\' median; on '
+                             'the main sweep, no range)')
     parser.add_argument('--idle-noise-bytes', type=int, metavar='BYTES',
                         help='check (a) judged again against max(4 MiB, this), the smoke run\'s idle noise')
     parser.add_argument('--datadir', default=str(DATA))
@@ -3253,6 +3263,13 @@ def main(argv=None):
         parser.error('--null-resamples must be at least 100')
     if args.late_limit_ms <= 0 or not 0 < args.client_wait_share <= 1:
         parser.error('--late-limit-ms must be positive and --client-wait-share in (0, 1]')
+    # The run line's placeholders (C=0; BUSY_CPU=0) until smoke items 2 and 13 give the values.
+    if args.capacity_tps is not None and args.capacity_tps <= 0:
+        parser.error("--capacity-tps must be the smoke run's C (positive), not the run line's placeholder")
+    if args.busy_cpu is not None and not 0 < args.busy_cpu <= 1:
+        parser.error("--busy-cpu must be smoke item 2's busy CPU at R_busy, a share in (0, 1], not the placeholder")
+    if args.idle_noise_bytes is not None and args.idle_noise_bytes < 0:
+        parser.error('--idle-noise-bytes cannot be negative')
     sweeps = [Path(s) for s in args.sweeps if Path(s, 'summary.csv').exists() or Path(s, 'runs').is_dir()]
     if not sweeps:
         raise SystemExit(f'no summary.csv or runs/ under {", ".join(args.sweeps)}')
