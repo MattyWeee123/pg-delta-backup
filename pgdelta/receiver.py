@@ -386,8 +386,9 @@ class _Verifier:
         self.thread = threading.Thread(target=self._run, name='pgdelta-verify', daemon=True)
         self.thread.start()
 
-    def submit(self, entry, size, digest):
-        self.queue.put((entry, size, digest))
+    def submit(self, entry, size, digest, written=None):
+        """`written`: --verify-scope written's (index, runs, B's node digests, B's leaf digests) for this file."""
+        self.queue.put((entry, size, digest, written))
 
     def finish(self):
         self.queue.put(None)
@@ -405,8 +406,13 @@ class _Verifier:
                 if item is None or receiver.stop.is_set():
                     return
                 started = time.perf_counter()
-                # A window of `jobs` tasks: verification queues behind less than B's hashing does.
-                receiver._verify_file(*item, window=receiver.jobs)
+                entry, size, digest, written = item
+                if written is not None:
+                    index, runs, nodes_b, leaves_b = written
+                    receiver._verify_written(index, entry, size, digest, runs, nodes_b, leaves_b)
+                else:
+                    # A window of `jobs` tasks: verification queues behind less than B's hashing does.
+                    receiver._verify_file(entry, size, digest, window=receiver.jobs)
                 self.busy_seconds += time.perf_counter() - started
         except BaseException as exc:
             if not isinstance(exc, PgDeltaError):
@@ -591,7 +597,7 @@ class _Receiver:
         except (OSError, ValueError) as exc:
             raise TransferError(f'cannot start the hashing workers: {exc}') from exc
         self.pool_start_seconds = time.perf_counter() - started
-        if self.verify == 'pipelined' and self.pool.parallel and self.verify_scope == 'all':
+        if self.verify == 'pipelined' and self.pool.parallel:
             self.verifier = _Verifier(self)
 
     def _start_fsync(self):
@@ -1020,16 +1026,19 @@ class _Receiver:
             os.close(output.fd)
             self.current = None
         self.rebuild_seconds += time.perf_counter() - started
+        written = None
         if self.verify_scope == 'written':
+            written = (index, list(output.runs), self.basis_nodes.pop(index, None), self.basis_leaves.pop(index, {}))
+        if self.verifier is not None:
+            self._accept_file(entry, size, digest)
+            self.verifier.submit(entry, size, digest, written)
+        elif written is not None:
             started = time.perf_counter()
-            self._verify_written(index, entry, size, digest, output.runs)
+            self._verify_written(index, entry, size, digest, *written[1:])
             elapsed = time.perf_counter() - started
             self.verify_seconds += elapsed
             self.verify_wait_seconds += elapsed
             self._accept_file(entry, size, digest)
-        elif self.verifier is not None:
-            self._accept_file(entry, size, digest)
-            self.verifier.submit(entry, size, digest)
         else:
             started = time.perf_counter()
             self._verify_file(entry, size, digest)
@@ -1096,62 +1105,70 @@ class _Receiver:
         os.chmod(path, entry.mode)
         self.counts.files_verified += 1
 
-    def _verify_written(self, index, entry, size, digest, runs):
+    def _verify_written(self, index, entry, size, digest, runs, nodes_b, leaves_b):
         """In place, --verify-scope written: the file's digest from this run's knowledge, re-reading only what it wrote.
 
         A node no page was written to, with the same extent in B as in the file, keeps the digest the basis
-        thread computed from B before anything was written. A node with written pages gets its digest from
-        those pages, re-read in runs, and from B's leaf digests for its other pages (from the leaf requests,
-        answered before the file was written). Any other node is re-read whole. The file digest must equal
-        the source's. In place every write goes through _page_data at the offsets in `runs`, and B is blocked
-        meanwhile; a write elsewhere would leave a page it was meant for unchanged, so it fails this check.
+        thread computed from B before anything was written. A node with few written pages (at most an eighth)
+        gets its digest from those pages, re-read, and from B's leaf digests for its other pages (from the leaf
+        requests, answered before the file was written). Any other node is re-read whole on the pool, as the
+        full verification would. The file digest must equal the source's. In place every write goes through
+        _page_data at the offsets in `runs`, and B is blocked meanwhile; a write elsewhere would leave a page it
+        was meant for unchanged, so it fails this check.
         """
         path = self._output_path(entry.path)
         basis_size = self.basis_files.get(index) if self.reuse else None
-        nodes_b = self.basis_nodes.pop(index, None)
-        leaves_b = self.basis_leaves.pop(index, {})
         block, per_node = self.block, self.node_blocks
-        node_size = block * per_node
+        node_size, light = block * per_node, max(1, per_node // 8)
         counts = self.written_verify
+        written_by_node = {}
+        for first, count in runs:
+            for page in range(first, first + count):
+                written_by_node.setdefault(page // per_node, []).append(page)
         try:
             fd = open_regular(path)
         except OSError as exc:
             raise TransferError(f'cannot re-read {entry.path} to verify it: {exc}') from exc
         try:
-            written, touched = {}, set()
-            for first, count in runs:
-                data = pread_exact(fd, min(count * block, size - first * block), first * block)
-                for i in range(count):
-                    written[first + i] = self.hasher.leaf(data[i * block:(i + 1) * block])
-                touched.update(range(first // per_node, (first + count - 1) // per_node + 1))
-                counts['pages_reread'] += count
-            nodes = []
+            nodes, heavy = [], []
             for node in range(node_count(size, block, per_node)):
                 lo, hi = node * node_size, min((node + 1) * node_size, size)
                 same_extent = basis_size is not None and min((node + 1) * node_size, basis_size) == hi
-                if (node not in touched and same_extent and nodes_b is not None
+                pages = written_by_node.get(node, [])
+                if (not pages and same_extent and nodes_b is not None
                         and (node + 1) * DIGEST_SIZE <= len(nodes_b)):
                     nodes.append(nodes_b[node * DIGEST_SIZE:(node + 1) * DIGEST_SIZE])
                     counts['nodes_kept'] += 1
                     continue
                 first, stop = node * per_node, page_count(hi, block)
                 blob = leaves_b.get(node, b'')
+                composable = (pages and len(pages) <= light
+                              and all(page in pages or (page - first + 1) * DIGEST_SIZE <= len(blob)
+                                      for page in range(first, stop)))
+                if not composable:
+                    nodes.append(None)
+                    heavy.append(node)
+                    continue
+                written = set(pages)
                 leaves = []
                 for page in range(first, stop):
                     if page in written:
-                        leaves.append(written[page])
-                    elif (page - first + 1) * DIGEST_SIZE <= len(blob):
-                        leaves.append(blob[(page - first) * DIGEST_SIZE:(page - first + 1) * DIGEST_SIZE])
+                        data = pread_exact(fd, min(block, size - page * block), page * block)
+                        leaves.append(self.hasher.leaf(data))
+                        counts['pages_reread'] += 1
                     else:
-                        leaves = None
-                        break
-                if leaves is None:
-                    data = pread_exact(fd, hi - lo, lo)
-                    leaves = [self.hasher.leaf(data[offset:offset + block]) for offset in range(0, len(data), block)]
-                    counts['nodes_reread'] += 1
-                else:
-                    counts['nodes_composed'] += 1
+                        leaves.append(blob[(page - first) * DIGEST_SIZE:(page - first + 1) * DIGEST_SIZE])
                 nodes.append(self.hasher.node(b''.join(leaves)))
+                counts['nodes_composed'] += 1
+            if heavy:
+                try:
+                    parts = self.pool.node_digests(path, fd, size, self.hasher, block, per_node, heavy, False,
+                                                   stop=self.stop, window=self.jobs)
+                except _SizeChanged:
+                    raise VerificationError(f'{entry.path}: rebuilt file has the wrong length') from None
+                for node, (node_digest, _) in zip(heavy, parts):
+                    nodes[node] = node_digest
+                counts['nodes_reread'] += len(heavy)
             if os.fstat(fd).st_size != size:
                 raise VerificationError(f'{entry.path}: rebuilt file has the wrong length')
         except OSError as exc:

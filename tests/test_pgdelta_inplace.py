@@ -622,8 +622,9 @@ class VerifyScopeTests(InPlaceTestCase):
                 self.assertEqual(outcome.receiver['verify_scope'], 'written')
                 counts = outcome.receiver['verify_written']
                 self.assertGreater(counts['nodes_kept'], 0)  # base/5/multi's nodes are unchanged
-                self.assertGreater(counts['nodes_composed'], 0)
-                self.assertEqual(counts['pages_reread'], outcome.sender['pages']['sent'])
+                self.assertGreater(counts['nodes_composed'], 0)  # one written page in a 4-page node
+                self.assertGreater(counts['nodes_reread'], 0)  # more than one, or a new or grown file's
+                self.assertLessEqual(counts['pages_reread'], outcome.sender['pages']['sent'])
                 self.assertEqual(outcome.receiver['files_verified'], outcome.receiver['files'])
                 settle(self)
 
@@ -658,10 +659,10 @@ class VerifyScopeTests(InPlaceTestCase):
         pg_shapes(self.source, self.basis)
         original = receiver_module._Receiver._verify_written
 
-        def truncate_first(self_, index, entry, size, digest, runs):
+        def truncate_first(self_, index, entry, size, digest, *rest):
             if size > PAGE:
                 os.truncate(self_._output_path(entry.path), size - 1)
-            return original(self_, index, entry, size, digest, runs)
+            return original(self_, index, entry, size, digest, *rest)
 
         with mock.patch.object(receiver_module._Receiver, '_verify_written', truncate_first):
             outcome = transfer(self.source, self.basis, None, **self.options())
