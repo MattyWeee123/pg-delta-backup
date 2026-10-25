@@ -1,6 +1,6 @@
 # EXP-26: Is BBR on pgdelta's socket fair enough to other traffic to be the default?
 
-Status: **pre-registered October 25, 2026, before any run.** One VM pair (`PAIR=fair`, two `n2-standard-8` in `us-central1-b`, as EXP-20/24's), about 2 hours. The open item [EXP-24](EXP-24-dr-with-bbr.md) left: with BBR on its own socket v1 holds at every DR round trip, but BBR isn't pgdelta's default because its fairness to other traffic on a shared link was untested.
+Status: **done October 25, 2026 (lean grid 15:53–16:17 UTC; 24 runs, all counted; VMs deleted 16:20): BBR stays opt-in. A BBR newcomer took far more from cubic traffic than a cubic newcomer would in 8 of 10 cells (H 0.32–0.95; the bar is 0.20), taking 81–96% of the link wherever the queue was one round trip or less.** Pre-registered before any run. One VM pair (`PAIR=fair`, two `n2-standard-8` in `us-central1-b`, as EXP-20/24's), about 2 hours. The open item [EXP-24](EXP-24-dr-with-bbr.md) left: with BBR on its own socket v1 holds at every DR round trip, but BBR isn't pgdelta's default because its fairness to other traffic on a shared link was untested.
 
 ## Question
 
@@ -67,3 +67,52 @@ The owner asked that experiments run long only where they must. The registered g
 - **The check on the shorter window:** the lean grid's 60 ms, 1-round-trip, 1-competitor cell is reported beside the smoke's 100-second runs of the same cell (H = 0.87). If the two disagree on which side of the bar the cell falls, the short window isn't trusted and that cell is rerun at 100 s.
 
 The cells, the measure, the bar, the predictions and the verdict rule are unchanged.
+
+## Results
+
+24 runs (20 in the lean grid, plus 2 more per newcomer in the one cell between 0.10 and 0.40), all counted: every sender got the congestion control it asked for, and every window was complete. Data: `docs/experiments/data/exp26-cells.csv`; raw `results/exp04/sets/fair/exp26` and `exp26repeats`; figure `analysis/exp26.py`.
+
+![BBR's harm to cubic traffic by queue depth, and the newcomer's share per cell](../figures/exp26-fairness.svg)
+
+*How to read it:* left, the harm H in each cell: above 0, a BBR newcomer leaves the cubic competitors less than a cubic newcomer would; the dashed line is the registered bar (0.20), with the grey band its ±20% margin. Right, the newcomer's share of what got through, cubic (grey) against BBR (orange); the black tick is an equal share, 1/(N+1).
+
+| Round trip, queue, competitors | Competitors beside a cubic / **BBR** newcomer (Mbit/s) | Newcomer, cubic / **BBR** | Ping, cubic / BBR newcomer (ms) | **H** |
+|---|---:|---:|---:|---:|
+| 20 ms, 1 RTT, 1 | 1,097 / **71** | 814 / **1,800** | 37 / 26 | **0.94** |
+| 60 ms, 0.5 RTT, 1 | 1,303 / **67** | 608 / **1,791** | 81 / 67 | **0.95** |
+| 60 ms, 0.5 RTT, 4 | 1,395 / **140** | 516 / **1,721** | 86 / 73 | **0.90** |
+| 60 ms, 1 RTT, 1 | 1,710 / **133** | 202 / **1,730** | 106 / 97 | **0.92** |
+| 60 ms, 1 RTT, 4 | 1,522 / **241** | 389 / **1,626** | 115 / 105 | **0.84** |
+| 60 ms, 2 RTT, 1 | 966 / **880** | 944 / **1,024** | 153 / 122 | 0.09 |
+| 60 ms, 2 RTT, 4 (3 runs each) | 1,513 / **1,025** | 397 / **876** | 167 / 125 | **0.32** |
+| 60 ms, 4 RTT, 1 | 617 / **1,060** | 1,293 / **851** | 250 / 226 | −0.72 |
+| 60 ms, 4 RTT, 4 | 1,824 / **1,018** | 91 / **883** | 264 / 210 | **0.44** |
+| 120 ms, 1 RTT, 1 | 1,382 / **359** | 531 / **1,503** | 202 / 192 | **0.74** |
+
+**The verdict, at the registered bar and at half and twice it:** BBR stays opt-in at all three. Above 0.20: 8 of 10 cells. Above 0.10: the same 8. Above 0.40: 7 (the 2-round-trip, 4-competitor cell drops out). No cell lies within 20% of the bar (0.16–0.24), so nothing is provisional by rule 11 and no second session is owed.
+
+**The check on the shorter window held:** at 60 ms, 1 round trip and 1 competitor, the lean grid's 30-second window gave H = 0.92 and the smoke's 60-second window 0.87, both far above the bar.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | At 0.5 round trips, H > 0.20 with 1 and 4 competitors | **Held:** 0.95 and 0.90 |
+| 2 | At 4 round trips with 1 competitor, H ≤ 0 | **Held:** −0.72 (the cubic newcomer took 1,293 Mbit/s, the BBR newcomer 851) |
+| 3 | H with 4 competitors above H with 1 at every depth | **Failed at 0.5 and 1 round trip** (0.90 against 0.95, 0.84 against 0.92: in both, BBR took nearly the whole link either way), held at 2 and 4 (0.32 against 0.09, 0.44 against −0.72) |
+| 4 | **Deciding: BBR stays opt-in** | **Held:** 8 of 10 cells above the bar |
+| 5 | The BBR newcomer at least as fast as the cubic one at 1 round trip or less | **Held** in all 6 such cells (1,503–1,800 Mbit/s against 202–814) |
+
+## What the records show
+
+- **In shallow queues BBR v1 all but takes the link.** At one round trip of queue or less, the BBR newcomer took 87–96% of what got through at 20 and 60 ms, and 81% at 120 ms, with 1 or 4 cubic flows. The cubic competitors fell to 5–16% of their rate beside a cubic newcomer (26% at 120 ms).
+- **Only a deep queue with a single competitor keeps BBR within the bar.** At 60 ms and 2 round trips of queue it took about what a cubic newcomer would (H = 0.09); at 4 round trips cubic took more (−0.72). With 4 cubic competitors it stayed above the bar even at 4 round trips (0.44): BBR v1 holds its share as loss-based flows are added, where a cubic newcomer's shrinks.
+- **BBR queues less.** In every cell the ping meanwhile was lower beside a BBR newcomer (by 9–54 ms), so latency-sensitive traffic waits less behind it, even as bulk traffic gets less.
+- **The short window may overstate H a little near the bar.** A cubic newcomer takes longer than BBR to reach its share: in the check cell its share was 0.11 over the 30-second window and 0.27 over the smoke's 60 seconds. That biases H upwards where a cubic newcomer is still growing, most in the 2-round-trip cells. The verdict rests on cells at 0.74–0.95, far beyond that.
+
+## What follows
+
+- **BBR stays opt-in** (`pgdelta send --congestion-control bbr`). The default remains the host's (cubic on Debian), and pgdelta does not ask for BBR on its own.
+- **The DR claim is qualified accordingly.** EXP-24's "holds at every DR round trip with BBR" is the speed pgdelta gets when it may take the link. The deployment note says when to ask for BBR:
+  - on a link the refresh has to itself, or one provisioned for it;
+  - not on a link shared with bulk cubic traffic (replication, other copies) whose rate matters during the refresh, where BBR v1 takes most of the link if the bottleneck's queue is a round trip or less.
+  With cubic, v1's DR verdict is EXP-20's: local changes only.
+- **A cap is the natural next step, untested.** BBR with a pacing-rate cap on pgdelta's socket (`SO_MAX_PACING_RATE`, a `--max-rate` option) would keep BBR's immunity to cubic's slow mode while bounding its share; BBRv3 (not in mainline Linux) and an AQM at the bottleneck would also change the sharing. None is measured here.

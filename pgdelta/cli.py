@@ -314,7 +314,9 @@ def build_parser():
                       help='ask for this TCP congestion control (for example bbr) on the connection to the '
                            'receiver, on Linux. An unprivileged sender gets it only if the host allows it '
                            '(net.ipv4.tcp_allowed_congestion_control); otherwise the host default stays, and '
-                           'the statistics say why')
+                           'the statistics say why. BBR avoids cubic\'s slow mode at DR round trips (EXP-24), but '
+                           'on a link shared with cubic traffic it takes most of the link when the bottleneck\'s '
+                           'queue is a round trip or less (EXP-26), so use it where the refresh may take the link')
     _source_kind_option(send)
     _jobs_option(send, 'S')
     send.set_defaults(func=cmd_send)

@@ -1,6 +1,6 @@
 """EXP-26's analysis: BBR's fairness to cubic on a shared bottleneck (docs/experiments/EXP-26-bbr-fairness.md).
 
-    .venv/bin/python analysis/exp26.py [--runs results/exp04/sets/fair/exp26] [--figdir DIR]
+    .venv/bin/python analysis/exp26.py [--runs DIR ...] [--figdir DIR]   (default: the lean grid and its repeats)
 
 Per run, from the iperf3 servers' per-second intervals: the competitors' mean received rate over t = 40-100 s and
 the newcomer's over the same seconds (its own t = 20-80); the congestion control each sender got; the source's tbf
@@ -56,10 +56,11 @@ def ping_ms(path):
     return statistics.median(times) if times else None
 
 
-def load(root):
+def load(roots):
     runs = []
-    for d in sorted(Path(root).glob('run-*')):
+    for d in sorted(d for root in roots for d in Path(root).glob('run-*')):
         meta = json.loads((d / 'meta.json').read_text())
+        meta['run'] = f'{d.parent.name}/{d.name}'
         try:
             comp, comp_s, comp_cc, comp_rx = window_mbit(d / 'comp.json', 'comp', meta)
             new, new_s, new_cc, new_rx = window_mbit(d / 'new.json', 'new', meta)
@@ -103,14 +104,15 @@ def cells(runs):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('--runs', default=str(ROOT / 'results' / 'exp04' / 'sets' / 'fair' / 'exp26'))
+    base = ROOT / 'results' / 'exp04' / 'sets' / 'fair'
+    ap.add_argument('--runs', nargs='+', default=[str(base / 'exp26'), str(base / 'exp26repeats')])
     ap.add_argument('--figdir')
     ap.add_argument('--tag', default='')
     a = ap.parse_args(argv)
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
     plotting.style()
-    runs = load(a.runs)
+    runs = load([r for r in a.runs if Path(r).exists()])
     bad = [r for r in runs if not r['ok']]
     print(f'{len(runs)} runs, {len(runs) - len(bad)} counted' + (f'; not counted: {[(r["run"], r["why"]) for r in bad]}'
                                                                if bad else ''))
