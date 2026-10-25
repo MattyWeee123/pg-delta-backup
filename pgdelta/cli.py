@@ -11,7 +11,7 @@ import tempfile
 import time
 import traceback
 
-from pgdelta import datadir, flush, inplace, placement, prefetch, receiver, sender, transport
+from pgdelta import datadir, flush, inplace, live, placement, prefetch, receiver, sender, transport
 from pgdelta.errors import EXIT_TRANSFER_FAILURE, InvalidInput, PgDeltaError, TransferError
 from pgdelta.hashing import NODE_BLOCKS
 from pgdelta.identity import read_identity
@@ -191,6 +191,22 @@ def _source_kind_option(parser):
     parser.add_argument('--psql', metavar='PATH',
                         help='--source-kind live: the psql binary (default: beside --pg-controldata, else psql '
                              'on PATH)')
+    parser.add_argument('--live-timeout', type=_positive_seconds, metavar='SECONDS',
+                        help='--source-kind live: while backup mode and the replication slot are held, give up '
+                             'when the receiver makes no progress for this long (a send it does not take, or a '
+                             'reply that does not come), so that backup mode ends and the slot stops holding WAL '
+                             'on the source; TCP keepalives on the connection follow it too (default: '
+                             f'{live.DEFAULT_TIMEOUT:g})')
+
+
+def _positive_seconds(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'expected a number of seconds, got {text!r}') from None
+    if not 0 < value < float('inf'):
+        raise argparse.ArgumentTypeError('must be a positive number of seconds')
+    return value
 
 
 def _byte_count(text):
@@ -404,13 +420,16 @@ def _sender_kwargs(args, identity):
     return {'identity': identity, 'block': args.block, 'node_blocks': args.node_blocks,
             'high_churn_node_fraction': args.high_churn_node_fraction, 'window': args.window, 'jobs': args.jobs,
             'hash_backend': args.hash_backend, 'source_kind': args.source_kind,
-            'pg_controldata': args.pg_controldata, 'pg_conn': args.pg_conn, 'psql': args.psql}
+            'pg_controldata': args.pg_controldata, 'pg_conn': args.pg_conn, 'psql': args.psql,
+            'live_timeout': args.live_timeout}
 
 
 def _source_identity(args):
     """S's identity; for --source-kind datadir and live the sender reads it (pgdelta.datadir, pgdelta.live)."""
     if args.source_kind != 'live' and (args.pg_conn or args.psql):
         raise InvalidInput('--pg-conn and --psql are for --source-kind live')
+    if args.source_kind != 'live' and args.live_timeout is not None:
+        raise InvalidInput('--live-timeout is for --source-kind live')
     if args.source_kind == 'datadir':
         if not args.pg_controldata:
             raise InvalidInput('--source-kind datadir needs --pg-controldata: it reads the cluster state '
@@ -422,6 +441,11 @@ def _source_identity(args):
         if not args.pg_conn:
             raise InvalidInput('--source-kind live needs --pg-conn: a psql connection string to the server '
                                'running on --source')
+        variant = live.broken_variant()
+        if variant is not None:
+            log(f'WARNING: {live.READ_BEFORE_START_ENV} is set: this run is the deliberately broken test variant '
+                f'"{variant}" (EXP-25\'s negative control). It reads the data directory before pg_backup_start '
+                f'returns, so its output will be wrong; the run fails (exit 4) even if the copy is completed')
         return None
     return _identity(args.source, args.pg_controldata)
 
@@ -441,6 +465,10 @@ def _run_sender_command(args, run, protected):
         failure = _failure_stats(exc)
         if args.stats_json:
             _write_stats(args.stats_json, failure)
+        variant = (failure.get('live') or {}).get('test_variant')
+        if variant is not None:
+            log(f'WARNING: the deliberately broken test variant "{variant}" ({live.READ_BEFORE_START_ENV}) ran; '
+                f'its output, if any, is wrong by design: do not start or use it')
         if failure.get('in_place') and not any(said in str(exc) for said in (inplace.BLOCKED, inplace.COMMITTED)):
             # The receiver accepted an in-place refresh, and has not said whether it left B blocked or committed.
             log('error: the receiver was refreshing B in place, so B may be incomplete and blocked from '

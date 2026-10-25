@@ -20,12 +20,16 @@ the previous trial's output. Each trial (seeded by its number):
    step 1 must be equal, and pg_amcheck (heapallindexed, every database) must find nothing; and no pgdelta slot or
    session may be left on S.
 
-Every `--negative-every`th trial (the one whose number is half-way through each block) is the negative control
-instead: fault none, and pgdelta's deliberately broken variant (PGDELTA_TEST_READ_BEFORE_START=1), whose output the
-checks must find wrong. It is not counted with the others.
+In each block of `--negative-every` trial numbers, two are negative controls instead of counted trials (fault none):
+the one half-way through runs pgdelta's broken variant that reads the files before pg_backup_start is called
+(PGDELTA_TEST_READ_BEFORE_START=1), and the block's last one the variant that reads them while pg_backup_start runs
+(=during). The checks must find their outputs wrong. pgdelta exits 4 for either variant even when the receiver
+committed B; such a run counts as run to completion.
 
-One JSON line per trial goes to OUT/trials.jsonl. A wrong output, or a refresh that fails, stops the campaign (exit
-status 2); a pgdelta slot or session left on S stops it (exit status 4); ten harness errors in a row stop it (3).
+One JSON line per trial goes to OUT/trials.jsonl, and the tallies to OUT/summary.json (summarize): the counted trials,
+the share whose refresh's WAL spans two segments or more, and each negative control's catches. A wrong output, or a
+refresh that fails, stops the campaign (exit status 2); a pgdelta slot or session left on S stops it (exit status 4);
+ten harness errors in a row stop it (3).
 """
 from __future__ import annotations
 
@@ -57,12 +61,23 @@ LEDGER_KEEP = "interval '2 minutes'"
 BASE_PORT = 55480
 SOURCE_PORT, COPY_PORT, KILLED_PORT, DIVERGED_PORT = BASE_PORT, BASE_PORT + 1, BASE_PORT + 2, BASE_PORT + 3
 # Smoke revision: with the default shared buffers the whole cluster stays in memory and its files change only at
-# checkpoints, so pgdelta read them unchanged (0 pages changed between hashing and sending in 15 refreshes). 1 MB of
+# checkpoints, so pgdelta read them unchanged (0 pages changed between hashing and sending in 15 refreshes). Small
 # shared buffers and an eager background writer put the load's pages into the files while they are read.
+# Review revision: 8 MB, not 1 MB, so that some of the load's changes are still only in shared buffers when a backup
+# starts (with 1 MB a read during the start checkpoint was caught in 2 of 61 trials, with 8 MB in 9 of 9), while the
+# files still change as they are read (30-191 pages per refresh in a probe; 0 with 32 MB).
 SETTINGS = ("-c listen_addresses='' -c fsync=off -c max_wal_size=256MB -c checkpoint_timeout=30s "
-            '-c shared_buffers=1MB -c bgwriter_delay=10ms -c bgwriter_lru_maxpages=1000')
+            '-c shared_buffers=8MB -c bgwriter_delay=10ms -c bgwriter_lru_maxpages=1000')
+WAL_SEGMENT_MB = 1  # review revision: a refresh's 8-16 MB of WAL then spans many segments, not one 16 MB one
 SLOT_WAIT_SECONDS = 10
 USER = 'postgres'
+# pgdelta's in-place block (pgdelta/inplace.py): what a B killed between the block and the commit must show.
+CONTROL_FILE, CONTROL_PENDING, MARKER = 'global/pg_control', 'global/pg_control.pgdelta-incomplete', \
+    'pgdelta-incomplete.json'
+# The negative controls: pgdelta's broken variants and the value of PGDELTA_TEST_READ_BEFORE_START for each.
+VARIANTS = {'before_start': '1', 'during_start': 'during'}
+CONTROL_SHARE = 0.9  # registered: each negative control caught in at least 90% of its completed runs
+MULTI_SEGMENT_SHARE = 0.9  # registered (review revision): the bound covers the WAL range only at this share or more
 
 
 class Cluster:
@@ -104,7 +119,10 @@ def clone(source, target):
 
 
 def make_template(bindir, sock, path):
-    run([str(Path(bindir) / 'initdb'), '-D', str(path), '-U', USER, '-A', 'trust', '--no-sync'])
+    """The template cluster, with 1 MiB WAL segments and on timeline 2 (review revision: so that every refresh's WAL
+    spans several segments, with a timeline history file to send, as a large refresh's would)."""
+    run([str(Path(bindir) / 'initdb'), '-D', str(path), '-U', USER, '-A', 'trust', '--no-sync',
+         '--wal-segsize', str(WAL_SEGMENT_MB)])
     cluster = Cluster(bindir, sock, path, SOURCE_PORT)
     cluster.start()
     cluster.sql(f'CREATE DATABASE {bank.DATABASE}', db='postgres')
@@ -116,6 +134,18 @@ def make_template(bindir, sock, path):
                 "INSERT INTO notes SELECT g, repeat(md5(g::text), 8) FROM generate_series(1, 20000) g")
     cluster.sql('CHECKPOINT')
     cluster.stop()
+    # An archive recovery that finds no archive ends at once and promotes: the cluster moves to timeline 2.
+    conf = Path(path) / 'postgresql.conf'
+    original = conf.read_text()
+    conf.write_text(original + "\nrestore_command = 'false'\n")
+    (Path(path) / 'recovery.signal').write_text('')
+    cluster.start()
+    timeline = cluster.sql('SELECT timeline_id FROM pg_control_checkpoint()', db='postgres')
+    cluster.sql('CHECKPOINT', db='postgres')
+    cluster.stop()
+    conf.write_text(original)
+    if timeline != '2' or not (Path(path) / 'pg_wal' / '00000002.history').exists():
+        raise HarnessError(f'the template did not move to timeline 2 (timeline {timeline})')
 
 
 # --- the load and the DDL on S -------------------------------------------------------------------------------
@@ -303,12 +333,23 @@ def pgdelta_argv(source, basis, stats, pg):
             str(pg / 'psql'), '--basis', str(basis), '--in-place', '--stats-json', str(stats)]
 
 
-def pgdelta_env(negative):
+def pgdelta_env(variant):
+    """pgdelta's environment: with the broken variant `variant` (a key of VARIANTS) switched on, or none."""
     env = dict(os.environ, PYTHONPATH=str(REPO))
     env.pop('PGDELTA_TEST_READ_BEFORE_START', None)
-    if negative:
-        env['PGDELTA_TEST_READ_BEFORE_START'] = '1'
+    if variant:
+        env['PGDELTA_TEST_READ_BEFORE_START'] = VARIANTS[variant]
     return env
+
+
+def negative_variant(n, every):
+    """The negative control trial number n is, or None: in each block of `every` numbers, the one half-way
+    through reads before pg_backup_start, the block's last one while it runs."""
+    if every <= 0:
+        return None
+    if every < 3:
+        raise HarnessError('--negative-every must be at least 3 (two negative controls in each block)')
+    return {every // 2: 'before_start', every - 1: 'during_start'}.get(n % every)
 
 
 def leftovers(source):
@@ -363,30 +404,86 @@ def check_copy(bindir, sock, source, path, work, port, start_us, stop_us, expect
     return True, problems, facts
 
 
-def refresh(source, basis, work, pg, negative):
+def refresh(source, basis, work, pg, variant):
     """Run pgdelta to completion: (exit status, statistics or None, harness launch and exit times)."""
     stats = Path(work) / 'stats.json'
     stats.unlink(missing_ok=True)
     launched = time.time()
-    result = run(pgdelta_argv(source, basis, stats, pg), check=False, cwd=REPO, env=pgdelta_env(negative))
+    result = run(pgdelta_argv(source, basis, stats, pg), check=False, cwd=REPO, env=pgdelta_env(variant))
     ended = time.time()
     data = json.loads(stats.read_text()) if stats.exists() else None
     return result, data, launched, ended
 
 
+def kill_state(basis, started, problems):
+    """How a refresh killed part-way left B, once B differs from before the run (the kill rule, revised after the
+    review of October 25: 'blocked' only by pgdelta's own block).
+
+    'new' if a clone of B started and passed every check; 'blocked' if it refused to start and B is in pgdelta's
+    documented blocked state (global/pg_control renamed to global/pg_control.pgdelta-incomplete, with the marker
+    pgdelta-incomplete.json beside it); otherwise 'wrong': a B that starts and fails a check, or one that cannot
+    start for any other reason (say, committed before its WAL and backup_label were written), which no rerun is
+    documented to repair.
+    """
+    if started:
+        return 'new' if not problems else 'wrong'
+    basis = Path(basis)
+    blocked = (not os.path.lexists(basis / CONTROL_FILE) and os.path.isfile(basis / CONTROL_PENDING)
+               and os.path.isfile(basis / MARKER))
+    return 'blocked' if blocked else 'wrong'
+
+
 def stats_summary(stats):
     info = stats.get('live') or {}
     return {'seconds': (stats.get('timings_seconds') or {}).get('total'), 'pages': stats.get('pages'),
-            **{key: info.get(key) for key in ('start_lsn', 'stop_lsn', 'backup_mode_seconds', 'wal_segments',
-                                              'files_vanished', 'files_shrunk', 'files_grew',
-                                              'pages_changed_after_hash', 'control_file_reads', 'cleanup')}}
+            **{key: info.get(key) for key in ('start_lsn', 'stop_lsn', 'timeline', 'backup_mode_seconds',
+                                              'wal_segment_size', 'wal_segments', 'history_files', 'files_vanished',
+                                              'files_shrunk', 'files_grew', 'pages_changed_after_hash',
+                                              'control_file_reads', 'test_variant', 'pre_read_seconds',
+                                              'timed_out', 'cleanup')}}
 
 
-def trial(n, negative, ctx):
+def summarize(records):
+    """The campaign's tallies from its trial records: the counted trials and how many passed; how many of them
+    refreshed with WAL spanning two segments or more, and whether that share reaches MULTI_SEGMENT_SHARE (the bound
+    covers the WAL range only then); and each negative control's completed runs and catches, and whether every
+    control reached CONTROL_SHARE (no bound is claimed otherwise)."""
+    counted = [r for r in records if 'pass' in r and not r.get('negative_control')]
+    multi = sum(1 for r in counted if ((r.get('pgdelta') or {}).get('wal_segments') or 0) >= 2)
+    share = multi / len(counted) if counted else None
+    controls = {}
+    for r in records:
+        if r.get('negative_control') and 'caught' in r:
+            tally = controls.setdefault(r.get('negative_variant') or 'before_start', {'ran': 0, 'caught': 0})
+            tally['ran'] += 1
+            tally['caught'] += bool(r['caught'])
+    return {
+        'counted': len(counted),
+        'passed': sum(1 for r in counted if r['pass']),
+        'multi_segment': multi,
+        'multi_segment_share': share,
+        'wal_range_covered': share is not None and share >= MULTI_SEGMENT_SHARE,
+        'negative_controls': controls,
+        'controls_met': set(controls) == set(VARIANTS) and all(
+            tally['caught'] >= CONTROL_SHARE * tally['ran'] for tally in controls.values()),
+        'harness_errors': sum(1 for r in records if 'harness_error' in r),
+    }
+
+
+def completed_variant(result, stats, variant):
+    """Whether a negative control's refresh ran to completion: pgdelta exits 4 for a broken variant even when the
+    receiver committed B (review revision), so completion is that exit with the receiver's confirmation."""
+    return (result.returncode == 4 and bool(stats) and stats.get('receiver') is not None
+            and (stats.get('live') or {}).get('test_variant') == variant)
+
+
+def trial(n, variant, ctx):
+    """One trial; `variant` (a key of VARIANTS) makes it that negative control, None a counted trial."""
+    negative = variant is not None
     rng = random.Random(n)
     fault = 'none' if negative else rng.choices([f for f, _ in FAULTS], weights=[w for _, w in FAULTS])[0]
     source, basis, work, pg, sock = ctx['source'], ctx['basis'], ctx['work'], ctx['pg'], ctx['sock']
-    rec = {'trial': n, 'fault': fault, 'negative_control': negative}
+    rec = {'trial': n, 'fault': fault, 'negative_control': negative, 'negative_variant': variant}
     rec['ddl'] = ddl(source, rng)
     expect = static_digest(source)
     if fault == 'diverged':
@@ -421,16 +518,21 @@ def trial(n, negative, ctx):
                 started, problems, facts = check_copy(pg, sock, source, basis, work, KILLED_PORT, bank.us(launched),
                                                       bank.us(killed), expect)
                 rec['killed_copy'] = dict(facts, problems=problems)
-                rec['b_state_at_kill'] = 'blocked' if not started else 'new' if not problems else 'wrong'
+                rec['b_state_at_kill'] = kill_state(basis, started, problems)
             rec['leftovers_after_kill'] = leftovers(source)
             if rec['leftovers_after_kill'] != '0,0':
                 rec.update(why=f'pgdelta slot or session left on S after the kill: {rec["leftovers_after_kill"]}',
                            cleanup_failure=True, **{'pass': False})
                 return rec
             if rec['b_state_at_kill'] == 'wrong':
-                rec.update(why=f'B was caught part-way, started, and is wrong: {problems[:3]}', **{'pass': False})
+                if started:
+                    why = f'B was caught part-way, started, and is wrong: {problems[:3]}'
+                else:
+                    why = (f'B was caught part-way and cannot start, but is not in pgdelta\'s blocked state '
+                           f'(global/pg_control renamed aside, with the marker): {facts.get("log", "")[-300:]}')
+                rec.update(why=why, **{'pass': False})
                 return rec
-    result, stats, launched, ended = refresh(source, basis, work, pg, negative)
+    result, stats, launched, ended = refresh(source, basis, work, pg, variant)
     rec.update(exit=result.returncode, seconds=round(ended - launched, 3))
     if stats:
         rec['pgdelta'] = stats_summary(stats)
@@ -439,12 +541,11 @@ def trial(n, negative, ctx):
         rec.update(why=f'pgdelta slot or session left on S: {rec["leftovers"]}', cleanup_failure=True,
                    **{'pass': False})
         return rec
-    if result.returncode != 0 or not stats:
-        why = f'pgdelta exit {result.returncode}: {result.stderr.strip()[-300:]}'
-        if negative:  # neither caught nor missed: not counted
-            rec['negative_failed'] = why
-        else:
-            rec.update(why=why, **{'pass': False})
+    if negative and not completed_variant(result, stats, variant):
+        rec['negative_failed'] = f'pgdelta exit {result.returncode}: {result.stderr.strip()[-300:]}'
+        return rec  # neither caught nor missed: not counted
+    if not negative and (result.returncode != 0 or not stats):
+        rec.update(why=f'pgdelta exit {result.returncode}: {result.stderr.strip()[-300:]}', **{'pass': False})
         return rec
     info = stats['live']
     # pgdelta's own times must lie within the harness's: then its tight bounds are as sound as the harness's.
@@ -472,10 +573,14 @@ def main(argv=None):
     parser.add_argument('--hours', type=float, default=3.0)
     parser.add_argument('--first', type=int, default=0)
     parser.add_argument('--negative-every', type=int, default=20,
-                        help='every Nth trial number (N/2, 3N/2, ...) is a negative control')
+                        help='in each block of N trial numbers, the one half-way through (N/2, 3N/2, ...) is the '
+                             'read-before-start negative control and the last one (N-1, 2N-1, ...) the '
+                             'read-during-start one; 0: none')
     parser.add_argument('--pg-bin', default='/opt/homebrew/opt/postgresql@17/bin')
     parser.add_argument('--work')
     args = parser.parse_args(argv)
+    if 0 < args.negative_every < 3:
+        parser.error('--negative-every must be 0 or at least 3 (two negative controls in each block)')
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     work = Path(args.work or tempfile.mkdtemp(prefix='exp25.'))
@@ -501,15 +606,17 @@ def main(argv=None):
         with open(out / 'trials.jsonl', 'a') as log:
             n = args.first
             while counted < args.trials and time.time() < deadline:
-                negative = args.negative_every > 0 and n % args.negative_every == args.negative_every // 2
+                variant = negative_variant(n, args.negative_every)
+                negative = variant is not None
                 if load.poll() is not None:
                     load = start_load(source, scripts, n, log=load_log)
                     log.write(json.dumps({'trial': n, 'load_restarted': True}) + '\n')
                     time.sleep(1)
                 try:
-                    rec = trial(n, negative, ctx)
+                    rec = trial(n, variant, ctx)
                 except HarnessError as exc:
-                    rec = {'trial': n, 'negative_control': negative, 'harness_error': str(exc)[-400:]}
+                    rec = {'trial': n, 'negative_control': negative, 'negative_variant': variant,
+                           'harness_error': str(exc)[-400:]}
                     errors += 1
                     for port, name in ((COPY_PORT, f'copy{COPY_PORT}'), (KILLED_PORT, f'copy{KILLED_PORT}')):
                         Cluster(pg, sock, work / name, port).stop(mode='immediate', check=False)
@@ -542,7 +649,8 @@ def main(argv=None):
                     outcome = 'did not run' if 'caught' not in rec else 'caught' if rec['caught'] else 'NOT CAUGHT'
                 else:
                     outcome = 'pass'
-                print(f'{time.strftime("%H:%M:%S")} trial {n} ({"negative control" if negative else rec["fault"]}): '
+                print(f'{time.strftime("%H:%M:%S")} trial {n} '
+                      f'({f"negative control, {variant}" if negative else rec["fault"]}): '
                       f'{outcome}; counted {counted}, negative controls caught {caught} of {negatives}, '
                       f'harness errors {errors}', flush=True)
                 n += 1
@@ -552,6 +660,10 @@ def main(argv=None):
         source.stop(check=False)
     print(f'done: counted {counted}, negative controls caught {caught} of {negatives}, harness errors {errors}',
           flush=True)
+    with open(out / 'trials.jsonl') as stream:
+        summary = summarize([json.loads(line) for line in stream if line.strip()])
+    (out / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
+    print(f'summary (all of {out / "trials.jsonl"}): {json.dumps(summary)}', flush=True)
     return status
 
 

@@ -27,10 +27,11 @@ import os
 import threading
 import time
 
-from pgdelta import __version__, datadir, live, matching, protocol, waits
+from pgdelta import __version__, datadir, live, matching, protocol, transport, waits
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
 from pgdelta.hashing import BLOCK, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key
+from pgdelta.inplace import COMMITTED
 from pgdelta.inventory import require_plain, scan
 from pgdelta.protocol import ChannelClosed
 from pgdelta.receiver import RECEIPT_SUFFIX
@@ -62,6 +63,10 @@ class Inbox:
         self.closed = False
         # The sender's protocol timers (pgdelta.waits.WaitTimers); without them waits aren't timed.
         self.timers = timers
+        # For the stall watch (StallWatch): when the last message arrived, and since when and for what a wait has
+        # blocked (time.monotonic(); None while no wait blocks).
+        self.last_message = 0.0
+        self.waiting_since = self.waiting_for = None
         self.thread = threading.Thread(target=self._run, name='pgdelta-inbox', daemon=True)
 
     def start(self):
@@ -82,6 +87,7 @@ class Inbox:
                 message = self.channel.recv()
                 if message is None:
                     return
+                self.last_message = time.monotonic()
                 code, payload = message
                 with self.cond:
                     self._dispatch(code, payload)
@@ -105,6 +111,13 @@ class Inbox:
         with self.cond:
             if self.error is None:
                 self.error = exc
+
+    def fail(self, exc):
+        """Fail the run from another thread (the stall watch): a wait in progress or to come raises `exc`."""
+        with self.cond:
+            if self.error is None:
+                self.error = exc
+            self.cond.notify_all()
 
     def _dispatch(self, code, payload):
         if code == protocol.ERROR:
@@ -145,6 +158,8 @@ class Inbox:
                         return value
                     if self.closed:
                         raise ChannelClosed(f'receiver closed the connection while the sender waited for {what}')
+                    if self.waiting_since is None:
+                        self.waiting_since, self.waiting_for = time.monotonic(), what
                     if timers is None:
                         self.cond.wait()
                         continue
@@ -154,12 +169,78 @@ class Inbox:
                     self.cond.wait(timers.poll)
                     timers.tick()
         finally:
+            self.waiting_since = self.waiting_for = None
             if blocked:
                 timers.end()
 
     def check(self):
         if self.error is not None:
             raise self.error
+
+
+class StallWatch:
+    """While a live source holds backup mode and its slot: give up on a receiver that has stopped.
+
+    The sender is stalled when it has been blocked on the receiver for
+    `seconds`: in one send() the receiver doesn't take (Channel.sending_since),
+    or in a wait during which no message arrived (Inbox.waiting_since and
+    last_message). Time spent working (hashing, reading S, psql) is no stall.
+    A thread checks every `interval`; on a stall it fails the inbox with a
+    TransferError naming it and aborts the channel, so the run fails and
+    pg_backup_stop is called and the slot dropped. Should the run still not
+    have ended `grace` seconds later (a send that even an abort cannot end),
+    it kills the psql session itself, which ends backup mode and drops the
+    temporary slot server side. Over TCP the connection also gets keepalives
+    (pgdelta.transport.keep_alive) for a peer lost while nothing is sent.
+    """
+
+    GRACE_SECONDS = 30.0
+
+    def __init__(self, channel, inbox, seconds, *, on_give_up=None, interval=None, grace=GRACE_SECONDS,
+                 clock=time.monotonic):
+        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not seconds > 0:
+            raise InvalidInput(f'the live timeout must be a positive number of seconds, not {seconds!r}')
+        self.channel, self.inbox, self.seconds = channel, inbox, float(seconds)
+        self.on_give_up, self.grace, self.clock = on_give_up, grace, clock
+        self.interval = interval if interval is not None else min(1.0, self.seconds / 10)
+        self.error = None
+        self._stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='pgdelta-stall-watch', daemon=True)
+
+    def stalled(self, now):
+        """What the sender has been blocked on for `seconds` by `now` (time.monotonic()), or None."""
+        since = self.channel.sending_since
+        if since is not None and now - since >= self.seconds:
+            return 'sending'
+        since, what = self.inbox.waiting_since, self.inbox.waiting_for
+        if since is not None and now - max(since, self.inbox.last_message) >= self.seconds:
+            return f'waiting for {what}'
+        return None
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def stop(self):
+        """The slot is gone or the run is over: stop watching. Safe to repeat."""
+        self._stopped.set()
+        if self.thread.is_alive() and self.thread is not threading.current_thread():
+            self.thread.join(5)
+
+    def _run(self):
+        while not self._stopped.wait(self.interval):
+            what = self.stalled(self.clock())
+            if what is None:
+                continue
+            self.error = TransferError(
+                f'the receiver made no progress for {self.seconds:g} s while the sender was {what}, with backup '
+                f'mode and the replication slot held on the source: giving up, so that backup mode ends and the '
+                f'slot is dropped (--live-timeout)')
+            self.inbox.fail(self.error)
+            self.channel.abort()
+            if not self._stopped.wait(self.grace) and self.on_give_up is not None:
+                self.on_give_up()
+            return
 
 
 @dataclass
@@ -197,14 +278,15 @@ def _parse_accept(accept, file_count):
 class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
-                 busy_inflight_bytes=None, pg_conn=None, psql=None):
+                 busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None):
         self.started = time.perf_counter()
         self.channel, self.source, self.identity = channel, Path(source), identity
         self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
         # A live source (pgdelta.live): its backup session, and how its files are read; the files appended
-        # after pg_backup_stop.
+        # after pg_backup_stop; the watch that gives up on a stalled receiver while the slot is held.
         self.pg_conn, self.psql = pg_conn, psql
-        self.live = self.reader = None
+        self.live_timeout = live.DEFAULT_TIMEOUT if live_timeout is None else live_timeout
+        self.live = self.reader = self.watch = None
         self.appended = []
         # Whether the receiver refreshes B in place (from ACCEPT; null until it arrives).
         self.in_place = None
@@ -233,7 +315,7 @@ class _Sender:
 
     def run(self):
         try:
-            return self._run()
+            stats = self._run()
         except BaseException as exc:
             failure = exc
             try:
@@ -250,15 +332,43 @@ class _Sender:
             self._close_live()
             if self.pool is not None:
                 self.pool.close()
+        if self.live is not None and self.live.variant is not None:
+            raise self._wrong_by_design(stats)
+        return stats
+
+    def _wrong_by_design(self, stats):
+        """A broken test variant ran to the end: the run fails (exit 4), however complete it looks."""
+        output = f'B, which {COMMITTED},' if self.in_place else 'the output the receiver published'
+        error = VerificationError(
+            f'the deliberately broken test variant ran ({live.READ_BEFORE_START_ENV}: {self.live.variant}): the '
+            f'files were read before pg_backup_start returned, so {output} is wrong by design and must not be '
+            f'used; refresh it again without the switch, or replace it with a full copy')
+        error.pgdelta_stats = dict(stats, status='failed', exit_code=error.exit_code, error=str(error))
+        return error
 
     def _close_live(self):
         if self.live is not None:
+            if self.watch is not None and self.watch.error is not None:
+                self.live.timed_out = True
             try:
                 self.live.close()
             except Exception:  # never hide the run's own failure; the session's end aborts backup mode anyway
                 pass
+        if self.watch is not None:
+            self.watch.stop()
+
+    def _kill_session(self):
+        """The stall watch's last resort, when even aborting the channel did not end the run: end the psql session,
+        which ends backup mode and drops the temporary slot server side."""
+        session = self.live.session if self.live is not None else None
+        if session is not None:
+            session.kill()
 
     def _fail(self, exc):
+        if self.watch is not None and self.watch.error is not None and not isinstance(exc, PeerError):
+            # The receiver stalled while the slot was held: whatever the run then hit (a wait failed by the watch,
+            # a send cut off by its abort) has that cause, and the aborted channel can carry no ERROR.
+            return self.watch.error
         if isinstance(exc, PeerError):
             return exc
         if isinstance(exc, ChannelClosed):
@@ -386,15 +496,31 @@ class _Sender:
     def _begin_live(self):
         """Open the backup session and its slot, call pg_backup_start, then list the data directory.
 
-        Read before start (PGDELTA_TEST_READ_BEFORE_START=1, EXP-25's broken variant): the data directory
-        is listed and copied aside first, and pg_backup_start called after.
+        From the slot's creation until it is dropped, the stall watch gives up on a receiver that stops
+        (StallWatch), and a TCP connection to it gets keepalives.
+
+        EXP-25's broken variants (PGDELTA_TEST_READ_BEFORE_START, pgdelta.live): the data directory is listed
+        and copied aside before pg_backup_start is called ("before_start"), or once it is sent and before
+        its answer is read ("during_start").
         """
         self.live = live.LiveSource(self.source, self.pg_conn, self.pg_controldata, psql=self.psql)
+        self.watch = StallWatch(self.channel, self.inbox, self.live_timeout, on_give_up=self._kill_session)
+        self.live.timeout = self.watch.seconds
+        sock = getattr(self.channel, 'sock', None)
+        if sock is not None:
+            self.live.keepalive = transport.keep_alive(sock, self.watch.seconds)
+        self.watch.start()
         self.live.open()
-        if self.live.read_before_start:
+        if self.live.variant == 'before_start':
             self.selection = self.live.select()
             self.live.pre_read(self.selection)
             self.live.start()
+        elif self.live.variant == 'during_start':
+            def read_meanwhile():
+                self.selection = self.live.select()
+                self.live.pre_read(self.selection)
+
+            self.live.start(meanwhile=read_meanwhile)
         else:
             self.live.start()
             self.selection = self.live.select()
@@ -414,6 +540,7 @@ class _Sender:
         self._send_json(protocol.APPEND, {'files': [[entry.path, entry.size, entry.mode] for entry in entries]})
         self._send_files(entries, first_index)
         self.live.finish()
+        self.watch.stop()  # the slot is dropped: waiting on the receiver from here on holds nothing on the source
 
     def _source_file(self, path):
         """The file read for the listed `path` (datadir: an unlogged relation's main fork is its init fork)."""
@@ -497,8 +624,11 @@ class _Sender:
         A page may have changed since the file was hashed; the copy is made of
         these bytes, so FILE_DONE carries the digest of the file with them in
         place (pgdelta.live.composite_digest), and the receiver verifies that.
+        A file held strictly (the WAL and history files) must not change at
+        all: a page of it that differs fails the run.
         """
         sent, changed, tree, block = 0, {}, job.tree, self.block
+        strict = job.path in self.reader.strict
         try:
             handle = self.reader.open(job.entry)
         except OSError as exc:
@@ -515,6 +645,9 @@ class _Sender:
                 for page in range(first, first + count):
                     leaf = self.hasher.leaf(view[(page - first) * block:(page - first + 1) * block])
                     if leaf != tree.leaf(page):
+                        if strict:
+                            raise VerificationError(f'{job.path} changed after it was hashed (page {page}): WAL '
+                                                    f'must not change once pg_backup_stop has returned')
                         changed[page] = leaf
                 self.inbox.check()
                 self._send(protocol.PAGE_DATA, protocol.page_data_head(job.index, first), data)
@@ -650,7 +783,7 @@ class _Sender:
 def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_BLOCKS,
                high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
-               busy_inflight_bytes=None, pg_conn=None, psql=None):
+               busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -666,6 +799,11 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     cluster's data directory in backup mode (pgdelta.live): it needs
     `pg_controldata` and `pg_conn`, a psql connection string to that
     server, and runs `psql` (default: beside pg_controldata, else on PATH).
+    While its replication slot is held, a receiver that makes no progress
+    for `live_timeout` seconds (default pgdelta.live.DEFAULT_TIMEOUT) fails
+    the run (StallWatch). A run with one of EXP-25's broken test variants
+    (PGDELTA_TEST_READ_BEFORE_START) raises VerificationError (exit 4) even
+    when the receiver published, its statistics attached as on failure.
     `window` files are hashed ahead of the one being sent (at least 1): it
     changes the order of the frames on the wire, never what they hold.
     `busy_inflight_bytes` (EXP-13): over TCP on Linux, a wait counts as busy
@@ -675,4 +813,4 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
-                   pg_conn, psql).run()
+                   pg_conn, psql, live_timeout).run()

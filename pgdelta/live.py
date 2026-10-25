@@ -31,7 +31,11 @@ inside pg_backup_start / pg_backup_stop, as pg_basebackup -X stream does:
 If anything fails, pg_backup_stop is still called and the slot dropped; if
 the session itself is broken, closing it aborts backup mode, and a
 temporary slot goes with its session. A sender killed outright leaves
-neither: its psql sees its input end and exits.
+neither: its psql sees its input end and exits. A receiver that stops
+answering or reading while the slot is held fails the run after the live
+timeout (DEFAULT_TIMEOUT, or --live-timeout; pgdelta.sender.StallWatch),
+so the slot never holds the source's WAL longer than that for a receiver
+that has stopped.
 
 Files that change while they are read (Reader):
 - A data file is read at the length it had when it was listed. Bytes it
@@ -44,20 +48,29 @@ Files that change while they are read (Reader):
   sent, as sent, and the pages left from B, as hashed. The receiver
   verifies every output file against it, as for any source.
 - The WAL segments, history files and backup_label must not change: a
-  change of size or of file (inode) fails the run. Each segment's first
-  page header must give its own address, the system identifier and the
-  segment size, and the last segment's page holding the stop LSN must be
-  on disk with its own address.
+  change of size or of file (inode) fails the run, and so does a page
+  whose bytes differ, when it is sent, from what was hashed. Each
+  segment's first page header must give its own address, the system
+  identifier and the segment size, and the last segment's page holding
+  the stop LSN must be on disk with its own address. (pg_backup_stop
+  switches to a new segment before it returns, so none of these is
+  written after it.)
 - global/pg_control is read until two reads in a row agree and carry a
   valid CRC (a read can tear while the server rewrites it), and sent as
   read.
 
-The deliberately broken variant, for EXP-25's negative control, is reached
-only through the environment (PGDELTA_TEST_READ_BEFORE_START=1): the data
-directory is listed and its files copied to a scratch directory before
-pg_backup_start is called, and the files are hashed and sent from that
-copy. Its outputs are expected to be wrong; the campaign's checks must
-catch them.
+Two deliberately broken variants, for EXP-25's negative controls, are
+reached only through the environment: the data directory is listed and
+its files copied to a scratch directory, and hashed and sent from that
+copy, either before pg_backup_start is called
+(PGDELTA_TEST_READ_BEFORE_START=1, "before_start") or once it is sent and
+before its answer is read, while its checkpoint runs
+(PGDELTA_TEST_READ_BEFORE_START=during, "during_start"). Their outputs
+are expected to be wrong; the campaign's checks must catch them. So that
+a stray environment variable can never pass for a good copy, a run with
+either variant warns on stderr when it starts and when it ends, and fails
+with exit 4 even though the receiver published or committed the output
+(pgdelta.sender).
 """
 from __future__ import annotations
 
@@ -86,6 +99,8 @@ from pgdelta.inventory import MODE_MASK, FileEntry
 from pgdelta.tree import SERIAL, FileTree, _SizeChanged, hash_stream, node_count, open_regular, pread_exact
 
 READ_BEFORE_START_ENV = 'PGDELTA_TEST_READ_BEFORE_START'
+TEST_VARIANTS = {'1': 'before_start', 'during': 'during_start'}  # the variable's values: the broken variants
+DEFAULT_TIMEOUT = 120.0  # seconds the receiver may make no progress while the slot is held (--live-timeout)
 CONTROL_FILE = 'global/pg_control'
 BACKUP_LABEL = 'backup_label'
 WAL_DIRECTORY = 'pg_wal'
@@ -332,6 +347,11 @@ class Session:
 
     def query(self, sql):
         """The lines psql prints for `sql` (one or more statements, without the final semicolon)."""
+        self.submit(sql)
+        return self.collect()
+
+    def submit(self, sql):
+        """Send `sql` without waiting for its answer, which collect() reads."""
         if self.closed:
             raise TransferError('the psql session is closed')
         try:
@@ -339,6 +359,9 @@ class Session:
             self.process.stdin.flush()
         except (OSError, ValueError):
             raise self._failed('the psql session ended') from None
+
+    def collect(self):
+        """The lines psql printed for the statement submitted last, once it has answered."""
         lines = []
         while True:
             line = self.process.stdout.readline()
@@ -351,13 +374,25 @@ class Session:
 
     def value(self, sql):
         """The one JSON value `sql` selects."""
-        lines = self.query(sql)
+        return self.parse(self.query(sql))
+
+    @staticmethod
+    def parse(lines):
+        """The one JSON value of psql's answer `lines`."""
         if len(lines) != 1:
             raise TransferError(f'expected one line from psql, got {len(lines)}')
         try:
             return json.loads(lines[0])
         except ValueError as exc:
             raise TransferError(f'psql printed something other than JSON: {lines[0][:200]!r}') from exc
+
+    def kill(self):
+        """End psql at once, from any thread: the server then ends the session, its backup mode and its
+        temporary slot. The thread using the session sees it end."""
+        try:
+            self.process.kill()
+        except OSError:
+            pass
 
     def close(self, timeout=10.0):
         """End psql, and with it the session; safe to repeat."""
@@ -384,6 +419,17 @@ class Session:
 
 # --- the backup ----------------------------------------------------------------------------------------
 
+def broken_variant(environ=None):
+    """The broken variant PGDELTA_TEST_READ_BEFORE_START asks for ("before_start", "during_start"), or None."""
+    value = (os.environ if environ is None else environ).get(READ_BEFORE_START_ENV, '')
+    if value in ('', '0'):
+        return None
+    if value not in TEST_VARIANTS:
+        raise InvalidInput(f'{READ_BEFORE_START_ENV}={value!r}: the test switch takes 1 (read before '
+                           f'pg_backup_start is called) or during (read while it runs)')
+    return TEST_VARIANTS[value]
+
+
 def read_live_identity(root, pg_controldata, attempts=IDENTITY_READS):
     """The cluster's identity from pg_controldata, read again if the control file was caught mid-write."""
     identity = None
@@ -398,13 +444,15 @@ def read_live_identity(root, pg_controldata, attempts=IDENTITY_READS):
 class LiveSource:
     """A running cluster read in backup mode: the session, the slot, pg_backup_start and pg_backup_stop."""
 
-    def __init__(self, root, conninfo, pg_controldata, psql=None, read_before_start=None, session_class=Session):
+    def __init__(self, root, conninfo, pg_controldata, psql=None, variant=None, session_class=Session):
         self.root = Path(root)
         self.conninfo, self.pg_controldata = conninfo, pg_controldata
         self.psql = psql or default_psql(pg_controldata)
-        if read_before_start is None:
-            read_before_start = os.environ.get(READ_BEFORE_START_ENV) == '1'
-        self.read_before_start = read_before_start
+        # The broken test variant ("before_start", "during_start"; False: none), from the environment unless given.
+        self.variant = broken_variant() if variant is None else variant or None
+        if self.variant not in (None, *TEST_VARIANTS.values()):
+            raise InvalidInput(f'unknown test variant {self.variant!r}')
+        self.read_before_start = self.variant is not None
         self.session_class = session_class
         self.session = None
         self.identity = self.server = None
@@ -422,8 +470,12 @@ class LiveSource:
         self.history = []
         self.backup_label = None
         self.snapshot = None  # read before start (test switch): the scratch copy the files are sent from
-        self.pre_read_seconds = None
+        self.pre_read_started_utc = self.pre_read_seconds = None
         self.cleanup = None
+        # Set by the sender's stall watch (pgdelta.sender.StallWatch): its timeout, the keepalive options set on
+        # the connection to the receiver, and whether it gave up on the receiver.
+        self.timeout = self.keepalive = None
+        self.timed_out = False
 
     # The steps, in order.
 
@@ -482,10 +534,24 @@ class LiveSource:
             raise InvalidInput(f'the server\'s WAL segment size {size} differs from pg_controldata\'s')
         self.segment_size = check_segment_size(size)
 
-    def start(self):
-        """pg_backup_start(label, fast := true): from its return on, the data directory may be read."""
+    def start(self, meanwhile=None):
+        """pg_backup_start(label, fast := true): from its return on, the data directory may be read.
+
+        `meanwhile` is for the during-start test variant only: it runs once the
+        call is sent and before its answer is read, while its checkpoint runs.
+        That call asks for a spread checkpoint (fast := false): an immediate
+        one can finish before the data directory is even listed (EXP-25).
+        """
         self.start_requested_utc = time.time()
-        answer = self.session.value(f"SELECT json_build_object('lsn', pg_backup_start('{self.label}', true)::text)")
+        fast = 'true' if meanwhile is None else 'false'
+        sql = f"SELECT json_build_object('lsn', pg_backup_start('{self.label}', {fast})::text)"
+        if meanwhile is None:
+            answer = self.session.value(sql)
+        else:
+            self.session.submit(sql)
+            self.in_backup = True  # sent: should anything fail from here on, pg_backup_stop is called
+            meanwhile()
+            answer = self.session.parse(self.session.collect())
         self.in_backup = True
         self.started_utc, self.started = time.time(), time.perf_counter()
         self.start_lsn = parse_lsn(answer['lsn'])
@@ -495,7 +561,9 @@ class LiveSource:
         return datadir.select_live(self.root, self.identity)
 
     def pre_read(self, selection):
-        """The test switch's broken step: copy every selected file to a scratch directory, before pg_backup_start."""
+        """The test switch's broken step: copy every selected file to a scratch directory, before pg_backup_start
+        returns."""
+        self.pre_read_started_utc = time.time()
         started = time.perf_counter()
         self.snapshot = Path(tempfile.mkdtemp(prefix='pgdelta-read-before-start-'))
         for entry in selection.inventory.files:
@@ -639,8 +707,16 @@ class LiveSource:
             'wal_last': self.wal[-1][1] if self.wal else None,
             'history_files': len(self.history),
             'backup_label_bytes': None if self.backup_label is None else len(self.backup_label),
+            # The broken test variants (PGDELTA_TEST_READ_BEFORE_START), never set in a real run.
             'read_before_start': self.read_before_start,
+            'test_variant': self.variant,
+            'pre_read_started_utc': self.pre_read_started_utc,
             'pre_read_seconds': None if self.pre_read_seconds is None else round(self.pre_read_seconds, 6),
+            # While the slot was held: how long the receiver could make no progress before the run gave up, and
+            # whether it did; keepalive is what was set on the TCP connection to the receiver (null over pipes).
+            'timeout_seconds': self.timeout,
+            'keepalive': self.keepalive,
+            'timed_out': self.timed_out,
             'cleanup': self.cleanup,
         }
 

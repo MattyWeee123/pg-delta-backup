@@ -9,6 +9,8 @@ Run as `stub_psql.py [psql options] -d CONNINFO`; its configuration is the JSON 
   ON_ERROR_STOP);
 - on_start: {relative path: hex bytes} written into the data directory when pg_backup_start is answered, so a
   test can tell what was read before it from what was read after;
+- start_delay: seconds pg_backup_start takes (as its checkpoint would) before those bytes are written and it
+  answers;
 - refuse_connect: exit at once with a connection error.
 
 Statements end with ';' at the end of a line; `\\echo X` prints X; `\\q` or the end of input ends it.
@@ -17,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 CONFIG = json.loads(Path(os.environ['STUB_PSQL_CONFIG']).read_text())
 
@@ -57,6 +60,7 @@ def answer(sql):
     elif 'pg_create_physical_replication_slot' in sql:
         out({'lsn': CONFIG['slot_lsn']})
     elif 'pg_backup_start' in sql:
+        time.sleep(CONFIG.get('start_delay', 0))
         for path, data in CONFIG.get('on_start', {}).items():
             target = Path(CONFIG['data_directory']) / path
             target.parent.mkdir(parents=True, exist_ok=True)

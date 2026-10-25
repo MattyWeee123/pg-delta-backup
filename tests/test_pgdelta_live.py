@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -32,7 +33,7 @@ import time
 import unittest
 from unittest import mock
 
-from pgdelta import datadir, live, protocol
+from pgdelta import datadir, live, protocol, sender, transport
 from pgdelta.datadir import select_live
 from pgdelta.errors import InvalidInput, PeerError, ProtocolError, TransferError, VerificationError
 from pgdelta.hashing import Hasher
@@ -50,6 +51,7 @@ from test_pgdelta_identity import SAMPLE
 
 sys.path.insert(0, str(REPO_ROOT / 'experiments' / 'correctness'))
 import bank  # noqa: E402  (EXP-25's load and checks)
+import live_campaign  # noqa: E402  (EXP-25's harness: its kill rule and summary)
 
 KEY = bytes(range(32))
 SEGMENT = 1 << 20
@@ -686,16 +688,69 @@ class StubSessionTests(StubServerTestCase):
         self.assert_live_stats(outcome.sender)
         settle(self)
 
-    def test_read_before_start_variant_reads_the_old_bytes(self):
-        outcome = self.run_live(**{live.READ_BEFORE_START_ENV: '1'})
-        self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
-        copy = self.root / 'O'
-        self.assertEqual((copy / 'base/5/16384').read_bytes(), self.old)  # read before pg_backup_start
-        self.assertFalse(os.path.lexists(copy / 'base/5/77777'))  # listed before it was created
-        info = outcome.sender['live']
-        self.assertTrue(info['read_before_start'])
+    def assert_wrong_by_design(self, outcome, variant):
+        """The broken variant ran to the end (the receiver published), and the run still fails, with exit 4."""
+        error = outcome.sender_error
+        self.assertIsInstance(error, VerificationError)
+        self.assertIn('deliberately broken test variant', str(error))
+        stats = error.pgdelta_stats
+        self.assertEqual((stats['status'], stats['exit_code']), ('failed', 4))
+        self.assertIsNotNone(stats['receiver'])  # set only once the receiver confirmed publication
+        info = stats['live']
+        self.assertEqual((info['read_before_start'], info['test_variant']), (True, variant))
         self.assertIsNotNone(info['pre_read_seconds'])
+        self.assertEqual(info['cleanup'], 'finished: slot dropped, session closed')
+        copy = self.root / 'O'
+        self.assertEqual((copy / 'base/5/16384').read_bytes(), self.old)  # read before pg_backup_start returned
+        self.assertFalse(os.path.lexists(copy / 'base/5/77777'))  # listed before it was created
         self.assertFalse(list(Path(tempfile.gettempdir()).glob('pgdelta-read-before-start-*')))
+        return info
+
+    def test_read_before_start_variant_reads_the_old_bytes(self):
+        info = self.assert_wrong_by_design(self.run_live(**{live.READ_BEFORE_START_ENV: '1'}), 'before_start')
+        self.assertLessEqual(info['pre_read_started_utc'], info['start_requested_utc'])  # copied, then started
+        settle(self)
+
+    def test_files_are_read_only_after_pg_backup_start_returns_even_when_it_is_slow(self):
+        self.config['start_delay'] = 1.0  # the start checkpoint takes a second: nothing may be read meanwhile
+        outcome = self.run_live()
+        self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+        self.assert_holds_the_live_copy(self.root / 'O')
+        settle(self)
+
+    def test_the_during_start_variant_reads_while_pg_backup_start_runs(self):
+        self.config['start_delay'] = 1.0
+        info = self.assert_wrong_by_design(self.run_live(**{live.READ_BEFORE_START_ENV: 'during'}), 'during_start')
+        self.assertLessEqual(info['start_requested_utc'], info['pre_read_started_utc'])  # started, then copied
+        self.assertLess(info['pre_read_started_utc'], info['started_utc'] - 0.5)  # long before it returned
+        self.assertEqual(self.kinds(), ['settings', 'server', 'create slot', 'start', 'stop', 'drop slot'])
+        settle(self)
+
+    def test_an_unknown_test_switch_value_is_refused(self):
+        outcome = self.run_live(**{live.READ_BEFORE_START_ENV: 'yes'})
+        self.assertIsInstance(outcome.sender_error, InvalidInput)
+        self.assertIn(live.READ_BEFORE_START_ENV, str(outcome.sender_error))
+        self.assertEqual(self.statements(), [])
+        settle(self)
+
+    def test_wal_that_changes_after_it_was_hashed_fails_the_run(self):
+        real = live.Reader._hash_strict
+        target = f'pg_wal/{SEGMENTS[0]}'
+
+        def hash_then_change(reader, entry):
+            tree = real(reader, entry)
+            if entry.path == target:  # rewritten in place (same file, same size), as a recycled segment would be
+                with open(reader.wal_root / entry.path, 'r+b') as stream:
+                    stream.seek(300000)
+                    stream.write(b'\xde\xad\xbe\xef' * 1024)
+            return tree
+
+        with mock.patch.object(live.Reader, '_hash_strict', hash_then_change):
+            outcome = self.run_live()
+        self.assertIsInstance(outcome.sender_error, VerificationError)
+        self.assertIn(f'{target} changed after it was hashed', str(outcome.sender_error))
+        self.assertFalse(os.path.lexists(self.root / 'O'))
+        self.assertEqual(self.kinds()[-1], 'drop slot')
         settle(self)
 
     def test_a_receiver_failure_ends_backup_mode_and_drops_the_slot(self):
@@ -776,8 +831,30 @@ class StubSessionTests(StubServerTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         stats = json.loads(stats_path.read_text())
         self.assertEqual((stats['source_kind'], stats['live']['wal_segments']), ('live', 2))
+        self.assertEqual(stats['live']['timeout_seconds'], live.DEFAULT_TIMEOUT)
+        self.assertNotIn('WARNING', result.stderr)
+        # The broken variant: a loud warning before and after, and exit 4, though the receiver published.
+        stats_path.unlink()
+        variant = subprocess.run(python_command(
+            'local', '--source', self.datadir, '--source-kind', 'live', '--basis', self.root / 'B0',
+            '--output', self.root / 'O-variant', '--pg-controldata', self.stub, '--pg-conn', 'host=stub',
+            '--psql', self.psql, '--live-timeout', '30', '--stats-json', stats_path), capture_output=True,
+            text=True, cwd=REPO_ROOT, timeout=120,
+            env=dict(subprocess_env(), STUB_PSQL_CONFIG=str(self.root / 'psql.json'),
+                     **{live.READ_BEFORE_START_ENV: '1'}))
+        self.assertEqual(variant.returncode, 4, variant.stderr)
+        self.assertEqual(variant.stderr.count('WARNING'), 2, variant.stderr)
+        self.assertIn('wrong by design', variant.stderr)
+        self.assertNotIn('complete (', variant.stderr)
+        stats = json.loads(stats_path.read_text())
+        self.assertEqual((stats['status'], stats['exit_code'], stats['live']['test_variant'],
+                          stats['live']['timeout_seconds']), ('failed', 4, 'before_start', 30.0))
+        self.assertTrue(os.path.isdir(self.root / 'O-variant'))
         for args, message in (((), '--source-kind live needs --pg-conn'),
-                              (('--source-kind', 'datadir', '--pg-conn', 'x'), '--pg-conn and --psql are for')):
+                              (('--source-kind', 'datadir', '--pg-conn', 'x'), '--pg-conn and --psql are for'),
+                              (('--source-kind', 'datadir', '--live-timeout', '5'), '--live-timeout is for'),
+                              (('--source-kind', 'live', '--pg-conn', 'x', '--live-timeout', '0'),
+                               'must be a positive number of seconds')):
             kind = () if args else ('--source-kind', 'live')
             refused = subprocess.run(python_command(
                 'local', '--source', self.datadir, *kind, *args, '--basis', self.root / 'B0',
@@ -785,6 +862,238 @@ class StubSessionTests(StubServerTestCase):
                 cwd=REPO_ROOT, env=subprocess_env(), timeout=120)
             self.assertEqual(refused.returncode, 2, refused.stderr)
             self.assertIn(message, refused.stderr)
+
+
+# --- a receiver that stops while backup mode is held --------------------------------------------------------
+
+class StallTests(StubServerTestCase):
+    """While backup mode and the slot are held, a receiver that stops answering or reading fails the run within
+    the live timeout: backup mode is ended and the slot dropped, so the source holds no WAL for it."""
+
+    def setUp(self):
+        super().setUp()
+        self.release = threading.Event()  # lets the stalled stand-in receivers go at the end
+        self.addCleanup(self.release.set)
+
+    def run_against(self, receive, timeout=1.0):
+        """The live sender over TCP to the stand-in `receive(conn)`: (outcome, seconds until it gave up)."""
+        listener = socket.create_server(('127.0.0.1', 0))
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)  # a small window: sends block early
+        self.addCleanup(listener.close)
+
+        def serve():
+            conn, _ = listener.accept()
+            try:
+                receive(conn)
+            finally:
+                for action in (lambda: conn.shutdown(socket.SHUT_RDWR), conn.close):
+                    try:
+                        action()
+                    except OSError:
+                        pass
+
+        threading.Thread(target=serve, name='test-stalled-receiver', daemon=True).start()
+        outcome = Outcome()
+
+        def send():
+            channel = transport.connect_channel('127.0.0.1', listener.getsockname()[1])
+            channel.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)  # no autotuned buffer to fill
+            try:
+                outcome.sender = sender.run_sender(channel, self.datadir, source_kind='live',
+                                                   pg_controldata=self.stub, pg_conn='host=stub user=u',
+                                                   psql=self.psql, live_timeout=timeout)
+            except BaseException as exc:
+                outcome.sender_error = exc
+            finally:
+                channel.close()
+
+        with self.env():
+            started = time.monotonic()
+            thread = threading.Thread(target=send, name='test-sender', daemon=True)
+            thread.start()
+            thread.join(30)
+            elapsed = time.monotonic() - started
+        self.assertFalse(thread.is_alive(), 'the sender is still blocked on the receiver after 30 s')
+        return outcome, elapsed
+
+    def silent(self, conn):
+        """Accepts, then never reads or answers: a receiver host that stopped responding."""
+        self.release.wait(60)
+
+    def stops_reading(self, conn, until=None):
+        """Answers HELLO with ACCEPT (full mode), reads every frame up to the first of type `until` (none: up to
+        none), then reads nothing more."""
+        channel = protocol.Channel(conn.makefile('rb'), conn.makefile('wb'))
+        self.assertEqual(channel.recv()[0], protocol.HELLO)
+        channel.send_json(protocol.ACCEPT, {'mode': 'full', 'reason': 'stand-in', 'basis_files': []})
+        while until is not None and channel.recv()[0] != until:
+            pass
+        self.release.wait(60)
+
+    def stops_reading_at_append(self, conn):
+        """Takes every data file, then stops reading at APPEND: pg_backup_stop has returned, the slot is held."""
+        self.stops_reading(conn, protocol.APPEND)
+
+    def assert_gave_up(self, outcome, elapsed, doing, after_stop=False):
+        error = outcome.sender_error
+        self.assertIsInstance(error, TransferError, repr(error))
+        self.assertIn(f'the receiver made no progress for 1 s while the sender was {doing}', str(error))
+        self.assertLess(elapsed, 15)
+        info = error.pgdelta_stats['live']
+        if after_stop:  # stalled while it sent the WAL: backup mode had ended, the slot still held it
+            self.assertEqual(self.kinds(), ['settings', 'server', 'create slot', 'start', 'stop', 'drop slot'])
+            self.assertEqual(info['cleanup'], 'slot dropped; session closed')
+        else:
+            self.assertEqual(self.kinds(), ['settings', 'server', 'create slot', 'start', 'abort stop', 'drop slot'])
+            self.assertEqual(info['cleanup'], 'pg_backup_stop called; slot dropped; session closed')
+        self.assertEqual((info['timeout_seconds'], info['timed_out']), (1.0, True))
+        self.assertEqual(info['keepalive']['SO_KEEPALIVE'], 1)
+        settle(self)
+
+    def test_a_receiver_that_never_answers(self):
+        outcome, elapsed = self.run_against(self.silent)
+        self.assert_gave_up(outcome, elapsed, 'waiting for ACCEPT')
+
+    def test_a_receiver_that_stops_reading(self):
+        outcome, elapsed = self.run_against(self.stops_reading)
+        self.assert_gave_up(outcome, elapsed, 'sending')
+
+    def test_a_receiver_that_stops_reading_while_the_wal_is_sent(self):
+        outcome, elapsed = self.run_against(self.stops_reading_at_append)
+        self.assert_gave_up(outcome, elapsed, 'sending', after_stop=True)
+
+
+class StallWatchTests(unittest.TestCase):
+    """What counts as a stall: one send blocked, or a wait with no message from the receiver, for the timeout."""
+
+    def test_a_stall_is_measured_from_the_last_sign_of_progress(self):
+        channel = mock.Mock(sending_since=None)
+        inbox = mock.Mock(waiting_since=None, waiting_for=None, last_message=0.0)
+        watch = sender.StallWatch(channel, inbox, 10.0)
+        self.assertIsNone(watch.stalled(1000.0))  # not blocked on the receiver: working is no stall
+        channel.sending_since = 100.0
+        self.assertIsNone(watch.stalled(109.9))
+        self.assertEqual(watch.stalled(110.0), 'sending')
+        channel.sending_since = None
+        inbox.waiting_since, inbox.waiting_for, inbox.last_message = 100.0, 'ACCEPT', 105.0
+        self.assertIsNone(watch.stalled(114.0))  # a message 9 s ago: the receiver is alive
+        self.assertEqual(watch.stalled(115.0), 'waiting for ACCEPT')
+        inbox.last_message = 50.0
+        self.assertEqual(watch.stalled(110.0), 'waiting for ACCEPT')
+        with self.assertRaises(InvalidInput):
+            sender.StallWatch(channel, inbox, 0)
+
+
+class AbortTests(unittest.TestCase):
+    def test_an_aborted_channel_sends_nothing_more_and_unblocks_a_blocked_send(self):
+        a, b = socket.socketpair()
+        self.addCleanup(a.close)
+        self.addCleanup(b.close)
+        channel = protocol.Channel(a.makefile('rb'), a.makefile('wb'), sock=a,
+                                   aborter=lambda: a.shutdown(socket.SHUT_RDWR))
+        self.addCleanup(channel.close)
+        failure = []
+
+        def flood():  # b never reads: the send blocks once the buffers are full
+            try:
+                while True:
+                    channel.send(protocol.PAGE_DATA, protocol.page_data_head(0, 0), bytes(1 << 16))
+            except protocol.ChannelClosed as exc:
+                failure.append(exc)
+
+        thread = threading.Thread(target=flood, daemon=True)
+        thread.start()
+        deadline = time.monotonic() + 10
+        while channel.sending_since is None or time.monotonic() - channel.sending_since < 0.2:
+            self.assertLess(time.monotonic(), deadline, 'the send never blocked')
+            time.sleep(0.01)
+        channel.abort()
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(failure), 1)
+        self.assertIsNone(channel.sending_since)
+        with self.assertRaisesRegex(protocol.ChannelClosed, 'aborted'):
+            channel.send(protocol.COMPLETE, b'{}')
+
+    def test_aborting_the_local_receiver_s_channel_kills_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            write_tree(Path(temp) / 'B', {'PG_VERSION': b'17\n'})
+            process, channel = transport.spawn_local_receiver(Path(temp) / 'B', Path(temp) / 'O')
+            try:
+                channel.abort()
+                self.assertEqual(process.wait(10), -signal.SIGKILL)
+                with self.assertRaisesRegex(protocol.ChannelClosed, 'aborted'):
+                    channel.send(protocol.HELLO, b'{}')
+            finally:
+                channel.close()
+
+    def test_keepalive_on_a_tcp_socket(self):
+        listener = socket.create_server(('127.0.0.1', 0))
+        self.addCleanup(listener.close)
+        sock = socket.create_connection(listener.getsockname())
+        self.addCleanup(sock.close)
+        options = transport.keep_alive(sock, 120)
+        self.assertEqual(options['SO_KEEPALIVE'], 1)
+        self.assertNotEqual(sock.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 0)
+        if hasattr(socket, 'TCP_KEEPINTVL'):
+            self.assertEqual((options['TCP_KEEPINTVL'], options['TCP_KEEPCNT']), (15, 4))
+            self.assertEqual(sock.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL), 15)
+        idle = 'TCP_KEEPIDLE' if hasattr(socket, 'TCP_KEEPIDLE') else 'TCP_KEEPALIVE'
+        if hasattr(socket, idle):
+            self.assertEqual(options[idle], 60)
+        if hasattr(socket, 'TCP_USER_TIMEOUT'):
+            self.assertEqual(options['TCP_USER_TIMEOUT'], 120000)
+        self.assertEqual(options.get('errors'), None)
+
+
+# --- EXP-25's harness: the kill rule and the summary ---------------------------------------------------------
+
+class KillRuleTests(unittest.TestCase):
+    """A B left by a kill, different from before the run, is 'blocked' only by pgdelta's own block."""
+
+    def state(self, files, started=False, problems=('the copy did not start',)):
+        with tempfile.TemporaryDirectory() as temp:
+            basis = write_tree(Path(temp) / 'B', dict.fromkeys(files, b'x'))
+            return live_campaign.kill_state(basis, started, list(problems))
+
+    def test_only_pgdelta_s_block_is_a_pass_when_b_cannot_start(self):
+        block = [CONTROL_PENDING, MARKER]
+        self.assertEqual(self.state(block), 'blocked')
+        self.assertEqual(self.state(block + ['base/1/1259']), 'blocked')
+        # Committed (pg_control back in place) yet unable to start: an unrecoverable output, so wrong.
+        self.assertEqual(self.state([CONTROL_FILE]), 'wrong')
+        self.assertEqual(self.state([CONTROL_FILE, MARKER]), 'wrong')
+        self.assertEqual(self.state([CONTROL_FILE, CONTROL_PENDING, MARKER]), 'wrong')
+        self.assertEqual(self.state([CONTROL_PENDING]), 'wrong')  # renamed without the marker: not pgdelta's
+        self.assertEqual(self.state([MARKER]), 'wrong')  # no control file at all
+
+    def test_a_b_that_starts_is_new_or_wrong_by_the_checks(self):
+        self.assertEqual(self.state([CONTROL_FILE], started=True, problems=()), 'new')
+        self.assertEqual(self.state([CONTROL_FILE], started=True, problems=('invariant',)), 'wrong')
+
+
+class CampaignSummaryTests(unittest.TestCase):
+    def test_the_wal_range_share_and_the_negative_controls(self):
+        records = [
+            {'trial': 0, 'fault': 'none', 'negative_control': False, 'pass': True, 'pgdelta': {'wal_segments': 3}},
+            {'trial': 1, 'fault': 'kill', 'negative_control': False, 'pass': True, 'pgdelta': {'wal_segments': 1}},
+            {'trial': 2, 'negative_control': True, 'negative_variant': 'before_start', 'caught': True},
+            {'trial': 3, 'negative_control': True, 'negative_variant': 'during_start', 'caught': False},
+            {'trial': 4, 'negative_control': True, 'negative_variant': 'during_start', 'negative_failed': 'x'},
+            {'trial': 5, 'harness_error': 'x'},
+            {'trial': 6, 'fault': 'none', 'negative_control': False, 'pass': True, 'pgdelta': {'wal_segments': 2}},
+        ]
+        summary = live_campaign.summarize(records)
+        self.assertEqual((summary['counted'], summary['multi_segment']), (3, 2))
+        self.assertAlmostEqual(summary['multi_segment_share'], 2 / 3)
+        self.assertFalse(summary['wal_range_covered'])  # registered: at least 90%
+        self.assertEqual(summary['negative_controls'], {'before_start': {'ran': 1, 'caught': 1},
+                                                        'during_start': {'ran': 1, 'caught': 0}})
+        self.assertFalse(summary['controls_met'])
+        records[1]['pgdelta']['wal_segments'] = 2
+        records[3]['caught'] = True
+        summary = live_campaign.summarize(records)
+        self.assertTrue(summary['wal_range_covered'] and summary['controls_met'])
 
 
 # --- EXP-25's checks of a recovered copy -------------------------------------------------------------------
@@ -995,6 +1304,44 @@ class RealServerTests(unittest.TestCase):
         os.kill(process.pid, signal.SIGKILL)  # the sender alone: its psql sees its input end and exits
         process.wait()
         self.assertEqual(self.eventually('SELECT count(*) FROM pg_replication_slots', '0'), '0')
+        self.assertEqual(self.eventually("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pgdelta'",
+                                         '0'), '0')
+
+    def test_a_receiver_that_stops_answering_does_not_hold_wal(self):
+        """`send` to a receiver that accepts and never answers: it gives up within --live-timeout, ending backup
+        mode and dropping the slot, instead of holding the source's WAL until pg_wal fills."""
+        listener = socket.create_server(('127.0.0.1', 0))
+        release = threading.Event()
+        self.addCleanup(release.set)
+        self.addCleanup(listener.close)
+
+        def silent():
+            conn, _ = listener.accept()
+            with conn:
+                release.wait(120)
+
+        threading.Thread(target=silent, daemon=True).start()
+        stats_path = self.root / 'stalled.json'
+        started = time.monotonic()
+        process = subprocess.Popen(python_command(
+            'send', '--source', self.source, '--source-kind', 'live', '--pg-controldata', CONTROLDATA,
+            '--pg-conn', f'host={self.sockets} port=5432 user=t dbname=postgres', '--live-timeout', '2',
+            '--connect', f'127.0.0.1:{listener.getsockname()[1]}', '--stats-json', stats_path),
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, cwd=REPO_ROOT, env=subprocess_env())
+        self.assertEqual(self.eventually('SELECT count(*) FROM pg_replication_slots', '1'), '1')
+        try:
+            _, stderr = process.communicate(timeout=60)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            self.fail('the sender was still waiting for the receiver after 60 s')
+        self.assertEqual(process.returncode, 3, stderr)
+        self.assertLess(time.monotonic() - started, 30)
+        self.assertIn('the receiver made no progress for 2 s', stderr)
+        stats = json.loads(stats_path.read_text())
+        self.assertEqual(stats['live']['cleanup'], 'pg_backup_stop called; slot dropped; session closed')
+        self.assertTrue(stats['live']['timed_out'])
+        self.assertEqual(self.sql('SELECT count(*) FROM pg_replication_slots'), '0')
         self.assertEqual(self.eventually("SELECT count(*) FROM pg_stat_activity WHERE application_name = 'pgdelta'",
                                          '0'), '0')
 
