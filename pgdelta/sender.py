@@ -524,6 +524,8 @@ class _Sender:
         else:
             self.live.start()
             self.selection = self.live.select()
+        if self.live.oracle_dir:
+            self.live.oracle_read(self.selection)
         if self.identity is None:
             self.identity = self.selection.identity
 

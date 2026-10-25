@@ -99,6 +99,9 @@ from pgdelta.inventory import MODE_MASK, FileEntry
 from pgdelta.tree import SERIAL, FileTree, _SizeChanged, hash_stream, node_count, open_regular, pread_exact
 
 READ_BEFORE_START_ENV = 'PGDELTA_TEST_READ_BEFORE_START'
+# EXP-27's oracle, honoured only with a broken variant on: a directory that receives a correct read of the same files,
+# made as soon as pg_backup_start returns, so a harness can build the copy a correct read would have made.
+ORACLE_ENV = 'PGDELTA_TEST_ORACLE_DIR'
 TEST_VARIANTS = {'1': 'before_start', 'during': 'during_start'}  # the variable's values: the broken variants
 DEFAULT_TIMEOUT = 120.0  # seconds the receiver may make no progress while the slot is held (--live-timeout)
 CONTROL_FILE = 'global/pg_control'
@@ -470,6 +473,7 @@ class LiveSource:
         self.history = []
         self.backup_label = None
         self.snapshot = None  # read before start (test switch): the scratch copy the files are sent from
+        self.oracle_dir = (os.environ.get(ORACLE_ENV) or None) if self.variant else None
         self.pre_read_started_utc = self.pre_read_seconds = None
         self.cleanup = None
         # Set by the sender's stall watch (pgdelta.sender.StallWatch): its timeout, the keepalive options set on
@@ -574,6 +578,17 @@ class LiveSource:
             except FileNotFoundError:
                 pass  # gone since it was listed: read as zeros, like any vanished file
         self.pre_read_seconds = time.perf_counter() - started
+
+    def oracle_read(self, selection):
+        """EXP-27's oracle (test switch only): copy the broken read's files again into oracle_dir, now that
+        pg_backup_start has returned, as a correct read would."""
+        for entry in selection.inventory.files:
+            target = Path(self.oracle_dir) / entry.path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copyfile(self.root / entry.path, target)
+            except FileNotFoundError:
+                pass  # gone since it was listed: the correct read finds it gone too
 
     def stop(self):
         """pg_backup_stop(false), then the files to append: [FileEntry] of the WAL, history files and backup_label."""

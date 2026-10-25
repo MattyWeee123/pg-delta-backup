@@ -726,6 +726,24 @@ class StubSessionTests(StubServerTestCase):
         self.assertEqual(self.kinds(), ['settings', 'server', 'create slot', 'start', 'stop', 'drop slot'])
         settle(self)
 
+    def test_the_oracle_reads_the_same_files_correctly_once_pg_backup_start_returns(self):
+        # EXP-27: beside the broken read, a correct read of the same files, made as soon as pg_backup_start returns.
+        self.config['start_delay'] = 1.0
+        oracle = self.root / 'oracle'
+        self.assert_wrong_by_design(self.run_live(**{live.READ_BEFORE_START_ENV: 'during',
+                                                     live.ORACLE_ENV: str(oracle)}), 'during_start')
+        self.assertEqual((oracle / 'base/5/16384').read_bytes()[:64], bytes.fromhex('aa' * 64))
+        self.assertEqual((oracle / 'base/5/16384').read_bytes()[64:], self.old[64:])
+        self.assertFalse(os.path.lexists(oracle / 'base/5/77777'))  # not in the broken read's listing
+        settle(self)
+
+    def test_the_oracle_switch_does_nothing_without_a_broken_variant(self):
+        oracle = self.root / 'oracle'
+        outcome = self.run_live(**{live.ORACLE_ENV: str(oracle)})
+        self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+        self.assertFalse(oracle.exists())
+        settle(self)
+
     def test_an_unknown_test_switch_value_is_refused(self):
         outcome = self.run_live(**{live.READ_BEFORE_START_ENV: 'yes'})
         self.assertIsInstance(outcome.sender_error, InvalidInput)
