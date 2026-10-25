@@ -1,6 +1,6 @@
 # EXP-25: Does v1's refresh from a live source ever produce a wrong copy? A randomized campaign under load
 
-Status: **pre-registered October 25, 2026, before any campaign run.** Only the smoke run below has run; the campaign itself has not. Local (a Mac, PostgreSQL 17.11); no VMs. It is EXP-17's campaign moved to T8's case: the source keeps running and writing while pgdelta reads it in backup mode (`--source-kind live`, built for this; [pgdelta/README.md](../../pgdelta/README.md#reading-a-running-server-in-backup-mode---source-kind-live)), and every output is checked independently of pgdelta by recovering a disposable copy of it.
+Status: **pre-registered October 25, 2026, before any campaign run; two settings revised after the smoke run, before the campaign (recorded below).** Only the smoke runs below have run (10 counted trials and 5 negative controls each, all as predicted); the campaign itself has not. Local (a Mac, PostgreSQL 17.11); no VMs. It is EXP-17's campaign moved to T8's case: the source keeps running and writing while pgdelta reads it in backup mode (`--source-kind live`, built for this; [pgdelta/README.md](../../pgdelta/README.md#reading-a-running-server-in-backup-mode---source-kind-live)), and every output is checked independently of pgdelta by recovering a disposable copy of it.
 
 ## Question
 
@@ -13,7 +13,7 @@ As in EXP-17: if N counted trials give no wrong output, a refresh drawn from thi
 ## Setup
 
 - **Template** (made once): `initdb`, a database `bank` with `pgbench -i -s 3` (300,000 accounts, all balances 0), EXP-25's load tables (below), a table `notes` of 20,000 rows, and `amcheck`; about 60 MB.
-- **S**: an APFS clone of the template, started once with `fsync=off`, `max_wal_size=256MB` and `checkpoint_timeout=30s` (so checkpoints also fall inside some refreshes), and kept running for the whole campaign.
+- **S**: an APFS clone of the template, started once with `fsync=off`, `max_wal_size=256MB` and `checkpoint_timeout=30s` (so checkpoints also fall inside some refreshes), and kept running for the whole campaign. *Revised after the smoke run, before the campaign: also `shared_buffers=1MB`, `bgwriter_delay=10ms` and `bgwriter_lru_maxpages=1000`, so the load's pages reach the files while pgdelta reads them (see the smoke run). The copies the checks start use the same settings.*
 - **The load** ([experiments/correctness/bank.py](../../experiments/correctness/bank.py), after EXP-12's): `pgbench`, 4 clients, open loop at 2,000 transactions per second, for the whole campaign (restarted and recorded if it ends). 99 in 100 transactions commit: each moves money between two accounts and adds exactly 1 to the sum of balances, adds 1 to its client's counter `n` in `load_progress` with `ts = clock_timestamp()`, and appends the ledger row `(client, n, ts)` to `load_ledger`, taking its locks in one order so none deadlock. The other 1 in 100 adds 10^9 to an account and rolls back. In any consistent state, sum(abalance) = sum(n), no balance holds a rolled-back 10^9, and each client's ledger holds its rows without a gap up to its `n`.
 - **B**: an APFS clone of the template at the start, then refreshed in place by every trial; each trial's B is the previous trial's output, with this trial's fault applied.
 
@@ -26,7 +26,7 @@ As in EXP-17: if N counted trials give no wrong output, a refresh drawn from thi
 |---|---:|---|---|
 | none | 40% | – | exit 0 and a correct B |
 | diverged | 15% | B is started (it recovers from its own `backup_label`), runs its own bank load for 0.3–1.5 s, gets a table and an `UPDATE` of its own, and is stopped cleanly: an ex-primary's writes | exit 0 and a correct B |
-| kill | 25% | the refresh's whole process group is SIGKILLed after a random 0.05–3.0 s; B is judged as the kill left it (the kill rule below), then the refresh is rerun | the kill rule holds, then exit 0 and a correct B |
+| kill | 25% | the refresh's whole process group is SIGKILLed after a random 0.05–3.0 s (*revised after the smoke run, before the campaign: 0.05–1.0 s*); B is judged as the kill left it (the kill rule below), then the refresh is rerun | the kill rule holds, then exit 0 and a correct B |
 | corrupt | 10% | 1–16 random bytes overwritten in 1–3 random relation files of B | exit 0 and a correct B |
 | truncate | 10% | a random relation file of B truncated to a random length, or deleted | exit 0 and a correct B |
 
@@ -42,7 +42,7 @@ As in EXP-17: if N counted trials give no wrong output, a refresh drawn from thi
    8. `pg_amcheck --all --heapallindexed` finds nothing, in every database;
    9. no pgdelta replication slot and no pgdelta session is left on S 10 s after the run ends.
 
-The bounds of items 3 and 4 hold for any correct copy whatever point between start and stop its recovery ends at; they don't say which transactions in between it holds, and nothing correct would.
+The bounds of items 3 and 4 hold for any correct copy whatever point between start and stop its recovery ends at; they don't say which transactions in between it holds, and nothing correct would. A check that cannot run on the copy (a query on it fails) counts as a failed check.
 
 ## The kill rule, written once from EXP-17's three revisions
 
@@ -82,4 +82,31 @@ No wrong output, no failed refresh and no cleanup failure. Every kill leaves B o
 
 ## The smoke run (October 25, before the campaign)
 
-*To be filled in after the smoke run: about 10 counted trials plus negative controls, and every harness fix it needed.*
+Two smoke runs, each of 15 trial numbers with a negative control every third (`--trials 10 --negative-every 3`: 10 counted trials and 5 negative controls), records in `results/correctness/exp25-smoke*/` (git-ignored). The harness needed no fix to run: no harness error in either.
+
+**The first smoke** (registered settings): 10 of 10 counted trials passed, and 5 of 5 negative controls were caught. Two things in its records made the campaign weaker than it was meant to be:
+
+- **The files hardly changed while pgdelta read them.** In all 15 refreshes no page changed between being hashed and being sent (`pages_changed_after_hash` 0), and at most 3 files grew. With PostgreSQL's default shared buffers the whole cluster stayed in memory: `pg_backup_start`'s checkpoint wrote it out, and the files then changed only at the next checkpoint, 30 s away, while a refresh took 0.48–0.99 s. The live path's hardest cases (a page changed or torn between reads) were barely exercised.
+- **Both kills came after the refresh had exited** (at 0.82 and 1.96 s): with refreshes of about 0.5–1.0 s, a delay of 0.05–3.0 s puts about four kills in five after the end.
+
+**Revisions, before the campaign** (rule 8; none changes a check):
+
+1. S, and the copies the checks start, run with `shared_buffers=1MB`, `bgwriter_delay=10ms` and `bgwriter_lru_maxpages=1000`, so the load's pages are written to the files continuously. Checked in a 6-trial probe and the second smoke: 29–157 pages changed between hashing and sending in every counted refresh, at the same load (about 2,000 transactions a second) and refresh time.
+2. The kill delay is 0.05–1.0 s instead of 0.05–3.0 s.
+3. A clarification of what the harness did from the start: a check that cannot run on the copy (a query on it fails) counts as a failed check.
+
+**The second smoke** (revised settings), about 40 s:
+
+| | Trials | As predicted | Notes |
+|---|---:|---:|---|
+| none | 3 | 3 correct | |
+| diverged (B's own load and DDL first) | 3 | 3 correct | B started and recovered from its previous `backup_label` each time |
+| kill, then rerun | 2 | 2 correct | one kill at 0.30 s caught B part-way (6 files differed): it refused to start ("could not find the database system"), and the rerun's B was correct; the other came after the exit |
+| corrupt | 1 | 1 correct | |
+| truncate | 1 | 1 correct | |
+| **counted** | **10** | **10** | refreshes 0.48–0.66 s, of which 0.31–0.45 s in backup mode; 4,057–9,957 of 13,850–18,601 pages sent; one or two WAL segments; `pg_amcheck` clean every time |
+| negative control (read before start) | 5 | **5 caught** | every copy started, and each failed several checks at once: rows of `pgbench_accounts` missing (3 to 558 of 300,000), the invariant broken, gaps of 200–300 rows in every client's ledger, and `pg_amcheck` reporting corruption (exit 2) |
+
+In the first smoke one negative control's copy failed on its first query ("could not read blocks 0..0 in file ...: read only 0 of 8192 bytes"), which revision 3 counts as caught; the others were caught as in the second.
+
+What the smoke shows, and doesn't: the harness runs end to end at about 3 s a trial (with EXP-17's extension running on the same Mac at the time, so no timing here is a measurement), so the stop rule's 1,000 counted trials (with about 50 negative controls) take about an hour, inside its 3 hours; the checks do catch the broken variant, by several independent signals each time. Ten trials bound nothing.

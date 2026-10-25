@@ -56,7 +56,11 @@ LOAD_TABLES = ('pgbench_accounts', 'load_progress', 'load_ledger')
 LEDGER_KEEP = "interval '2 minutes'"
 BASE_PORT = 55480
 SOURCE_PORT, COPY_PORT, KILLED_PORT, DIVERGED_PORT = BASE_PORT, BASE_PORT + 1, BASE_PORT + 2, BASE_PORT + 3
-SETTINGS = "-c listen_addresses='' -c fsync=off -c max_wal_size=256MB -c checkpoint_timeout=30s"
+# Smoke revision: with the default shared buffers the whole cluster stays in memory and its files change only at
+# checkpoints, so pgdelta read them unchanged (0 pages changed between hashing and sending in 15 refreshes). 1 MB of
+# shared buffers and an eager background writer put the load's pages into the files while they are read.
+SETTINGS = ("-c listen_addresses='' -c fsync=off -c max_wal_size=256MB -c checkpoint_timeout=30s "
+            '-c shared_buffers=1MB -c bgwriter_delay=10ms -c bgwriter_lru_maxpages=1000')
 SLOT_WAIT_SECONDS = 10
 USER = 'postgres'
 
@@ -392,7 +396,7 @@ def trial(n, negative, ctx):
     elif fault == 'truncate':
         truncate(basis, rng, rec)
     elif fault == 'kill':
-        delay = rng.uniform(0.05, 3.0)
+        delay = rng.uniform(0.05, 1.0)  # smoke revision: 0.05-3.0 s put nearly every kill after the exit
         rec['kill_delay'] = round(delay, 3)
         before = tree_digest(basis)
         stats = Path(work) / 'stats-killed.json'
