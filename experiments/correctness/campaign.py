@@ -217,6 +217,7 @@ def trial(n, pg, template, foreign_template, work):
         return rec
     if fault == 'kill':
         delay = rng.uniform(0.02, 2.0)
+        before = tree_digest(b)
         proc = subprocess.Popen(pgdelta(pg, s, b, stats), cwd=REPO, stdout=subprocess.DEVNULL,
                                 stderr=subprocess.DEVNULL, start_new_session=True)
         try:
@@ -226,6 +227,8 @@ def trial(n, pg, template, foreign_template, work):
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
             rec['finished_before_kill'] = False
+            # Revised October 25 (rule 8): what must hold depends on whether the killed run had touched B.
+            rec['b_changed_at_kill'] = tree_digest(b) != before
             started = pg.start(b, check=False)
             rec['refused_start_after_kill'] = started.returncode != 0
             if started.returncode == 0:
@@ -242,8 +245,8 @@ def trial(n, pg, template, foreign_template, work):
     pg.stop(b)
     rec['logical_ok'] = got == expect
     ok = rec['bytes']['ok'] and rec['logical_ok']
-    if fault == 'kill' and rec.get('finished_before_kill') is False:
-        ok = ok and rec['refused_start_after_kill']
+    if fault == 'kill' and rec.get('finished_before_kill') is False and rec.get('b_changed_at_kill'):
+        ok = ok and rec['refused_start_after_kill']  # a touched B must not start; an untouched B is the old copy
     rec['pass'] = ok
     rec['why'] = None if ok else 'wrong output'
     return rec
