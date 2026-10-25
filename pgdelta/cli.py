@@ -175,6 +175,10 @@ def _rebuild_options(parser):
                              'sequential right after writing it. Either way every file is verified '
                              'before O is published; with --jobs 1 it is always sequential '
                              '(default: %(default)s)')
+    parser.add_argument('--verify-scope', choices=receiver.VERIFY_SCOPES, default=receiver.DEFAULT_VERIFY_SCOPE,
+                        help='what is re-read to verify each file: all of it, or (with --in-place) only the pages '
+                             'this run wrote, every other part checked by the digests of B computed before '
+                             'anything was written. "written" removes the second pass over B (default: %(default)s)')
     # T3 arm (b): where the output files are fsynced.
     parser.add_argument('--fsync', choices=flush.FSYNC_MODES, default=flush.DEFAULT_FSYNC,
                         help='where each finished output file is fsynced: main, in the main loop before the '
@@ -435,7 +439,7 @@ def _receive(args):
 
 def _receiver_engine(args):
     return {'jobs': args.jobs, 'hash_backend': args.hash_backend, 'rebuild': args.rebuild,
-            'verify': args.verify, 'fsync': args.fsync}
+            'verify': args.verify, 'fsync': args.fsync, 'verify_scope': args.verify_scope}
 
 
 def _basis_controldata(args):

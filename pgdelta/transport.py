@@ -40,12 +40,13 @@ def stdio_channel():
 
 def spawn_local_receiver(basis, output, *, pg_controldata=None, reuse_any_basis=False,
                          local_source=None, jobs=None, hash_backend=None, rebuild=None, verify=None,
-                         in_place=False, fsync=None):
+                         in_place=False, fsync=None, verify_scope=None):
     """Start `receive --stdio` as a child process and return (process, channel).
 
     local_source is S: the child then also refuses to build O inside it.
-    jobs, hash_backend, rebuild, verify and fsync, when given, are passed on
-    as the child's --jobs, --hash-backend, --rebuild, --verify and --fsync.
+    jobs, hash_backend, rebuild, verify, fsync and verify_scope, when given, are
+    passed on as the child's --jobs, --hash-backend, --rebuild, --verify, --fsync
+    and --verify-scope.
     in_place (output None) passes --in-place instead of --output.
     """
     command = [sys.executable, '-c', _CHILD_BOOTSTRAP, _PACKAGE_PARENT, 'receive', '--stdio',
@@ -59,7 +60,7 @@ def spawn_local_receiver(basis, output, *, pg_controldata=None, reuse_any_basis=
     if reuse_any_basis:
         command.append('--reuse-any-basis')
     for flag, value in (('--jobs', jobs), ('--hash-backend', hash_backend), ('--rebuild', rebuild),
-                        ('--verify', verify), ('--fsync', fsync)):
+                        ('--verify', verify), ('--fsync', fsync), ('--verify-scope', verify_scope)):
         if value is not None:
             command += [flag, str(value)]
     try:

@@ -603,6 +603,82 @@ class OrderGuardTests(InPlaceTestCase):
         settle(self)
 
 
+class VerifyScopeTests(InPlaceTestCase):
+    """--verify-scope written: each file verified from B's digests and the pages this run wrote, not a re-read."""
+
+    def options(self, config=None, **extra):
+        options = in_place(config) if config else {'receiver_options': {'in_place': True}}
+        options['receiver_options'] = dict(options['receiver_options'], verify_scope='written', **extra)
+        return options
+
+    def test_every_shape_and_engine_is_refreshed_and_verified(self):
+        for name, config in CONFIGS.items():
+            with self.subTest(config=name):
+                shutil.rmtree(self.root / 'S', ignore_errors=True)
+                shutil.rmtree(self.root / 'B', ignore_errors=True)
+                pg_shapes(self.source, self.basis)
+                outcome = transfer(self.source, self.basis, None, **self.options(config))
+                self.assert_refreshed(outcome)
+                self.assertEqual(outcome.receiver['verify_scope'], 'written')
+                counts = outcome.receiver['verify_written']
+                self.assertGreater(counts['nodes_kept'], 0)  # base/5/multi's nodes are unchanged
+                self.assertGreater(counts['nodes_composed'], 0)
+                self.assertEqual(counts['pages_reread'], outcome.sender['pages']['sent'])
+                self.assertEqual(outcome.receiver['files_verified'], outcome.receiver['files'])
+                settle(self)
+
+    def test_both_scopes_give_the_same_copy(self):
+        pg_shapes(self.source, self.basis)
+        shutil.copytree(self.basis, self.root / 'B2', symlinks=True)
+        written = transfer(self.source, self.basis, None, **self.options())
+        full = transfer(self.source, self.root / 'B2', None, receiver_options={'in_place': True})
+        self.assert_refreshed(written)
+        self.assert_refreshed(full, self.root / 'B2')
+        self.assertEqual(snapshot(self.basis), snapshot(self.root / 'B2'))  # files_digest is per session key
+        self.assertNotIn('verify_scope', full.receiver)  # the default leaves the statistics as they were
+        settle(self)
+
+    def test_a_page_written_at_the_wrong_offset_fails_the_verification(self):
+        # The page meant for one place lands one page further on: the page it was meant for keeps B's bytes.
+        pg_shapes(self.source, self.basis)
+        original, calls = receiver_module._write_all, []
+
+        def misplaced(fd, data, offset):
+            calls.append(offset)
+            return original(fd, data, offset + PAGE if len(calls) == 1 else offset)
+
+        with mock.patch.object(receiver_module, '_write_all', misplaced):
+            outcome = transfer(self.source, self.basis, None, **self.options())
+        self.assertIsInstance(outcome.receiver_error, VerificationError)
+        self.assertIn('does not match the source digest', str(outcome.receiver_error))
+        self.assertTrue(os.path.lexists(self.basis / MARKER))  # still blocked
+        settle(self)
+
+    def test_a_file_whose_length_ends_wrong_fails_the_verification(self):
+        pg_shapes(self.source, self.basis)
+        original = receiver_module._Receiver._verify_written
+
+        def truncate_first(self_, index, entry, size, digest, runs):
+            if size > PAGE:
+                os.truncate(self_._output_path(entry.path), size - 1)
+            return original(self_, index, entry, size, digest, runs)
+
+        with mock.patch.object(receiver_module._Receiver, '_verify_written', truncate_first):
+            outcome = transfer(self.source, self.basis, None, **self.options())
+        self.assertIsInstance(outcome.receiver_error, (VerificationError, TransferError))
+        self.assertTrue(os.path.lexists(self.basis / MARKER))
+        settle(self)
+
+    def test_written_scope_needs_in_place(self):
+        pg_shapes(self.source, self.basis)
+        before = snapshot(self.basis)
+        outcome = transfer(self.source, self.basis, self.root / 'O', receiver_options={'verify_scope': 'written'})
+        self.assertIsInstance(outcome.receiver_error, InvalidInput)
+        self.assertIn('--verify-scope written needs --in-place', str(outcome.receiver_error))
+        self.assertEqual(snapshot(self.basis), before)
+        settle(self)
+
+
 class CliTests(InPlaceTestCase):
     def test_local_in_place_refreshes_b_and_says_so(self):
         pg_shapes(self.source, self.basis)

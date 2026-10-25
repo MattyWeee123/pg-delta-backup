@@ -97,6 +97,11 @@ REBUILDS = ('copy-patch', 'gap-fill')
 DEFAULT_REBUILD = 'copy-patch'
 VERIFY_MODES = ('pipelined', 'sequential')
 DEFAULT_VERIFY = 'pipelined'
+# What is re-read to verify a file: all of it, or (in place only) the pages this run wrote, every other node's
+# digest coming from the basis thread's pass over B (_verify_written). "written" removes the second pass over B
+# that lost v1 the HA case beyond memory (EXP-22).
+VERIFY_SCOPES = ('all', 'written')
+DEFAULT_VERIFY_SCOPE = 'all'
 JOIN_SECONDS = 10.0
 HELLO_KEYS = frozenset(('protocol_version', 'block', 'node_blocks', 'key', 'source_identity',
                         'root_mode', 'directories', 'files'))
@@ -410,8 +415,14 @@ class _Verifier:
 
 class _Receiver:
     def __init__(self, channel, setup, jobs, hash_backend=DEFAULT_BACKEND, rebuild=DEFAULT_REBUILD,
-                 verify=DEFAULT_VERIFY, prefetch=None, fsync=DEFAULT_FSYNC, launched=None, listening=None):
+                 verify=DEFAULT_VERIFY, prefetch=None, fsync=DEFAULT_FSYNC, launched=None, listening=None,
+                 verify_scope=DEFAULT_VERIFY_SCOPE):
         self.channel, self.setup = channel, setup
+        # --verify-scope written: B's node digests from the basis thread and the leaf digests it answered leaf
+        # requests with, by file index, kept until the file is verified; and what the verification did.
+        self.verify_scope = verify_scope
+        self.basis_nodes, self.basis_leaves = {}, {}
+        self.written_verify = {'nodes_kept': 0, 'nodes_composed': 0, 'nodes_reread': 0, 'pages_reread': 0}
         # EXP-13's protocol timers, on the time.perf_counter() clock: publish_s counts from `launched` (the
         # receive command's start) and hello_wait_s from `listening` (its listener's), each else from here.
         started = time.perf_counter()
@@ -562,6 +573,11 @@ class _Receiver:
                                       ('fsync', self.fsync, FSYNC_MODES)):
             if value not in choices:
                 raise InvalidInput(f'{label} must be one of {", ".join(choices)}, not {value!r}')
+        if self.verify_scope not in VERIFY_SCOPES:
+            raise InvalidInput(f'verify scope must be one of {", ".join(VERIFY_SCOPES)}, not {self.verify_scope!r}')
+        if self.verify_scope == 'written' and not self.in_place:
+            raise InvalidInput('--verify-scope written needs --in-place: a new copy O is built by copying B, and '
+                               'only a re-read checks the copy')
 
     def _start_pool(self):
         started = time.perf_counter()
@@ -571,7 +587,7 @@ class _Receiver:
         except (OSError, ValueError) as exc:
             raise TransferError(f'cannot start the hashing workers: {exc}') from exc
         self.pool_start_seconds = time.perf_counter() - started
-        if self.verify == 'pipelined' and self.pool.parallel:
+        if self.verify == 'pipelined' and self.pool.parallel and self.verify_scope == 'all':
             self.verifier = _Verifier(self)
 
     def _start_fsync(self):
@@ -747,6 +763,8 @@ class _Receiver:
                 if keep:
                     with self.cache_lock:
                         self.leaf_cache[index] = tree.leaf_blob
+                if self.verify_scope == 'written':
+                    self.basis_nodes[index] = tree.node_blob  # read before anything was written to it
                 self.channel.send(protocol.BASIS_NODES,
                                   protocol.encode_basis_nodes(index, size, tree.node_blob))
         except BaseException as exc:
@@ -805,6 +823,8 @@ class _Receiver:
                 raise TransferError(f'cannot read basis file {path}: {exc}') from exc
             self.hash_leaf_seconds += time.perf_counter() - started
             self.counts.leaf_nodes_reread += len(nodes)
+        if self.verify_scope == 'written':
+            self.basis_leaves.setdefault(index, {}).update(entries)  # B's, before the file is written
         self.channel.send(protocol.LEAF_DIGESTS, protocol.encode_leaf_digests(index, entries))
 
     def _output_path(self, path):
@@ -990,7 +1010,14 @@ class _Receiver:
             os.close(output.fd)
             self.current = None
         self.rebuild_seconds += time.perf_counter() - started
-        if self.verifier is not None:
+        if self.verify_scope == 'written':
+            started = time.perf_counter()
+            self._verify_written(index, entry, size, digest, output.runs)
+            elapsed = time.perf_counter() - started
+            self.verify_seconds += elapsed
+            self.verify_wait_seconds += elapsed
+            self._accept_file(entry, size, digest)
+        elif self.verifier is not None:
             self._accept_file(entry, size, digest)
             self.verifier.submit(entry, size, digest)
         else:
@@ -1055,6 +1082,73 @@ class _Receiver:
         except OSError as exc:
             raise TransferError(f'cannot re-read {entry.path} to verify it: {exc}') from exc
         if tree.size != size or tree.digest != digest:
+            raise VerificationError(f'{entry.path}: rebuilt file does not match the source digest')
+        os.chmod(path, entry.mode)
+        self.counts.files_verified += 1
+
+    def _verify_written(self, index, entry, size, digest, runs):
+        """In place, --verify-scope written: the file's digest from this run's knowledge, re-reading only what it wrote.
+
+        A node no page was written to, with the same extent in B as in the file, keeps the digest the basis
+        thread computed from B before anything was written. A node with written pages gets its digest from
+        those pages, re-read in runs, and from B's leaf digests for its other pages (from the leaf requests,
+        answered before the file was written). Any other node is re-read whole. The file digest must equal
+        the source's. In place every write goes through _page_data at the offsets in `runs`, and B is blocked
+        meanwhile; a write elsewhere would leave a page it was meant for unchanged, so it fails this check.
+        """
+        path = self._output_path(entry.path)
+        basis_size = self.basis_files.get(index) if self.reuse else None
+        nodes_b = self.basis_nodes.pop(index, None)
+        leaves_b = self.basis_leaves.pop(index, {})
+        block, per_node = self.block, self.node_blocks
+        node_size = block * per_node
+        counts = self.written_verify
+        try:
+            fd = open_regular(path)
+        except OSError as exc:
+            raise TransferError(f'cannot re-read {entry.path} to verify it: {exc}') from exc
+        try:
+            written, touched = {}, set()
+            for first, count in runs:
+                data = pread_exact(fd, min(count * block, size - first * block), first * block)
+                for i in range(count):
+                    written[first + i] = self.hasher.leaf(data[i * block:(i + 1) * block])
+                touched.update(range(first // per_node, (first + count - 1) // per_node + 1))
+                counts['pages_reread'] += count
+            nodes = []
+            for node in range(node_count(size, block, per_node)):
+                lo, hi = node * node_size, min((node + 1) * node_size, size)
+                same_extent = basis_size is not None and min((node + 1) * node_size, basis_size) == hi
+                if (node not in touched and same_extent and nodes_b is not None
+                        and (node + 1) * DIGEST_SIZE <= len(nodes_b)):
+                    nodes.append(nodes_b[node * DIGEST_SIZE:(node + 1) * DIGEST_SIZE])
+                    counts['nodes_kept'] += 1
+                    continue
+                first, stop = node * per_node, page_count(hi, block)
+                blob = leaves_b.get(node, b'')
+                leaves = []
+                for page in range(first, stop):
+                    if page in written:
+                        leaves.append(written[page])
+                    elif (page - first + 1) * DIGEST_SIZE <= len(blob):
+                        leaves.append(blob[(page - first) * DIGEST_SIZE:(page - first + 1) * DIGEST_SIZE])
+                    else:
+                        leaves = None
+                        break
+                if leaves is None:
+                    data = pread_exact(fd, hi - lo, lo)
+                    leaves = [self.hasher.leaf(data[offset:offset + block]) for offset in range(0, len(data), block)]
+                    counts['nodes_reread'] += 1
+                else:
+                    counts['nodes_composed'] += 1
+                nodes.append(self.hasher.node(b''.join(leaves)))
+            if os.fstat(fd).st_size != size:
+                raise VerificationError(f'{entry.path}: rebuilt file has the wrong length')
+        except OSError as exc:
+            raise TransferError(f'cannot re-read {entry.path} to verify it: {exc}') from exc
+        finally:
+            os.close(fd)
+        if self.hasher.file(size, b''.join(nodes)) != digest:
             raise VerificationError(f'{entry.path}: rebuilt file does not match the source digest')
         os.chmod(path, entry.mode)
         self.counts.files_verified += 1
@@ -1274,7 +1368,7 @@ class _Receiver:
 
     def stats(self):
         """Receiver's own view; its byte counts exclude the final COMPLETE frame it is about to send."""
-        return {
+        stats = {
             'mode': self.mode,
             'gate_reason': self.reason,
             'reuse_policy': self.policy,
@@ -1335,6 +1429,11 @@ class _Receiver:
             # every other session's final COMPLETE keeps its bytes (tests/pgdelta_frames.py).
             **({'appended_files': self.appended} if self.appends else {}),
         }
+        if self.verify_scope != DEFAULT_VERIFY_SCOPE:
+            # Only off the default, so a default session's COMPLETE frame is byte-for-byte unchanged.
+            stats['verify_scope'] = self.verify_scope
+            stats['verify_written'] = dict(self.written_verify)
+        return stats
 
 
 def _rounded(seconds):
@@ -1344,7 +1443,7 @@ def _rounded(seconds):
 def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None, pg_controldata=None,
                  reuse_any_basis=False, local_source=None, jobs=DEFAULT_JOBS, hash_backend=DEFAULT_BACKEND,
                  rebuild=DEFAULT_REBUILD, verify=DEFAULT_VERIFY, prefetch=None, in_place=False,
-                 fsync=DEFAULT_FSYNC, launched=None, listening=None):
+                 fsync=DEFAULT_FSYNC, launched=None, listening=None, verify_scope=DEFAULT_VERIFY_SCOPE):
     """Run one session as the receiver and return its statistics dict.
 
     Pass a ReceiverSetup from prepare_receiver(), or basis and output to run
@@ -1379,4 +1478,4 @@ def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None,
                 pass
             raise
     return _Receiver(channel, setup, jobs, hash_backend, rebuild, verify, prefetch, fsync, launched,
-                     listening).run()
+                     listening, verify_scope).run()
