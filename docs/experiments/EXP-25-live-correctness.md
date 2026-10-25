@@ -1,6 +1,6 @@
 # EXP-25: Does v1's refresh from a live source ever produce a wrong copy? A randomized campaign under load
 
-Status: **pre-registered October 25, 2026, before any campaign run; two settings revised after the smoke run, and the design revised after a code review, both before the campaign (recorded below).** Only the smoke runs below have run (10 counted trials each, all as predicted, with 5 negative controls in each of the first two and 8 in the third); the campaign itself has not. Local (a Mac, PostgreSQL 17.11); no VMs. It is EXP-17's campaign moved to T8's case: the source keeps running and writing while pgdelta reads it in backup mode (`--source-kind live`, built for this; [pgdelta/README.md](../../pgdelta/README.md#reading-a-running-server-in-backup-mode---source-kind-live)), and every output is checked independently of pgdelta by recovering a disposable copy of it.
+Status: **done October 25, 2026 (second run 11:19–12:36 local; 1,110 trials). v1's in-place refresh from a live source gave no wrong output in 1,000 counted trials, every one spanning 8–19 WAL segments with a timeline history file: below 0.69% per refresh at 99.9% confidence (0.30% at 95%). Both negative controls met their registered bar: read before `pg_backup_start` caught 55 of 55, read while it runs 50 of 55 (90.9%, against 90%, by one trial).** Pre-registered before any campaign run; two settings revised after the smoke, the design after a code review, and two harness faults fixed during the campaign (all recorded below). Local (a Mac, PostgreSQL 17.11); no VMs. It is EXP-17's campaign moved to T8's case: the source keeps running and writing while pgdelta reads it in backup mode (`--source-kind live`, built for this; [pgdelta/README.md](../../pgdelta/README.md#reading-a-running-server-in-backup-mode---source-kind-live)), and every output is checked independently of pgdelta by recovering a disposable copy of it.
 
 ## Question
 
@@ -181,3 +181,50 @@ What the third smoke shows: the revised harness runs end to end with no harness 
 - The harness now checks an existing template with `pg_controldata` (segment size and timeline 2) and rebuilds it if it doesn't match. On the stale template the check returned false.
 - The campaign is restarted from trial 0 on a fresh template, under the registered stop rule: 1,000 counted trials or 3 hours. Its output goes to `results/correctness/exp25b/`.
 - Nothing else changed: the checks, faults, mix, seeds and thresholds are the registered ones. The multi-segment share in its summary shows whether the WAL range is covered.
+
+## Results (the second run, on the registered template)
+
+1,110 trials in 76 minutes: 1,000 counted and 110 negative controls, no harness error. Data: `docs/experiments/data/exp25-summary.csv`; raw `results/correctness/exp25b/`; figure `analysis/exp25.py`.
+
+![1,000 counted refreshes from a live source, and the WAL each one sent](../figures/exp25-live.svg)
+
+*How to read it:* left, every counted trial by the fault injected into B, green when the output passed every check; below them the two broken variants, blue when the checks caught their output. Right, how many WAL segments each counted refresh sent: grey, the first run on the stale template (one 16 MiB segment); orange, this run (8–19 segments of 1 MiB).
+
+| Fault | Counted | Correct | Median refresh |
+|---|---:|---:|---:|
+| none | 414 | 414 | 0.50 s |
+| B diverged (ran its own load and DDL) | 171 | 171 | 0.50 s |
+| killed part-way, then rerun | 229 | 229 | 0.51 s |
+| B corrupted | 82 | 82 | 0.51 s |
+| B truncated or a file deleted | 104 | 104 | 0.50 s |
+| **all** | **1,000** | **1,000** | |
+
+- **The source changed under every read.** All 1,000 refreshes saw pages change between hashing and sending (median 75 pages), so every one exercised the WAL replay that makes a live read consistent.
+- **The WAL range was covered.** Every counted refresh sent 8–19 WAL segments, with the start and stop LSNs in different segments, and the timeline-2 history file. The registered share was 90%; it was 100%.
+- **Kills:** 102 of the 229 killed refreshes were killed before they exited. B was then blocked in pgdelta's documented state 76 times (`global/pg_control` renamed aside, with the marker), untouched 22 times and already complete 4 times; never anything else. The other 127 kills came after the exit. Every rerun was correct.
+- **Timing:** pgdelta's own backup-start and backup-stop times lay within the harness's in 1,000 of 1,000 refreshes, so its bank state could be judged against the backup window.
+- **The negative controls:**
+  - *read before `pg_backup_start`:* **55 of 55 caught**. 43 failed the bank or digest checks, 7 copies didn't start, and 5 copies looped a query until the time limit (pg_amcheck then named the broken index in each).
+  - *read while `pg_backup_start` runs:* **50 of 55 caught (90.9%)**. 28 failed the bank or digest checks, 13 didn't start, and 14 were caught only by pg_amcheck. 5 were missed (trials 319, 359, 479, 919 and 1039): their copies started, passed pg_amcheck, and kept the bank invariant.
+- **The bound:** no wrong output in N = 1,000 counted trials gives below 1 − 0.001^(1/1000) = **0.69% per refresh at 99.9% confidence** (0.30% at 95%). It covers the WAL range, since the multi-segment share was met, and holds because both controls met their bar.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | No wrong output, no failed refresh, no cleanup failure | **Held:** 1,000 of 1,000 correct; no slot or session ever left on S |
+| 2 | Every kill leaves B old, blocked or new | **Held:** 22 old, 76 blocked, 4 new |
+| 3 | Both negative controls caught in every trial (registered: 90% each) | **Held for the read before start** (55 of 55). **Failed for the read during start** (50 of 55), which still meets its registered 90% |
+| 4 | Every counted refresh's WAL spans two segments or more (registered: 90%) | **Held:** 1,000 of 1,000 |
+
+**The first run, reported apart:** on the stale template (16 MiB segments, timeline 1), 712 counted trials, no wrong output; both controls 39 of 39. Without the WAL range, its bound is below 0.97% at 99.9% confidence. It is not merged with the second run.
+
+## What the five missed controls may be
+
+The `during_start` variant reads files while the start checkpoint is still writing, so the pages it reads stale are those the load changed before the checkpoint's redo point that the checkpoint hadn't yet written. Such a copy is wrong only if a stale page is never repaired. But with `full_page_writes` on, the first change to a page after the redo point puts the whole page into the WAL. Recovery then restores it, whatever was read. Under this load, most pages change again within the backup, so some of the variant's copies may contain no unrepaired stale page and be correct. The checks would then have nothing to catch.
+
+Nothing in the five records separates them from the caught ones (read times, pages changed, WAL segments). The explanation is untested. A direct test would have the variant also read every file after `pg_backup_start` returns, and count the pages that differ between the two reads, changed before the redo point, and are untouched by any WAL record up to the stop LSN. A missed control with zero such pages was a correct copy; one with any would be a blind spot of the checks.
+
+## What follows
+
+- **T8's correctness half is settled for this setup.** v1's in-place refresh from a live source (backup mode, WAL from start to stop, `backup_label`) gave no wrong output in 1,000 randomized trials under a continuous write load, random DDL between refreshes and injected faults: below 0.69% per refresh at 99.9% confidence, on one Mac with a small cluster (about 60 MB of data; see the limitations). Every part-way kill left B in a state the documented contract allows.
+- **The checks are strong for reads before the backup starts, and good but not airtight for reads during it** (50 of 55). The test above would say whether the five misses are a gap in the checks or correct copies.
+- **T8's other half,** v1's speed and its slowdown of a live source with the load's client on its own VM, is T10b's.

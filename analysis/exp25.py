@@ -95,7 +95,9 @@ def main(argv=None):
     for v in VARIANTS:
         for r in controls[v]:
             problems = ' '.join((r.get('copy') or {}).get('problems') or [])
-            catchers[(v, 'did not start' if not (r.get('copy') or {}).get('started', True) else
+            copy = r.get('copy') or {}
+            catchers[(v, 'did not start' if not copy.get('started', True) else
+                      'a query hung' if copy.get('hung') else
                       'pg_amcheck only' if problems.startswith('pg_amcheck') else 'bank or digest check')] += 1
     print(f'  how the controls were caught: {dict(catchers)}')
     n = len(counted)
@@ -148,7 +150,7 @@ def main(argv=None):
     right.axvline(1.5, color=COLORS['black'], lw=0.8, ls=':')
     right.set_xlabel('WAL segments a refresh sent')
     right.set_ylabel('counted refreshes')
-    right.set_title('Does the WAL range span segments? (registered: 90% at 2+)', fontsize=10)
+    right.set_title('WAL segments per refresh (registered: 90% at 2 or more)', fontsize=10)
     right.legend(fontsize=8)
     fig.tight_layout()
     print(plotting.save(fig, 'exp25-live'))
