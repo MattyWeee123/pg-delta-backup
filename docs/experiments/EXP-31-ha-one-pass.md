@@ -81,3 +81,13 @@ v1's own timers (medians, seconds; the phases overlap):
   - its verification runs on the worker pool, pipelined like the full re-read, reading whole nodes where many pages were written;
   - a live-source campaign (EXP-25's) has run with it on.
 - **A tie is the most a design that reads everything can get here.** With the second pass gone, v1's time for local changes is its read of S on the source, at the disk's rate (hash S: 57.9 s), and a full copy reads S at that rate too. Keeping B's tree from the previous refresh would only remove the destination's read, which already overlaps S's. To beat a full copy on a disk-bound source, the source must not be read whole: that takes change tracking there, such as PostgreSQL 17's WAL summaries, the mechanism native incremental backup uses. pgdelta's niche, refreshing any older copy whose history is lost, doesn't have that history. So on fast local disks (EXP-11, EXP-18) v1's lead comes from CPU and the copy's write path, and beyond memory on a capped disk it can at best tie, with far fewer bytes. For scattered changes, the in-place write pattern on an IOPS-limited disk is the remaining cost.
+
+## Second session, pre-registered (October 25, before it ran)
+
+**Why:** the hot cell's ratios (0.96, 1.01) lie within 20% of 0.90, so rule 11 (K10, as narrowed) asks for a second session on fresh VMs. The verification for `--verify-scope written` has also changed since: it now runs on the pipelined verifier, and heavily written nodes are re-read whole on the worker pool.
+
+**What runs:** the same design and command, on fresh VMs, with order seed 31401, to `exp31b-s400`.
+
+**Predictions:**
+1. Hot: v1 written ÷ each full copy stays between 0.90 and 1.10, a tie either way. The hot cell's verdict ("not faster than the full copies") then stands at two sessions.
+2. Uniform: v1 written's wait for verification drops below 10 s (from 30.8), and its time below 115 s (from 129.6). It stays above the full copies: the in-place writes remain.

@@ -74,3 +74,11 @@ The harness passes `--verify-scope written` to every pgdelta run. EXP-17's harne
 
 - **`--verify-scope written` is shown correct on EXP-17's fault mix,** at a tenth of EXP-17's 10,000 trials. A misplaced write is caught every time, as argued.
 - Whether it becomes v1's default for in-place refreshes is decided by [EXP-31](EXP-31-ha-one-pass.md)'s speed result. A default would also deserve EXP-25's live-source campaign with the scope on.
+
+## The implementation changed after the campaign, so the campaign is rerun (October 25, before the rerun)
+
+EXP-31 found the first implementation's verification single-threaded and waited for (31 s for scattered changes at 12 GB). It now runs on the pipelined verifier:
+- nodes with at most an eighth of their pages written are composed from B's leaf digests and the re-read pages, as before;
+- more heavily written nodes are re-read whole on the worker pool.
+
+That changes code this campaign judged, so it is rerun in full, with the same design, seeds and rules, to `results/correctness/exp32b/`. The registered predictions are the same. The first run's result above stands for the first implementation.
