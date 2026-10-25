@@ -33,7 +33,9 @@ EXCLUDED_FILES = {'postgresql.auto.conf.tmp', 'current_logfiles.tmp', 'backup_la
 EXCLUDED_DIRS = {'pg_stat_tmp', 'pg_replslot', 'pg_dynshmem', 'pg_notify', 'pg_serial', 'pg_snapshots',
                  'pg_subtrans', 'pg_wal', 'pg_logical'}
 PORT = 55470
-MARKER_PREFIX = 'pgdelta-incomplete.json'  # pgdelta's marker and its temporary file, at B's root
+def pgdelta_own(rel):
+    """pgdelta's marker at B's root, and the temporary file it writes it through (pgdelta/inplace.py)."""
+    return '/' not in rel and (rel == 'pgdelta-incomplete.json' or (rel.startswith('.pgdelta-') and rel.endswith('.tmp')))
 
 
 class HarnessError(Exception):
@@ -235,7 +237,7 @@ def trial(n, pg, template, foreign_template, work):
                     'changed': sorted(k for k in set(before) & set(after) if before[k] != after[k])}
             rec['diff_at_kill'] = {k: v[:20] for k, v in diff.items()}
             rec['b_changed_at_kill'] = any(diff.values())
-            data_diff = [p for v in diff.values() for p in v if not p.startswith(MARKER_PREFIX)]
+            data_diff = [p for v in diff.values() for p in v if not pgdelta_own(p)]
             rec['b_state_at_kill'] = ('old' if not data_diff else 'new' if byte_check(s, b)['ok'] else 'partial')
             started = pg.start(b, check=False)
             rec['refused_start_after_kill'] = started.returncode != 0
