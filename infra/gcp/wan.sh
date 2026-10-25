@@ -16,7 +16,8 @@
 #             holds about 0.43 of the bandwidth-delay product.
 # netem before tbf: packets wait in netem's delay line, then queue at the shaper, so the delay line stays
 # apart from the bottleneck queue. With DELAY_ONE_WAY_MS 0 (the anchor) the tree is the same, delay 0.
-# RATE is an integer with a tc unit (bit, kbit, mbit or gbit); BURST=bytes overrides the burst.
+# RATE is an integer with a tc unit (bit, kbit, mbit or gbit); BURST=bytes overrides the burst, and QUEUE_MS=ms the
+# bottleneck queue (EXP-26 sets it in round trips: its depth decides how BBR shares the link with CUBIC).
 set -euo pipefail
 action=${1:?usage: wan.sh RATE DELAY_ONE_WAY_MS PEER_IP CONTROL_PORT [DEV] | off [DEV] | show [--json] [DEV]}
 NETEM_LIMIT=1000000
@@ -88,6 +89,10 @@ case "$action" in
     [ "$burst" -ge 131072 ] || burst=131072
     # The bottleneck queue: max(50 ms, the round trip, twice the one-way delay).
     queue=$(awk -v d="$delay" -v floor="$QUEUE_FLOOR_MS" 'BEGIN { q = 2 * d; if (q < floor) q = floor; printf "%g", q }')
+    if [ -n "${QUEUE_MS:-}" ]; then
+      [[ "$QUEUE_MS" =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "bad QUEUE_MS: $QUEUE_MS" >&2; exit 2; }
+      queue=$QUEUE_MS
+    fi
     if [ "${DRY_RUN:-0}" = 1 ]; then
       tc_run qdisc del dev "$dev" root
     else
