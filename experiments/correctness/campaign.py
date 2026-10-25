@@ -227,8 +227,10 @@ def trial(n, pg, template, foreign_template, work):
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
             rec['finished_before_kill'] = False
-            # Revised October 25 (rule 8): what must hold depends on whether the killed run had touched B.
+            # Revised October 25 (rule 8, twice): B may start only as the old copy or as the complete new one.
             rec['b_changed_at_kill'] = tree_digest(b) != before
+            rec['b_state_at_kill'] = ('old' if not rec['b_changed_at_kill'] else
+                                      'new' if byte_check(s, b)['ok'] else 'partial')
             started = pg.start(b, check=False)
             rec['refused_start_after_kill'] = started.returncode != 0
             if started.returncode == 0:
@@ -245,8 +247,8 @@ def trial(n, pg, template, foreign_template, work):
     pg.stop(b)
     rec['logical_ok'] = got == expect
     ok = rec['bytes']['ok'] and rec['logical_ok']
-    if fault == 'kill' and rec.get('finished_before_kill') is False and rec.get('b_changed_at_kill'):
-        ok = ok and rec['refused_start_after_kill']  # a touched B must not start; an untouched B is the old copy
+    if fault == 'kill' and rec.get('b_state_at_kill') == 'partial':
+        ok = ok and rec['refused_start_after_kill']  # neither old nor new: it must not start
     rec['pass'] = ok
     rec['why'] = None if ok else 'wrong output'
     return rec

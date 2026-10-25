@@ -52,12 +52,11 @@ def main(argv=None):
         rs = by[f]
         print(f'  {f:9s} {len(rs):5d} counted, {sum(r["pass"] for r in rs):5d} passed'
               + (f', refresh {statistics.median(r["seconds"] for r in rs):.2f} s median' if rs else ''))
-    touched = [r for r in unfinished if r.get('b_changed_at_kill')]
-    untouched = [r for r in unfinished if r.get('b_changed_at_kill') is False]
-    print(f'  kills: {len(unfinished)} before the refresh finished: {len(touched)} had changed B, of which '
-          f'{sum(bool(r.get("refused_start_after_kill")) for r in touched)} refused to start; {len(untouched)} had not '
-          f'touched B (it started as the old copy: {sum(not r.get("refused_start_after_kill") for r in untouched)}); '
-          f'{len(kills) - len(unfinished)} after it finished')
+    states = Counter(r.get('b_state_at_kill') for r in unfinished)
+    partial = [r for r in unfinished if r.get('b_state_at_kill') == 'partial']
+    print(f'  kills before the process exited: {len(unfinished)}; B at the kill: {dict(states)}; partial ones that '
+          f'refused to start: {sum(bool(r.get("refused_start_after_kill")) for r in partial)} of {len(partial)}; '
+          f'{len(kills) - len(unfinished)} after it exited')
     print(f'  foreign bases refused with B unchanged: {sum(r["pass"] for r in by["foreign"])} of {len(by["foreign"])}')
     n = len(counted)
     for c in (0.95, 0.999):
