@@ -1,0 +1,9 @@
+row,trials,correct_or_caught,wrong_or_missed
+none,358,358,0
+diverged,164,164,0
+kill,242,242,0
+corrupt,92,92,0
+truncate,92,92,0
+foreign,52,52,0
+all counted,1000,1000,0
+negative control (misplaced write),53,53,0

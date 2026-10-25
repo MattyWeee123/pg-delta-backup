@@ -29,6 +29,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--trials', default=str(ROOT / 'results' / 'correctness' / 'exp32' / 'trials.jsonl'))
     ap.add_argument('--figdir')
+    ap.add_argument('--tag', default='', help='suffix for the data and figure files (the rerun: -b)')
     a = ap.parse_args(argv)
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
@@ -51,7 +52,7 @@ def main(argv=None):
           f'repaired {sum(bool(r.get("pass")) for r in controls)}')
     for c in (0.95, 0.999):
         print(f'  bound at {c:.1%}: ' + ('none (a wrong output)' if wrong else f'{1 - (1 - c) ** (1 / n):.4%} per refresh'))
-    with open(ROOT / 'docs' / 'experiments' / 'data' / 'exp32-summary.csv', 'w', newline='') as f:
+    with open(ROOT / 'docs' / 'experiments' / 'data' / f'exp32-summary{a.tag}.csv', 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(['row', 'trials', 'correct_or_caught', 'wrong_or_missed'])
         for fl in FAULTS:
@@ -74,7 +75,7 @@ def main(argv=None):
     ax.set_title(f'{n} randomized in-place refreshes with --verify-scope written (green: correct),\n'
                  'and the misplaced-write control (blue: caught by the verification)', fontsize=10)
     fig.tight_layout()
-    print(plotting.save(fig, 'exp32-correctness'))
+    print(plotting.save(fig, f'exp32-correctness{a.tag}'))
 
 
 if __name__ == '__main__':

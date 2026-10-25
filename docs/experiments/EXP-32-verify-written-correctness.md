@@ -1,6 +1,6 @@
 # EXP-32: Is v1 still correct when it verifies only what it wrote?
 
-Status: **done October 25, 2026 (15:35–16:22 local; 1,053 trials): no wrong output in 1,000 counted trials with `--verify-scope written` (below 0.69% per refresh at 99.9% confidence), and all 53 misplaced-write controls caught and then repaired.** Pre-registered before the counted campaign (a 25-trial smoke checked the harness; see below). Local (the Mac, PostgreSQL 17.11), about an hour. It is the correctness test that `--verify-scope written` needs before it can be recommended. [EXP-31](EXP-31-ha-one-pass.md) measures its speed.
+Status: **done October 25, 2026, twice: on the first implementation (15:35–16:22 local) and, after it moved to the pipelined verifier, again (17:20–18:44). Each run: no wrong output in 1,000 counted trials with `--verify-scope written` (below 0.69% per refresh at 99.9% confidence), and all 53 misplaced-write controls caught and then repaired.** Pre-registered before the counted campaign (a 25-trial smoke checked the harness; see below). Local (the Mac, PostgreSQL 17.11), about an hour. It is the correctness test that `--verify-scope written` needs before it can be recommended. [EXP-31](EXP-31-ha-one-pass.md) measures its speed.
 
 ## Question
 
@@ -84,3 +84,15 @@ EXP-31 found the first implementation's verification single-threaded and waited 
 That changes code this campaign judged, so it is rerun in full, with the same design, seeds and rules, to `results/correctness/exp32b/`. The registered predictions are the same. The first run's result above stands for the first implementation.
 
 **Restarted, October 25, 17:20 (before any result was read).** The rerun first started at 17:13. A minute later, `--hash auto` (the hash negotiation) landed in the working tree it ran from, and from then on its trials hashed with BLAKE3. It was stopped after 25 trials and set aside (`results/correctness/exp32b-aborted`, not counted). It restarts from a frozen checkout of commit c870b17 with `--pgdelta-args "--verify-scope written --hash blake2b"`, BLAKE2b pinned as at registration. EXP-33 covers BLAKE3.
+
+## The rerun on the revised implementation: results (17:20–18:44 local; 1,053 trials)
+
+Run from a frozen checkout of commit c870b17, with `--verify-scope written --hash blake2b`. Data: `docs/experiments/data/exp32-summary-b.csv`; raw `results/correctness/exp32b/`; figure `analysis/exp32.py --tag=-b`.
+
+![The rerun](../figures/exp32-correctness-b.svg)
+
+- **No wrong output in 1,000 counted trials** (below 0.69% per refresh at 99.9% confidence): 358 with no fault, 164 diverged, 242 killed and rerun, 92 corrupted, 92 truncated, 52 foreign (refused, B untouched).
+- **53 of 53 negative controls caught** (exit 4, B blocked, start refused) and repaired.
+- **Of 65 kills before the exit,** 23 left B old, 6 new, and 36 part-way, all 36 refusing to start.
+
+All three predictions held again, on the implementation that EXP-31's second session measured. Across both runs, `--verify-scope written` has 2,000 trials with no wrong output, below 0.35% per refresh at 99.9% confidence. That pooling is fair for the verification logic both versions share, though they differ in how its reads are scheduled.
