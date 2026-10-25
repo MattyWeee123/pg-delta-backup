@@ -390,6 +390,7 @@ It reads each sweep's run records (in `summary.csv`'s order), trial records and 
 | `--negative-control METHOD@CONDITIONS` | that arm at those conditions in each trial's first repeat |
 | `--zero-delay-link-rates`, `--first-visit-link-streams N@CONDITIONS`, `--ssh-probe-port`, `--stunnel-link-test CONDITIONS` | the probes above |
 | `--control-port`, `--tuned-tcp-max-bytes` | 2222 and 128 MiB in the run lines |
+| `--base-rtt-ms` | A real path's own round trip (EXP-15, VMs in two regions): the visit's ping check and each run's minrtt check expect the emulated r plus it, with 5% of it as extra slack; 0 (the default) on one zone |
 | `--link-test-warmup` | the link test's warmup, and the median-of-last-3 steady rate; needed with `--conditions`, and `--link-test-seconds` must be at least its ceiling plus 3, or every probe link test would fail |
 | `--idle-noise-plan SECONDS:WINDOWS,...`, `--dirty-noise-table SECONDS:MIB,...` | check (a)'s idle noise by window length, measured or given (`run.json` `dirty_idle_noise`, `noise_table_bytes`); each run's limit is max(4 MiB, the noise of the shortest length that covers its clock), recorded in its `durability` (`noise_window_s`) |
 | `--stunnel`, `--stunnel-strace`, `--tls-refusal-check` | stunnel's path; smoke item 12's strace of each stunnel and its refusals (`t12_preflight.tls_refusals`) |
