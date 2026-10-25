@@ -1,0 +1,5 @@
+size,pattern,pgdelta_direct_inplace_s,full_s,parcopy8_s,v1_over_full,v1_over_bound,v1_hash_source_s,v1_hash_basis_s,v1_verify_s,v1_verify_wait_s,v1_rebuild_s
+2.1 GB (fits in memory),hot,11.36,14.08,10.82,0.807,1.05,10.4,10.2,6.1,0.3,0.2
+2.1 GB (fits in memory),uniform,13.63,14.11,10.86,0.966,1.256,10.3,10.1,1.3,0.4,7.1
+12 GB (1.5x memory),hot,108.98,61.63,58.32,1.768,1.869,57.6,71.3,82.0,36.8,0.4
+12 GB (1.5x memory),uniform,132.17,61.84,58.55,2.137,2.257,58.0,64.0,65.7,22.6,52.5
