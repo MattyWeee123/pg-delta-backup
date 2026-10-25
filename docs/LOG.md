@@ -17,6 +17,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - EXP-33, a live source with BLAKE3 and `written`: 1,000 trials, no wrong output, but its during-start control fell to 47 of 55, so no bound was claimed.
   - EXP-35's oracle on that configuration: the checks caught 39 of 39 wrong copies.
   - By EXP-35's registered rule, `--verify-scope written` is now the default in place (`--verify-scope auto`).
+- **EXP-34 (T13c):** 16 hard resets of the destination mid-refresh left B blocked (10, refusing to start) or complete (6, starting), never wrong; every rerun completed it.
 - **A slip, caught:** the hash negotiation landed in the working tree while two campaigns ran from it. They were restarted from a frozen checkout, the first starts set aside. Campaigns now always run from one.
 
 ## 2026-10-25 (evening): access to the Google Cloud project, checked

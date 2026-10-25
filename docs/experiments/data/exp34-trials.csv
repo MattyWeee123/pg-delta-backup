@@ -1,0 +1,17 @@
+trial,reset_after_s,state,start_ok,start_as_documented,sender_status,after_rerun,pass
+13,1.67,blocked,False,True,failed,new,True
+2,2.02,blocked,False,True,failed,new,True
+15,2.6,blocked,False,True,failed,new,True
+3,3.02,blocked,False,True,failed,new,True
+14,3.42,blocked,False,True,failed,new,True
+7,5.46,blocked,False,True,failed,new,True
+4,5.86,blocked,False,True,failed,new,True
+0,6.22,blocked,False,True,failed,new,True
+9,6.36,blocked,False,True,failed,new,True
+6,8.62,blocked,False,True,failed,new,True
+1,8.95,new,True,True,complete,new,True
+5,11.78,new,True,True,complete,new,True
+11,13.09,new,True,True,complete,new,True
+8,13.31,new,True,True,complete,new,True
+12,13.55,new,True,True,complete,new,True
+10,13.58,new,True,True,complete,new,True
