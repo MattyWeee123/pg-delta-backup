@@ -1,0 +1,5 @@
+pattern,host,pgdelta_direct_inplace_s,pgdelta_direct_inplace_bbr_s,parcopy8_s,full_s,pgdelta_direct_inplace_R_fast,pgdelta_direct_inplace_bbr_R_fast,pgdelta_direct_inplace_R_F0,pgdelta_direct_inplace_bbr_R_F0
+hot,default,3.68,3.15,9.59,23.94,0.383,0.329,0.154,0.132
+hot,tuned,3.93,3.19,9.6,10.89,0.41,0.333,0.361,0.293
+uniform,default,11.26,9.79,9.62,25.99,1.171,1.017,0.433,0.376
+uniform,tuned,7.49,5.9,9.62,10.89,0.778,0.613,0.687,0.542

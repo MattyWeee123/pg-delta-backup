@@ -1,6 +1,6 @@
 # EXP-15: Do EXP-13's emulated DR verdicts hold on a real cross-region link? (T12x)
 
-Status: **pre-registered October 25, 2026, as a proposal; reviewed October 25 and revised (see [After the review](#after-the-review-october-25-2026)); not built, not run.** This is test T12x, proposed by the [rule 11 audit](../FIRMNESS.md#41-the-tests) and allowed by the owner's K3 ([ledger](../DECISIONS.md#decisions-of-october-24-2026-night-after-the-rule-11-audit)). It checks [EXP-13](EXP-13-latency-transport.md)'s emulated WAN on a real path. EXP-13's [revision under rule 11](EXP-13-latency-transport.md#revisions-under-rule-11-october-25-2026-before-running) makes this check a condition for any of its DR rows to pick a route. Like EXP-11 to EXP-13, this design gets an independent review, and a check of the revision, before its harness is built; the review is done, and its changes are made in place, marked "(after the review)". Everything here is written before running. Two things can only be fixed by measuring the path: the region, and its round trip r_R. A probe fixes them before EXP-13's session 1 (below), and they are recorded here, dated, before any arm runs.
+Status: **a lean session ran October 25, 2026 (results at the end): on a real 31 ms Iowa–Oregon link, v1 with BBR beat both full copies for local changes everywhere and for scattered changes on tuned hosts.** Earlier: **pre-registered October 25, 2026, as a proposal; reviewed October 25 and revised (see [After the review](#after-the-review-october-25-2026)); not built, not run.** This is test T12x, proposed by the [rule 11 audit](../FIRMNESS.md#41-the-tests) and allowed by the owner's K3 ([ledger](../DECISIONS.md#decisions-of-october-24-2026-night-after-the-rule-11-audit)). It checks [EXP-13](EXP-13-latency-transport.md)'s emulated WAN on a real path. EXP-13's [revision under rule 11](EXP-13-latency-transport.md#revisions-under-rule-11-october-25-2026-before-running) makes this check a condition for any of its DR rows to pick a route. Like EXP-11 to EXP-13, this design gets an independent review, and a check of the revision, before its harness is built; the review is done, and its changes are made in place, marked "(after the review)". Everything here is written before running. Two things can only be fixed by measuring the path: the region, and its round trip r_R. A probe fixes them before EXP-13's session 1 (below), and they are recorded here, dated, before any arm runs.
 
 ## Question
 
@@ -334,3 +334,25 @@ Under rule 11 as the owner clarified it (small experiments, no two-session progr
 **What follows:** if 2 and 3 hold, the emulated results stand on a real path and BBR's role is confirmed; if BBR v1 is slow here, the emulator misled and the DR claim goes back to provisional.
 
 **First attempt (07:48–07:52 UTC), before any run counted:** the harness's visit check expects the emulated round trip (0–1 ms at r = 0), and on the real path the ping minimum was 31.3 ms, so every visit failed its check twice and the invocation stopped with no run, as A11 (i) prescribes. The harness gained `--base-rtt-ms` (the path's own round trip, added to what the ping and minrtt checks expect, with 5% of it as slack). The VMs were deleted before the failure was read, an ordering slip in the commands; the logs had been fetched first, and the pair is created again for the rerun with `--base-rtt-ms 31`.
+
+## The lean session's results (08:05–08:40 UTC; 80 runs, all verified; VMs deleted 08:41)
+
+![A real Iowa–Oregon link: each arm's median time](../figures/exp15-lean.svg)
+
+*How to read it:* bars are median times on a real link between `us-central1-a` and `us-west1-b` (ping minimum 31.2–31.4 ms), under the tree's 2 Gbit/s cap with no emulated delay. Data: [exp15-lean-cells.csv](data/exp15-lean-cells.csv); analysis `analysis/exp15_lean.py`; raw `results/exp04/sets/xr/exp15-lean/` (git-ignored).
+
+| Workload, host | one `pg_basebackup` | parallel bound | cubic v1 (R_fast, R_F0) | BBR v1 (R_fast, R_F0) |
+|---|---:|---:|---|---|
+| hot, default | 23.94 s | 9.59 | 3.68 (0.38, 0.15) | **3.15 (0.33, 0.13)** |
+| hot, tuned | 10.89 | 9.60 | 3.93 (0.41, 0.36) | **3.19 (0.33, 0.29)** |
+| uniform 1%, default | 25.99 | 9.62 | 11.26 (1.17, 0.43) | **9.79 (1.02, 0.38)** |
+| uniform 1%, tuned | 10.89 | 9.62 | 7.49 (0.78, 0.69) | **5.90 (0.61, 0.54)** |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | Round trip 30–50 ms; one default stream 0.9–1.4 Gbit/s, a tuned one at least 1.8 | **In part:** 31.2–31.4 ms and 1.82–1.91 tuned held; one default stream reached only 0.70–0.79 Gbit/s |
+| 2 | BBR v1 in the slow mode in 0 of 10 uniform runs | **Held:** 0 of 10 (every one of the 20 BBR runs got BBR on its socket) |
+| 3 | Uniform 1%, tuned: BBR v1 ÷ the fastest copy at most 0.90 | **Held:** 0.61 |
+| 4 | Cubic v1's slow mode on a real link (an open question) | **0 of 10** here |
+
+**What it shows.** On a real path, v1 with BBR beat the fastest parallel copy for both workloads on tuned hosts (0.33 and 0.61) and one `pg_basebackup` stream everywhere (0.13–0.54), as EXP-24's emulated 20–60 ms cells said. Cubic's slow mode didn't appear on this path in 10 runs (95% interval 0–31%), so EXP-20's collapse at 20–120 ms was at least amplified by the emulator's queue, or this path was calmer that hour; even without it, BBR was 15–21% faster than cubic for both workloads. On default hosts one stream's window holds scattered changes to about the bound's time (1.02). So the DR claim on a real link is: **v1 beats both full copies for local changes on any host, and for scattered changes with tuned TCP buffers; BBR on pgdelta's socket helps everywhere and never hurt.** One path, one hour, one session.
