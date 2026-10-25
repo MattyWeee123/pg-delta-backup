@@ -11,22 +11,23 @@ COMMON=(--patterns hot --repeats 3 --manifest-checksums CRC32C --methods full,pg
 level() {  # NAME K ARGS...
   local name=$1 k=$2 burn=''
   shift 2
-  local out=$R/$name
-  mkdir -p "$out"
+  local out=$R/$name cal=$R/exp18-calibration
+  mkdir -p "$cal"  # run_exp04 wants its own output directory empty
   if [ "$k" -gt 0 ]; then
-    python3 experiments/network/agent.py burn --procs "$k" --seconds 7200 > "$out/burn.json" &
+    python3 experiments/network/agent.py burn --procs "$k" --seconds 7200 > "$cal/$name-burn.json" &
     burn=$!
     sleep 2
   fi
-  python3 experiments/network/calibrate.py > "$out/calibrate-dest.json"
-  python3 experiments/network/run_exp04.py --source-ip "$SRC" --out "$out" "${COMMON[@]}" "$@" > "$out/driver.log" 2>&1
-  echo "$(date -u +%T) $name: run_exp04 exit $?"
+  python3 experiments/network/calibrate.py > "$cal/$name-before.json"
+  python3 experiments/network/run_exp04.py --source-ip "$SRC" --out "$out" "${COMMON[@]}" "$@" > "$cal/$name-driver.log" 2>&1
+  local status=$?
+  echo "$(date -u +%T) $name: run_exp04 exit $status"
   if [ -n "$burn" ]; then
     pkill -P "$burn" 2>/dev/null
     kill "$burn" 2>/dev/null
     wait "$burn" 2>/dev/null
   fi
-  python3 experiments/network/calibrate.py > "$out/calibrate-dest-after.json"
+  python3 experiments/network/calibrate.py > "$cal/$name-after.json"
 }
 
 level exp18-k0 0 --speeds 2,unthrottled --order-seed 18
