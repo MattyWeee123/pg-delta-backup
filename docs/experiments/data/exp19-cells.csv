@@ -1,0 +1,17 @@
+level,condition,arm,speed,runs,measured_s,predicted_s,error,hash_rate,disk_write_mib_s,disk_read_mib_s
+exp19-k0,idle,full,2g,3,10.279,10.279,0.0,292161,1556.1,2159.4
+exp19-k0,idle,full,unthrottled,3,3.896,3.896,0.0,292161,1556.1,2159.4
+exp19-k0,idle,pgdelta_direct_inplace,2g,3,3.078,3.078,0.0,292161,1556.1,2159.4
+exp19-k0,idle,pgdelta_direct_inplace,unthrottled,3,3.085,3.085,0.0,292161,1556.1,2159.4
+exp19-k3,3 busy processes,full,2g,3,10.294,10.279,-0.0015,160569,1559.6,1960.3
+exp19-k3,3 busy processes,full,unthrottled,3,3.874,3.896,0.0057,160569,1559.6,1960.3
+exp19-k3,3 busy processes,pgdelta_direct_inplace,2g,3,4.252,4.516,0.0621,160569,1559.6,1960.3
+exp19-k3,3 busy processes,pgdelta_direct_inplace,unthrottled,3,4.429,4.703,0.0619,160569,1559.6,1960.3
+exp19-io,disk contention,full,2g,3,11.286,10.279,-0.0892,277694,784.3,1408.7
+exp19-io,disk contention,full,unthrottled,3,4.999,3.896,-0.2206,277694,784.3,1408.7
+exp19-io,disk contention,pgdelta_direct_inplace,2g,3,3.214,3.169,-0.0139,277694,784.3,1408.7
+exp19-io,disk contention,pgdelta_direct_inplace,unthrottled,3,3.247,3.188,-0.0182,277694,784.3,1408.7
+exp19-k0b,"idle, at the end",full,2g,3,10.281,10.279,-0.0002,291924,1559.9,1977.3
+exp19-k0b,"idle, at the end",full,unthrottled,3,3.881,3.896,0.0039,291924,1559.9,1977.3
+exp19-k0b,"idle, at the end",pgdelta_direct_inplace,2g,3,3.127,3.079,-0.0152,291924,1559.9,1977.3
+exp19-k0b,"idle, at the end",pgdelta_direct_inplace,unthrottled,3,3.099,3.087,-0.004,291924,1559.9,1977.3

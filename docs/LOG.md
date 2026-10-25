@@ -6,6 +6,13 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+
+## 2026-10-25 (night): EXP-19 held; the owner set standing autonomy
+
+[EXP-19](experiments/EXP-19-two-part-model.md) fixed EXP-18's two-part model before running and tested it on new VMs at 3 busy processes: within 6.2%. Under disk contention v1 slowed 4–5% and one `pg_basebackup` stream up to 28%, so the fast-link comparison turns on which resource is busy on the destination: CPU (v1 loses its lead) or disk (it grows). VMs 03:35–03:56 UTC, deleted.
+
+The owner said routine steps in the set direction need no permission, that resources are not constrained, and that any git activity is fine; main was pushed (76 commits, scanned first for addresses and emails).
+
 ## 2026-10-25 (night): EXP-18, the first lab test, on one VM pair for 23 minutes
 
 [EXP-18](experiments/EXP-18-calibrated-contention.md) loaded the destination on purpose with 0, 2 and 4 busy processes and asked whether a hash benchmark taken before the runs predicts the slowdown. Its deciding prediction failed: scaling all of v1's fixed work by the benchmark overshoots by 13–20% (without it, the model undershoots by 20–35%). Exploratory: if about 60% of that work scales, a fit on one level predicts the next within 4%, a hypothesis to test next. And a finding for the positioning: with 2 busy processes on the destination, v1 lost its unthrottled lead over one `pg_basebackup` stream (4.04 against 3.79 s); at 2 Gbit/s it stayed far ahead. The VMs ran 03:08–03:31 UTC (about 0.40 USD) and are deleted. The console link redirects to the university's single sign-on, which needs the owner's sign-in; gcloud access, signed in by the owner earlier, works.
