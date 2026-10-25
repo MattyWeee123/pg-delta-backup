@@ -78,7 +78,7 @@ arms = ['none', 'full', 'v1_j1', 'v1_j2', 'v1_j4']
 cells = [(a, s) for a in arms for s in ('unthrottled', '2gbit')] if plan == 'full' else [(a, 'unthrottled') for a in arms]
 if only:
     cells = [tuple(c.split(':')) for c in only.split()]
-runs = [(a, s, k) for a, s in cells for k in range(repeats if plan == 'full' else 1)]
+runs = [(a, s, k) for a, s in cells for k in range(repeats if plan == 'full' or only else 1)]
 random.Random(seed).shuffle(runs)
 for i, run in enumerate(runs):
     print(i, *run)
