@@ -37,3 +37,9 @@ If N independent trials give no wrong output, then the probability that a refres
 ## Limitations, known before running
 
 A stopped source only (v1's live read is T8). One small cluster (about 50 MB), so files are few and short; size-dependent bugs above a few relation segments wouldn't show. macOS's APFS, not ext4 or XFS. One PostgreSQL version. The faults are the ones listed; a crash of the host (not just the process) isn't simulated, and that remains T13c's.
+
+## The smoke run and the checker's negative controls (October 25, before the campaign)
+
+- **Harness fixes, none in pgdelta:** `pg_ctl` needed its `start` operation; PostgreSQL on macOS needs `LC_ALL` set; the schema digest needed a cast (`relkind::text`); a workload expression overflowed a 32-bit integer; and the loop now stops after 10 harness errors in a row instead of retrying them.
+- **Smoke:** 6 trials in 17.5 s (none, corrupt, foreign, kill among them), every one passing; the killed run had not finished and B refused to start until the rerun completed. At about 3 s a trial, the stop rule's 1,000 trials come before its 3 hours.
+- **Negative controls on the checker** (a checker that can't fail shows nothing): from an exact copy of S, one bit flipped in a random relation file was caught in 20 of 20 tries; an extra relation file in B was caught; one changed row was caught by the logical digest and by the byte check.
