@@ -8,6 +8,19 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-25 (evening): access to the Google Cloud project, checked
+
+The owner's project `postgres-delta-backup` is reached through `gcloud`, signed in as the owner (the browser console goes through the university's sign-in, which only the owner completes). A read-only check:
+- the project is ACTIVE, created 2026-09-19;
+- no VM is left running;
+- the quotas that bound the experiments:
+  - **32 vCPUs across all regions** (`CPUS_ALL_REGIONS`; the owner chose to work within it, K2), and 200 per region;
+  - 8 in-use external addresses;
+  - 500 GB of local SSD and 4,096 GB of persistent disk in `us-central1`;
+  - 16 AMD (N2D) vCPUs.
+
+Every VM set this session stayed within them and was deleted after its results were fetched. The owner's sign-in lapsed once and was renewed by the owner.
+
 ## 2026-10-25 (evening): BLAKE3 and a one-pass verification, each measured end to end
 
 - **EXP-29 (T5's gate):** keyed BLAKE3 hashes a page 4.8 times as fast per core as BLAKE2b on the x86 VMs. `pgdelta --hash blake3` was built: the algorithm goes in HELLO, and BLAKE2b stays the default.
