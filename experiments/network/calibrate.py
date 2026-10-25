@@ -41,13 +41,30 @@ def measure(procs, seconds):
             'mib_per_s': round(pages * PAGE / elapsed / 2**20, 1)}
 
 
+def disk(directory):
+    """MiB/s of a 1 GiB O_DIRECT write and read with dd, in 1 MiB blocks."""
+    import subprocess
+    path = os.path.join(directory, 'calibrate.tmp')
+    out = {}
+    for name, cmd in (('write', ['dd', 'if=/dev/zero', f'of={path}', 'bs=1M', 'count=1024', 'oflag=direct', 'conv=fsync']),
+                      ('read', ['dd', f'if={path}', 'of=/dev/null', 'bs=1M', 'iflag=direct'])):
+        started = time.perf_counter()
+        subprocess.run(cmd, check=True, capture_output=True)
+        out[f'{name}_mib_per_s'] = round(1024 / (time.perf_counter() - started), 1)
+    os.remove(path)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--seconds', type=float, default=3.0)
     ap.add_argument('--procs', default='1,4')
+    ap.add_argument('--disk', help='also time a 1 GiB direct write and read of a file in this directory (EXP-19)')
     a = ap.parse_args()
-    print(json.dumps({'utc': time.time(), 'cpus': os.cpu_count(), 'hash': [measure(int(p), a.seconds)
-                                                                           for p in a.procs.split(',')]}))
+    out = {'utc': time.time(), 'cpus': os.cpu_count(), 'hash': [measure(int(p), a.seconds) for p in a.procs.split(',')]}
+    if a.disk:
+        out['disk'] = disk(a.disk)
+    print(json.dumps(out))
 
 
 if __name__ == '__main__':
