@@ -7,6 +7,11 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+
+## 2026-10-25 (morning, the owner away): the lean round of experiments
+
+With the owner away and routine steps pre-approved, ten short experiments ran back to back, each pre-registered, each written up with its figure and pushed: EXP-20 (DR's deciding cells: "local changes only"), EXP-21 (the cause: cubic's early-loss slow mode, not slow start after idle), EXP-23 (its rate: BBR 0 of 30, cubic 12 of 15 at 20 ms), EXP-24 (with BBR on pgdelta's socket, v1 holds at every DR round trip), EXP-22 (HA on persistent disks beyond memory: v1 1.8–2.3× both full copies) and EXP-15's lean session (a real 31 ms link confirms the DR result; cubic's slow mode absent there). pgdelta gained `--congestion-control`, the harness `--base-rtt-ms` and named VM sets in two regions. EXP-17's extension ran on the Mac alongside. The ledger's [What the lean tests settled](DECISIONS.md#what-the-lean-tests-settled-october-25-2026) has the summary. Two slips are recorded where they happened: a VM pair deleted before its failure was read (EXP-15's first attempt), and an analysis edit pushed with a scoping error, fixed before it was used.
+
 ## 2026-10-25 (night): EXP-19 held; the owner set standing autonomy
 
 [EXP-19](experiments/EXP-19-two-part-model.md) fixed EXP-18's two-part model before running and tested it on new VMs at 3 busy processes: within 6.2%. Under disk contention v1 slowed 4–5% and one `pg_basebackup` stream up to 28%, so the fast-link comparison turns on which resource is busy on the destination: CPU (v1 loses its lead) or disk (it grows). VMs 03:35–03:56 UTC, deleted.
