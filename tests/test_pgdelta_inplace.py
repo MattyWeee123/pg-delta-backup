@@ -713,6 +713,18 @@ class CliTests(InPlaceTestCase):
         self.assertEqual(stats['receiver']['fsync'], 'worker')
         self.assertEqual(stats['switches']['receiver']['rebuild'], 'in-place')
         self.assertEqual(json.loads(receipt_path(self.basis).read_text())['status'], 'committed')
+        # EXP-35's registered consequence: in place, the command line verifies only what the run wrote.
+        self.assertEqual(stats['receiver']['verify_scope'], 'written')
+
+    def test_the_command_lines_verify_scope_is_written_in_place_and_all_otherwise(self):
+        for in_place, expected in ((True, 'written'), (False, 'all')):
+            with self.subTest(in_place=in_place):
+                args = cli.build_parser().parse_args(
+                    ['local', '--source', 'S', '--basis', 'B', *(['--in-place'] if in_place else ['--output', 'O'])])
+                self.assertEqual(cli._verify_scope(args), expected)
+        args = cli.build_parser().parse_args(['local', '--source', 'S', '--basis', 'B', '--in-place',
+                                              '--verify-scope', 'all'])
+        self.assertEqual(cli._verify_scope(args), 'all')
 
     def test_tcp_receive_in_place(self):
         pg_shapes(self.source, self.basis)
