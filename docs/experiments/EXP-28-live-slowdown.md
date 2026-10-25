@@ -107,6 +107,7 @@ The grid then reused this set-up (the cluster, B and C), skipping a second set-u
 
 ## What follows
 
+- *October 25, after [EXP-30](EXP-30-blake3-live.md): the 4-worker miss did not repeat on fresh VMs (BLAKE2b at 4 workers met O4 there, excesses −0.001 and −0.001), so it is session-dependent. The cap at 2 stands: 2 workers met O4 with margin in both sessions, and with BLAKE3 they were also faster than 4.*
 - **Live mode defaults to at most 2 source workers** (`LIVE_MAX_DEFAULT_JOBS` in `pgdelta/cli.py`, for `send` and `local` with `--source-kind live`). A `--jobs` given explicitly is kept, so an operator who accepts the load's cost can ask for 4. The cap is the registered consequence of prediction 3 failing: the largest count that met O4 at both speeds. Tested in `tests/test_pgdelta_cli.py`.
 - **O4 is met at 2 workers** on this load, with the client off the source, at both speeds; the time cost against 4 workers is 1.3 s here (5.2 against 3.9 s).
 - **Still open:**
