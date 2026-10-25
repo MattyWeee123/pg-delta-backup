@@ -3,6 +3,13 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+
+## 2026-10-25: the plan made lean; a timing model checked on existing data (EXP-16)
+
+The owner judged wave 1's designs far too costly (EXP-13 revised at about 8 h a session, EXP-14 at about 30 h and 260 USD) and clarified rule 11: no guesswork and confidence that matches the evidence, not replicating everything; and the token budget is limited, so no more multi-agent review rounds by default. The check of the wave 1 designs was stopped part-way. EXP-13's rule 11 revision, EXP-14 and EXP-15 are on hold, not run, pending the owner's choice of a lean approach: a single-VM lab that varies disk, CPU, memory and network on purpose, a timing model with a per-session calibration benchmark, and randomized fault tests for correctness.
+
+[EXP-16](experiments/EXP-16-timing-model-check.md) checked the model idea first, with no VMs: fitted on the October 23 sessions, it predicts the October 24 pair within 2% wherever the link sets the pace; where CPU sets it the second pair was 6–25% slower, and scaling v1's fixed work by its own CPU-seconds brings the error to a median 2.0%. Session drift was compute speed, which a short benchmark can measure.
+
 ## 2026-10-24 (night, later): VM sets, so several tests can run at once
 
 **Why:** the firming plan runs tests side by side within the 32-vCPU quota ([FIRMNESS.md](FIRMNESS.md#43-what-runs-at-once): T12r beside T9-PD, T13c beside OMNI-1), and T10b and T8 put the load's client on a third VM. The infrastructure made one pair from one configuration, and `create.sh` deleted the shared `known_hosts` whenever it made VMs (the audit's C-capacity item).
