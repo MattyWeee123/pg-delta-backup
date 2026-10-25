@@ -55,13 +55,16 @@ V1PROXY_METHODS = ('v1proxy', 'v1proxy_s1')
 # stunnel pair (TLS 1.3, mutual authentication; run_exp04 --conditions starts and stops the pair).
 T12_V1_ARMS = ('pgdelta_direct_inplace_w1', 'pgdelta_direct_inplace_w16', 'pgdelta_direct_inplace_hc',
                'pgdelta_direct_inplace_tls')
+# EXP-23's follow-up: v1's path asking for BBR on its data socket (pgdelta send --congestion-control bbr). Kept
+# apart from EXP-13's registered side arms, which analysis/exp13.py reads as exactly four.
+CC_V1_ARMS = ('pgdelta_direct_inplace_bbr',)
 TLS_METHODS = ('pgdelta_direct_inplace_tls',)
 # T8a: the sender reads the cleanly stopped source's data directory; no capture. T2 (EXP-11) adds
 # v1's path at 8 jobs on each end, pgdelta_direct_inplace_j8. T10a's proxies take v1's path through
 # every dispatch too (they read the snapshot, method_paths' source_data, and never stop the source).
 # T12's side arms are v1's path too.
 PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
-                          *V1PROXY_METHODS, *T12_V1_ARMS)
+                          *V1PROXY_METHODS, *T12_V1_ARMS, *CC_V1_ARMS)
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
 PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
 # T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On
@@ -105,7 +108,7 @@ PARCOPY_METHODS = tuple(PARCOPY_VARIANTS)
 T2_METHODS = ('full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS, 'parcopy8', 'parcopy4',
               'pgdelta_direct_inplace_j8')
 # The arms EXP-13 (T12) adds; its runs need --conditions (the emulated WAN) and CRC32C manifests.
-T12_METHODS = (*T12_V1_ARMS, 'parcopy16')
+T12_METHODS = (*T12_V1_ARMS, *CC_V1_ARMS, 'parcopy16')
 # T10a (EXP-12), the source's slowdown under a fixed-rate load (run_exp04 --load). none: an empty timed
 # phase of --none-window-s, the null's own windows; capture: the staged capture alone, a local
 # pg_basebackup of S on the source; bracket: pg_backup_start and pg_backup_stop in one session.
@@ -130,7 +133,7 @@ RSYNC_METHODS = ('rsync_8k', 'rsync_default')
 STAGED_METHODS = PGDELTA_STAGED_METHODS + RSYNC_METHODS
 # pgdelta refreshing B itself (--in-place) rather than writing a new copy O.
 IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', *V1PROXY_METHODS,
-                    *T12_V1_ARMS)
+                    *T12_V1_ARMS, *CC_V1_ARMS)
 # Methods that patch B, a copy of B0 made before the cache drop and not timed: in a real
 # refresh B already exists. The copy keeps B0 itself unchanged for the next method.
 BASIS_COPY_METHODS = IN_PLACE_METHODS + PGBACKREST_METHODS
@@ -176,7 +179,9 @@ TIERS = {'full': 'omni_today', 'full_nosync': 'diagnostic', 'full_syncfs': 'rele
          # EXP-13's (its Arms table): the side arms are protocol readings beside v1, never v1's place in a
          # row; parcopy16 is the bound with 16 streams, a B_fast candidate where it runs.
          'parcopy16': 'bound', 'pgdelta_direct_inplace_w1': 'protocol', 'pgdelta_direct_inplace_w16': 'protocol',
-         'pgdelta_direct_inplace_hc': 'protocol', 'pgdelta_direct_inplace_tls': 'protocol_tls'}
+         'pgdelta_direct_inplace_hc': 'protocol', 'pgdelta_direct_inplace_tls': 'protocol_tls',
+         # EXP-23's follow-up: v1 with BBR on its data socket.
+         'pgdelta_direct_inplace_bbr': 'protocol'}
 # The engine each pgdelta method runs, named by its flags, so that no change of pgdelta's
 # defaults can change what a method measures (as compare_methods pins EXP-02's):
 # - pgdelta: EXP-06's choice, which is also the command line's default on these 8-vCPU
@@ -247,6 +252,8 @@ PGDELTA_ENGINES.update({
     'pgdelta_direct_inplace_w16': {**_V1_ENGINE, 'window': 16},
     'pgdelta_direct_inplace_hc': {**_V1_ENGINE, 'high_churn': 0.5},
     'pgdelta_direct_inplace_tls': {**_V1_ENGINE, 'transport': 'tls'},
+    # EXP-23's follow-up: v1's engine asking for BBR on its data socket.
+    'pgdelta_direct_inplace_bbr': {**_V1_ENGINE, 'congestion_control': 'bbr'},
 })
 del _V1_ENGINE
 
@@ -281,6 +288,8 @@ def pgdelta_args(engine: dict) -> dict:
         send += ('--window', str(engine['window']))
     if engine.get('high_churn') is not None:
         send += ('--high-churn-node-fraction', f"{engine['high_churn']:g}")
+    if engine.get('congestion_control'):
+        send += ('--congestion-control', engine['congestion_control'])
     return {'send': send, 'receive': receive}
 
 
@@ -2742,7 +2751,8 @@ T12_UPPER_S = {
 # v1's side arms: v1's bound plus the largest difference from v1 written for the arm (E9's window 1 in hot and 16,
 # E10's fallback in uniform 1%, E11's TLS at 120 ms tuned).
 T12_SIDE_EXTRA_S = {'pgdelta_direct_inplace_w1': 2.0, 'pgdelta_direct_inplace_w16': 0.1,
-                    'pgdelta_direct_inplace_hc': 2.8, 'pgdelta_direct_inplace_tls': 0.5}
+                    'pgdelta_direct_inplace_hc': 2.8, 'pgdelta_direct_inplace_tls': 0.5,
+                    'pgdelta_direct_inplace_bbr': 0.1}
 
 
 def t12_workload(pattern, fraction) -> str:

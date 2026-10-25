@@ -281,6 +281,12 @@ def build_parser():
                            'when some of its bytes are unsent, or more than BYTES are in flight (what the path '
                            'holds without queueing), and idle otherwise; read from the TCP socket\'s send queue, '
                            'on Linux. Without it only unsent bytes count as busy')
+    # Experiment switch (EXP-21, EXP-23): the data socket's TCP congestion control.
+    send.add_argument('--congestion-control', metavar='NAME',
+                      help='ask for this TCP congestion control (for example bbr) on the connection to the '
+                           'receiver, on Linux. An unprivileged sender gets it only if the host allows it '
+                           '(net.ipv4.tcp_allowed_congestion_control); otherwise the host default stays, and '
+                           'the statistics say why')
     _source_kind_option(send)
     _jobs_option(send, 'S')
     send.set_defaults(func=cmd_send)
@@ -434,10 +440,13 @@ def cmd_send(args):
 
     def run():
         identity = _source_identity(args)
-        channel = transport.connect_channel(host, port)
+        channel = transport.connect_channel(host, port, congestion_control=args.congestion_control)
         try:
-            return sender.run_sender(channel, args.source, busy_inflight_bytes=args.busy_inflight_bytes,
-                                     **_sender_kwargs(args, identity))
+            stats = sender.run_sender(channel, args.source, busy_inflight_bytes=args.busy_inflight_bytes,
+                                      **_sender_kwargs(args, identity))
+            if channel.congestion_control is not None:
+                stats['congestion_control'] = channel.congestion_control
+            return stats
         finally:
             channel.close()
 

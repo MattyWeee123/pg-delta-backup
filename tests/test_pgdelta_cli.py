@@ -370,3 +370,51 @@ class StatsAndUnexpectedErrorTests(CliTestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class CongestionControlTests(unittest.TestCase):
+    """EXP-23's follow-up: --congestion-control asks for a congestion control on the sender's socket."""
+
+    def test_connect_reports_what_the_socket_got(self):
+        import socket as _socket
+        from pgdelta import transport
+        listener = _socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        try:
+            channel = transport.connect_channel('127.0.0.1', listener.getsockname()[1], congestion_control='reno')
+            accepted, _ = listener.accept()
+            report = channel.congestion_control
+            self.assertEqual(report['requested'], 'reno')
+            if hasattr(_socket, 'TCP_CONGESTION'):
+                self.assertEqual((report['effective'], report['error']), ('reno', None))
+            else:
+                self.assertIsNone(report['effective'])
+                self.assertIn('not available', report['error'])
+            accepted.close()
+            channel.close()
+        finally:
+            listener.close()
+
+    def test_without_the_option_nothing_is_set(self):
+        import socket as _socket
+        from pgdelta import transport
+        listener = _socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(1)
+        try:
+            channel = transport.connect_channel('127.0.0.1', listener.getsockname()[1])
+            accepted, _ = listener.accept()
+            self.assertIsNone(channel.congestion_control)
+            accepted.close()
+            channel.close()
+        finally:
+            listener.close()
+
+    def test_the_send_command_takes_the_option(self):
+        from pgdelta import cli
+        parser = cli.build_parser() if hasattr(cli, 'build_parser') else None
+        if parser is None:
+            self.skipTest('no build_parser')
+        args = parser.parse_args(['send', '--source', 'S', '--connect', 'h:1', '--congestion-control', 'bbr'])
+        self.assertEqual(args.congestion_control, 'bbr')
