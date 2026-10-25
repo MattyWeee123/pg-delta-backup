@@ -191,6 +191,20 @@ Matt, the project owner, settled the open sponsor questions on October 23, worki
 
 **What changes in the queue:** T1 is done. T11, T8a and T3 run next, in that order. T3 (e) tests in-place patching with a startup block instead of an undo journal.
 
+## Decisions of October 24, 2026 (night, after the rule 11 audit)
+
+The owner answered four of the [audit's](FIRMNESS.md#42-owner-decisions-this-plan-needs) twelve questions, the ones that block the next work:
+
+| # | Question | The owner's answer | What follows |
+|---|---|---|---|
+| K1, K12 | Are per-experiment VM-hour budgets lifted with the VM count? Is EXP-13's larger cost accepted? | **Yes: size each experiment to what firm results need.** | Budgets and cut lines no longer shape designs; cuts are for infrastructure faults only. Two sessions per test, on fresh VMs and different days. EXP-13's revised cost (about 24 instance-hours) is accepted. |
+| K3 | One session outside `us-central1`, for a real cross-region link? | **Yes.** | T12x, a real cross-region check of DR's path, is pre-registered beside EXP-13. VMs stay labelled and are deleted after their results are fetched. |
+| K4 | Kubernetes for the Omni probe? | **GKE is allowed.** | Enabling GKE adds a Google-managed service agent to the project's IAM and lets GKE create its own firewall rules; those are allowed for this, and nothing else changes IAM, firewall, billing or org policy. OMNI-1 and OMNI-2 can be built. |
+| K10 | Is one pre-registered session firm when its deciding margin is inside the shift measured between sessions? | **No: such a result needs a second session that agrees.** | Every one-session result inside session drift stays provisional until replicated. |
+| K6 | For HA, which full copy must v1 beat? | **Both, judged separately:** the fastest copy measured (rule 3) and the released tools Omni can run. | Every HA verdict is stated against each yardstick, and the positioning names the one it uses. |
+
+Still open (they steer later work, not the next): K2 (raise the vCPU quota), K5 (a native package such as BLAKE3, or standard library only), K7 (how much lost work is material for O4, and whether latency counts), K8 (T13's fault classes), K9 (whether the code freeze of about November 13 stands) and K11 (D13's key design).
+
 ## What T3, T8a and T11 settled (October 24, 2026)
 
 Three experiments ran on two new `n2-standard-8` VMs in `us-central1-a`: 552 timed runs and 48 correctness runs, all verified. Each write-up was rechecked independently against the raw data, EXP-10's XFS arm and write-back rerun in a second recheck, and the corrections are in them.
