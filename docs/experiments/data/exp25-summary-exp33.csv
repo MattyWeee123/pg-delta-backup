@@ -1,0 +1,9 @@
+row,trials,correct_or_caught,wrong_or_missed,median_refresh_s
+none,414,414,0,0.485
+diverged,171,171,0,0.499
+kill,229,229,0,0.5
+corrupt,82,82,0,0.474
+truncate,104,104,0,0.497
+all counted,1000,1000,0,
+negative control before_start,55,55,0,
+negative control during_start,55,47,8,

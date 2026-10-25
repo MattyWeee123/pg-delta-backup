@@ -67,6 +67,7 @@ def main(argv=None):
     ap.add_argument('--trials', default=str(ROOT / 'results' / 'correctness' / 'exp25b' / 'trials.jsonl'))
     ap.add_argument('--first-run', default=str(ROOT / 'results' / 'correctness' / 'exp25' / 'trials.jsonl'))
     ap.add_argument('--figdir')
+    ap.add_argument('--tag', default='', help='suffix for the data and figure files (EXP-33: -exp33)')
     a = ap.parse_args(argv)
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
@@ -108,7 +109,7 @@ def main(argv=None):
     first = load(a.first_run) if Path(a.first_run).exists() else []
     first_segments = describe('first run (stale template, reported apart)', first)[2] if first else []
 
-    data = ROOT / 'docs' / 'experiments' / 'data' / 'exp25-summary.csv'
+    data = ROOT / 'docs' / 'experiments' / 'data' / f'exp25-summary{a.tag}.csv'
     with open(data, 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(['row', 'trials', 'correct_or_caught', 'wrong_or_missed', 'median_refresh_s'])
@@ -153,7 +154,7 @@ def main(argv=None):
     right.set_title('WAL segments per refresh (registered: 90% at 2 or more)', fontsize=10)
     right.legend(fontsize=8)
     fig.tight_layout()
-    print(plotting.save(fig, 'exp25-live'))
+    print(plotting.save(fig, f'exp25-live{a.tag}'))
 
 
 if __name__ == '__main__':
