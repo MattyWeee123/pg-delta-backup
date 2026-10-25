@@ -3,6 +3,20 @@
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
+## 2026-10-24 (night, later): VM sets, so several tests can run at once
+
+**Why:** the firming plan runs tests side by side within the 32-vCPU quota ([FIRMNESS.md](FIRMNESS.md#43-what-runs-at-once): T12r beside T9-PD, T13c beside OMNI-1), and T10b and T8 put the load's client on a third VM. The infrastructure made one pair from one configuration, and `create.sh` deleted the shared `known_hosts` whenever it made VMs (the audit's C-capacity item).
+
+**What was built** ([infra/gcp/README.md](../infra/gcp/README.md#vm-sets)):
+- `PAIR=NAME` names a set of VMs: `pgd-NAME-ROLE`, with its own `known_hosts` and SSH config, and its settings in `infra/gcp/sets/NAME.sh` if that exists, the environment over them. With no set named, every script and `remote.py` act on `pgd-source` and `pgd-dest` as before.
+- Roles beyond source and dest, each with its own zone, machine type and data disk if wanted. The client role defaults to an n2-standard-4 with a 50 GB balanced persistent disk, in the set's zone.
+- Two kinds of data disk at `/data`, both ext4 with the same options: local NVMe (RAID 0 when more than one) as before, or one balanced persistent disk of a given size, deleted with its VM.
+- `create.sh` refuses, before making anything, a VM of another set, one in another zone than asked, and a set the quota can't hold. `teardown.sh` deletes only its set and its disks, in every zone, and exits 1 naming anything of the set that is left. `DRY_RUN=1` prints every gcloud command and runs none.
+- `remote.py --pair NAME` (or `PAIR`) acts on a set, each VM described in its own zone; `fetch` keeps a set's runs under `results/exp04/sets/NAME/`. `agent.py env` records each VM's set, role and disk kind from its metadata.
+- `tests/test_infra_sets.py`: 33 tests, none calling the cloud; a fake gcloud keeps a project's VMs and disks in a file.
+
+**Not done:** nothing ran on GCP. The first real `create.sh` of a named set, of a balanced persistent disk and of a client is their smoke test. The harness for T10b's load on the client is T10b's work.
+
 ## 2026-10-24 (night): a rule 11 audit: what is firm, and how to firm the rest
 
 **Why:** the owner asked whether anything else would leave decisions unfirm, and added rule 11 to the ledger: only a firm decision picks a single route; anything less keeps its routes open as branches, with an experiment queued to firm it.

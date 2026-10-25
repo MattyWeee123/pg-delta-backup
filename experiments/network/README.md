@@ -498,6 +498,8 @@ python3 experiments/network/remote.py fetch full            # -> results/exp04/f
 infra/gcp/teardown.sh                      # results on /data are lost: fetch first
 ```
 
+Several sets of VMs can run at once ([infra/gcp/](../../infra/gcp/README.md#vm-sets)). `PAIR=a infra/gcp/create.sh` makes the set named a (`pgd-a-source`, `pgd-a-dest`, and a client if its `ROLES` has one), and `remote.py --pair a COMMAND` (or `PAIR=a` in the environment) acts on it: each VM described in its own zone, the set's own `known_hosts`, `fetch` into `results/exp04/sets/a/NAME`. Every line here, with no set named, acts on `pgd-source` and `pgd-dest` as before.
+
 For T3, T8a and T11 (see [Methods for T3, T8a and T11](#methods-for-t3-t8a-and-t11); speeds and repeats here are examples):
 
 ```sh

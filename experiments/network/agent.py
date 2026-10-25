@@ -210,6 +210,9 @@ def cmd_env(args) -> dict:
         'clk_tck': os.sysconf('SC_CLK_TCK'),
         'gce': {key: metadata(key) for key in ('name', 'id', 'machine-type', 'zone',
                                                'cpu-platform')},
+        # The VM set and role infra/gcp/create.sh made this VM for, and its data disk's kind (local-nvme or
+        # pd-balanced), from the instance metadata; None on a VM made before sets.
+        'vm_set': {key: metadata(f'attributes/pgd-{key}') for key in ('set', 'role', 'data-disk')},
         'iface': {'name': iface, 'mtu': read(f'/sys/class/net/{iface}/mtu'), 'driver': driver,
                   'queues_tx': len(list(Path(f'/sys/class/net/{iface}/queues').glob('tx-*')))},
         'qdisc': text_of(['tc', 'qdisc', 'show', 'dev', iface]),
