@@ -1,6 +1,6 @@
 # EXP-31: Without its second pass over B, does v1 recover the HA case beyond memory?
 
-Status: **done October 25, 2026 (VMs 19:3x–21:01 UTC; 16 runs, all verified; deleted): without its second pass, v1 ties the full copies for local changes (0.96 of one `pg_basebackup` stream, 1.01 of the parallel copy, from 1.69 and 1.79), but stays about 2.1× slower for scattered ones. HA beyond memory stays out as a speed target.** Pre-registered before any run. [EXP-22](EXP-22-ha-scale-model.md)'s scale model again, at its deciding size: a 12 GB database on 8 GB machines, on balanced persistent disks, across two zones. Now with v1's new `--verify-scope written` (built since: it verifies each file from B's digests and the pages it wrote, without re-reading B) beside v1 as before. One VM pair (`PAIR=ha`), about 1 hour.
+Status: **done October 25, 2026 (run 19:35–21:01 UTC; 16 runs, all verified; deleted): without its second pass, v1 ties the full copies for local changes (0.96 of one `pg_basebackup` stream, 1.01 of the parallel copy, from 1.69 and 1.79), but stays about 2.1× slower for scattered ones. HA beyond memory stays out as a speed target.** Pre-registered before any run. [EXP-22](EXP-22-ha-scale-model.md)'s scale model again, at its deciding size: a 12 GB database on 8 GB machines, on balanced persistent disks, across two zones. Now with v1's new `--verify-scope written` (built since: it verifies each file from B's digests and the pages it wrote, without re-reading B) beside v1 as before. One VM pair (`PAIR=ha`), about 1 hour.
 
 ## Question
 
