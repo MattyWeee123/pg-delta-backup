@@ -1,6 +1,6 @@
 # EXP-17: Does v1's refresh ever produce a wrong copy? A randomized fault campaign
 
-Status: **pre-registered October 25, 2026, before running.** Local (a Mac, PostgreSQL 17); no VMs. It is the correctness campaign of the lean plan (rule 11 as clarified October 25): many cheap randomized trials with an independent check of every output, giving a stated bound on the failure rate instead of a handful of runs.
+Status: **done October 25, 2026: 1,000 trials, no wrong output** (results below). Pre-registered before running; its kill rule was revised twice after the campaign's stop rule fired on safe behaviour (both revisions are recorded below, before the run that counts). Local (a Mac, PostgreSQL 17); no VMs. It is the correctness campaign of the lean plan (rule 11 as clarified October 25): many cheap randomized trials with an independent check of every output, giving a stated bound on the failure rate instead of a handful of runs.
 
 ## Question
 
@@ -58,3 +58,32 @@ A stopped source only (v1's live read is T8). One small cluster (about 50 MB), s
 - **The rule was still wrong:** "changed" is not "unfinished". The property, as pgdelta's own help states it, is that B starts only as the old copy or as the complete new one, never in between.
 - **The second revision, before the next run:** at each kill before the process exits, B is classed as old (unchanged), new (byte-identical to S over the checked files) or partial (neither). Only a partial B must refuse to start. Everything else is unchanged; the campaign reruns from trial 0.
 - **Read with care:** the pre-registered kill rule was revised twice after seeing results. Both revisions narrow it to the exact property and were found by the campaign's own stop rule; neither touched an output check, and no wrong copy has appeared in 80 trials so far.
+
+## Results (the third run, 02:20–03:04 UTC, 1,000 trials)
+
+![Outcomes by fault, and the bound they support](../figures/exp17-correctness.svg)
+
+*How to read it:* left, every counted trial by its injected fault, green where the refreshed copy was correct (or, for a foreign basis, refused with B untouched); right, the upper bound on the failure rate that N trials with no wrong output support, at 95% and 99.9% confidence, with this campaign's N marked.
+
+| Fault | Trials | Correct | Median refresh |
+|---|---:|---:|---:|
+| none | 358 | 358 | 0.48 s |
+| B diverged (its own writes first) | 157 | 157 | 0.47 s |
+| killed part-way, then rerun | 247 | 247 | 1.05 s |
+| B corrupted (1–16 bytes in 1–3 files) | 93 | 93 | 0.48 s |
+| B truncated or a file deleted | 93 | 93 | 0.48 s |
+| foreign B (another cluster) | 52 | 52 refused, B unchanged | 0.33 s |
+| **all** | **1,000** | **1,000** | |
+
+Data: [exp17-summary.csv](data/exp17-summary.csv); raw trials in `results/correctness/exp17/` (git-ignored); analysis `analysis/exp17.py`.
+
+- **No wrong output, no harness error.** Every refreshed copy was byte-identical to S over the checked files, had no extra relation file, started, and gave S's logical digest exactly.
+- **Kills:** 49 of the 247 landed before the process exited. At the kill, B was partial in 30, the old copy in 16 and already the complete new copy in 3. **All 30 partial copies refused to start**; the 19 others started as a whole database, old or new. The other 198 kills came after the process had exited.
+- **Foreign bases:** 52 of 52 refused, with B byte-for-byte unchanged.
+
+## What it supports
+
+- **The bound:** with no wrong output in 1,000 independent trials, a refresh drawn from this mix of workloads and faults produces a wrong copy with probability **below 0.69% at 99.9% confidence (below 0.30% at 95%)**. More trials tighten it in proportion: 10,000 would give 0.069%, about 8 hours of a laptop.
+- **G1's crash promise held in every case seen:** 30 of 30 copies caught part-way refused to start, across the whole refresh, not just one moment (the kill times were drawn from 0.02–2 s, and the reproductions in the two sections above add 6 more).
+- **Detection of a bad basis:** corrupted, truncated, missing and diverged pages in B were all found and replaced from S (343 trials), as the design says every reused page is checked by its digest.
+- **Scope, unchanged from the limitations:** a stopped source, a 50 MB cluster, macOS's APFS, PostgreSQL 17, and process kills, not host crashes. It says nothing yet about v1 reading a live source (T8), large files, or a power loss (T13c).

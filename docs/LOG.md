@@ -4,6 +4,13 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
+
+## 2026-10-25 (night): EXP-17, a randomized correctness campaign, locally
+
+[EXP-17](experiments/EXP-17-randomized-correctness.md) ran 1,000 randomized in-place refreshes on the Mac, each with a random workload and one injected fault (a kill part-way and a rerun, corrupted, truncated, diverged or foreign bases), and checked every output independently of pgdelta: byte identity over S's files and S's logical digest after starting. No wrong output: below 0.69% per refresh at 99.9% confidence, within its scope (a stopped source, 50 MB, macOS). All 30 copies caught part-way refused to start.
+
+The campaign stopped twice before that, both times on its own kill rule, not on a wrong copy: first a kill before pgdelta had touched B (B started as the old copy), then a kill after it had published (B started as the new copy). Each was reproduced with kills across the refresh, the rule was narrowed to the property pgdelta promises (start only as the old copy or the complete new one), recorded, and the campaign rerun from the start. Cost: no VMs; about 2 hours of laptop time.
+
 ## 2026-10-25: the plan made lean; a timing model checked on existing data (EXP-16)
 
 The owner judged wave 1's designs far too costly (EXP-13 revised at about 8 h a session, EXP-14 at about 30 h and 260 USD) and clarified rule 11: no guesswork and confidence that matches the evidence, not replicating everything; and the token budget is limited, so no more multi-agent review rounds by default. The check of the wave 1 designs was stopped part-way. EXP-13's rule 11 revision, EXP-14 and EXP-15 are on hold, not run, pending the owner's choice of a lean approach: a single-VM lab that varies disk, CPU, memory and network on purpose, a timing model with a per-session calibration benchmark, and randomized fault tests for correctness.
