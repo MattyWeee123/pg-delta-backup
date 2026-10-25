@@ -621,6 +621,14 @@ def main(argv=None):
                     for port, name in ((COPY_PORT, f'copy{COPY_PORT}'), (KILLED_PORT, f'copy{KILLED_PORT}')):
                         Cluster(pg, sock, work / name, port).stop(mode='immediate', check=False)
                     Cluster(pg, sock, work / 'b', DIVERGED_PORT).stop(mode='immediate', check=False)
+                if negative and 'harness_error' not in rec:
+                    # Added October 25 (a harness fix, after trial 391): a negative control leaves B wrong on purpose;
+                    # a normal refresh repairs it before the next trial, which may start B (the diverged fault).
+                    repair = run(pgdelta_argv(source, ctx['basis'], work / 'stats-repair.json', pg), check=False,
+                                 cwd=REPO, env=pgdelta_env(None))
+                    rec['repair_exit'] = repair.returncode
+                    if repair.returncode != 0:
+                        rec['harness_error'] = f'the repair refresh after a negative control exited {repair.returncode}'
                 log.write(json.dumps(rec) + '\n')
                 log.flush()
                 streak = streak + 1 if 'harness_error' in rec else 0
@@ -650,7 +658,7 @@ def main(argv=None):
                 else:
                     outcome = 'pass'
                 print(f'{time.strftime("%H:%M:%S")} trial {n} '
-                      f'({f"negative control, {variant}" if negative else rec["fault"]}): '
+                      f'({f"negative control, {variant}" if negative else rec.get("fault", "?")}): '
                       f'{outcome}; counted {counted}, negative controls caught {caught} of {negatives}, '
                       f'harness errors {errors}', flush=True)
                 n += 1
