@@ -8,6 +8,17 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-25 (afternoon): EXP-25 finished on the second try; EXP-26 settled BBR's default
+
+**EXP-25 (live-source correctness).** The first campaign run stopped making progress at trial 790. A negative control's deliberately broken copy had looped the checker's query for 3 h 22 min: a torn btree whose right links form a cycle, in a loop where PostgreSQL never checks for interrupts, so not even a cancel stops it. pg_amcheck named the index in under a second. Queries on a copy now have a 120 s limit, a hung query counts as a problem with the copy, pg_amcheck still runs, and the copy is stopped with SIGQUIT. The run's summary then showed that it had used a stale template, built before the review revision (16 MiB WAL segments, timeline 1), so only 4 of 712 refreshes spanned two segments. The harness now checks the template, and the campaign restarted from trial 0 on the registered one.
+- **Result:** no wrong output in 1,000 counted trials, each spanning 8–19 WAL segments with a history file (below 0.69% per refresh at 99.9% confidence).
+- **Controls:** read before start 55 of 55, read during start 50 of 55, against a bar of 90%.
+- **Still to test:** whether the five misses were correct copies, which full-page writes would explain.
+
+**EXP-26 (BBR's fairness).** gcloud needed the owner to sign in again. The owner then asked why every experiment ran for hours, and the registered grid (60 runs of 100 s) was cut, before it ran, to 20 runs of 50 s with repeats only near the bar: 24 minutes in all.
+- **Result:** BBR stays opt-in. A BBR newcomer took far more from cubic traffic than a cubic newcomer would in 8 of 10 cells (harm 0.32–0.95, bar 0.20), 81–96% of the link at a queue of one round trip or less.
+- **Changes:** the CLI help and the ledger say when to use BBR. The VMs are deleted.
+
 ## 2026-10-25: review fixes for the live source and EXP-25
 
 A code review of `build/t8-live` found six things, each checked with a failing test or a probe before it was fixed (branch `build/t8-live-fixed`). In pgdelta: a receiver that stopped answering or reading left the source's slot holding WAL indefinitely; the sender now gives up after `--live-timeout` (default 120 s), ends backup mode and drops the slot, with TCP keepalives on the connection, and `max_slot_wal_keep_size` is documented as the backstop. A WAL page that changed after hashing now fails the run. The broken test variant now warns and exits 4. In EXP-25, before the campaign: a second negative control that reads while a spread `pg_backup_start` runs (with `fast := true` the start checkpoint takes 3-10 ms, less than listing the files, so that order can't be tested here and rests on the code and a stub test); S's shared buffers at 8 MB so that control has dirty pages to miss; the kill rule's "blocked" only in pgdelta's own blocked state; 1 MiB WAL segments on timeline 2. The third smoke: 10 of 10 counted trials correct, 4 of 4 of each control caught, every refresh 8-16 segments. The campaign has not run.
