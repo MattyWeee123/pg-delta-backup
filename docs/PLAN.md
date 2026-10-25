@@ -2,6 +2,8 @@
 
 Proposed October 22, 2026, for the team to confirm at the October 23 sync.
 Code freeze is about November 13; the sponsor demo is late November or the first week of December.
+
+*Revised October 25, 2026: the code freeze moves to **November 30**, and the presentation is in the first week of December (the owner's decision K9 in the [ledger](DECISIONS.md#decisions-of-october-24-2026-night-after-the-rule-11-audit)). The [schedule to the presentation](#schedule-to-the-presentation-october-25-2026) replaces the week-by-week schedule below.*
 The [September 30 plan](archive/2026-09-30-plan.md) is archived.
 
 ## Where we are
@@ -48,6 +50,21 @@ Owners are suggestions to confirm at the sync.
 | Oct 28–Nov 3 | v1 over the network | Baselines at 1 and 10 GB | Catchup baselines; active-load correctness check | Tricky-copies library v1 |
 | Nov 4–10 | Run against tricky copies; fix | Full comparison runs, 3 repeats | Correctness on all methods | Edge-case tests; answer to Ben's LSN question |
 | Nov 11–13 | Freeze, docs | Final chart: refresh time vs. link speed | Final checks | Write-up |
+
+## Schedule to the presentation (October 25, 2026)
+
+This order follows the [rule 11 audit's](FIRMNESS.md#43-what-runs-at-once) waves, with the owner's decisions of October 24 and 25: experiments sized to what firm results need, two sessions per test on different days, no vCPU cap, a compiled hash allowed, and a freeze on November 30. It is a ranking by judgment, so under rule 11 it is provisional, and it moves as results come in. With the quota raised, waves that share a week run at once; within today's 32 vCPUs they run one after another, a few days later.
+
+| Dates | Experiments (VMs) | Building (no VMs) |
+|---|---|---|
+| Oct 25–31 | Wave 1, session 1: EXP-13 revised beside EXP-14 (the HA re-test on persistent disks across zones) | Multi-pair infrastructure; EXP-13's revision, EXP-14 and EXP-15 pre-registered and reviewed; their harness; T8's design and build start; T4 on the Mac |
+| Nov 1–7 | Wave 1, session 2, on another day; T13c (the in-place crash test on Linux) beside OMNI-1 (an Omni container probe); EXP-15 (the real cross-region link) | OMNI-2 on GKE; T10b's harness, with its client VM, and T5's arms |
+| Nov 8–14 | OMNI-2; T13c's second session; T10b with T5 inside it, two sessions | T8's build |
+| Nov 15–23 | T8's two sessions (v1 itself on a live source, the client on its own VM); T10b's v1 arm; v1 against native incremental | Fixes from T8 |
+| Nov 24–30 | T9 at scale; T11b; T13's fault classes; any second sessions still owed | Final charts and write-ups; **freeze November 30** |
+| Dec 1–5 | – | Presentation; fixes only |
+
+Anything not firm by November 30 is presented as provisional, with the experiment that would make it firm.
 
 ## Interfaces to agree at the sync
 

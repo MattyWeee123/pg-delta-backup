@@ -203,7 +203,15 @@ The owner answered four of the [audit's](FIRMNESS.md#42-owner-decisions-this-pla
 | K10 | Is one pre-registered session firm when its deciding margin is inside the shift measured between sessions? | **No: such a result needs a second session that agrees.** | Every one-session result inside session drift stays provisional until replicated. |
 | K6 | For HA, which full copy must v1 beat? | **Both, judged separately:** the fastest copy measured (rule 3) and the released tools Omni can run. | Every HA verdict is stated against each yardstick, and the positioning names the one it uses. |
 
-Still open (they steer later work, not the next): K2 (raise the vCPU quota), K5 (a native package such as BLAKE3, or standard library only), K7 (how much lost work is material for O4, and whether latency counts), K8 (T13's fault classes), K9 (whether the code freeze of about November 13 stands) and K11 (D13's key design).
+Three more, answered October 25:
+
+| # | Question | The owner's answer | What follows |
+|---|---|---|---|
+| K2 | Raise the vCPU quota? | **vCPUs should not be capped:** the owner holds the project, and the Google sponsor said to use as much as needed. | The project's quota (32 vCPUs across all regions, 8 external addresses per region) is Google's limit; the owner raises it in the console. Until then, waves run one after another within it. |
+| K5 | May pgdelta use a native package (keyed BLAKE3), or must it stay standard library only? | **A compiled hash library is allowed.** | D07's "standard library only" no longer binds the hash. Whether BLAKE3 replaces BLAKE2b is T5's to decide by measurement, with its packaging (a wheel for each CPU type in the sidecar image) part of what it records. |
+| K9 | Does the code freeze of about November 13 stand? | **No: the freeze moves to November 30,** before the presentation in the first week of December. | Features until November 30, then fixes only. Anything not firm by then is presented as provisional. See [PLAN.md](PLAN.md#schedule-to-the-presentation-october-25-2026). |
+
+Still open: K7 (how much lost work is material for O4, and whether latency counts), K8 (T13's fault classes) and K11 (D13's key design).
 
 ## What T3, T8a and T11 settled (October 24, 2026)
 
@@ -436,7 +444,7 @@ The tests T0 to T14, and T11b, are described in the queue further down.
 | D38p | (added) Build a complete new O rather than patch in place, clone or copy ahead | **X** | Never varied. Costs 3.3-3.5 s of the 4.3-5.0 s transfer. *October 24 (EXP-10): in place is 1.56-1.58 s faster than this new copy on ext4 (0.6-0.9 s faster than a new copy with the fsync on a thread); on XFS, clones make a new copy within 0.19 s of in place for local changes (0.33 s for uniform). Superseded by D85 and D86.* | Settled. | done |
 | D40p | (added) fsync each file serially in the main loop | **X** | Never varied. 1.66-1.72 s, the largest single phase; one 5.87 s outlier. *October 24 (EXP-10): an fsync thread saves 0.68-1.00 s (0.69-1.04 s in a later sweep); fixed early write-back 0.43-0.98 s. Superseded by D86.* | Settled. | done |
 | D41p | (added) Separate re-read verification rather than fused or O_DIRECT | D | Never compared. 1.40-1.52 s of verifier time, mostly hidden; 4.0 s sequential. *October 24 (EXP-09): with the writing gone, this is v1's bottleneck: 1.75 s busy, the main loop waiting 0.62 s for it at the end, the re-read served from the page cache.* | Cost beyond RAM; what fused would miss. | T13, T9 |
-| D07 | Python, standard library only | C | Threads fail; 4 processes hash 3.88 times faster. Hashing is most of the source CPU. No compiled build compared. | Source CPU; v1's floor. | T5 |
+| D07 | Python, standard library only | C | Threads fail; 4 processes hash 3.88 times faster. Hashing is most of the source CPU. No compiled build compared. *October 25 (K5): the owner allows a compiled hash library, so "standard library only" no longer binds the hash; whether one replaces BLAKE2b is T5's to measure. Grade unchanged.* | Source CPU; v1's floor. | T5 |
 | D12 | No LSN or summary hints, even for ordering | D | No reason given. Summaries never missed a changed page (36/36). v0 is the pure-hash half of the research's hybrid. | Ordering's value in v1. | T8 |
 | D13 | No cached hash tree of B | D | Not motivated. It is the one scan-reducing lever compatible with the niche. | How often B is unchanged; storing a keyed tree. | T1 |
 | D15 | BLAKE2b instead of keyed BLAKE3 | D | Never compared. 0.54-0.55 GB/s per VM core. | Per-core gain; effect on source CPU. | T5 |
