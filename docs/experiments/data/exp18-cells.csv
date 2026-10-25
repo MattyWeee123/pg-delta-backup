@@ -1,0 +1,15 @@
+level,busy,arm,speed,runs,measured_s,calibrated_s,calibrated_error,uncalibrated_s,uncalibrated_error,hash_rate
+exp18-k0,0,full,2g,3,10.282,10.282,0.0,10.282,0.0,292531
+exp18-k0,0,full,unthrottled,3,3.993,3.941,-0.013,3.941,-0.013,292531
+exp18-k0,0,pgdelta_direct_inplace,2g,3,3.061,3.144,0.0271,3.144,0.0271,292531
+exp18-k0,0,pgdelta_direct_inplace,unthrottled,3,3.044,3.04,-0.0012,3.04,-0.0012,292531
+exp18-k2,2,full,2g,3,10.287,10.283,-0.0004,10.283,-0.0004,193942
+exp18-k2,2,full,unthrottled,3,3.792,3.942,0.0397,3.942,0.0397,193942
+exp18-k2,2,pgdelta_direct_inplace,2g,3,3.955,4.681,0.1835,3.144,-0.2051,193942
+exp18-k2,2,pgdelta_direct_inplace,unthrottled,3,4.035,4.577,0.1344,3.041,-0.2465,193942
+exp18-k4,4,full,2g,3,10.288,10.283,-0.0005,10.283,-0.0005,158634
+exp18-k4,4,full,unthrottled,3,4.122,3.942,-0.0437,3.942,-0.0437,158634
+exp18-k4,4,pgdelta_direct_inplace,2g,3,4.742,5.697,0.2015,3.145,-0.3367,158634
+exp18-k4,4,pgdelta_direct_inplace,unthrottled,3,4.688,5.593,0.1931,3.041,-0.3513,158634
+exp18-k0b,0,full,unthrottled,3,3.926,3.942,0.0041,3.942,0.0041,292236
+exp18-k0b,0,pgdelta_direct_inplace,unthrottled,3,3.124,3.044,-0.0257,3.041,-0.0267,292236

@@ -5,6 +5,11 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+
+## 2026-10-25 (night): EXP-18, the first lab test, on one VM pair for 23 minutes
+
+[EXP-18](experiments/EXP-18-calibrated-contention.md) loaded the destination on purpose with 0, 2 and 4 busy processes and asked whether a hash benchmark taken before the runs predicts the slowdown. Its deciding prediction failed: scaling all of v1's fixed work by the benchmark overshoots by 13–20% (without it, the model undershoots by 20–35%). Exploratory: if about 60% of that work scales, a fit on one level predicts the next within 4%, a hypothesis to test next. And a finding for the positioning: with 2 busy processes on the destination, v1 lost its unthrottled lead over one `pg_basebackup` stream (4.04 against 3.79 s); at 2 Gbit/s it stayed far ahead. The VMs ran 03:08–03:31 UTC (about 0.40 USD) and are deleted. The console link redirects to the university's single sign-on, which needs the owner's sign-in; gcloud access, signed in by the owner earlier, works.
+
 ## 2026-10-25 (night): EXP-17, a randomized correctness campaign, locally
 
 [EXP-17](experiments/EXP-17-randomized-correctness.md) ran 1,000 randomized in-place refreshes on the Mac, each with a random workload and one injected fault (a kill part-way and a rerun, corrupted, truncated, diverged or foreign bases), and checked every output independently of pgdelta: byte identity over S's files and S's logical digest after starting. No wrong output: below 0.69% per refresh at 99.9% confidence, within its scope (a stopped source, 50 MB, macOS). All 30 copies caught part-way refused to start.
