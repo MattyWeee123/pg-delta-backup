@@ -316,3 +316,19 @@ An independent review read this design with EXP-13's revision under rule 11 and 
 - **Near the line across sessions** uses each ratio's measured shift (minor).
 
 Found while checking: EXP-15 had said EXP-13's R1 "applies to EXP-13's rows" only, which would have let R's rows 1–3 make a WAN claim for v1 that the ledger's rule withholds. Rows 1–3 here now carry EXP-13's R1. This doesn't favour v1.
+
+## A lean session instead (October 25, 2026, before running)
+
+Under rule 11 as the owner clarified it (small experiments, no two-session programme), and after [EXP-20](EXP-20-dr-latency-core.md) to [EXP-24](EXP-24-dr-with-bbr.md) found that v1's DR result turns on cubic's early-loss slow mode, which BBR avoids, the design above is on hold and this one session runs instead. Its question: **does the slow mode, and BBR's escape from it, happen on a real link between regions, not only in netem?**
+
+- **VMs** (set file `infra/gcp/sets/xr.sh`): two `n2-standard-8` with local NVMe, the source in `us-central1-a`, dest in `us-west1-b`; the harness's link tests and pings record the real round trip and one stream's rate. BBR is added to the source's allowed list (the default stays cubic), as in EXP-24.
+- **Conditions:** no emulated delay; the tree's 2 Gbit/s rate limit on default and on tuned hosts (2:0:default, 2:0:tuned), so the real path supplies the round trip.
+- **Arms:** `pgdelta_direct_inplace` (cubic), `pgdelta_direct_inplace_bbr`, `full`, `parcopy8`; hot and uniform 1%; **5 repeats**.
+
+**Predictions**
+1. The round trip is 30–50 ms; one default stream reaches 0.9–1.4 Gbit/s, a tuned one at least 1.8.
+2. For uniform 1%, BBR v1 is in the slow mode in 0 of 10 runs (both settings).
+3. For uniform 1% on tuned hosts, BBR v1 ÷ the fastest copy is at most 0.90 (EXP-24 at 20 and 60 ms tuned: 0.63–0.73).
+4. Whether cubic v1 falls into the slow mode here is the open question: reported as a count, not predicted.
+
+**What follows:** if 2 and 3 hold, the emulated results stand on a real path and BBR's role is confirmed; if BBR v1 is slow here, the emulator misled and the DR claim goes back to provisional.
