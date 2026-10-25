@@ -52,3 +52,5 @@ EXP-17, EXP-25, EXP-32 and EXP-33 killed pgdelta's processes mid-refresh: the ke
 ## Revision before any trial (October 25)
 
 The two-VM set didn't fit the SSD-backed disk quota while EXP-31's pair ran: balanced persistent disks and boot disks count against it, and 100 GB was free. **One VM** (`n2-standard-4`, a 40 GB data disk) now holds the stopped source cluster and B, and `pgdelta local --in-place --source-kind datadir` runs both ends there. The reset cuts the power to both at once. That changes nothing the test judges: the source is stopped and only read, and what survives on B's disk is what is checked. Everything else is as registered.
+
+**That revision was dropped before any trial:** the VM tooling requires a source and a dest in every set. The run waits for EXP-31's pair to finish and free the quota, then uses two VMs as first registered, with 40 GB data disks. The driver keeps the one-VM path, unused.
