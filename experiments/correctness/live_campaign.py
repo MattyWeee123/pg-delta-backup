@@ -78,11 +78,18 @@ CONTROL_FILE, CONTROL_PENDING, MARKER = 'global/pg_control', 'global/pg_control.
 VARIANTS = {'before_start': '1', 'during_start': 'during'}
 CONTROL_SHARE = 0.9  # registered: each negative control caught in at least 90% of its completed runs
 MULTI_SEGMENT_SHARE = 0.9  # registered (review revision): the bound covers the WAL range only at this share or more
+# Added October 25 (a harness fix, after trial 790): a wrong copy can make a query loop for ever (trial 790's
+# negative control: a cycle of right links in a torn btree, where _bt_moveright never checks for interrupts, so
+# neither a cancel nor statement_timeout stops it). A query on a copy that runs past this is a problem with the copy;
+# a correct one answers in under a second. pg_amcheck still runs, with its own limit, and the copy is stopped
+# immediately (SIGQUIT), which ends such a backend.
+COPY_QUERY_SECONDS, AMCHECK_SECONDS = 120, 600
 
 
 class Cluster:
-    def __init__(self, bindir, sock, data, port):
+    def __init__(self, bindir, sock, data, port, query_timeout=None):
         self.bin, self.sock, self.data, self.port = Path(bindir), sock, Path(data), port
+        self.query_timeout = query_timeout  # seconds, for each psql call (a copy's: COPY_QUERY_SECONDS)
 
     def start(self, check=True):
         return run([str(self.bin / 'pg_ctl'), '-D', str(self.data), '-w', '-t', '120', '-l', f'{self.data}.log',
@@ -99,7 +106,7 @@ class Cluster:
 
     def sql(self, text, db=bank.DATABASE):
         return run([str(self.bin / 'psql'), '-h', self.sock, '-p', str(self.port), '-U', USER, '-d', db, '-qAtX',
-                    '-v', 'ON_ERROR_STOP=1', '-c', text]).stdout.strip()
+                    '-v', 'ON_ERROR_STOP=1', '-c', text], timeout=self.query_timeout).stdout.strip()
 
     def conninfo(self):
         return f'host={self.sock} port={self.port} user={USER} dbname=postgres'
@@ -146,6 +153,17 @@ def make_template(bindir, sock, path):
     conf.write_text(original)
     if timeline != '2' or not (Path(path) / 'pg_wal' / '00000002.history').exists():
         raise HarnessError(f'the template did not move to timeline 2 (timeline {timeline})')
+
+
+def template_matches(bindir, path):
+    """Whether an existing template is the one make_template builds now: WAL_SEGMENT_MB segments on timeline 2.
+    Added October 25, after trial 790: the campaign had reused a template from before the review revision, with
+    16 MiB segments on timeline 1, so only 4 of its first 712 counted refreshes spanned two WAL segments."""
+    out = run([str(Path(bindir) / 'pg_controldata'), str(path)], check=False).stdout
+    fields = dict(line.split(':', 1) for line in out.splitlines() if ':' in line)
+    fields = {key.strip(): value.strip() for key, value in fields.items()}
+    return (fields.get('Bytes per WAL segment') == str(WAL_SEGMENT_MB * 1024 * 1024)
+            and fields.get("Latest checkpoint's TimeLineID") == '2')
 
 
 # --- the load and the DDL on S -------------------------------------------------------------------------------
@@ -366,7 +384,7 @@ def check_copy(bindir, sock, source, path, work, port, start_us, stop_us, expect
     """Start a disposable clone of `path` and check it: (started, problems, facts)."""
     target = Path(work) / f'copy{port}'
     clone(path, target)
-    cluster = Cluster(bindir, sock, target, port)
+    cluster = Cluster(bindir, sock, target, port, query_timeout=COPY_QUERY_SECONDS)
     started = time.perf_counter()
     result = cluster.start(check=False)
     facts = {'start_seconds': round(time.perf_counter() - started, 3)}
@@ -375,7 +393,7 @@ def check_copy(bindir, sock, source, path, work, port, start_us, stop_us, expect
         cluster.stop(mode='immediate', check=False)
         shutil.rmtree(target, ignore_errors=True)
         return False, ['the copy did not start'], facts
-    problems = []
+    problems, hung = [], False
     try:
         log = Path(f'{target}.log').read_text(errors='replace')
         if lsns is not None:
@@ -391,15 +409,24 @@ def check_copy(bindir, sock, source, path, work, port, start_us, stop_us, expect
         differ = sorted(key for key in set(got) | set(expect) if got.get(key) != expect.get(key))
         if differ:
             problems.append(f'tables the load does not write differ from S\'s: {differ[:5]}')
+    except (HarnessError, ValueError) as exc:
+        problems.append(f'checking the copy failed: {str(exc)[-400:]}')
+    except subprocess.TimeoutExpired as exc:
+        hung = True
+        problems.append(f'a query on the copy ran past {COPY_QUERY_SECONDS} s: {str(exc.cmd[-1])[:120]!r}')
+    try:
         amcheck = run([str(Path(bindir) / 'pg_amcheck'), '-h', sock, '-p', str(port), '-U', USER, '--all',
-                       '--heapallindexed', '--install-missing'], check=False)
+                       '--heapallindexed', '--install-missing'], check=False, timeout=AMCHECK_SECONDS)
         facts['amcheck'] = amcheck.returncode
         if amcheck.returncode != 0:
             problems.append(f'pg_amcheck exit {amcheck.returncode}: {(amcheck.stdout + amcheck.stderr)[-400:]}')
-    except (HarnessError, ValueError) as exc:
-        problems.append(f'checking the copy failed: {str(exc)[-400:]}')
+    except subprocess.TimeoutExpired:
+        hung = True
+        facts['amcheck'] = 'timeout'
+        problems.append(f'pg_amcheck ran past {AMCHECK_SECONDS} s')
     finally:
-        cluster.stop(check=False)
+        facts['hung'] = hung
+        cluster.stop(mode='immediate' if hung else 'fast', check=False)
         shutil.rmtree(target, ignore_errors=True)
     return True, problems, facts
 
@@ -588,7 +615,8 @@ def main(argv=None):
     sock = tempfile.mkdtemp(prefix='pgs.')
     pg = Path(args.pg_bin)
     template = work / 'template'
-    if not template.exists():
+    if not template.exists() or not template_matches(pg, template):
+        shutil.rmtree(template, ignore_errors=True)
         make_template(pg, sock, template)
     source = Cluster(pg, sock, work / 's', SOURCE_PORT)
     clone(template, source.data)

@@ -158,3 +158,26 @@ What the third smoke shows: the revised harness runs end to end with no harness 
 - **Before it:** 352 counted trials (144 none, 86 kill, 57 diverged, 37 truncate, 28 corrupt), no wrong output; 39 negative controls (20 read-before-start, 19 read-during-start), all 39 caught.
 - **What happened:** trial 390 was a negative control. As designed it left B wrong (its check found, among other faults, an index file `base/16384/17964` of 0 bytes). Every trial refreshes B in place from the previous trial's output, and every fault but one starts by refreshing it, which repairs such a B; trial 391's fault started B first (the diverged fault runs B's own load), and B's own query hit the empty file: a harness error, as the rules count it, not a judged trial. The script then crashed on that record's missing fault field while printing its progress line. The live source was untouched: it has no file 17964 at all.
 - **The fix, before resuming:** after every negative control, the harness runs one normal refresh of B (not judged; its exit status is recorded as `repair_exit`, and a non-zero exit is a harness error), so a control's deliberately wrong B is never the next trial's starting point; and the progress line no longer reads a missing field. No check, fault mix or rule changed. The campaign resumes from trial 391 with the rest of its registered budget (648 more counted trials, or the rest of its 3 hours).
+
+## The run stopped again at trial 790, and is restarted on the registered template (October 25)
+
+**What happened.** Trial 790 was a `before_start` negative control. Its copy started, but the checker's first query never ended: it spun at full CPU for 3 h 22 min, inside `_bt_moveright`, following right links of the copy's torn `load_ledger_pkey`. That loop never checks for interrupts: `pg_cancel_backend` returned true and the backend kept spinning, so neither a cancel nor `statement_timeout` could stop it. Meanwhile, pg_amcheck, run with a time limit against the same copy, reported `cross page item order invariant violated for index "load_ledger_pkey"` in under a second. A fresh clone of the same B hung the same way, so the hang is a property of that wrong copy, not chance. No counted trial was affected: each of the 712 before it answered in under a second.
+
+**Fix 1 (harness, no check changed).**
+- Every query on a copy has a limit, `COPY_QUERY_SECONDS = 120`; a correct copy answers in under a second.
+- A query past the limit is recorded as a problem with the copy. In a counted trial that is a wrong output, which stops the campaign. In a negative control it is a catch.
+- pg_amcheck now runs even after a failed or hung query, with its own limit, `AMCHECK_SECONDS = 600`.
+- A hung copy is stopped with `-m immediate` (SIGQUIT), which ends the spinning backend.
+- Tested end to end on a fresh clone of trial 790's B, with the limit at 15 s:
+  - the query hit the limit and was recorded;
+  - pg_amcheck reported the index;
+  - the copy stopped and was removed, all in 16 s.
+
+**The summary found a second fault: the run used a stale template.** Only 4 of the 712 counted refreshes spanned two WAL segments or more (0.56%). The review revision (above) builds the template with 1 MiB WAL segments and promotes it to timeline 2. But the harness builds a template only when none exists, and the work folder kept the one built at 05:25 by the pre-registered harness: 16 MiB segments, timeline 1 (checked with `pg_controldata`). The review's code changes all applied: the second negative control, the stricter kill rule, the 8 MB shared buffers. Only the template-level revision was missing.
+
+**What the first run is, then.** 712 counted trials, 0 wrong. Both negative controls were caught in 39 of 39 runs each, and the WAL range was not covered: a refresh's WAL sat in one 16 MiB segment, on timeline 1, with no history file. It is reported as its own result: below 6.9/712 = 0.97% at 99.9% confidence for that setup. It is not merged with the second run.
+
+**Fix 2, and the second run.**
+- The harness now checks an existing template with `pg_controldata` (segment size and timeline 2) and rebuilds it if it doesn't match. On the stale template the check returned false.
+- The campaign is restarted from trial 0 on a fresh template, under the registered stop rule: 1,000 counted trials or 3 hours. Its output goes to `results/correctness/exp25b/`.
+- Nothing else changed: the checks, faults, mix, seeds and thresholds are the registered ones. The multi-segment share in its summary shows whether the WAL range is covered.
