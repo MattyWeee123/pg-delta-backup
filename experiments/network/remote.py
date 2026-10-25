@@ -130,6 +130,8 @@ def instances(config: dict) -> dict:
 
 def ssh_argv(config: dict, address: str, command: str | None = None, *,
              tty: bool = False) -> list[str]:
+    # A named set's known_hosts lives in its own folder, which ssh won't create (seen on EXP-22's first set).
+    os.makedirs(os.path.dirname(os.path.expanduser(config['SSH_KNOWN_HOSTS'])), exist_ok=True)
     argv = ['ssh', '-i', config['SSH_KEY'], '-o', f'UserKnownHostsFile={config["SSH_KNOWN_HOSTS"]}',
             '-o', 'StrictHostKeyChecking=accept-new', '-o', 'ConnectTimeout=20',
             '-o', 'ServerAliveInterval=30']
