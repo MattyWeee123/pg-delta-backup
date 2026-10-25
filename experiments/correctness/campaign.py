@@ -33,6 +33,7 @@ EXCLUDED_FILES = {'postgresql.auto.conf.tmp', 'current_logfiles.tmp', 'backup_la
 EXCLUDED_DIRS = {'pg_stat_tmp', 'pg_replslot', 'pg_dynshmem', 'pg_notify', 'pg_serial', 'pg_snapshots',
                  'pg_subtrans', 'pg_wal', 'pg_logical'}
 PORT = 55470
+MARKER_PREFIX = 'pgdelta-incomplete.json'  # pgdelta's marker and its temporary file, at B's root
 
 
 class HarnessError(Exception):
@@ -227,10 +228,15 @@ def trial(n, pg, template, foreign_template, work):
             os.killpg(proc.pid, signal.SIGKILL)
             proc.wait()
             rec['finished_before_kill'] = False
-            # Revised October 25 (rule 8, twice): B may start only as the old copy or as the complete new one.
-            rec['b_changed_at_kill'] = tree_digest(b) != before
-            rec['b_state_at_kill'] = ('old' if not rec['b_changed_at_kill'] else
-                                      'new' if byte_check(s, b)['ok'] else 'partial')
+            # Revised October 25 (rule 8, three times): B may start only as the old copy or as the complete new one,
+            # as pgdelta/inplace.py documents; its own marker beside an intact pg_control leaves B the old copy.
+            after = tree_digest(b)
+            diff = {'added': sorted(set(after) - set(before)), 'removed': sorted(set(before) - set(after)),
+                    'changed': sorted(k for k in set(before) & set(after) if before[k] != after[k])}
+            rec['diff_at_kill'] = {k: v[:20] for k, v in diff.items()}
+            rec['b_changed_at_kill'] = any(diff.values())
+            data_diff = [p for v in diff.values() for p in v if not p.startswith(MARKER_PREFIX)]
+            rec['b_state_at_kill'] = ('old' if not data_diff else 'new' if byte_check(s, b)['ok'] else 'partial')
             started = pg.start(b, check=False)
             rec['refused_start_after_kill'] = started.returncode != 0
             if started.returncode == 0:
