@@ -1,6 +1,6 @@
 # EXP-32: Is v1 still correct when it verifies only what it wrote?
 
-Status: **done October 25, 2026, twice: on the first implementation (15:35–16:22 local) and, after it moved to the pipelined verifier, again (17:20–18:44). Each run: no wrong output in 1,000 counted trials with `--verify-scope written` (below 0.69% per refresh at 99.9% confidence), and all 53 misplaced-write controls caught and then repaired.** Pre-registered before the counted campaign (a 25-trial smoke checked the harness; see below). Local (the Mac, PostgreSQL 17.11), about an hour. It is the correctness test that `--verify-scope written` needs before it can be recommended. [EXP-31](EXP-31-ha-one-pass.md) measures its speed.
+Status: **done October 25, 2026, twice: on the first implementation (15:35–16:22 local) and, after it moved to the pipelined verifier, again (17:20–18:43). Each run: no wrong output in 1,000 counted trials with `--verify-scope written` (below 0.69% per refresh at 99.9% confidence), and all 53 misplaced-write controls caught and then repaired.** Pre-registered before the counted campaign (a 25-trial smoke checked the harness; see below). Local (the Mac, PostgreSQL 17.11), about an hour. It is the correctness test that `--verify-scope written` needs before it can be recommended. [EXP-31](EXP-31-ha-one-pass.md) measures its speed.
 
 ## Question
 
@@ -85,7 +85,7 @@ That changes code this campaign judged, so it is rerun in full, with the same de
 
 **Restarted, October 25, 17:20 (before any result was read).** The rerun first started at 17:13. A minute later, `--hash auto` (the hash negotiation) landed in the working tree it ran from, and from then on its trials hashed with BLAKE3. It was stopped after 25 trials and set aside (`results/correctness/exp32b-aborted`, not counted). It restarts from a frozen checkout of commit c870b17 with `--pgdelta-args "--verify-scope written --hash blake2b"`, BLAKE2b pinned as at registration. EXP-33 covers BLAKE3.
 
-## The rerun on the revised implementation: results (17:20–18:44 local; 1,053 trials)
+## The rerun on the revised implementation: results (17:20–18:43 local; 1,053 trials)
 
 Run from a frozen checkout of commit c870b17, with `--verify-scope written --hash blake2b`. Data: `docs/experiments/data/exp32-summary-b.csv`; raw `results/correctness/exp32b/`; figure `analysis/exp32.py --tag=-b`.
 
