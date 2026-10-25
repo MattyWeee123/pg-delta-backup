@@ -470,6 +470,7 @@ def stats_summary(stats):
     return {'seconds': (stats.get('timings_seconds') or {}).get('total'), 'pages': stats.get('pages'),
             # EXP-33: the receiver's verification scope (absent: the default, all) and what it did.
             'verify_scope': receiver.get('verify_scope', 'all'), 'verify_written': receiver.get('verify_written'),
+            'hash': stats.get('hash'),
             **{key: info.get(key) for key in ('start_lsn', 'stop_lsn', 'timeline', 'backup_mode_seconds',
                                               'wal_segment_size', 'wal_segments', 'history_files', 'files_vanished',
                                               'files_shrunk', 'files_grew', 'pages_changed_after_hash',

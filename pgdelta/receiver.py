@@ -79,7 +79,7 @@ from pgdelta import __version__, flush, inplace, placement, protocol
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
 from pgdelta.flush import DEFAULT_FSYNC, FSYNC_MODES, WRITEBACK_BYTES
-from pgdelta.hashing import ALGORITHMS, DEFAULT_ALGORITHM, DIGEST_SIZE, KEY_SIZE, FilesDigest, Hasher
+from pgdelta.hashing import ALGORITHMS, DEFAULT_ALGORITHM, DIGEST_SIZE, KEY_SIZE, FilesDigest, Hasher, usable
 from pgdelta.identity import gate, read_identity, reuse_policy
 from pgdelta.inventory import MODE_MASK, parse_entries, require_plain, scan
 from pgdelta.protocol import ChannelClosed
@@ -109,7 +109,9 @@ JOIN_SECONDS = 10.0
 HELLO_KEYS = frozenset(('protocol_version', 'block', 'node_blocks', 'key', 'source_identity',
                         'root_mode', 'directories', 'files'))
 # Only a live source's HELLO has it (pgdelta.live): files follow in one APPEND before COMPLETE.
-HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash'))  # hash: the digest algorithm, absent for BLAKE2b (EXP-29)
+# hash: the digest algorithm, absent for BLAKE2b (EXP-29); hash_offer: what a sender with --hash auto can use,
+# preferred first, of which this receiver picks the first it can use and names it in ACCEPT.
+HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer'))
 _CREATE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0)
                  | getattr(os, 'O_NOFOLLOW', 0))
 _KERNEL_COPY = sys.platform.startswith('linux') and hasattr(os, 'copy_file_range')
@@ -651,6 +653,8 @@ class _Receiver:
         }
         if self.in_place:
             accept['in_place'] = True
+        if getattr(self, 'hash_offer', None) is not None:
+            accept['hash'] = self.hasher.algorithm  # the receiver's pick of the sender's hash_offer
         self.channel.send_json(protocol.ACCEPT, accept)
         self._start_pool()
         self._start_fsync()
@@ -703,6 +707,14 @@ class _Receiver:
         algorithm = hello.get('hash', DEFAULT_ALGORITHM)
         if algorithm not in ALGORITHMS:
             raise ProtocolError(f'HELLO hash must be one of {", ".join(ALGORITHMS)}, not {algorithm!r}')
+        self.hash_offer = hello.get('hash_offer')
+        if self.hash_offer is not None:
+            if ('hash' in hello or not isinstance(self.hash_offer, list) or not self.hash_offer
+                    or any(item not in ALGORITHMS for item in self.hash_offer)):
+                raise ProtocolError(f'HELLO hash_offer must be a list of {", ".join(ALGORITHMS)}, without hash')
+            algorithm = next((item for item in self.hash_offer if usable(item)), None)
+            if algorithm is None:
+                raise InvalidInput(f'none of the offered hashes {self.hash_offer} can be used here')
         try:
             self.hasher = Hasher(key, algorithm)
         except ImportError as exc:

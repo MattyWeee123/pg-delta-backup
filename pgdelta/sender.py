@@ -30,7 +30,7 @@ import time
 from pgdelta import __version__, datadir, live, matching, protocol, transport, waits
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
-from pgdelta.hashing import BLOCK, DEFAULT_ALGORITHM, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key
+from pgdelta.hashing import BLOCK, DEFAULT_ALGORITHM, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key, offer
 from pgdelta.inplace import COMMITTED
 from pgdelta.inventory import require_plain, scan
 from pgdelta.protocol import ChannelClosed
@@ -426,20 +426,13 @@ class _Sender:
         inventory = prepare_source(self.source) if self.selection is None else self.selection.inventory
         self.directory_count, self.file_count = len(inventory.directories), len(inventory.files)
         key = self.key or new_key()
-        try:
-            self.hasher = Hasher(key, self.hash_algorithm)
-        except (ImportError, ValueError) as exc:
-            raise InvalidInput(str(exc)) from exc
-        started = time.perf_counter()
-        try:
-            self.pool = HashPool(self.jobs, backend=self.hash_backend, key=key, algorithm=self.hash_algorithm)
-        except (OSError, ValueError) as exc:
-            raise TransferError(f'cannot start the hashing workers: {exc}') from exc
-        self.pool_start_seconds = time.perf_counter() - started
-        if self.live is not None:
-            # Read before start (test switch): the data files come from the copy made before pg_backup_start.
-            self.reader = live.Reader(self.live.snapshot or self.source, self.source, self.hasher, self.block,
-                                      self.node_blocks, self.pool)
+        # --hash auto: offer BLAKE3 too where it can hash here; the receiver picks in ACCEPT, so the hasher and the
+        # pool start after it. With only BLAKE2b to offer, nothing is offered and the session is as before.
+        offered = offer() if self.hash_algorithm == 'auto' else None
+        if offered == [DEFAULT_ALGORITHM]:
+            offered, self.hash_algorithm = None, DEFAULT_ALGORITHM
+        if offered is None:
+            self._start_hashing(key)
         self.protocol_started = time.perf_counter()
         self.inbox.start()
         hello = {
@@ -454,10 +447,18 @@ class _Sender:
         }
         if self.live is not None:
             hello['appends'] = True  # the WAL and backup_label follow in APPEND, after pg_backup_stop
-        if self.hash_algorithm != DEFAULT_ALGORITHM:
+        if offered is not None:
+            hello['hash_offer'] = offered
+        elif self.hash_algorithm != DEFAULT_ALGORITHM:
             hello['hash'] = self.hash_algorithm  # EXP-29: absent means BLAKE2b, so older receivers still match
         self._send_json(protocol.HELLO, hello)
         accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
+        if offered is not None:
+            chosen = accept.get('hash')
+            if chosen not in offered:
+                raise ProtocolError(f'ACCEPT hash must be one of the offered {offered}, not {chosen!r}')
+            self.hash_algorithm = chosen
+            self._start_hashing(key)
         self.reuse, self.reason, self.policy, self.basis_identity, self.basis_sizes = _parse_accept(
             accept, len(inventory.files))
         self.in_place = accept.get('in_place', False)
@@ -488,6 +489,23 @@ class _Sender:
         receiver = final.get('receiver')
         self.receiver_stats = receiver if isinstance(receiver, dict) else None
         return self.stats('complete', 0, None)
+
+    def _start_hashing(self, key):
+        """The session's hasher and hash pool, and a live source's reader, for self.hash_algorithm."""
+        try:
+            self.hasher = Hasher(key, self.hash_algorithm)
+        except (ImportError, ValueError) as exc:
+            raise InvalidInput(str(exc)) from exc
+        started = time.perf_counter()
+        try:
+            self.pool = HashPool(self.jobs, backend=self.hash_backend, key=key, algorithm=self.hash_algorithm)
+        except (OSError, ValueError) as exc:
+            raise TransferError(f'cannot start the hashing workers: {exc}') from exc
+        self.pool_start_seconds = time.perf_counter() - started
+        if self.live is not None:
+            # Read before start (test switch): the data files come from the copy made before pg_backup_start.
+            self.reader = live.Reader(self.live.snapshot or self.source, self.source, self.hasher, self.block,
+                                      self.node_blocks, self.pool)
 
     def _send_files(self, entries, first_index):
         """Hash, compare and send `entries` (file indexes from first_index on), up to `window` files ahead."""

@@ -84,6 +84,15 @@ class CliTests(CliTestCase):
                 self.assertEqual(stats['pages']['sent'], differing_pages(self.source, self.basis))
                 self.assertEqual(stats['hash'], 'blake3')
 
+    @unittest.skipUnless(importlib.util.find_spec('blake3'), 'the blake3 package is not installed')
+    def test_the_default_hash_is_blake3_where_both_ends_have_it(self):
+        stats_path = self.root / 'stats.json'
+        result = run('local', '--source', self.source, '--basis', self.basis, '--output', self.output,
+                     '--assume-same-cluster', '--stats-json', stats_path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(snapshot(self.output), snapshot(self.source))
+        self.assertEqual(json.loads(stats_path.read_text())['hash'], 'blake3')
+
     def test_local_mode_rebuilds_and_writes_stats(self):
         before = snapshot(self.basis)
         stats_path = self.root / 'stats.json'

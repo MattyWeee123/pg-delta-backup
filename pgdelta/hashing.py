@@ -26,6 +26,21 @@ BLAKE3_CONTEXTS = ('pgdelta 2026-10-25 leaf digest key', 'pgdelta 2026-10-25 nod
                    'pgdelta 2026-10-25 file digest key')
 
 
+def usable(algorithm):
+    """Whether `algorithm` can hash here: BLAKE2b always, BLAKE3 with the blake3 package."""
+    if algorithm == 'blake3':
+        try:
+            blake3_module()
+        except ImportError:
+            return False
+    return algorithm in ALGORITHMS
+
+
+def offer():
+    """What a sender asked for --hash auto offers, preferred first: BLAKE3 where it can hash here, then BLAKE2b."""
+    return [algorithm for algorithm in ('blake3', 'blake2b') if usable(algorithm)]
+
+
 def blake3_module():
     """The blake3 package, or ImportError saying how to get it."""
     try:

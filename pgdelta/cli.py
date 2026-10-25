@@ -149,10 +149,11 @@ def _jobs_option(parser, what, sides=1, live=False):
 
 
 def _hash_option(parser):
-    parser.add_argument('--hash', choices=ALGORITHMS, default=DEFAULT_ALGORITHM,
-                        help='the keyed digest for pages, nodes and files; the receiver follows the sender. '
-                             'blake3 hashed a page 4.8 times as fast per core as blake2b on x86 VMs (EXP-29) '
-                             'and needs the blake3 package on both ends (default: %(default)s)')
+    parser.add_argument('--hash', choices=('auto', *ALGORITHMS), default='auto',
+                        help='the keyed digest for pages, nodes and files. auto offers blake3 where the blake3 '
+                             'package is installed here, and the receiver picks it if it has the package too, '
+                             'else blake2b; blake2b or blake3 asks for that one. blake3 hashed a page 4.8 times '
+                             'as fast per core as blake2b on x86 VMs (EXP-29, EXP-30) (default: %(default)s)')
 
 
 def resolve_jobs(args):
