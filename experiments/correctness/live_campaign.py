@@ -39,6 +39,7 @@ import json
 import os
 from pathlib import Path
 import random
+import shlex
 import shutil
 import signal
 import subprocess
@@ -345,10 +346,13 @@ def truncate(basis, rng, record):
 
 # --- the refresh and the checks --------------------------------------------------------------------------------
 
+EXTRA_ARGS = []  # EXP-33: --pgdelta-args, appended to every pgdelta command
+
+
 def pgdelta_argv(source, basis, stats, pg):
     return [sys.executable, '-m', 'pgdelta', 'local', '--source', str(source.data), '--source-kind', 'live',
             '--pg-conn', source.conninfo(), '--pg-controldata', str(pg / 'pg_controldata'), '--psql',
-            str(pg / 'psql'), '--basis', str(basis), '--in-place', '--stats-json', str(stats)]
+            str(pg / 'psql'), '--basis', str(basis), '--in-place', '--stats-json', str(stats), *EXTRA_ARGS]
 
 
 def pgdelta_env(variant):
@@ -462,7 +466,10 @@ def kill_state(basis, started, problems):
 
 def stats_summary(stats):
     info = stats.get('live') or {}
+    receiver = stats.get('receiver') or {}
     return {'seconds': (stats.get('timings_seconds') or {}).get('total'), 'pages': stats.get('pages'),
+            # EXP-33: the receiver's verification scope (absent: the default, all) and what it did.
+            'verify_scope': receiver.get('verify_scope', 'all'), 'verify_written': receiver.get('verify_written'),
             **{key: info.get(key) for key in ('start_lsn', 'stop_lsn', 'timeline', 'backup_mode_seconds',
                                               'wal_segment_size', 'wal_segments', 'history_files', 'files_vanished',
                                               'files_shrunk', 'files_grew', 'pages_changed_after_hash',
@@ -605,7 +612,9 @@ def main(argv=None):
                              'read-during-start one; 0: none')
     parser.add_argument('--pg-bin', default='/opt/homebrew/opt/postgresql@17/bin')
     parser.add_argument('--work')
+    parser.add_argument('--pgdelta-args', default='', help='flags appended to every pgdelta command (EXP-33)')
     args = parser.parse_args(argv)
+    EXTRA_ARGS[:] = shlex.split(args.pgdelta_args)
     if 0 < args.negative_every < 3:
         parser.error('--negative-every must be 0 or at least 3 (two negative controls in each block)')
     out = Path(args.out)
