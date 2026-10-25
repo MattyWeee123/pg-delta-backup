@@ -29,7 +29,9 @@ PGBIN=/usr/lib/postgresql/17/bin
 ROOT=/data/exp28/src
 B=/data/exp28/B
 FULL=/data/exp28/full
-SETTLE=15 TAIL=10 NONE_SECONDS=8 CLIENTS=32 THREADS=4 SHARE=0.6
+# Smoke revision: 128 clients, not EXP-12's 32. Over the network 32 clients were bound by round trips (C = 7,277,
+# the source about a quarter busy); C levels off near 21,000 at 128-192, the source about 70% busy.
+SETTLE=15 TAIL=10 NONE_SECONDS=8 CLIENTS=128 THREADS=4 SHARE=0.6
 LOAD="$PGBIN/pgbench -n -M prepared -c $CLIENTS -j $THREADS -f commit.sql@99 -f abort.sql@1 -h $SRC -p 5432 -U study loaddb"
 
 on_src() { "${SSRC[@]}" "export PATH=\$PATH:/usr/sbin:/sbin; cd ~/pgd; $1"; }
@@ -49,6 +51,7 @@ if [ "${SKIP_SETUP:-0}" != 1 ]; then
   echo "$(date -u +%T) set-up"
   on_src "python3 experiments/network/source_cluster.py setup --root $ROOT --log-dir /data/exp28/logs --listen-ip $SRC \
     --client-ip $DEST --scale 70 --pattern uniform --fraction 0.01 > /data/exp28-setup.json && \
+    echo 'max_connections = 300  # EXP-28: 128 load clients over the network' >> $ROOT/data/postgresql.conf && \
     python3 experiments/network/source_cluster.py loaddb-setup --root $ROOT --log-dir /data/exp28/logs \
       --load-dir /dev/shm/exp28-unused --clients $CLIENTS > /data/exp28-loaddb.json && \
     sed -i '1i host loaddb study $CLI/32 trust' $ROOT/data/pg_hba.conf && \
@@ -100,8 +103,8 @@ while read -r i arm speed k; do
   fi
   rp=
   if [ "${arm#v1_j}" != "$arm" ]; then  # the receiver listens before the clock starts
-    python3 -m pgdelta receive --basis "$B" --in-place --listen 0.0.0.0:7000 --pg-controldata "$PGBIN/pg_controldata" \
-      --jobs 4 --stats-json "$d/receive.json" > "$d/receive.log" 2>&1 &
+    python3 -m pgdelta receive --basis "$B" --in-place --listen 0.0.0.0:7000 \
+      --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 > "$d/receive.log" 2>&1 &
     rp=$!
     for x in $(seq 100); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
   fi

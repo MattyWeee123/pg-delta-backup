@@ -54,3 +54,12 @@ By proxy, v1's source side at 4 workers lost 0.05–0.07 s of the load's work an
 - **The null is the `none` runs' median,** not a bootstrap over load-only time, so "measurable" rests on EXP-12's floors.
 - **Each v1 run refreshes a copy minutes old.** A refresh after hours of changes reads and sends more.
 - **One session.**
+
+## Smoke (October 25, 17:22–17:29 UTC, not counted) and two revisions before the grid
+
+The smoke ran set-up and each arm once, unthrottled.
+- **`full` and `none` ran.** `pg_basebackup` took 3.76 s.
+- **Every v1 run failed in 0.45 s,** a driver error: `pgdelta receive` takes neither `--stats-json` nor `--pg-controldata` (its flag is `--basis-pg-controldata`), so the receiver exited at once. Fixed.
+- **The load was bound by the network, not the source.** With the client on its own VM, each of a transaction's five statements waits a round trip, and 32 clients reached only C = 7,277 transactions a second. Probes at closed loop: 64 clients gave 13,820 (the source 46% busy), 96 gave 19,325 (64%), 128 gave 21,126 (70%), 192 gave 21,439 (74%). Above 100 clients, PostgreSQL's default `max_connections` refused the connections.
+
+**Revision (rule 8, before the grid):** 128 load clients (and `max_connections = 300`), where C levels off and the source is the limit, as with EXP-12's 32 clients on the source itself. R stays 0.6 × C, measured at set-up. Nothing else changes.
