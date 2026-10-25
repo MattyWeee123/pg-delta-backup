@@ -151,15 +151,47 @@ def accept_channel(listener):
     return socket_channel(sock)
 
 
-def connect_channel(host, port, timeout=30.0):
-    """Connect to a receiver; the channel's connect_seconds is the connect's own time (EXP-13's connect_s)."""
-    started = time.perf_counter()
+def set_congestion_control(sock, name):
+    """Ask for TCP congestion control `name` on this socket (Linux's TCP_CONGESTION) before it connects.
+
+    Returns {'requested', 'effective', 'error'}. An unprivileged process may choose only what the host's
+    net.ipv4.tcp_allowed_congestion_control lists (Debian's default: reno and cubic); otherwise, and on systems
+    without TCP_CONGESTION (macOS), the host's default stays and 'error' says why (EXP-21, EXP-23)."""
+    out = {'requested': name, 'effective': None, 'error': None}
+    option = getattr(socket, 'TCP_CONGESTION', None)
+    if option is None:
+        out['error'] = 'TCP_CONGESTION not available on this system'
+        return out
     try:
-        sock = socket.create_connection((host, port), timeout=timeout)
+        sock.setsockopt(socket.IPPROTO_TCP, option, name.encode())
+    except OSError as exc:
+        out['error'] = str(exc)
+    try:
+        out['effective'] = sock.getsockopt(socket.IPPROTO_TCP, option, 16).split(b'\0', 1)[0].decode()
+    except OSError:
+        pass
+    return out
+
+
+def connect_channel(host, port, timeout=30.0, congestion_control=None):
+    """Connect to a receiver; the channel's connect_seconds is the connect's own time (EXP-13's connect_s), and
+    with congestion_control its congestion_control reports what the socket got (set_congestion_control)."""
+    started = time.perf_counter()
+    chosen = None
+    try:
+        if congestion_control is None:
+            sock = socket.create_connection((host, port), timeout=timeout)
+        else:
+            family, kind, proto, _, address = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)[0]
+            sock = socket.socket(family, kind, proto)
+            chosen = set_congestion_control(sock, congestion_control)
+            sock.settimeout(timeout)
+            sock.connect(address)
     except OSError as exc:
         raise TransferError(f'cannot connect to {host}:{port}: {exc}') from exc
     connected = time.perf_counter() - started
     sock.settimeout(None)
     channel = socket_channel(sock)
     channel.connect_seconds = connected
+    channel.congestion_control = chosen
     return channel
