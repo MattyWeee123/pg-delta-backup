@@ -13,7 +13,7 @@ Status: **pre-registered October 25, 2026, before running.** On EXP-21/23's VM p
 1. Every `pgdelta_direct_inplace_bbr` run gets BBR (pgdelta's statistics) and none is in the slow mode.
 2. **EXP-13's DR verdict for v1 with BBR** (EXP-20's analysis, `--v1 pgdelta_direct_inplace_bbr`): row 1 ("holds as shipped") at 20 ms, and row 2 ("holds with tuned buffers") at 60 and 120 ms. At 60 and 120 ms default hosts one stream's 6 MiB window still caps v1, which the parallel copies escape with 8 or 16 streams, so row 1 isn't expected there. This is the deciding prediction.
 3. For hot 1%, BBR changes v1 by less than 10% at every condition.
-4. Cubic v1 in this session: its slow mode appears at 2:20:default in at least 6 of its 3 runs × 2 workloads... read simply: in at least 2 of the 3 uniform runs at 2:20:default, as in EXP-23.
+4. Cubic v1 falls into its slow mode in at least 2 of its 3 uniform 1% runs at 2:20:default, as in EXP-23 (12 of 15 there).
 
 ## What follows
 
