@@ -27,6 +27,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -184,7 +185,9 @@ def main(argv=None):
     parser.add_argument('--first', type=int, default=2000)
     parser.add_argument('--pg-bin', default='/opt/homebrew/opt/postgresql@17/bin')
     parser.add_argument('--work')
+    parser.add_argument('--pgdelta-args', default='', help='flags appended to every pgdelta command (EXP-35)')
     args = parser.parse_args(argv)
+    lc.EXTRA_ARGS[:] = shlex.split(args.pgdelta_args)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     work = Path(args.work or tempfile.mkdtemp(prefix='exp27.'))
