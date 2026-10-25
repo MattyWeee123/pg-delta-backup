@@ -28,3 +28,7 @@ EXP-11's HA verdict, and EXP-18/19's finding that v1 is bound by the destination
 ## Limitations
 
 A scale model: 12 GB on 8 GB machines, not 1 TB on 64 GB; the ratio holds, the absolute times don't. One session; one disk size (500 GiB); n2-highcpu-8's CPUs are the same family as EXP-11's n2-standard-8.
+
+## Revision before running (October 25, 05:20 UTC)
+
+The region's persistent-disk quota is 500 GB, 100 GB of it held by EXP-21's boot disks, so two 500 GiB data disks don't fit (`create.sh`'s quota check refused the set before creating anything). The data disks are **150 GiB** instead: about 182 MiB/s by Google's formula (140 + 0.28 per GiB), closer to a small GKE default volume. Everything else, and every prediction (stated per measured disk rate D), is unchanged.

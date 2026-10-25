@@ -4,4 +4,4 @@ ZONE=${ZONE:-us-central1-a}
 DEST_ZONE=${DEST_ZONE:-us-central1-b}
 MACHINE=${MACHINE:-n2-highcpu-8}
 DATA_DISK=${DATA_DISK:-pd-balanced}
-PD_SIZE_GB=${PD_SIZE_GB:-500}
+PD_SIZE_GB=${PD_SIZE_GB:-150}
