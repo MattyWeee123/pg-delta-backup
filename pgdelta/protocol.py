@@ -19,6 +19,10 @@ HEADER = struct.Struct('>IB')
 MAX_FRAME = 64 << 20
 
 HELLO, ACCEPT, BASIS_NODES, LEAF_REQUEST, LEAF_DIGESTS, PAGE_DATA, FILE_DONE, COMPLETE, ERROR = range(1, 10)
+# A live source (--source-kind live, pgdelta.live) learns which WAL segments and what backup_label to send only
+# after pg_backup_stop, when every listed file has been sent. Its HELLO says so ("appends": true), and APPEND
+# then lists those files once, before COMPLETE. No other session sends either, so their bytes are unchanged.
+APPEND = 10
 MESSAGES = {
     HELLO: ('HELLO', 'control'),
     ACCEPT: ('ACCEPT', 'control'),
@@ -29,6 +33,7 @@ MESSAGES = {
     FILE_DONE: ('FILE_DONE', 'control'),
     COMPLETE: ('COMPLETE', 'control'),
     ERROR: ('ERROR', 'control'),
+    APPEND: ('APPEND', 'control'),
 }
 CATEGORIES = ('control', 'node_digests', 'leaf_digests', 'page_data')
 

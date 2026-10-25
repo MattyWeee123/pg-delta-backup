@@ -173,12 +173,24 @@ def _target_options(parser):
 
 
 def _source_kind_option(parser):
-    # T8a: read a stopped data directory directly, without a backup taken first.
+    # T8a: read a stopped data directory directly, without a backup taken first. T8: a running one, in backup mode.
     parser.add_argument('--source-kind', choices=datadir.SOURCE_KINDS, default=datadir.DEFAULT_SOURCE_KIND,
                         help='backup: --source is a finished backup S, sent whole; datadir: --source is a '
                              'cleanly stopped data directory (needs --pg-controldata, which must report '
-                             '"shut down"), of which only what pg_basebackup would send is sent '
+                             '"shut down"), of which only what pg_basebackup would send is sent; live: --source '
+                             'is the data directory of a running primary on this host (needs --pg-controldata '
+                             'and --pg-conn), read between pg_backup_start and pg_backup_stop, with the WAL '
+                             'between them and the backup_label sent after, so the copy starts by recovering '
                              '(default: %(default)s)')
+    parser.add_argument('--pg-conn', metavar='CONNINFO',
+                        help='--source-kind live: a psql connection string to the server running on --source, '
+                             'for example "host=/tmp port=5432 user=postgres dbname=postgres", as a role that may '
+                             'run pg_backup_start and create a replication slot. Give a password through '
+                             'PGPASSWORD or ~/.pgpass, not here: the statistics record the string with any '
+                             'password masked, but it is passed to psql on its command line')
+    parser.add_argument('--psql', metavar='PATH',
+                        help='--source-kind live: the psql binary (default: beside --pg-controldata, else psql '
+                             'on PATH)')
 
 
 def _byte_count(text):
@@ -392,15 +404,24 @@ def _sender_kwargs(args, identity):
     return {'identity': identity, 'block': args.block, 'node_blocks': args.node_blocks,
             'high_churn_node_fraction': args.high_churn_node_fraction, 'window': args.window, 'jobs': args.jobs,
             'hash_backend': args.hash_backend, 'source_kind': args.source_kind,
-            'pg_controldata': args.pg_controldata}
+            'pg_controldata': args.pg_controldata, 'pg_conn': args.pg_conn, 'psql': args.psql}
 
 
 def _source_identity(args):
-    """S's identity; for --source-kind datadir the sender reads it with the cluster state (pgdelta.datadir)."""
+    """S's identity; for --source-kind datadir and live the sender reads it (pgdelta.datadir, pgdelta.live)."""
+    if args.source_kind != 'live' and (args.pg_conn or args.psql):
+        raise InvalidInput('--pg-conn and --psql are for --source-kind live')
     if args.source_kind == 'datadir':
         if not args.pg_controldata:
             raise InvalidInput('--source-kind datadir needs --pg-controldata: it reads the cluster state '
                                'and the REDO WAL file from it')
+        return None
+    if args.source_kind == 'live':
+        if not args.pg_controldata:
+            raise InvalidInput('--source-kind live needs --pg-controldata: it reads the cluster identity')
+        if not args.pg_conn:
+            raise InvalidInput('--source-kind live needs --pg-conn: a psql connection string to the server '
+                               'running on --source')
         return None
     return _identity(args.source, args.pg_controldata)
 
