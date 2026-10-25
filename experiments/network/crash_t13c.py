@@ -74,6 +74,10 @@ class Lab:
         self.remote = remote
         self.config = remote.load_config(pair=pair)
         self.vms = remote.instances(self.config)
+        # One VM (the revision before any trial): the stopped source lives on dest too, and `pgdelta local` runs
+        # both ends there; the reset cuts the power to both.
+        self.vms.setdefault('source', self.vms['dest'])
+        self.single = self.vms['source'] is self.vms['dest']
         self.src, self.dest = self.vms['source'], self.vms['dest']
         self.dest_vm = remote.set_vms(self.config)['dest']
         self.out = Path(out)
@@ -99,8 +103,7 @@ class Lab:
         trial = '--scale 70 --pattern uniform --fraction 0.01'
         self.sh('source', f'python3 experiments/network/source_cluster.py setup --root {ROOT}/src --log-dir {ROOT}/logs '
                           f'--listen-ip {src} --client-ip {dest} {trial} > /dev/null')
-        self.sh('dest', f'rm -rf {ROOT} && mkdir -p {ROOT} && pg_basebackup -h {src} -p 5432 -U study -D {B0} '
-                        f'-X stream -c fast')
+        self.sh('dest', f'rm -rf {B0} {B} && pg_basebackup -h {src} -p 5432 -U study -D {B0} -X stream -c fast')
         self.sh('source', f'python3 experiments/network/source_cluster.py workload --root {ROOT}/src --log-dir '
                           f'{ROOT}/logs {trial} > /dev/null && python3 experiments/network/source_cluster.py '
                           f'stop-clean --root {ROOT}/src > /dev/null')
@@ -111,6 +114,12 @@ class Lab:
         self.log(f'set-up: S has {len(json.loads(manifest_s))} files')
 
     def start_refresh(self):
+        if self.single:
+            self.sh('dest', f'rm -f /tmp/t13c-send.json /tmp/t13c-send.log; (setsid nohup python3 -m pgdelta local '
+                            f'--source {SRC_DATA} --source-kind datadir --pg-controldata {PGBIN}/pg_controldata '
+                            f'--basis {B} --in-place --stats-json /tmp/t13c-send.json > /tmp/t13c-send.log 2>&1 '
+                            f'< /dev/null &)')
+            return time.time()
         self.sh('dest', f'rm -f {ROOT}/recv.log; (setsid nohup python3 -m pgdelta receive --basis {B} --in-place '
                         f'--listen 0.0.0.0:7000 --basis-pg-controldata {PGBIN}/pg_controldata > {ROOT}/recv.log 2>&1 '
                         f'< /dev/null &); for i in $(seq 100); do ss -ltn | grep -q ":7000 " && exit 0; sleep 0.05; done; '
@@ -124,12 +133,12 @@ class Lab:
     def wait_sender(self, timeout=300):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            code, _ = self.sh('source', 'pgrep -f "pgdelta send" > /dev/null', check=False, timeout=60)
+            code, _ = self.sh('source', 'pgrep -f "pgdelta (send|local)" > /dev/null', check=False, timeout=60)
             if code != 0:
                 break
             time.sleep(1)
         else:
-            self.sh('source', 'pkill -f "pgdelta send"', check=False)
+            self.sh('source', 'pkill -f "pgdelta (send|local)"', check=False)
         _, stats = self.sh('source', 'cat /tmp/t13c-send.json 2>/dev/null; true', check=False)
         _, logtail = self.sh('source', 'tail -c 300 /tmp/t13c-send.log 2>/dev/null; true', check=False)
         try:
