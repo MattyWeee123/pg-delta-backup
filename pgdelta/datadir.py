@@ -49,6 +49,16 @@ the files pgdelta sends. That list is printed only when each listed path's
 bytes in DIR are what the copy holds; with a reset main fork it exits 2,
 and `--sources` must be used: it prints [path, path read] pairs, of which
 the second path is the one to hash.
+
+A running cluster (--source-kind live, pgdelta.live) is listed by the same
+rules by select_live(), after pg_backup_start has returned, with three
+differences: nothing is refused for running (postmaster.pid is left out by
+its rule, and the state is not checked); every file of pg_wal/ is left
+out, since the WAL from the backup's start to its stop is sent after
+pg_backup_stop; and no main fork is reset, since that copy always starts by
+recovering, which resets unlogged relations itself (pg_basebackup's
+output exactly). A file or directory that disappears while it is listed is
+skipped, as pg_basebackup's sendDir skips it.
 """
 from __future__ import annotations
 
@@ -65,7 +75,7 @@ from pgdelta.errors import InvalidInput, PgDeltaError, VerificationError
 from pgdelta.identity import controldata_value, read_controldata
 from pgdelta.inventory import MODE_MASK, DirEntry, FileEntry, Inventory, require_plain
 
-SOURCE_KINDS = ('backup', 'datadir')
+SOURCE_KINDS = ('backup', 'datadir', 'live')
 DEFAULT_SOURCE_KIND = 'backup'
 SHUT_DOWN = 'shut down'
 REDO_WAL_FILE_LABEL = "Latest checkpoint's REDO WAL file"
@@ -91,10 +101,10 @@ _MAX_OID = (1 << 32) - 1
 
 @dataclass
 class Selection:
-    """What --source-kind datadir sends from a stopped data directory, and what it leaves out."""
+    """What --source-kind datadir sends from a stopped data directory (live: a running one), and what it leaves out."""
     inventory: Inventory
     identity: dict
-    redo_wal_file: str
+    redo_wal_file: object  # None for a live source, whose WAL is sent after pg_backup_stop
     excluded: dict = field(default_factory=dict)
     # {listed path: path read instead}: the main forks of unlogged relations, sent as their init forks.
     sources: dict = field(default_factory=dict)
@@ -146,28 +156,41 @@ def _named_rule(name, is_directory, relations, database, names):
     return None
 
 
-def _measure(path, info):
+def _measure(path, info, live=False):
     """(files, directories, bytes) of an entry, a directory counted with all it holds (no symlink followed)."""
     if not stat.S_ISDIR(info.st_mode):
         return 1, 0, info.st_size if stat.S_ISREG(info.st_mode) else 0
     files, directories, size = 0, 1, 0
-    for child in _children(path):
-        counts = _measure(child.path, _stat(child))
+    for child in _children(path, live):
+        child_info = _stat(child, live)
+        if child_info is None:
+            continue
+        counts = _measure(child.path, child_info, live)
         files, directories, size = files + counts[0], directories + counts[1], size + counts[2]
     return files, directories, size
 
 
-def _children(directory):
+def _children(directory, live=False):
+    """The entries of a directory by name; live, a directory that has disappeared meanwhile has none."""
     try:
         with os.scandir(directory) as entries:
             return sorted(entries, key=lambda entry: entry.name)
+    except FileNotFoundError as exc:
+        if live:
+            return []
+        raise InvalidInput(f'cannot list {directory}: {exc.strerror}') from exc
     except OSError as exc:
         raise InvalidInput(f'cannot list {directory}: {exc.strerror}') from exc
 
 
-def _stat(entry):
+def _stat(entry, live=False):
+    """The entry's own status (no symlink followed); live, None for one that has disappeared meanwhile."""
     try:
         return entry.stat(follow_symlinks=False)
+    except FileNotFoundError as exc:
+        if live:
+            return None
+        raise InvalidInput(f'cannot stat {entry.path}: {exc.strerror}') from exc
     except OSError as exc:
         raise InvalidInput(f'cannot stat {entry.path}: {exc.strerror}') from exc
 
@@ -192,6 +215,16 @@ def _check_stopped(root, identity, output):
     return redo
 
 
+def _root_stat(root):
+    try:
+        root_stat = os.stat(root)
+    except OSError as exc:
+        raise InvalidInput(f'cannot read directory {root}: {exc.strerror}') from exc
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise InvalidInput(f'not a directory: {root}')
+    return root_stat
+
+
 def select(datadir, pg_controldata):
     """The files and directories of a cleanly stopped data directory that pg_basebackup would send.
 
@@ -204,22 +237,35 @@ def select(datadir, pg_controldata):
         raise InvalidInput('--source-kind datadir needs --pg-controldata: it reads the cluster state and '
                            'the REDO WAL file from it')
     root = Path(datadir)
-    try:
-        root_stat = os.stat(root)
-    except OSError as exc:
-        raise InvalidInput(f'cannot read directory {root}: {exc.strerror}') from exc
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise InvalidInput(f'not a directory: {root}')
+    root_stat = _root_stat(root)
     _refuse_running(root)
     identity, output = read_controldata(root, pg_controldata)
     redo = _check_stopped(root, identity, output)
+    return _select(root, root_stat, identity, redo, live=False)
+
+
+def select_live(datadir, identity):
+    """What pg_basebackup sends from a running cluster's data directory, listed after pg_backup_start returned.
+
+    `identity` is the cluster's, as pgdelta.live read it. Unlike select(),
+    nothing is refused for running, every file of pg_wal/ is left out
+    (rule "wal": the WAL is sent after pg_backup_stop), no main fork of an
+    unlogged relation is reset (recovery resets them), and an entry that
+    disappears while it is listed is skipped. Symlinks, special files and
+    tablespaces among what is selected are still refused.
+    """
+    root = Path(datadir)
+    return _select(root, _root_stat(root), identity, None, live=True)
+
+
+def _select(root, root_stat, identity, redo, live):
     inventory = Inventory(root_mode=stat.S_IMODE(root_stat.st_mode) & MODE_MASK,
                           directory_ids={(root_stat.st_dev, root_stat.st_ino)})
     selection = Selection(inventory, identity, redo, {rule: {'files': 0, 'directories': 0, 'bytes': 0}
                                                       for rule in RULES})
 
     def exclude(rule, path, info):
-        files, directories, size = _measure(path, info)
+        files, directories, size = _measure(path, info, live)
         counts = selection.excluded[rule]
         counts['files'] += files
         counts['directories'] += directories
@@ -230,19 +276,23 @@ def select(datadir, pg_controldata):
         inventory.directory_ids.add((info.st_dev, info.st_ino))
 
     def keep_contents_out(entry, rule):
-        for child in _children(entry.path):
-            exclude(rule, child.path, _stat(child))
+        for child in _children(entry.path, live):
+            child_info = _stat(child, live)
+            if child_info is not None:
+                exclude(rule, child.path, child_info)
 
     pending, wal_found = [''], False
     while pending:
         relative = pending.pop()
-        children = _children(root / relative if relative else root)
+        children = _children(root / relative if relative else root, live)
         names = {entry.name for entry in children}
         database = bool(_DATABASE_DIRECTORY.fullmatch(relative))
         relations = database or relative == GLOBAL_DIRECTORY
         for entry in children:
             path = f'{relative}/{entry.name}' if relative else entry.name
-            info = _stat(entry)
+            info = _stat(entry, live)
+            if info is None:  # live: removed since its directory was listed; sendDir skips it too
+                continue
             is_directory = stat.S_ISDIR(info.st_mode)
             rule = _named_rule(entry.name, is_directory, relations, database, names)
             if rule:
@@ -252,9 +302,11 @@ def select(datadir, pg_controldata):
                 keep_contents_out(entry, 'directory_contents')
             elif is_directory and path == WAL_DIRECTORY:
                 keep_directory(path, info)
-                for child in _children(entry.path):
-                    child_info = _stat(child)
-                    if child.name == redo and stat.S_ISREG(child_info.st_mode):
+                for child in _children(entry.path, live):
+                    child_info = _stat(child, live)
+                    if child_info is None:
+                        continue
+                    if not live and child.name == redo and stat.S_ISREG(child_info.st_mode):
                         inventory.files.append(FileEntry(f'{path}/{child.name}', child_info.st_size,
                                                          stat.S_IMODE(child_info.st_mode) & MODE_MASK))
                         wal_found = True
@@ -269,7 +321,8 @@ def select(datadir, pg_controldata):
             elif stat.S_ISREG(info.st_mode):
                 mode = stat.S_IMODE(info.st_mode) & MODE_MASK
                 inventory.files.append(FileEntry(path, info.st_size, mode))
-                relation = _relation(entry.name) if relations else None
+                # Live: recovery resets unlogged relations, so their main forks are left out as pg_basebackup does.
+                relation = _relation(entry.name) if relations and not live else None
                 if relation and relation[1] == 'init':
                     # What recovery's reset of unlogged relations would leave: the init fork as main fork.
                     main = f'{relative}/{relation[0]}{relation[2]}'
@@ -279,7 +332,7 @@ def select(datadir, pg_controldata):
                 inventory.symlinks.append(path)
             else:
                 inventory.special.append(path)
-    if not wal_found:
+    if not live and not wal_found:
         raise InvalidInput(f'{root}: the REDO WAL segment {WAL_DIRECTORY}/{redo} named by pg_controldata '
                            f'is missing; without it the copy cannot start')
     for name in ('directories', 'files'):

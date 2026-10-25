@@ -48,6 +48,13 @@ Where files are fsynced (`fsync`, pgdelta.flush): in the main loop
 ("main", default), there with early write-back on Linux ("writeback"), or
 on a background thread ("worker"); publication or the commit waits for
 every fsync either way.
+
+A live source (pgdelta.live) says in HELLO that files follow the listed
+ones ("appends": true): once every listed file is done, one APPEND lists
+the WAL segments and the backup_label, which are then sent whole like any
+file without a basis. They are part of the inventory from then on: written,
+verified and kept like the others, so O is published, or B committed, only
+with them in place.
 """
 from __future__ import annotations
 
@@ -93,6 +100,8 @@ DEFAULT_VERIFY = 'pipelined'
 JOIN_SECONDS = 10.0
 HELLO_KEYS = frozenset(('protocol_version', 'block', 'node_blocks', 'key', 'source_identity',
                         'root_mode', 'directories', 'files'))
+# Only a live source's HELLO has it (pgdelta.live): files follow in one APPEND before COMPLETE.
+HELLO_OPTIONAL_KEYS = frozenset(('appends',))
 _CREATE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0)
                  | getattr(os, 'O_NOFOLLOW', 0))
 _KERNEL_COPY = sys.platform.startswith('linux') and hasattr(os, 'copy_file_range')
@@ -439,6 +448,9 @@ class _Receiver:
         self.mode = self.reason = self.source_identity = None
         self.policy = reuse_policy(setup.reuse_any_basis)
         self.files, self.directories, self.basis_files = [], [], {}
+        # A live source's HELLO announces files appended after the listed ones (None until HELLO; then
+        # whether it did), and how many APPEND brought.
+        self.appends, self.appended = None, None
         self.counts = _Counts()
         self.hash_basis_seconds = self.hash_leaf_seconds = 0.0
         self.rebuild_seconds = self.verify_seconds = 0.0
@@ -625,6 +637,8 @@ class _Receiver:
             self.basis_thread.start()
         handlers = {protocol.LEAF_REQUEST: self._leaf_request, protocol.PAGE_DATA: self._page_data,
                     protocol.FILE_DONE: self._file_done}
+        if self.appends:
+            handlers[protocol.APPEND] = self._append
         while True:
             waited = time.perf_counter()
             code, payload = self._recv()
@@ -642,10 +656,13 @@ class _Receiver:
         if code != protocol.HELLO:
             raise ProtocolError(f'expected HELLO, received {protocol.name(code)}')
         hello = protocol.decode_json(payload, 'HELLO')
-        if set(hello) != HELLO_KEYS:
+        unknown = set(hello) - HELLO_KEYS - HELLO_OPTIONAL_KEYS
+        if not HELLO_KEYS <= set(hello) or unknown:
             raise ProtocolError(f'HELLO fields differ from protocol version {protocol.PROTOCOL_VERSION}: '
-                                f'missing {sorted(HELLO_KEYS - set(hello))}, '
-                                f'unknown {sorted(set(hello) - HELLO_KEYS)}')
+                                f'missing {sorted(HELLO_KEYS - set(hello))}, unknown {sorted(unknown)}')
+        self.appends = hello.get('appends', False)
+        if type(self.appends) is not bool:
+            raise ProtocolError('HELLO appends must be true or false')
         if hello['protocol_version'] != protocol.PROTOCOL_VERSION:
             raise InvalidInput(f'unsupported protocol version {hello["protocol_version"]!r}')
         protocol.check_parameters(hello['block'], hello['node_blocks'])
@@ -977,6 +994,34 @@ class _Receiver:
             self.verify_wait_seconds += elapsed
             self._accept_file(entry, size, digest)
 
+    def _append(self, payload):
+        """A live source's APPEND: the files that follow the listed ones (its WAL and backup_label).
+
+        Once, after every listed file was transferred. Each needs a listed
+        parent directory, a name no listed file or directory has, and, in
+        place, none of the reserved names; none has a basis, so each is sent
+        whole, and in place a file of B at its path is overwritten.
+        """
+        if self.appended is not None:
+            raise ProtocolError('a second APPEND')
+        if self.current is not None or self.next_file != len(self.files):
+            raise ProtocolError('APPEND arrived before every listed file was transferred')
+        info = protocol.decode_json(payload, 'APPEND')
+        if set(info) != {'files'}:
+            raise ProtocolError(f'APPEND fields must be just "files", not {sorted(info)}')
+        _, entries = parse_entries([[entry.path, entry.mode] for entry in self.directories], info['files'])
+        taken = {entry.path for entry in self.files}
+        clashes = sorted(entry.path for entry in entries if entry.path in taken)
+        if clashes:
+            raise ProtocolError(f'APPEND lists files already listed: {", ".join(clashes[:3])}')
+        if self.in_place:
+            inplace.check_appended(entries)
+            changes = inplace.prepare_tree(self.setup.basis, [], entries)
+            self.tree_changes['files_removed'] += changes['files_removed']
+            self.tree_changes['directories_removed'] += changes['directories_removed']
+        self.files.extend(entries)
+        self.appended = len(entries)
+
     def _accept_file(self, entry, size, digest):
         self.files_digest.add(entry.path, size, digest)
         self.total_bytes += size
@@ -1032,6 +1077,8 @@ class _Receiver:
 
     def _complete(self, payload):
         info = protocol.decode_json(payload, 'COMPLETE')
+        if self.appends and self.appended is None:
+            raise ProtocolError('COMPLETE arrived before the APPEND that HELLO announced')
         if (self.current is not None or self.next_file != len(self.files)
                 or info.get('files') != len(self.files) or info.get('directories') != len(self.directories)):
             raise ProtocolError('COMPLETE arrived before every file was transferred and verified')
@@ -1277,6 +1324,9 @@ class _Receiver:
                                 'published_utc': self.published_utc},
             'bytes_read': self.channel.received.summary(),
             'bytes_written': self.channel.sent.summary(),
+            # A live source's files appended after the listed ones (its WAL and backup_label). Only for one:
+            # every other session's final COMPLETE keeps its bytes (tests/pgdelta_frames.py).
+            **({'appended_files': self.appended} if self.appends else {}),
         }
 
 

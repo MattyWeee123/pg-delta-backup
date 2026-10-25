@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import struct
 import threading
+import time
 
 from pgdelta.errors import ProtocolError, TransferError
 from pgdelta.hashing import DIGEST_SIZE
@@ -19,6 +20,10 @@ HEADER = struct.Struct('>IB')
 MAX_FRAME = 64 << 20
 
 HELLO, ACCEPT, BASIS_NODES, LEAF_REQUEST, LEAF_DIGESTS, PAGE_DATA, FILE_DONE, COMPLETE, ERROR = range(1, 10)
+# A live source (--source-kind live, pgdelta.live) learns which WAL segments and what backup_label to send only
+# after pg_backup_stop, when every listed file has been sent. Its HELLO says so ("appends": true), and APPEND
+# then lists those files once, before COMPLETE. No other session sends either, so their bytes are unchanged.
+APPEND = 10
 MESSAGES = {
     HELLO: ('HELLO', 'control'),
     ACCEPT: ('ACCEPT', 'control'),
@@ -29,6 +34,7 @@ MESSAGES = {
     FILE_DONE: ('FILE_DONE', 'control'),
     COMPLETE: ('COMPLETE', 'control'),
     ERROR: ('ERROR', 'control'),
+    APPEND: ('APPEND', 'control'),
 }
 CATEGORIES = ('control', 'node_digests', 'leaf_digests', 'page_data')
 
@@ -76,16 +82,26 @@ class Channel:
     `sock` is the TCP socket under the stream (None over pipes), whose send
     queue the sender reads while it waits (pgdelta.waits); `connect_seconds`
     is how long connecting it took, when this end connected.
+
+    `sending_since` is the time.monotonic() at which the send() in progress
+    began (None between sends), so another thread can tell a send that the
+    peer has stopped taking. abort() ends the stream at once from any
+    thread through `aborter` (a TCP socket: shut it down; a child process:
+    kill it), so a send or receive blocked on the peer fails, and every
+    later send fails without writing.
     """
     connect_seconds = None
 
-    def __init__(self, reader, writer, *, closer=None, max_frame=MAX_FRAME, sock=None):
+    def __init__(self, reader, writer, *, closer=None, max_frame=MAX_FRAME, sock=None, aborter=None):
         self._reader, self._writer, self._closer = reader, writer, closer
         self.max_frame = max_frame
         self.sock = sock
         self.sent, self.received = Counter(), Counter()
         self._lock = threading.Lock()
         self._closed = self._broken = False
+        self._aborter = aborter
+        self.aborted = False
+        self.sending_since = None
 
     def send(self, code, *parts):
         if code not in MESSAGES:
@@ -94,8 +110,11 @@ class Channel:
         if size > self.max_frame:
             raise ProtocolError(f'{name(code)} payload of {size} bytes exceeds the {self.max_frame} byte frame limit')
         with self._lock:
+            if self.aborted:
+                raise ChannelClosed(f'cannot send {name(code)}: the connection was aborted')
             if self._broken:
                 raise ChannelClosed(f'cannot send {name(code)}: an earlier frame was cut off')
+            self.sending_since = time.monotonic()
             try:
                 self._writer.write(HEADER.pack(size, code))
                 for part in parts:
@@ -107,7 +126,20 @@ class Channel:
                 if isinstance(exc, (OSError, ValueError)):
                     raise ChannelClosed(f'cannot send {name(code)}: {exc}') from exc
                 raise
+            finally:
+                self.sending_since = None
             self.sent.add(code, HEADER.size + size)
+
+    def abort(self):
+        """End the stream now, from any thread: what is blocked on the peer fails, and nothing more is sent."""
+        if self.aborted:
+            return
+        self.aborted = True
+        if self._aborter is not None:
+            try:
+                self._aborter()
+            except OSError:
+                pass
 
     def send_json(self, code, value):
         self.send(code, json.dumps(value, separators=(',', ':'), allow_nan=False).encode('utf-8'))

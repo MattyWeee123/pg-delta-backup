@@ -9,9 +9,13 @@ round trips overlap hashing. Each file's nodes are hashed on a pool of
 when jobs is 1. The waits for the receiver, and the time blocked sending,
 are timed for EXP-13 (pgdelta.waits).
 
-The source is a finished backup S (`source_kind` "backup", default), or a
+The source is a finished backup S (`source_kind` "backup", default), a
 cleanly stopped data directory read directly ("datadir", pgdelta.datadir),
-of which only what pg_basebackup would send is listed.
+of which only what pg_basebackup would send is listed, or a running
+cluster's data directory read in backup mode ("live", pgdelta.live): the
+listed files are read only after pg_backup_start returns, and the WAL from
+the backup's start to its stop and the backup_label are appended to the
+inventory (APPEND) after pg_backup_stop.
 """
 from __future__ import annotations
 
@@ -23,10 +27,11 @@ import os
 import threading
 import time
 
-from pgdelta import __version__, datadir, matching, protocol, waits
+from pgdelta import __version__, datadir, live, matching, protocol, transport, waits
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
 from pgdelta.hashing import BLOCK, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key
+from pgdelta.inplace import COMMITTED
 from pgdelta.inventory import require_plain, scan
 from pgdelta.protocol import ChannelClosed
 from pgdelta.receiver import RECEIPT_SUFFIX
@@ -58,6 +63,10 @@ class Inbox:
         self.closed = False
         # The sender's protocol timers (pgdelta.waits.WaitTimers); without them waits aren't timed.
         self.timers = timers
+        # For the stall watch (StallWatch): when the last message arrived, and since when and for what a wait has
+        # blocked (time.monotonic(); None while no wait blocks).
+        self.last_message = 0.0
+        self.waiting_since = self.waiting_for = None
         self.thread = threading.Thread(target=self._run, name='pgdelta-inbox', daemon=True)
 
     def start(self):
@@ -78,6 +87,7 @@ class Inbox:
                 message = self.channel.recv()
                 if message is None:
                     return
+                self.last_message = time.monotonic()
                 code, payload = message
                 with self.cond:
                     self._dispatch(code, payload)
@@ -101,6 +111,13 @@ class Inbox:
         with self.cond:
             if self.error is None:
                 self.error = exc
+
+    def fail(self, exc):
+        """Fail the run from another thread (the stall watch): a wait in progress or to come raises `exc`."""
+        with self.cond:
+            if self.error is None:
+                self.error = exc
+            self.cond.notify_all()
 
     def _dispatch(self, code, payload):
         if code == protocol.ERROR:
@@ -141,6 +158,8 @@ class Inbox:
                         return value
                     if self.closed:
                         raise ChannelClosed(f'receiver closed the connection while the sender waited for {what}')
+                    if self.waiting_since is None:
+                        self.waiting_since, self.waiting_for = time.monotonic(), what
                     if timers is None:
                         self.cond.wait()
                         continue
@@ -150,12 +169,78 @@ class Inbox:
                     self.cond.wait(timers.poll)
                     timers.tick()
         finally:
+            self.waiting_since = self.waiting_for = None
             if blocked:
                 timers.end()
 
     def check(self):
         if self.error is not None:
             raise self.error
+
+
+class StallWatch:
+    """While a live source holds backup mode and its slot: give up on a receiver that has stopped.
+
+    The sender is stalled when it has been blocked on the receiver for
+    `seconds`: in one send() the receiver doesn't take (Channel.sending_since),
+    or in a wait during which no message arrived (Inbox.waiting_since and
+    last_message). Time spent working (hashing, reading S, psql) is no stall.
+    A thread checks every `interval`; on a stall it fails the inbox with a
+    TransferError naming it and aborts the channel, so the run fails and
+    pg_backup_stop is called and the slot dropped. Should the run still not
+    have ended `grace` seconds later (a send that even an abort cannot end),
+    it kills the psql session itself, which ends backup mode and drops the
+    temporary slot server side. Over TCP the connection also gets keepalives
+    (pgdelta.transport.keep_alive) for a peer lost while nothing is sent.
+    """
+
+    GRACE_SECONDS = 30.0
+
+    def __init__(self, channel, inbox, seconds, *, on_give_up=None, interval=None, grace=GRACE_SECONDS,
+                 clock=time.monotonic):
+        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not seconds > 0:
+            raise InvalidInput(f'the live timeout must be a positive number of seconds, not {seconds!r}')
+        self.channel, self.inbox, self.seconds = channel, inbox, float(seconds)
+        self.on_give_up, self.grace, self.clock = on_give_up, grace, clock
+        self.interval = interval if interval is not None else min(1.0, self.seconds / 10)
+        self.error = None
+        self._stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='pgdelta-stall-watch', daemon=True)
+
+    def stalled(self, now):
+        """What the sender has been blocked on for `seconds` by `now` (time.monotonic()), or None."""
+        since = self.channel.sending_since
+        if since is not None and now - since >= self.seconds:
+            return 'sending'
+        since, what = self.inbox.waiting_since, self.inbox.waiting_for
+        if since is not None and now - max(since, self.inbox.last_message) >= self.seconds:
+            return f'waiting for {what}'
+        return None
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def stop(self):
+        """The slot is gone or the run is over: stop watching. Safe to repeat."""
+        self._stopped.set()
+        if self.thread.is_alive() and self.thread is not threading.current_thread():
+            self.thread.join(5)
+
+    def _run(self):
+        while not self._stopped.wait(self.interval):
+            what = self.stalled(self.clock())
+            if what is None:
+                continue
+            self.error = TransferError(
+                f'the receiver made no progress for {self.seconds:g} s while the sender was {what}, with backup '
+                f'mode and the replication slot held on the source: giving up, so that backup mode ends and the '
+                f'slot is dropped (--live-timeout)')
+            self.inbox.fail(self.error)
+            self.channel.abort()
+            if not self._stopped.wait(self.grace) and self.on_give_up is not None:
+                self.on_give_up()
+            return
 
 
 @dataclass
@@ -165,6 +250,9 @@ class _Job:
     tree: object
     basis_size: object = None
     plan: matching.NodePlan = field(default_factory=matching.NodePlan)
+    entry: object = None
+    # Live: the digest of what the copy is made of, the pages sent as sent (pgdelta.live.composite_digest).
+    digest: object = None
 
 
 def _parse_accept(accept, file_count):
@@ -190,10 +278,16 @@ def _parse_accept(accept, file_count):
 class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
-                 busy_inflight_bytes=None):
+                 busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None):
         self.started = time.perf_counter()
         self.channel, self.source, self.identity = channel, Path(source), identity
         self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
+        # A live source (pgdelta.live): its backup session, and how its files are read; the files appended
+        # after pg_backup_stop; the watch that gives up on a stalled receiver while the slot is held.
+        self.pg_conn, self.psql = pg_conn, psql
+        self.live_timeout = live.DEFAULT_TIMEOUT if live_timeout is None else live_timeout
+        self.live = self.reader = self.watch = None
+        self.appended = []
         # Whether the receiver refreshes B in place (from ACCEPT; null until it arrives).
         self.in_place = None
         self.block, self.node_blocks = block, node_blocks
@@ -221,22 +315,60 @@ class _Sender:
 
     def run(self):
         try:
-            return self._run()
+            stats = self._run()
         except BaseException as exc:
             failure = exc
             try:
                 failure = self._fail(exc)
             finally:
+                # A live source: end backup mode and drop the slot before the statistics record how.
+                self._close_live()
                 failure.pgdelta_stats = self.stats('failed', getattr(failure, 'exit_code',
                                                    EXIT_TRANSFER_FAILURE), str(failure))
             if failure is exc:
                 raise
             raise failure from exc
         finally:
+            self._close_live()
             if self.pool is not None:
                 self.pool.close()
+        if self.live is not None and self.live.variant is not None:
+            raise self._wrong_by_design(stats)
+        return stats
+
+    def _wrong_by_design(self, stats):
+        """A broken test variant ran to the end: the run fails (exit 4), however complete it looks."""
+        output = f'B, which {COMMITTED},' if self.in_place else 'the output the receiver published'
+        error = VerificationError(
+            f'the deliberately broken test variant ran ({live.READ_BEFORE_START_ENV}: {self.live.variant}): the '
+            f'files were read before pg_backup_start returned, so {output} is wrong by design and must not be '
+            f'used; refresh it again without the switch, or replace it with a full copy')
+        error.pgdelta_stats = dict(stats, status='failed', exit_code=error.exit_code, error=str(error))
+        return error
+
+    def _close_live(self):
+        if self.live is not None:
+            if self.watch is not None and self.watch.error is not None:
+                self.live.timed_out = True
+            try:
+                self.live.close()
+            except Exception:  # never hide the run's own failure; the session's end aborts backup mode anyway
+                pass
+        if self.watch is not None:
+            self.watch.stop()
+
+    def _kill_session(self):
+        """The stall watch's last resort, when even aborting the channel did not end the run: end the psql session,
+        which ends backup mode and drops the temporary slot server side."""
+        session = self.live.session if self.live is not None else None
+        if session is not None:
+            session.kill()
 
     def _fail(self, exc):
+        if self.watch is not None and self.watch.error is not None and not isinstance(exc, PeerError):
+            # The receiver stalled while the slot was held: whatever the run then hit (a wait failed by the watch,
+            # a send cut off by its abort) has that cause, and the aborted channel can carry no ERROR.
+            return self.watch.error
         if isinstance(exc, PeerError):
             return exc
         if isinstance(exc, ChannelClosed):
@@ -275,6 +407,8 @@ class _Sender:
             self.selection = datadir.select(self.source, self.pg_controldata)
             if self.identity is None:
                 self.identity = self.selection.identity
+        elif self.source_kind == 'live':
+            self._begin_live()
         self.block = self._resolve_block()
         protocol.check_parameters(self.block, self.node_blocks, InvalidInput)
         if self.high_churn is not None and not 0 <= self.high_churn <= 1:
@@ -297,9 +431,13 @@ class _Sender:
         except (OSError, ValueError) as exc:
             raise TransferError(f'cannot start the hashing workers: {exc}') from exc
         self.pool_start_seconds = time.perf_counter() - started
+        if self.live is not None:
+            # Read before start (test switch): the data files come from the copy made before pg_backup_start.
+            self.reader = live.Reader(self.live.snapshot or self.source, self.source, self.hasher, self.block,
+                                      self.node_blocks, self.pool)
         self.protocol_started = time.perf_counter()
         self.inbox.start()
-        self._send_json(protocol.HELLO, {
+        hello = {
             'protocol_version': protocol.PROTOCOL_VERSION,
             'block': self.block,
             'node_blocks': self.node_blocks,
@@ -308,7 +446,10 @@ class _Sender:
             'root_mode': inventory.root_mode,
             'directories': [[entry.path, entry.mode] for entry in inventory.directories],
             'files': [[entry.path, entry.size, entry.mode] for entry in inventory.files],
-        })
+        }
+        if self.live is not None:
+            hello['appends'] = True  # the WAL and backup_label follow in APPEND, after pg_backup_stop
+        self._send_json(protocol.HELLO, hello)
         accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
         self.reuse, self.reason, self.policy, self.basis_identity, self.basis_sizes = _parse_accept(
             accept, len(inventory.files))
@@ -318,18 +459,14 @@ class _Sender:
         self.mode = 'reuse' if self.reuse else 'full'
         self.max_run = max(1, RUN_BYTES // self.block)
         self.max_request = protocol.max_nodes_per_request(self.node_blocks)
-        pending = deque()
-        for index, entry in enumerate(inventory.files):
-            self.inbox.check()
-            pending.append(self._plan(index, entry))
-            while len(pending) > self.window:
-                self._finish(pending.popleft())
-        while pending:
-            self._finish(pending.popleft())
-        if self.selection is not None:
+        self._send_files(inventory.files, 0)
+        if self.live is not None:
+            # Every listed file has been sent: end backup mode, then send the WAL it needs and its backup_label.
+            self._end_live(len(inventory.files))
+        elif self.selection is not None:
             # A server started on the data directory meanwhile: fail before the receiver publishes.
             datadir.check_unchanged(self.source, self.pg_controldata, self.selection)
-        self._send_json(protocol.COMPLETE, {'files': len(inventory.files), 'directories': self.directory_count})
+        self._send_json(protocol.COMPLETE, {'files': self.file_count, 'directories': self.directory_count})
         try:
             final = self.inbox.wait(lambda: self.inbox.complete, 'COMPLETE', 'complete')
         except ChannelClosed as exc:
@@ -345,6 +482,66 @@ class _Sender:
         self.receiver_stats = receiver if isinstance(receiver, dict) else None
         return self.stats('complete', 0, None)
 
+    def _send_files(self, entries, first_index):
+        """Hash, compare and send `entries` (file indexes from first_index on), up to `window` files ahead."""
+        pending = deque()
+        for index, entry in enumerate(entries, first_index):
+            self.inbox.check()
+            pending.append(self._plan(index, entry))
+            while len(pending) > self.window:
+                self._finish(pending.popleft())
+        while pending:
+            self._finish(pending.popleft())
+
+    def _begin_live(self):
+        """Open the backup session and its slot, call pg_backup_start, then list the data directory.
+
+        From the slot's creation until it is dropped, the stall watch gives up on a receiver that stops
+        (StallWatch), and a TCP connection to it gets keepalives.
+
+        EXP-25's broken variants (PGDELTA_TEST_READ_BEFORE_START, pgdelta.live): the data directory is listed
+        and copied aside before pg_backup_start is called ("before_start"), or once it is sent and before
+        its answer is read ("during_start").
+        """
+        self.live = live.LiveSource(self.source, self.pg_conn, self.pg_controldata, psql=self.psql)
+        self.watch = StallWatch(self.channel, self.inbox, self.live_timeout, on_give_up=self._kill_session)
+        self.live.timeout = self.watch.seconds
+        sock = getattr(self.channel, 'sock', None)
+        if sock is not None:
+            self.live.keepalive = transport.keep_alive(sock, self.watch.seconds)
+        self.watch.start()
+        self.live.open()
+        if self.live.variant == 'before_start':
+            self.selection = self.live.select()
+            self.live.pre_read(self.selection)
+            self.live.start()
+        elif self.live.variant == 'during_start':
+            def read_meanwhile():
+                self.selection = self.live.select()
+                self.live.pre_read(self.selection)
+
+            self.live.start(meanwhile=read_meanwhile)
+        else:
+            self.live.start()
+            self.selection = self.live.select()
+        if self.identity is None:
+            self.identity = self.selection.identity
+
+    def _end_live(self, first_index):
+        """pg_backup_stop, then the WAL segments, history files and backup_label, appended; then drop the slot."""
+        entries = self.live.stop()
+        for entry in entries:
+            if entry.path == live.BACKUP_LABEL:
+                self.reader.pin(entry.path, self.live.backup_label)
+            else:
+                self.reader.hold(entry.path, self.live.segment_check(entry.path))
+        self.appended = entries
+        self.file_count += len(entries)
+        self._send_json(protocol.APPEND, {'files': [[entry.path, entry.size, entry.mode] for entry in entries]})
+        self._send_files(entries, first_index)
+        self.live.finish()
+        self.watch.stop()  # the slot is dropped: waiting on the receiver from here on holds nothing on the source
+
     def _source_file(self, path):
         """The file read for the listed `path` (datadir: an unlogged relation's main fork is its init fork)."""
         return self.source / (path if self.selection is None else self.selection.source_path(path))
@@ -352,15 +549,18 @@ class _Sender:
     def _plan(self, index, entry):
         started = time.perf_counter()
         try:
-            tree = hash_file(self._source_file(entry.path), None, self.block, self.node_blocks,
-                             hasher=self.hasher, pool=self.pool)
+            if self.reader is not None:  # live: always entry.size bytes (pgdelta.live.Reader)
+                tree = self.reader.hash(entry)
+            else:
+                tree = hash_file(self._source_file(entry.path), None, self.block, self.node_blocks,
+                                 hasher=self.hasher, pool=self.pool)
         except OSError as exc:
             raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
         self.hash_source += time.perf_counter() - started
         if tree.size != entry.size:
             raise VerificationError(f'source file {entry.path} changed size during the run '
                                     f'({entry.size} -> {tree.size} bytes); S must be immutable')
-        job = _Job(index, entry.path, tree, self.basis_sizes.get(index))
+        job = _Job(index, entry.path, tree, self.basis_sizes.get(index), entry=entry)
         if job.basis_size is None or not self.reuse:
             job.plan.whole = list(range(tree.node_count))
             return job
@@ -388,9 +588,13 @@ class _Sender:
         for node in plan.whole:
             pages += matching.node_pages(tree, node)
         pages.sort()
-        sent_bytes = self._send_pages(job, pages) if pages else 0
-        self._send(protocol.FILE_DONE, protocol.encode_file_done(job.index, tree.size, tree.digest))
-        self.files_digest.add(job.path, tree.size, tree.digest)
+        if self.reader is not None:
+            sent_bytes = self._send_live_pages(job, pages) if pages else 0
+        else:
+            sent_bytes = self._send_pages(job, pages) if pages else 0
+        digest = job.digest or tree.digest
+        self._send(protocol.FILE_DONE, protocol.encode_file_done(job.index, tree.size, digest))
+        self.files_digest.add(job.path, tree.size, digest)
         self._count(job, len(pages), sent_bytes)
 
     def _send_pages(self, job, pages):
@@ -412,6 +616,47 @@ class _Sender:
                 sent += length
         finally:
             os.close(fd)
+        return sent
+
+    def _send_live_pages(self, job, pages):
+        """Live: send the pages as read now, each hashed again, and keep the digest of what was sent in job.digest.
+
+        A page may have changed since the file was hashed; the copy is made of
+        these bytes, so FILE_DONE carries the digest of the file with them in
+        place (pgdelta.live.composite_digest), and the receiver verifies that.
+        A file held strictly (the WAL and history files) must not change at
+        all: a page of it that differs fails the run.
+        """
+        sent, changed, tree, block = 0, {}, job.tree, self.block
+        strict = job.path in self.reader.strict
+        try:
+            handle = self.reader.open(job.entry)
+        except OSError as exc:
+            raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
+        try:
+            for first, count in matching.runs(pages, self.max_run):
+                offset = first * block
+                length = min(count * block, tree.size - offset)
+                try:
+                    data = handle.read(offset, length)
+                except OSError as exc:
+                    raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
+                view = memoryview(data)
+                for page in range(first, first + count):
+                    leaf = self.hasher.leaf(view[(page - first) * block:(page - first + 1) * block])
+                    if leaf != tree.leaf(page):
+                        if strict:
+                            raise VerificationError(f'{job.path} changed after it was hashed (page {page}): WAL '
+                                                    f'must not change once pg_backup_stop has returned')
+                        changed[page] = leaf
+                self.inbox.check()
+                self._send(protocol.PAGE_DATA, protocol.page_data_head(job.index, first), data)
+                sent += length
+        finally:
+            handle.close()
+        if changed:
+            self.reader.counts['pages_changed_after_hash'] += len(changed)
+            job.digest = live.composite_digest(tree, self.hasher, changed)
         return sent
 
     def _send(self, code, *parts):
@@ -444,6 +689,14 @@ class _Sender:
         self.nodes['descended'] += len(plan.descend)
         self.nodes['sent_whole'] += len(plan.whole)
         self.high_churn_files += plan.high_churn
+
+    def _live_summary(self):
+        if self.live is None:
+            return None
+        summary = self.live.summary()
+        summary['appended_files'] = len(self.appended)
+        summary.update(self.reader.counts if self.reader is not None else {})
+        return summary
 
     def switches(self):
         """The sender's engine settings in effect."""
@@ -498,9 +751,13 @@ class _Sender:
             'switches': {'sender': self.switches(), 'receiver': receiver.get('switches')},
             'source_identity': self.identity,
             'basis_identity': self.basis_identity,
-            # A backup (S), or a stopped data directory read directly, and what was left out of it.
+            # A backup (S), a stopped data directory read directly, or a running one read in backup mode, and
+            # what was left out of it.
             'source_kind': self.source_kind,
             'source_excluded': None if self.selection is None else self.selection.excluded_summary(),
+            # A running source (pgdelta.live): its backup's LSNs and times, the WAL sent, how its files changed
+            # while they were read, and how backup mode ended; null for the other kinds.
+            'live': self._live_summary(),
             'in_place': self.in_place,
             'files': dict(self.files),
             'directories': self.directory_count,
@@ -526,7 +783,7 @@ class _Sender:
 def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_BLOCKS,
                high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
-               busy_inflight_bytes=None):
+               busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -538,7 +795,15 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     (`if __name__ == '__main__':`), as multiprocessing's spawn requires.
     `source_kind` "datadir" reads a cleanly stopped data directory directly
     (pgdelta.datadir) and needs `pg_controldata`; its identity is then read
-    from it unless `identity` is given.
+    from it unless `identity` is given. `source_kind` "live" reads a running
+    cluster's data directory in backup mode (pgdelta.live): it needs
+    `pg_controldata` and `pg_conn`, a psql connection string to that
+    server, and runs `psql` (default: beside pg_controldata, else on PATH).
+    While its replication slot is held, a receiver that makes no progress
+    for `live_timeout` seconds (default pgdelta.live.DEFAULT_TIMEOUT) fails
+    the run (StallWatch). A run with one of EXP-25's broken test variants
+    (PGDELTA_TEST_READ_BEFORE_START) raises VerificationError (exit 4) even
+    when the receiver published, its statistics attached as on failure.
     `window` files are hashed ahead of the one being sent (at least 1): it
     changes the order of the frames on the wire, never what they hold.
     `busy_inflight_bytes` (EXP-13): over TCP on Linux, a wait counts as busy
@@ -547,4 +812,5 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     change.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
-                   window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes).run()
+                   window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
+                   pg_conn, psql, live_timeout).run()

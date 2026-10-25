@@ -79,7 +79,8 @@ def spawn_local_receiver(basis, output, *, pg_controldata=None, reuse_any_basis=
             process.wait()
         reader.close()
 
-    return process, Channel(process.stdout, process.stdin, closer=close)
+    # abort(): a receiver that stopped reading is killed, so a send blocked on its pipe fails at once.
+    return process, Channel(process.stdout, process.stdin, closer=close, aborter=process.kill)
 
 
 def parse_hostport(text):
@@ -126,7 +127,37 @@ def socket_channel(sock):
             except OSError:
                 pass
 
-    return Channel(reader, writer, closer=close, sock=sock)
+    # abort(): a shut-down socket fails a send or receive blocked on it at once, on Linux and macOS alike.
+    return Channel(reader, writer, closer=close, sock=sock, aborter=lambda: sock.shutdown(socket.SHUT_RDWR))
+
+
+def keep_alive(sock, seconds):
+    """TCP keepalives on `sock`, so that a peer gone silent without a reset (a host down, a network partition)
+    ends the connection within about `seconds` even while nothing is sent; on Linux also TCP_USER_TIMEOUT, so
+    data left unacknowledged for `seconds` ends it too. The first probe goes after half of `seconds`, then 4
+    probes at an eighth of it each. Returns what was set, {option name: value}, with "errors" for what the
+    system refused; options the system lacks (TCP_USER_TIMEOUT off Linux) are left out."""
+    seconds = max(8, int(seconds))
+    wanted = [('SO_KEEPALIVE', socket.SOL_SOCKET, 1),
+              # Linux names the idle time TCP_KEEPIDLE; macOS, TCP_KEEPALIVE.
+              ('TCP_KEEPIDLE' if hasattr(socket, 'TCP_KEEPIDLE') else 'TCP_KEEPALIVE', socket.IPPROTO_TCP,
+               seconds // 2),
+              ('TCP_KEEPINTVL', socket.IPPROTO_TCP, seconds // 8),
+              ('TCP_KEEPCNT', socket.IPPROTO_TCP, 4),
+              ('TCP_USER_TIMEOUT', socket.IPPROTO_TCP, seconds * 1000)]
+    out, errors = {}, {}
+    for option, level, value in wanted:
+        number = getattr(socket, option, None)
+        if number is None:
+            continue
+        try:
+            sock.setsockopt(level, number, value)
+            out[option] = value
+        except OSError as exc:
+            errors[option] = str(exc)
+    if errors:
+        out['errors'] = errors
+    return out
 
 
 def listen(host, port):

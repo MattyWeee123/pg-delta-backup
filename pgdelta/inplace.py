@@ -205,6 +205,13 @@ def check_source(files, directories):
                            f'renaming it is what keeps B from starting until the refresh commits')
 
 
+def check_appended(files):
+    """The files a live source appends after the listed ones (its WAL and backup_label) take no reserved name either."""
+    clashes = sorted({entry.path for entry in files} & set(RESERVED))
+    if clashes:
+        raise InvalidInput(f'the source appends {", ".join(clashes)}, which an in-place refresh reserves')
+
+
 def new_marker(basis, previous, basis_identity, source_identity):
     now = _utc_now()
     previous = previous or {}
