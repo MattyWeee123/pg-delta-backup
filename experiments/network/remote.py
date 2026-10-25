@@ -19,6 +19,15 @@ pgd-dest under nohup, so the Mac can disconnect while it runs.
     remote.py fetch NAME [--to DIR]       copy the results to DIR (default results/exp04/NAME)
     remote.py stop NAME                   SIGTERM the orchestrator (it cleans up)
     remote.py ssh source|dest [CMD...]    a shell or a command on one VM
+    remote.py config                      the set's resolved settings (no gcloud call)
+    remote.py ssh-config                  write an ssh config for the set's VMs, by role
+
+VM sets (infra/gcp/README.md): `remote.py --pair a COMMAND` (or PAIR=a in the
+environment) acts on the set named a, pgd-a-source and pgd-a-dest and any further
+roles it has, with its own known_hosts. Every VM of the set gets wait-ready,
+provision and deploy; setup-ssh authorizes dest's key on every other role; ssh
+takes any of its roles; fetch defaults to results/exp04/sets/a/NAME. With no set
+named, everything is as above.
 
 Standard library only.
 """
@@ -41,7 +50,10 @@ import time
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG = REPO_ROOT / 'infra' / 'gcp' / 'config.sh'
 CONFIG_KEYS = ('PROJECT', 'ZONE', 'SOURCE_VM', 'DEST_VM', 'GCLOUD', 'SSH_USER', 'SSH_KEY',
-               'SSH_KNOWN_HOSTS')
+               'SSH_KNOWN_HOSTS', 'SSH_CONFIG', 'PAIR', 'SET_NAME', 'SET_FILE', 'ROLES')
+# What config.sh's pgd_role gives each role of the set, and the key it has in config['VMS'][role].
+ROLE_KEYS = (('VM', 'name'), ('ZONE', 'zone'), ('MACHINE', 'machine'), ('DATA_DISK', 'data_disk'),
+             ('LOCAL_SSDS', 'local_ssds'), ('PD_SIZE_GB', 'pd_size_gb'))
 REMOTE_REPO = '~/pgd'
 RESULTS_ROOT = '/data/exp04-results'
 DEST_KEY = '~/.ssh/exp04_ed25519'
@@ -58,14 +70,36 @@ EXP11_PGDELTA_COMMIT = '1aeeeb0e59ed276ccac2574e112bdfd3115e5628'
 PGDELTA_DIFF_LIMIT = 200_000  # characters of that diff kept in DEPLOYED.json; its hash covers all of it
 
 
-def load_config(path: Path = CONFIG) -> dict:
-    """The settings config.sh exports, after environment overrides."""
-    script = f'source {shlex.quote(str(path))}; printf "%s\\0" ' + ' '.join(
-        f'"${key}"' for key in CONFIG_KEYS)
-    output = subprocess.run(['bash', '-c', script], capture_output=True, text=True,
-                            check=True).stdout
-    values = output.split('\0')[:len(CONFIG_KEYS)]
-    return dict(zip(CONFIG_KEYS, values))
+def load_config(path: Path = CONFIG, pair: str | None = None) -> dict:
+    """The settings config.sh exports, after environment overrides, for the VM set `pair` (None: the PAIR
+    environment variable's; neither: the default set, pgd-source and pgd-dest). ROLES is a list, and VMS maps
+    each role, in ROLES's order, to its VM's name, zone, machine type and data disk."""
+    env = dict(os.environ)
+    if pair is not None:
+        env['PAIR'] = pair
+    script = (f'set -e; source {shlex.quote(str(path))}; printf "%s\\0" '
+              + ' '.join(f'"${key}"' for key in CONFIG_KEYS)
+              + '; for role in $ROLES; do for key in ' + ' '.join(key for key, _ in ROLE_KEYS)
+              + '; do printf "%s\\0" "$(pgd_role "$role" "$key")"; done; done')
+    result = subprocess.run(['bash', '-c', script], capture_output=True, text=True, env=env)
+    if result.returncode != 0:
+        raise SystemExit(result.stderr.strip() or f'{path} failed ({result.returncode})')
+    values = result.stdout.split('\0')
+    config = dict(zip(CONFIG_KEYS, values[:len(CONFIG_KEYS)]))
+    config['ROLES'] = config['ROLES'].split()
+    per_role = values[len(CONFIG_KEYS):]
+    config['VMS'] = {role: {name: per_role[i * len(ROLE_KEYS) + j] for j, (_, name) in enumerate(ROLE_KEYS)}
+                     for i, role in enumerate(config['ROLES'])}
+    return config
+
+
+def set_vms(config: dict) -> dict:
+    """{role: {'name': ..., 'zone': ...}} for the set's VMs, in ROLES's order. A config without VMS (one made
+    by hand) has source and dest in ZONE, as before sets."""
+    if config.get('VMS'):
+        return config['VMS']
+    return {'source': {'name': config['SOURCE_VM'], 'zone': config['ZONE']},
+            'dest': {'name': config['DEST_VM'], 'zone': config['ZONE']}}
 
 
 def parse_instance(description: dict) -> dict:
@@ -76,18 +110,21 @@ def parse_instance(description: dict) -> dict:
             'external': access[0].get('natIP'), 'status': description.get('status')}
 
 
+def describe_argv(config: dict, vm: dict) -> list[str]:
+    return [config['GCLOUD'], '--project', config['PROJECT'], 'compute', 'instances', 'describe', vm['name'],
+            '--zone', vm['zone'], '--format=json']
+
+
 def instances(config: dict) -> dict:
+    """Every VM of the set, by role (source and dest first), each described in its own zone."""
     found = {}
-    for role, key in (('source', 'SOURCE_VM'), ('dest', 'DEST_VM')):
-        output = subprocess.run(
-            [config['GCLOUD'], '--project', config['PROJECT'], 'compute', 'instances',
-             'describe', config[key], '--zone', config['ZONE'], '--format=json'],
-            capture_output=True, text=True)
+    for role, vm in set_vms(config).items():
+        output = subprocess.run(describe_argv(config, vm), capture_output=True, text=True)
         if output.returncode != 0:
-            raise SystemExit(f'cannot describe {config[key]}: {output.stderr.strip()}')
+            raise SystemExit(f'cannot describe {vm["name"]}: {output.stderr.strip()}')
         found[role] = parse_instance(json.loads(output.stdout))
         if not found[role]['external']:
-            raise SystemExit(f'{config[key]} has no external address')
+            raise SystemExit(f'{vm["name"]} has no external address')
     return found
 
 
@@ -248,31 +285,37 @@ def cmd_deploy(config, args) -> int:
 
 
 def cmd_setup_ssh(config, args) -> int:
+    """dest's key, authorized on the source and on every other role of the set (a client), and dest's first
+    connection to each by its internal address."""
     vms = instances(config)
-    dest, source = vms['dest']['external'], vms['source']['external']
+    dest = vms['dest']['external']
+    dest_name = vms['dest'].get('name', 'pgd-dest')
     key = ssh(config, dest, f'test -f {DEST_KEY} || ssh-keygen -q -t ed25519 -N "" '
                             f'-C exp04-pgd-dest -f {DEST_KEY}; cat {DEST_KEY}.pub').stdout
     key = key.decode().strip()
     if not key.startswith('ssh-ed25519 '):
         raise SystemExit(f'unexpected public key: {key!r}')
     quoted = shlex.quote(key)
-    ssh(config, source, 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys '
-                        f'&& (grep -qxF {quoted} ~/.ssh/authorized_keys || echo {quoted} '
-                        '>> ~/.ssh/authorized_keys) && chmod 600 ~/.ssh/authorized_keys')
-    probe = ssh(config, dest, f'ssh -i {DEST_KEY} -o BatchMode=yes '
-                              f'-o StrictHostKeyChecking=accept-new '
-                              f'{config["SSH_USER"]}@{vms["source"]["internal"]} hostname')
-    print(f'pgd-dest -> {vms["source"]["internal"]}: {probe.stdout.decode().strip()}')
+    for role, vm in vms.items():
+        if role == 'dest':
+            continue
+        ssh(config, vm['external'], 'mkdir -p ~/.ssh && chmod 700 ~/.ssh && touch ~/.ssh/authorized_keys '
+                                    f'&& (grep -qxF {quoted} ~/.ssh/authorized_keys || echo {quoted} '
+                                    '>> ~/.ssh/authorized_keys) && chmod 600 ~/.ssh/authorized_keys')
+        probe = ssh(config, dest, f'ssh -i {DEST_KEY} -o BatchMode=yes '
+                                  f'-o StrictHostKeyChecking=accept-new '
+                                  f'{config["SSH_USER"]}@{vm["internal"]} hostname')
+        print(f'{dest_name} -> {vm["internal"]}: {probe.stdout.decode().strip()}')
     if getattr(args, 'control_port', 0):
         # EXP-13: the harness's control path, which infra/gcp/wan.sh leaves outside the emulated WAN
         # (startup.sh has sshd listen there too; run_exp04 --control-port uses it).
         probe = ssh(config, dest, control_probe_command(config['SSH_USER'], vms['source']['internal'],
                                                         args.control_port), check=False)
         if probe.returncode != 0:
-            raise SystemExit(f'pgd-dest cannot reach the source on the control port {args.control_port} '
+            raise SystemExit(f'{dest_name} cannot reach the source on the control port {args.control_port} '
                              f'({probe.stderr.decode(errors="replace").strip()[-500:]}); remote.py provision runs '
                              'infra/gcp/startup.sh, which has sshd listen there')
-        print(f'pgd-dest -> {vms["source"]["internal"]}:{args.control_port}: {probe.stdout.decode().strip()}')
+        print(f'{dest_name} -> {vms["source"]["internal"]}:{args.control_port}: {probe.stdout.decode().strip()}')
     return 0
 
 
@@ -330,9 +373,17 @@ def cmd_wait(config, args) -> int:
         time.sleep(args.poll)
 
 
+def fetch_dir(config: dict, name: str) -> Path:
+    """Where fetch puts a run by default: results/exp04/NAME, or results/exp04/sets/PAIR/NAME for a named set, so
+    two sets' runs of one name never land in one directory."""
+    pair = config.get('PAIR')
+    base = REPO_ROOT / 'results' / 'exp04'
+    return base / 'sets' / pair / name if pair else base / name
+
+
 def cmd_fetch(config, args) -> int:
     out = results_dir(args.name)
-    target = Path(args.to) if args.to else REPO_ROOT / 'results' / 'exp04' / args.name
+    target = Path(args.to) if args.to else fetch_dir(config, args.name)
     target.mkdir(parents=True, exist_ok=True)
     data = ssh(config, instances(config)['dest']['external'],
                f'tar -C {out} -czf - .', timeout=3600).stdout
@@ -350,6 +401,10 @@ def cmd_stop(config, args) -> int:
 
 
 def cmd_ssh(config, args) -> int:
+    roles = list(set_vms(config))
+    if args.role not in roles:
+        raise SystemExit(f'set {config.get("SET_NAME") or "default"} has no {args.role!r}; its roles: '
+                         f'{", ".join(roles)}')
     vm = instances(config)[args.role]
     # Like ssh itself: the words are joined with spaces and run by the remote shell.
     command = ' '.join(args.command) if args.command else None
@@ -357,9 +412,42 @@ def cmd_ssh(config, args) -> int:
                                    tty=command is None)).returncode
 
 
+def cmd_config(config, args) -> int:
+    """The set's resolved settings, from config.sh alone: no gcloud call."""
+    print(json.dumps({'set': config.get('SET_NAME') or 'default', 'set_file': config.get('SET_FILE') or None,
+                      'project': config.get('PROJECT'), 'ssh_known_hosts': config.get('SSH_KNOWN_HOSTS'),
+                      'ssh_config': config.get('SSH_CONFIG'), 'vms': set_vms(config)}, indent=2))
+    return 0
+
+
+def ssh_config_text(config: dict, vms: dict) -> str:
+    """An ssh config for the set: one Host per VM, by role and by name, with the set's own known_hosts."""
+    lines = [f'# The VMs of set {config.get("SET_NAME") or "default"}, written by experiments/network/remote.py '
+             f'ssh-config at {datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}.',
+             f'# ssh -F {config["SSH_CONFIG"]} dest', '']
+    for role, vm in vms.items():
+        lines += [f'Host {role} {vm["name"]}', f'  HostName {vm["external"]}', f'  User {config["SSH_USER"]}',
+                  f'  IdentityFile "{config["SSH_KEY"]}"', '  IdentitiesOnly yes',
+                  f'  UserKnownHostsFile "{config["SSH_KNOWN_HOSTS"]}"', '  StrictHostKeyChecking accept-new', '']
+    return '\n'.join(lines)
+
+
+def cmd_ssh_config(config, args) -> int:
+    """Write SSH_CONFIG (beside the set's known_hosts) from the VMs' current addresses."""
+    path = Path(config['SSH_CONFIG'])
+    text = ssh_config_text(config, instances(config))
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_text(text)
+    print(path)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--pair', metavar='NAME',
+                        help='the VM set to act on (infra/gcp/config.sh; default: $PAIR, else pgd-source and '
+                             'pgd-dest); before the command')
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('ips').set_defaults(func=cmd_ips)
     sub = commands.add_parser('wait-ready')
@@ -391,15 +479,17 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_argument('name')
     sub.set_defaults(func=cmd_stop)
     sub = commands.add_parser('ssh')
-    sub.add_argument('role', choices=('source', 'dest'))
+    sub.add_argument('role', help="source, dest, or another of the set's roles (client)")
     sub.add_argument('command', nargs=argparse.REMAINDER)
     sub.set_defaults(func=cmd_ssh)
+    commands.add_parser('config').set_defaults(func=cmd_config)
+    commands.add_parser('ssh-config').set_defaults(func=cmd_ssh_config)
     return parser
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    config = load_config()
+    config = load_config(pair=args.pair)
     return args.func(config, args)
 
 

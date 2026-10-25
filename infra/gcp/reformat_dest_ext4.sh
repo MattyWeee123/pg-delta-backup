@@ -7,10 +7,13 @@
 # It unmounts /data, runs startup.sh's mkfs.ext4 (inode tables and journal initialised up
 # front) on the existing md array, mounts it again with startup.sh's options and /data's old
 # owner and mode, recreates /data/.startup-done, and prints the filesystem type.
+# On a named set's dest, give the set: sudo PAIR=a ./reformat_dest_ext4.sh --yes. On a set
+# whose dest has a pd-balanced data disk, that disk is reformatted instead of the array.
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./config.sh
 target=/dev/md/pgdata
+if [ -e /dev/disk/by-id/google-pgd-data ]; then target=/dev/disk/by-id/google-pgd-data; fi
 
 if [ "${1:-}" != "--yes" ]; then
   echo "usage: sudo $0 --yes   (destroys everything on /data of $DEST_VM)" >&2
@@ -26,7 +29,7 @@ if [ "$host" = "$SOURCE_VM" ]; then
   exit 2
 fi
 if [ "$host" != "$DEST_VM" ]; then
-  echo "refusing to run on $host: this script is for $DEST_VM only" >&2
+  echo "refusing to run on $host: this script is for $DEST_VM only (a named set's dest: sudo PAIR=NAME $0 --yes)" >&2
   exit 2
 fi
 if [ ! -e "$target" ]; then

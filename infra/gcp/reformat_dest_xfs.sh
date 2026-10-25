@@ -8,10 +8,13 @@
 # options and /data's old owner and mode, recreates /data/.startup-done, and prints the
 # filesystem's reflink setting. startup.sh keeps the XFS filesystem at the next boot: it
 # formats the array only when it holds no filesystem. To go back to ext4, run reformat_dest_ext4.sh.
+# On a named set's dest, give the set: sudo PAIR=a ./reformat_dest_xfs.sh --yes. On a set
+# whose dest has a pd-balanced data disk, that disk is reformatted instead of the array.
 set -euo pipefail
 cd "$(dirname "$0")"
 source ./config.sh
 target=/dev/md/pgdata
+if [ -e /dev/disk/by-id/google-pgd-data ]; then target=/dev/disk/by-id/google-pgd-data; fi
 
 if [ "${1:-}" != "--yes" ]; then
   echo "usage: sudo $0 --yes   (destroys everything on /data of $DEST_VM)" >&2
@@ -27,7 +30,7 @@ if [ "$host" = "$SOURCE_VM" ]; then
   exit 2
 fi
 if [ "$host" != "$DEST_VM" ]; then
-  echo "refusing to run on $host: this script is for $DEST_VM only" >&2
+  echo "refusing to run on $host: this script is for $DEST_VM only (a named set's dest: sudo PAIR=NAME $0 --yes)" >&2
   exit 2
 fi
 if [ ! -e "$target" ]; then

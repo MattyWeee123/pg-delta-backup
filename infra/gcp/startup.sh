@@ -1,9 +1,38 @@
 #!/bin/bash
-# VM startup script: install the benchmark tools, then stripe the local SSDs
-# into /data. Runs as root on every boot; each step is idempotent. Progress is
-# in the serial console and `journalctl -u google-startup-scripts`; success
-# writes /data/.startup-done.
+# VM startup script: install the benchmark tools, then make the data disk /data:
+# the local NVMe SSDs striped (RAID 0), or the pd-balanced disk create.sh attaches
+# as pgd-data, ext4 either way. Runs as root on every boot; each step is
+# idempotent. Progress is in the serial console and `journalctl -u
+# google-startup-scripts`; success writes /data/.startup-done.
 set -euo pipefail
+
+# data_disks DIR: the data disk among the block devices DIR (/dev/disk/by-id)
+# names. Prints "pd DEVICE" for a pd-balanced disk attached as pgd-data, "nvme
+# DEVICE" for one local NVMe SSD, or "raid DEVICE..." for several, to be striped.
+# Fails if there are neither, or both.
+data_disks() {
+  local pd=$1/google-pgd-data devices
+  shopt -s nullglob
+  devices=("$1"/google-local-nvme-ssd-*)
+  shopt -u nullglob
+  if [ -e "$pd" ] && [ ${#devices[@]} -gt 0 ]; then
+    echo "both a pd-balanced data disk ($pd) and local NVMe SSDs; refusing to choose" >&2
+    return 1
+  elif [ -e "$pd" ]; then
+    echo "pd $pd"
+  elif [ ${#devices[@]} -eq 0 ]; then
+    echo "no data disk: no local NVMe SSDs and no $pd" >&2
+    return 1
+  elif [ ${#devices[@]} -eq 1 ]; then
+    echo "nvme ${devices[0]}"
+  else
+    echo "raid ${devices[*]}"
+  fi
+}
+
+# Sourced (by the tests), it stops here, with only the function defined.
+if [ "${BASH_SOURCE[0]:-$0}" != "$0" ]; then return 0; fi
+
 export DEBIAN_FRONTEND=noninteractive
 APT=(apt-get -y -q -o DPkg::Lock::Timeout=600)
 
@@ -88,14 +117,10 @@ if [ -d /etc/postgresql/17/main ]; then pg_dropcluster --stop 17 main || true; f
 systemctl disable --now postgresql >/dev/null 2>&1 || true
 
 if ! mountpoint -q /data; then
-  shopt -s nullglob
-  devices=(/dev/disk/by-id/google-local-nvme-ssd-*)
-  shopt -u nullglob
-  if [ ${#devices[@]} -eq 0 ]; then
-    echo "no local NVMe SSDs found" >&2
-    exit 1
-  fi
-  if [ ${#devices[@]} -gt 1 ]; then
+  disks=$(data_disks /dev/disk/by-id)
+  kind=${disks%% *}
+  read -r -a devices <<< "${disks#* }"
+  if [ "$kind" = raid ]; then
     # A reboot keeps local SSD data; the array then comes back under its name.
     [ -e /dev/md/pgdata ] || mdadm --assemble --scan >/dev/null 2>&1 || true
     if [ ! -e /dev/md/pgdata ]; then
@@ -104,10 +129,12 @@ if ! mountpoint -q /data; then
     fi
     target=/dev/md/pgdata
   else
+    # One local SSD, or the pd-balanced disk, which keeps its filesystem across
+    # reboots and stops.
     target=${devices[0]}
   fi
-  # Initialise inode tables and journal now, so no background zeroing runs
-  # during measurements.
+  # The same filesystem on either kind. Initialise inode tables and journal now,
+  # so no background zeroing runs during measurements.
   blkid "$target" >/dev/null 2>&1 || mkfs.ext4 -q -F -m 0 \
     -E lazy_itable_init=0,lazy_journal_init=0 "$target"
   mkdir -p /data
