@@ -332,3 +332,5 @@ Under rule 11 as the owner clarified it (small experiments, no two-session progr
 4. Whether cubic v1 falls into the slow mode here is the open question: reported as a count, not predicted.
 
 **What follows:** if 2 and 3 hold, the emulated results stand on a real path and BBR's role is confirmed; if BBR v1 is slow here, the emulator misled and the DR claim goes back to provisional.
+
+**First attempt (07:48–07:52 UTC), before any run counted:** the harness's visit check expects the emulated round trip (0–1 ms at r = 0), and on the real path the ping minimum was 31.3 ms, so every visit failed its check twice and the invocation stopped with no run, as A11 (i) prescribes. The harness gained `--base-rtt-ms` (the path's own round trip, added to what the ping and minrtt checks expect, with 5% of it as slack). The VMs were deleted before the failure was read, an ordering slip in the commands; the logs had been fetched first, and the pair is created again for the rerun with `--base-rtt-ms 31`.
