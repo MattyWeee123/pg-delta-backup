@@ -1,0 +1,2 @@
+rtt_ms,depth_rtt,competitors,runs_cubic,comp_mbit_cubic,new_mbit_cubic,ping_ms_cubic,runs_bbr,comp_mbit_bbr,new_mbit_bbr,ping_ms_bbr,harm
+60,1,1,1,1396.0,514.8,112.0,1,179.6,1683.3,95.8,0.871

@@ -54,3 +54,16 @@ From the published behaviour of BBR v1 against loss-based flows:
 ## Smoke
 
 Before the grid, the driver's smoke plan runs one cell (60 ms, 1 round trip, 1 competitor) once per newcomer, to check the pipeline: both congestion controls applied, full windows, readable server intervals. It is not counted.
+
+**Smoke result (October 25, 15:45–15:49 UTC, not counted).** After two harness fixes (ssh read the plan from stdin, so only the first run ran; the iperf3 servers needed `-J` to return their per-second counts as JSON), both runs completed with full windows and the right congestion control. At 60 ms, a 1-round-trip queue and 1 competitor, the cubic competitor got **180 Mbit/s beside a BBR newcomer** (which took 1,683) against **1,396 beside a cubic newcomer** (which took 515): **H = 0.87** from one run each, four times the bar. Data `docs/experiments/data/exp26-cells-smoke.csv`.
+
+## Revision before the grid ran: a lean grid (October 25)
+
+The owner asked that experiments run long only where they must. The registered grid (60 runs of 100 s, about 1 h 45 min) was stopped during its first run, which isn't used. The verdict needs one cell clearly above the bar, and the map of where BBR is safe needs each cell's H, its sign and rough size, not three-repeat precision far from the bar. So, before any grid run:
+
+- **50-second runs:** competitors from 0 to 50 s, the newcomer from 10 s, the window 20–50 s (30 s, about one and a half of cubic's growth cycles at 60 ms).
+- **One run per newcomer per cell:** 20 runs, about 20 minutes, in the order seed 260 gives.
+- **Extra repeats only near the bar:** a cell whose H falls between 0.10 and 0.40 (half and twice the bar) gets two more runs per newcomer, and its H then comes from the medians.
+- **The check on the shorter window:** the lean grid's 60 ms, 1-round-trip, 1-competitor cell is reported beside the smoke's 100-second runs of the same cell (H = 0.87). If the two disagree on which side of the bar the cell falls, the short window isn't trusted and that cell is rerun at 100 s.
+
+The cells, the measure, the bar, the predictions and the verdict rule are unchanged.

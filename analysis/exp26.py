@@ -5,7 +5,7 @@
 Per run, from the iperf3 servers' per-second intervals: the competitors' mean received rate over t = 40-100 s and
 the newcomer's over the same seconds (its own t = 20-80); the congestion control each sender got; the source's tbf
 drops; and the ping round trip meanwhile. A run counts only if both senders got what they asked for and each window
-has at least 55 of its 60 seconds. Per cell (round trip, queue depth, competitors): the median of each newcomer's
+has at least 90% of its seconds. Per cell (round trip, queue depth, competitors): the median of each newcomer's
 repeats, and the harm H = 1 - (competitors' rate beside a BBR newcomer) / (beside a cubic newcomer). The verdict
 (registered): BBR becomes pgdelta's default only if H <= 0.20 in every cell; also reported at 0.10 and 0.40, and an
 H within 20% of 0.20 (0.16-0.24) in a cell that decides it is provisional. Writes docs/experiments/data/exp26-cells.csv
@@ -28,14 +28,14 @@ from plotting import COLORS, plt
 ROOT = Path(__file__).resolve().parents[1]
 LINK_MBIT = 2000
 BAR, MARGIN = 0.20, 0.20
-WINDOWS = {'comp': (40, 100), 'new': (20, 80)}
-MIN_SECONDS = 55
+WINDOWS = {'comp': (40, 100), 'new': (20, 80)}  # the registered timing; a run's meta.json gives its own
+MIN_SHARE = 0.9  # of the window's seconds
 
 
-def window_mbit(path, which):
+def window_mbit(path, which, meta):
     """Mean received Mbit/s over the window, the seconds it rests on, and the congestion control the sender got."""
     j = json.loads(Path(path).read_text())
-    lo, hi = WINDOWS[which]
+    lo, hi = meta.get(f'{which}_window') or WINDOWS[which]
     rates = [x['sum']['bits_per_second'] for x in j.get('server_output_json', {}).get('intervals', [])
              if lo <= x['sum']['start'] < hi]
     end = j.get('end', {})
@@ -61,15 +61,16 @@ def load(root):
     for d in sorted(Path(root).glob('run-*')):
         meta = json.loads((d / 'meta.json').read_text())
         try:
-            comp, comp_s, comp_cc, comp_rx = window_mbit(d / 'comp.json', 'comp')
-            new, new_s, new_cc, new_rx = window_mbit(d / 'new.json', 'new')
+            comp, comp_s, comp_cc, comp_rx = window_mbit(d / 'comp.json', 'comp', meta)
+            new, new_s, new_cc, new_rx = window_mbit(d / 'new.json', 'new', meta)
         except (OSError, ValueError, KeyError) as exc:
             runs.append({**meta, 'ok': False, 'why': f'unreadable: {exc}'})
             continue
         why = []
         if comp_cc != 'cubic' or new_cc != meta['newcomer']:
             why.append(f'congestion control {comp_cc}/{new_cc}')
-        if comp_s < MIN_SECONDS or new_s < MIN_SECONDS:
+        lo, hi = meta.get('comp_window') or WINDOWS['comp']
+        if min(comp_s, new_s) < MIN_SHARE * (hi - lo):
             why.append(f'windows of {comp_s} and {new_s} s')
         before, after = tbf_drops(d / 'qdisc-before.json'), tbf_drops(d / 'qdisc-after.json')
         runs.append({**meta, 'ok': not why, 'why': '; '.join(why), 'comp_mbit': comp, 'new_mbit': new,
