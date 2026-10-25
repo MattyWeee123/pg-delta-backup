@@ -91,3 +91,23 @@ v1's own timers (medians, seconds; the phases overlap):
 **Predictions:**
 1. Hot: v1 written ÷ each full copy stays between 0.90 and 1.10, a tie either way. The hot cell's verdict ("not faster than the full copies") then stands at two sessions.
 2. Uniform: v1 written's wait for verification drops below 10 s (from 30.8), and its time below 115 s (from 129.6). It stays above the full copies: the in-place writes remain.
+
+## Second session: results (21:15–22:40 UTC, fresh VMs; 16 runs, all verified; deleted)
+
+Data: `docs/experiments/data/exp31-cells-b.csv`; raw `results/exp04/sets/ha/exp31b-s400`; figure `analysis/exp31.py --tag=-b`.
+
+![The second session](../figures/exp31-ha-b.svg)
+
+| Workload | one `pg_basebackup` | parallel copy (8) | v1 | **v1, `written`** | ÷ `pg_basebackup` | ÷ parallel copy | v1 written's wait for verification |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| hot | 61.5 s | 58.4 s | 109.3 s | **58.9 s** | **0.96** | **1.01** | 0.0 s |
+| uniform | 61.7 | 58.5 | 143.9 | **118.6** | 1.92 | 2.03 | **0.0 s** (was 30.8) |
+
+| # | Prediction (second session) | Verdict |
+|---|---|---|
+| 1 | Hot: v1 written ÷ each full copy between 0.90 and 1.10 | **Held:** 0.96 and 1.01, as in the first session (0.96, 1.01). The hot verdict, a tie that is not faster, now rests on two sessions |
+| 2 | Uniform: the wait for verification under 10 s, and the time under 115 s | **The wait held** (0.0 s, from 30.8), **the time failed narrowly** (118.6 s, from 129.6) |
+
+**What the timers show:** pipelining the verification hid it completely, but saved less than its 31 s. The verifier now reads the written nodes while the next file's pages are written, on the same disk, and the in-place write phase slowed from 42.7 to 61.3 s. For scattered changes v1 written is about 2× the full copies, bound by its in-place writes on an IOPS-limited disk.
+
+**The verdict stands at two sessions:** HA beyond memory on balanced persistent disk stays out as a speed target. For local changes v1 ties the full copies, and for scattered ones it is about 2× slower.

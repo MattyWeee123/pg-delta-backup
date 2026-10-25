@@ -45,6 +45,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--sweep', default=str(ROOT / 'results' / 'exp04' / 'sets' / 'ha' / 'exp31-s400'))
     ap.add_argument('--figdir')
+    ap.add_argument('--tag', default='', help='suffix for the data and figure files (the second session: -b)')
     a = ap.parse_args(argv)
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
@@ -65,7 +66,7 @@ def main(argv=None):
             rows.append(row)
             print(row)
     keys = sorted({k for r in rows for k in r}, key=lambda k: (k not in ('pattern', 'method', 'runs', 'median_s'), k))
-    with open(ROOT / 'docs' / 'experiments' / 'data' / 'exp31-cells.csv', 'w', newline='') as f:
+    with open(ROOT / 'docs' / 'experiments' / 'data' / f'exp31-cells{a.tag}.csv', 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
         w.writerows(rows)
@@ -105,7 +106,7 @@ def main(argv=None):
     right.set_title("Where v1's time goes", fontsize=10)
     right.legend(fontsize=7.5, loc='upper center', bbox_to_anchor=(0.5, -0.18), ncol=2, frameon=False)
     fig.tight_layout()
-    print(plotting.save(fig, 'exp31-ha'))
+    print(plotting.save(fig, f'exp31-ha{a.tag}'))
 
 
 if __name__ == '__main__':
