@@ -1,0 +1,9 @@
+median_s,method,pattern,runs,t_fsync,t_hash_basis,t_rebuild,t_total,t_verify_wait,vs_full,vs_parcopy8
+61.69,full,hot,2,,,,,,,
+58.35,parcopy8,hot,2,,,,,,,
+104.44,pgdelta_direct_inplace,hot,2,0.3,67.9,0.4,104.0,35.8,1.693,1.79
+59.05,pgdelta_direct_inplace_vw,hot,2,0.3,57.9,0.4,58.6,0.3,0.957,1.012
+61.88,full,uniform,2,,,,,,,
+58.52,parcopy8,uniform,2,,,,,,,
+142.64,pgdelta_direct_inplace,uniform,2,61.4,66.5,63.4,142.2,22.6,2.305,2.437
+129.56,pgdelta_direct_inplace_vw,uniform,2,40.7,58.0,42.7,129.1,30.8,2.094,2.214

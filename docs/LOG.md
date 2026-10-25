@@ -8,6 +8,15 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-25 (evening): BLAKE3 and a one-pass verification, each measured end to end
+
+- **EXP-29 (T5's gate):** keyed BLAKE3 hashes a page 4.8 times as fast per core as BLAKE2b on the x86 VMs. `pgdelta --hash blake3` was built: the algorithm goes in HELLO, and BLAKE2b stays the default.
+- **EXP-30:** on a busy primary, v1 with BLAKE3 at 2 workers refreshed 2.1 times faster than `pg_basebackup`, at no measurable cost to the load, with 64% less sender CPU. EXP-28's 4-worker miss didn't repeat; the live cap stays at 2.
+- **A correction:** I had written that the destination's CPU decided EXP-22. Its timers show two disk passes over B did.
+- **`pgdelta --verify-scope written` was built.** In place, each file is verified from B's digests and the pages the run wrote, without re-reading B.
+- **EXP-32:** 1,000 randomized trials with the scope on, no wrong output, and 53 of 53 misplaced-write controls caught.
+- **EXP-31:** at 12 GB on balanced persistent disk, v1 without its second pass ties the full copies for local changes (from 1.7×), but stays about 2.1× slower for scattered ones. HA beyond memory stays out as a speed target.
+
 ## 2026-10-25 (late afternoon): EXP-27 explained the missed controls; EXP-28 set live mode's workers
 
 **EXP-27.** With an oracle, a correct read of the same backup compared page by page after recovery, the 3 missed `during_start` controls in 40 trials were each identical to the correct copy. The checks caught all 37 wrong copies and flagged no correct one; pg_amcheck alone caught the 14 whose rows were right. So EXP-25's misses were copies the WAL had fully repaired, not a gap in the checks.
