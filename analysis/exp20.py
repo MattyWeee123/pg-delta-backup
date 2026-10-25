@@ -70,10 +70,14 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--sweep', default=str(ROOT / 'results' / 'exp04' / 'exp20'))
     ap.add_argument('--figdir')
+    ap.add_argument('--v1', default=V1, help='the v1 arm to judge (EXP-24: pgdelta_direct_inplace_bbr)')
+    ap.add_argument('--tag', default='', help='suffix for the data and figure files')
     a = ap.parse_args(argv)
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
     plotting.style()
+    global V1
+    V1 = a.v1
     c = cells(Path(a.sweep))
     conds = ['2:0:default', '2:20:default', '2:60:default', '2:120:default', '2:0:tuned', '2:60:tuned', '2:120:tuned']
     rows = []
@@ -92,7 +96,7 @@ def main(argv=None):
         qual = all((ratios(c, p, f'2:{r}:default')['R_F0'] or 9) <= 0.90 for p in ('hot', 'uniform'))
         print(f"  {r:3d} ms: {verdict}" + (' (provisional: a deciding ratio within 20% of its threshold)' if close else '')
               + f"; qualifier (v1 faster than one pg_basebackup stream, default hosts): {'yes' if qual else 'no'}")
-    out = ROOT / 'docs' / 'experiments' / 'data' / 'exp20-cells.csv'
+    out = ROOT / 'docs' / 'experiments' / 'data' / f'exp20-cells{a.tag}.csv'
     with open(out, 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0])); w.writeheader(); w.writerows(rows)
     print(out)
@@ -112,9 +116,9 @@ def main(argv=None):
         ax.set_title(f'{p} 1% changes'); ax.set_yscale('log')
     axes[0].set_ylabel('time ratio (below 1: v1 faster)')
     axes[1].legend(fontsize=7.5, loc='upper left')
-    fig.suptitle("EXP-20: v1 against the full copies at disaster-recovery round trips (dotted 0.90, solid 1.00)", fontsize=11)
+    fig.suptitle(f"{V1} against the full copies at disaster-recovery round trips (dotted 0.90, solid 1.00)", fontsize=11)
     fig.tight_layout()
-    print(plotting.save(fig, 'exp20-dr'))
+    print(plotting.save(fig, f'exp20-dr{a.tag}'))
 
 
 if __name__ == '__main__':
