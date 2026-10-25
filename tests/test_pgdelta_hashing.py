@@ -7,13 +7,17 @@ import random
 import tempfile
 import unittest
 
-from pgdelta.hashing import (BLOCK, DIGEST_SIZE, NODE_BLOCKS, Hasher, file_digest, leaf_digest,
-                             new_key, node_digest)
+from pgdelta.hashing import (ALGORITHMS, BLAKE3_CONTEXTS, BLOCK, DIGEST_SIZE, NODE_BLOCKS, Hasher, file_digest,
+                             leaf_digest, new_key, node_digest)
 from pgdelta.tree import hash_file, hash_stream, leaf_digests, open_regular, split_digests
 
 KEY = bytes(range(32))
 OTHER_KEY = bytes(range(1, 33))
 MIB = 1 << 20
+try:
+    import blake3
+except ImportError:  # the BLAKE3 tests need the optional package
+    blake3 = None
 
 
 def reference_tree(data, key, block=BLOCK, node_blocks=NODE_BLOCKS):
@@ -148,3 +152,60 @@ class TreeTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+@unittest.skipUnless(blake3, 'the blake3 package is not installed')
+class Blake3Tests(unittest.TestCase):
+    """EXP-29's option: keyed BLAKE3, each level keyed by a key derived from the session key."""
+
+    def reference(self, level, payload, key=KEY):
+        derived = blake3.blake3(key, derive_key_context=BLAKE3_CONTEXTS[level]).digest()
+        return blake3.blake3(payload, key=derived).digest(length=DIGEST_SIZE)
+
+    def test_digests_match_blake3_itself(self):
+        hasher, page = Hasher(KEY, 'blake3'), os.urandom(BLOCK)
+        self.assertEqual(hasher.algorithm, 'blake3')
+        self.assertEqual(hasher.leaf(page), self.reference(0, page))
+        self.assertEqual(hasher.node(page[:64]), self.reference(1, page[:64]))
+        self.assertEqual(hasher.file(5, page[:32]), self.reference(2, (5).to_bytes(8, 'big') + page[:32]))
+        self.assertEqual(len(hasher.leaf(page)), DIGEST_SIZE)
+
+    def test_levels_keys_and_algorithms_are_separated(self):
+        page = b'\x00' * 32
+        b3 = Hasher(KEY, 'blake3')
+        self.assertEqual(len({b3.leaf(page), b3.node(page), b3.file(0, page)}), 3)
+        self.assertNotEqual(b3.leaf(page), Hasher(OTHER_KEY, 'blake3').leaf(page))
+        self.assertNotEqual(b3.leaf(page), Hasher(KEY, 'blake2b').leaf(page))
+
+    def test_reused_states_do_not_leak_between_calls(self):
+        hasher = Hasher(KEY, 'blake3')
+        first = hasher.leaf(b'a' * BLOCK)
+        hasher.leaf(b'b' * BLOCK)
+        self.assertEqual(hasher.leaf(b'a' * BLOCK), first)
+
+    def test_the_tree_is_the_same_on_one_job_and_on_worker_processes(self):
+        from pgdelta.tree import HashPool
+        data = os.urandom(3 * MIB + 5 * BLOCK)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'f'
+            path.write_bytes(data)
+            hasher = Hasher(KEY, 'blake3')
+            serial = hash_file(path, None, keep_leaves=True, hasher=hasher)
+            pool = HashPool(2, key=KEY, algorithm='blake3')
+            try:
+                parallel = hash_file(path, None, keep_leaves=True, hasher=hasher, pool=pool)
+            finally:
+                pool.close()
+        self.assertEqual(parallel.digest, serial.digest)
+        self.assertNotEqual(serial.digest, hash_file(Path(__file__), KEY).digest)
+
+
+class AlgorithmTests(unittest.TestCase):
+    def test_unknown_algorithm_is_refused(self):
+        self.assertEqual(ALGORITHMS, ('blake2b', 'blake3'))
+        with self.assertRaises(ValueError):
+            Hasher(KEY, 'sha256')
+
+    def test_default_is_blake2b(self):
+        self.assertEqual(Hasher(KEY).algorithm, 'blake2b')
+        self.assertEqual(Hasher(KEY).leaf(b'x'), Hasher(KEY, 'blake2b').leaf(b'x'))

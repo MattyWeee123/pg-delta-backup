@@ -13,7 +13,7 @@ import traceback
 
 from pgdelta import datadir, flush, inplace, live, placement, prefetch, receiver, sender, transport
 from pgdelta.errors import EXIT_TRANSFER_FAILURE, InvalidInput, PgDeltaError, TransferError
-from pgdelta.hashing import NODE_BLOCKS
+from pgdelta.hashing import ALGORITHMS, DEFAULT_ALGORITHM, NODE_BLOCKS
 from pgdelta.identity import read_identity
 from pgdelta.tree import BACKENDS, DEFAULT_BACKEND
 
@@ -146,6 +146,13 @@ def _jobs_option(parser, what, sides=1, live=False):
                                 f'primary no more than pg_basebackup (EXP-28)' if live else '') + ')')
     # Experiment switch (EXP-06): worker threads instead of processes, as measured in EXP-05.
     parser.add_argument('--hash-backend', choices=BACKENDS, default=DEFAULT_BACKEND, help=argparse.SUPPRESS)
+
+
+def _hash_option(parser):
+    parser.add_argument('--hash', choices=ALGORITHMS, default=DEFAULT_ALGORITHM,
+                        help='the keyed digest for pages, nodes and files; the receiver follows the sender. '
+                             'blake3 hashed a page 4.8 times as fast per core as blake2b on x86 VMs (EXP-29) '
+                             'and needs the blake3 package on both ends (default: %(default)s)')
 
 
 def resolve_jobs(args):
@@ -338,6 +345,7 @@ def build_parser():
                            'queue is a round trip or less (EXP-26), so use it where the refresh may take the link')
     _source_kind_option(send)
     _jobs_option(send, 'S', live=True)
+    _hash_option(send)
     send.set_defaults(func=cmd_send)
 
     local = commands.add_parser('local', help='run both ends on this host, receiver as a child process')
@@ -349,6 +357,7 @@ def build_parser():
     _source_kind_option(local)
     _basis_controldata_option(local)
     _jobs_option(local, 'S, and in the receiver B and O (N on each side)', sides=2, live=True)
+    _hash_option(local)
     _rebuild_options(local)
     local.set_defaults(func=cmd_local)
     return parser
@@ -442,7 +451,7 @@ def _sender_kwargs(args, identity):
             'high_churn_node_fraction': args.high_churn_node_fraction, 'window': args.window, 'jobs': args.jobs,
             'hash_backend': args.hash_backend, 'source_kind': args.source_kind,
             'pg_controldata': args.pg_controldata, 'pg_conn': args.pg_conn, 'psql': args.psql,
-            'live_timeout': args.live_timeout}
+            'live_timeout': args.live_timeout, 'hash_algorithm': args.hash}
 
 
 def _source_identity(args):

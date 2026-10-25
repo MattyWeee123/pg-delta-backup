@@ -1,4 +1,5 @@
 """The python -m pgdelta command line: local mode over pipes, TCP mode, exit codes and statistics."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -68,6 +69,21 @@ class CliTestCase(unittest.TestCase):
 
 
 class CliTests(CliTestCase):
+    @unittest.skipUnless(importlib.util.find_spec('blake3'), 'the blake3 package is not installed')
+    def test_local_mode_with_blake3_rebuilds_the_same_copy(self):
+        # EXP-29's option: the receiver follows the sender's HELLO; the output is the same as with BLAKE2b.
+        stats_path = self.root / 'stats.json'
+        for jobs in ('1', '2'):
+            with self.subTest(jobs=jobs):
+                output = self.root / f'O-blake3-{jobs}'
+                result = run('local', '--source', self.source, '--basis', self.basis, '--output', output,
+                             '--assume-same-cluster', '--hash', 'blake3', '--jobs', jobs, '--stats-json', stats_path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(snapshot(output), snapshot(self.source))
+                stats = json.loads(stats_path.read_text())
+                self.assertEqual(stats['pages']['sent'], differing_pages(self.source, self.basis))
+                self.assertEqual(stats['hash'], 'blake3')
+
     def test_local_mode_rebuilds_and_writes_stats(self):
         before = snapshot(self.basis)
         stats_path = self.root / 'stats.json'

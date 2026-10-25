@@ -52,7 +52,7 @@ import threading
 import time
 
 from pgdelta.errors import TransferError
-from pgdelta.hashing import BLOCK, DIGEST_SIZE, NODE_BLOCKS, Hasher
+from pgdelta.hashing import BLOCK, DEFAULT_ALGORITHM, DIGEST_SIZE, NODE_BLOCKS, Hasher
 
 READ_BYTES = 1 << 20
 # Process backend: one task covers about this many bytes of consecutive nodes,
@@ -112,11 +112,11 @@ class _WorkerState:
 _WORKER = _WorkerState()
 
 
-def _worker_init(key, ready=None):
+def _worker_init(key, ready=None, algorithm=DEFAULT_ALGORITHM):
     # Ctrl-C reaches every process in the foreground group; only the parent acts on it, and it
     # shuts the pool down. SIGTERM keeps its default: a worker told to stop, stops.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    _WORKER.hasher = Hasher(key)
+    _WORKER.hasher = Hasher(key, algorithm)
     parent = multiprocessing.parent_process()
     if parent is not None:
         threading.Thread(target=_exit_with_parent, args=(parent.sentinel,), name='pgdelta-parent-watch',
@@ -162,7 +162,7 @@ class HashPool:
     backend: workers get it once, through the pool initializer.
     """
 
-    def __init__(self, jobs=1, *, backend=DEFAULT_BACKEND, key=None):
+    def __init__(self, jobs=1, *, backend=DEFAULT_BACKEND, key=None, algorithm=DEFAULT_ALGORITHM):
         if type(jobs) is not int or jobs < 1:
             raise ValueError(f'jobs must be a positive integer, not {jobs!r}')
         if backend not in BACKENDS:
@@ -170,6 +170,7 @@ class HashPool:
         self.jobs = jobs
         self.backend = 'serial' if jobs == 1 else backend
         self.key = None if key is None else bytes(key)
+        self.algorithm = algorithm
         self.start_seconds = 0.0
         # Seconds from creating the pool until the first, and until every one, of its `jobs`
         # worker processes had started (None until then); 0 without worker processes.
@@ -187,7 +188,7 @@ class HashPool:
         elif self.backend == 'process':
             if self.key is None:
                 raise ValueError('the process backend needs the session key')
-            Hasher(self.key)  # checks the key before any process starts
+            Hasher(self.key, self.algorithm)  # checks the key and the algorithm before any process starts
             self._start_workers(started)
         self.start_seconds = time.perf_counter() - started
 
@@ -207,7 +208,7 @@ class HashPool:
         self._ready_ends = (reader, writer)
         try:
             self._executor = ProcessPoolExecutor(max_workers=self.jobs, mp_context=context,
-                                                 initializer=_worker_init, initargs=(self.key, writer))
+                                                 initializer=_worker_init, initargs=(self.key, writer, self.algorithm))
             self._ready_thread = threading.Thread(target=self._watch_ready, args=(reader, started),
                                                   name='pgdelta-pool-ready', daemon=True)
             self._ready_thread.start()
@@ -306,8 +307,8 @@ class HashPool:
         """
         nodes = list(nodes)
         if self.backend == 'process' and len(nodes) > 1:
-            if hasher.key != self.key:
-                raise ValueError('the hasher and the hash pool use different keys')
+            if hasher.key != self.key or hasher.algorithm != self.algorithm:
+                raise ValueError('the hasher and the hash pool use different keys or algorithms')
             per_task = max(1, min(TASK_BYTES // (block * node_blocks), -(-len(nodes) // self.jobs)))
             chunks = [tuple(nodes[start:start + per_task]) for start in range(0, len(nodes), per_task)]
             if len(chunks) > 1:

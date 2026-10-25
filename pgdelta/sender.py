@@ -30,7 +30,7 @@ import time
 from pgdelta import __version__, datadir, live, matching, protocol, transport, waits
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
-from pgdelta.hashing import BLOCK, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key
+from pgdelta.hashing import BLOCK, DEFAULT_ALGORITHM, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key
 from pgdelta.inplace import COMMITTED
 from pgdelta.inventory import require_plain, scan
 from pgdelta.protocol import ChannelClosed
@@ -278,8 +278,10 @@ def _parse_accept(accept, file_count):
 class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
-                 busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None):
+                 busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
+                 hash_algorithm=DEFAULT_ALGORITHM):
         self.started = time.perf_counter()
+        self.hash_algorithm = hash_algorithm
         self.channel, self.source, self.identity = channel, Path(source), identity
         self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
         # A live source (pgdelta.live): its backup session, and how its files are read; the files appended
@@ -424,10 +426,13 @@ class _Sender:
         inventory = prepare_source(self.source) if self.selection is None else self.selection.inventory
         self.directory_count, self.file_count = len(inventory.directories), len(inventory.files)
         key = self.key or new_key()
-        self.hasher = Hasher(key)
+        try:
+            self.hasher = Hasher(key, self.hash_algorithm)
+        except (ImportError, ValueError) as exc:
+            raise InvalidInput(str(exc)) from exc
         started = time.perf_counter()
         try:
-            self.pool = HashPool(self.jobs, backend=self.hash_backend, key=key)
+            self.pool = HashPool(self.jobs, backend=self.hash_backend, key=key, algorithm=self.hash_algorithm)
         except (OSError, ValueError) as exc:
             raise TransferError(f'cannot start the hashing workers: {exc}') from exc
         self.pool_start_seconds = time.perf_counter() - started
@@ -449,6 +454,8 @@ class _Sender:
         }
         if self.live is not None:
             hello['appends'] = True  # the WAL and backup_label follow in APPEND, after pg_backup_stop
+        if self.hash_algorithm != DEFAULT_ALGORITHM:
+            hello['hash'] = self.hash_algorithm  # EXP-29: absent means BLAKE2b, so older receivers still match
         self._send_json(protocol.HELLO, hello)
         accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
         self.reuse, self.reason, self.policy, self.basis_identity, self.basis_sizes = _parse_accept(
@@ -747,6 +754,7 @@ class _Sender:
             'window': self.window,
             'jobs': self.jobs,
             'hash_backend': self.switches()['hash_backend'],
+            'hash': self.hash_algorithm,  # the keyed digest both ends used (EXP-29: blake2b or blake3)
             # "spawn": the workers are this process's children, so wait4/RUSAGE_CHILDREN count them.
             'worker_start_method': None if self.pool is None else self.pool.start_method,
             # Both ends' engine settings; the receiver's are null until its final statistics arrive.
@@ -785,7 +793,8 @@ class _Sender:
 def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_BLOCKS,
                high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
-               busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None):
+               busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
+               hash_algorithm=DEFAULT_ALGORITHM):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -815,4 +824,4 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
-                   pg_conn, psql, live_timeout).run()
+                   pg_conn, psql, live_timeout, hash_algorithm).run()
