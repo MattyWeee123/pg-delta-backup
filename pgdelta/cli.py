@@ -31,6 +31,10 @@ from pgdelta.tree import BACKENDS, DEFAULT_BACKEND
 # in-process engine. Library callers (run_sender, run_receiver) still default to one job, since more
 # needs the main-module guard of multiprocessing.
 MAX_DEFAULT_JOBS = 4
+# Reading a running primary (--source-kind live), the default is at most 2 (EXP-28): on a busy primary, its
+# load's client on another host, 1 and 2 workers cost the load no more than one pg_basebackup stream, while 4
+# lost 0.073 s of its work and raised its p95 latency to 74 ms unthrottled. --jobs given explicitly is kept.
+LIVE_MAX_DEFAULT_JOBS = 2
 
 
 def log(message):
@@ -127,15 +131,30 @@ def default_jobs(cpus=None, sides=1):
     return max(1, min(MAX_DEFAULT_JOBS, (available_cpus() if cpus is None else cpus) // sides))
 
 
-def _jobs_option(parser, what, sides=1):
+class _DefaultJobs(int):
+    """--jobs's default, told apart from the same number given on the command line (resolve_jobs)."""
+
+
+def _jobs_option(parser, what, sides=1, live=False):
     share = 'CPUs' if sides == 1 else f'CPUs / {sides}'
-    parser.add_argument('--jobs', type=_positive_int, default=default_jobs(sides=sides), metavar='N',
+    parser.add_argument('--jobs', type=_positive_int, default=_DefaultJobs(default_jobs(sides=sides)), metavar='N',
                         help=f'hash {what} on N worker processes, a run of 1 MiB nodes per task; 1 hashes '
                              f'single-threaded in this process. The digests, the bytes sent and the '
                              f'output are the same for any N (default: min({MAX_DEFAULT_JOBS}, {share}), '
-                             f'here %(default)s)')
+                             f'here %(default)s'
+                             + (f'; with --source-kind live at most {LIVE_MAX_DEFAULT_JOBS}, which slows a busy '
+                                f'primary no more than pg_basebackup (EXP-28)' if live else '') + ')')
     # Experiment switch (EXP-06): worker threads instead of processes, as measured in EXP-05.
     parser.add_argument('--hash-backend', choices=BACKENDS, default=DEFAULT_BACKEND, help=argparse.SUPPRESS)
+
+
+def resolve_jobs(args):
+    """--jobs's default for a live source: at most LIVE_MAX_DEFAULT_JOBS; a --jobs given explicitly is kept."""
+    jobs = getattr(args, 'jobs', None)
+    if isinstance(jobs, _DefaultJobs):
+        live = getattr(args, 'source_kind', None) == 'live'
+        args.jobs = min(int(jobs), LIVE_MAX_DEFAULT_JOBS) if live else int(jobs)  # a plain int from here on
+    return args
 
 
 def _rebuild_options(parser):
@@ -318,7 +337,7 @@ def build_parser():
                            'on a link shared with cubic traffic it takes most of the link when the bottleneck\'s '
                            'queue is a round trip or less (EXP-26), so use it where the refresh may take the link')
     _source_kind_option(send)
-    _jobs_option(send, 'S')
+    _jobs_option(send, 'S', live=True)
     send.set_defaults(func=cmd_send)
 
     local = commands.add_parser('local', help='run both ends on this host, receiver as a child process')
@@ -329,7 +348,7 @@ def build_parser():
     _sender_options(local)
     _source_kind_option(local)
     _basis_controldata_option(local)
-    _jobs_option(local, 'S, and in the receiver B and O (N on each side)', sides=2)
+    _jobs_option(local, 'S, and in the receiver B and O (N on each side)', sides=2, live=True)
     _rebuild_options(local)
     local.set_defaults(func=cmd_local)
     return parser
@@ -531,7 +550,7 @@ def main(argv=None, launched=None):
     """Run one command. `launched`: time.perf_counter() when the process started its pgdelta part
     (`python -m pgdelta` passes it); the receiver's publish_s counts from it, else from here (EXP-13)."""
     launched = time.perf_counter() if launched is None else launched
-    args = build_parser().parse_args(argv)
+    args = resolve_jobs(build_parser().parse_args(argv))
     args.launched = launched
     signal.signal(signal.SIGTERM, _terminate)
     try:

@@ -204,6 +204,24 @@ class CliTests(CliTestCase):
                 self.assertEqual(cli.build_parser().parse_args([command, *args, '--jobs', '1']).jobs, 1)
                 self.assertIn(f'min(4, {share})', ' '.join(run(command, '--help').stdout.split()))
 
+    def test_a_live_source_defaults_to_two_jobs_at_most(self):
+        # EXP-28: on a busy primary 4 source workers slowed the load more than pg_basebackup; 1 and 2 didn't.
+        self.assertEqual(cli.LIVE_MAX_DEFAULT_JOBS, 2)
+        with mock.patch.object(cli, 'available_cpus', return_value=8):
+            parser = cli.build_parser()
+            send = ['send', '--source', 'S', '--connect', 'h:1']
+            self.assertEqual(cli.resolve_jobs(parser.parse_args([*send, '--source-kind', 'live'])).jobs, 2)
+            self.assertEqual(cli.resolve_jobs(parser.parse_args([*send, '--source-kind', 'live', '--jobs', '4'])).jobs, 4)
+            self.assertEqual(cli.resolve_jobs(parser.parse_args(send)).jobs, 4)
+            local = ['local', '--source', 'S', '--basis', 'B', '--in-place', '--source-kind', 'live']
+            self.assertEqual(cli.resolve_jobs(parser.parse_args(local)).jobs, 2)
+            receive = parser.parse_args(['receive', '--basis', 'B', '--output', 'O', '--stdio'])
+            self.assertEqual(cli.resolve_jobs(receive).jobs, 4)
+        with mock.patch.object(cli, 'available_cpus', return_value=1):
+            live = cli.build_parser().parse_args(['send', '--source', 'S', '--connect', 'h:1', '--source-kind', 'live'])
+            self.assertEqual(cli.resolve_jobs(live).jobs, 1)
+        self.assertIn('with --source-kind live at most 2', ' '.join(run('send', '--help').stdout.split()))
+
     def test_local_splits_the_cpus_between_its_two_ends(self):
         # `local` runs N workers on each side: on 4-7 CPUs min(4, CPUs) per side would start up to 8
         # workers plus the two pgdelta processes (EXP-06 review), so each side gets CPUs // 2.

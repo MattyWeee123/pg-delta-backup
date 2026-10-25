@@ -167,16 +167,18 @@ def main(argv=None):
             if full is not None:
                 bar = full + (max(floor, SHARE_W * full) if key == 'W_net' else floor)
                 ax.hlines(bar, -0.5, len(arms) - 0.5, color=color, ls='--', lw=0.9)
-        ax.set_xticks(xs, ['pg_basebackup' if x == 'full' else x.replace('v1_j', 'v1, ') + (' worker' if x == 'v1_j1'
+        ax.set_xticks(xs, ['pg_base-\nbackup' if x == 'full' else x.replace('v1_j', 'v1,\n') + (' worker' if x == 'v1_j1'
                            else ' workers') for x in arms], fontsize=8.5)
         ax.set_title(title + '\n(dashed: O4\'s bar, pg_basebackup plus its tolerance)', fontsize=9.5)
     axes[0].legend(fontsize=8)
     for speed, color in (('unthrottled', COLORS['blue']), ('2gbit', COLORS['orange'])):
         pts = [(r['seconds'], r.get('W_net') or 0, r['arm']) for r in rows if r['speed'] == speed and r['arm'] != 'none']
-        axes[2].scatter([p[0] for p in pts], [p[1] for p in pts], color=color, zorder=3)
+        axes[2].scatter([p[0] for p in pts], [p[1] for p in pts], color=color, zorder=3,
+                        label='unthrottled' if speed == 'unthrottled' else '2 Gbit/s')
         for p in pts:
             axes[2].annotate(p[2].replace('v1_j', 'v1 j').replace('full', 'pg_basebackup'), (p[0], p[1]),
                              textcoords='offset points', xytext=(4, 3), fontsize=7.5)
+    axes[2].legend(fontsize=8)
     axes[2].set_xlabel('refresh time (s)')
     axes[2].set_ylabel('work lost beyond load-only time (s)')
     axes[2].set_title('Time against the load\'s loss', fontsize=9.5)

@@ -8,6 +8,12 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-25 (late afternoon): EXP-27 explained the missed controls; EXP-28 set live mode's workers
+
+**EXP-27.** With an oracle, a correct read of the same backup compared page by page after recovery, the 3 missed `during_start` controls in 40 trials were each identical to the correct copy. The checks caught all 37 wrong copies and flagged no correct one; pg_amcheck alone caught the 14 whose rows were right. So EXP-25's misses were copies the WAL had fully repaired, not a gap in the checks.
+
+**EXP-28 (T10b, lean).** Three VMs, the load's client on its own. The first smoke never ran (its log folder was missing on the new VM); the second showed that 32 clients over the network were bound by round trips, so the load moved to 128 clients, recorded before the grid. In 22 runs, v1 from a live source at 1 and 2 workers cost a busy primary no more than `pg_basebackup` at both speeds, and 2 workers were as fast as `pg_basebackup` unthrottled and 2.1× faster at 2 Gbit/s. 4 workers missed O4 unthrottled. Live mode's default `--jobs` is now at most 2, with a test; the VMs are deleted.
+
 ## 2026-10-25 (afternoon): EXP-25 finished on the second try; EXP-26 settled BBR's default
 
 **EXP-25 (live-source correctness).** The first campaign run stopped making progress at trial 790. A negative control's deliberately broken copy had looped the checker's query for 3 h 22 min: a torn btree whose right links form a cycle, in a loop where PostgreSQL never checks for interrupts, so not even a cancel stops it. pg_amcheck named the index in under a second. Queries on a copy now have a 120 s limit, a hung query counts as a problem with the copy, pg_amcheck still runs, and the copy is stopped with SIGQUIT. The run's summary then showed that it had used a stale template, built before the review revision (16 MiB WAL segments, timeline 1), so only 4 of 712 refreshes spanned two segments. The harness now checks the template, and the campaign restarted from trial 0 on the registered one.

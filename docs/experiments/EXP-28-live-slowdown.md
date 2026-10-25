@@ -1,6 +1,6 @@
 # EXP-28: How much does v1 reading a live primary slow it, against one `pg_basebackup` stream?
 
-Status: **pre-registered October 25, 2026, before any run.** Ledger test T10b, lean: the one decision it serves, with v1 itself on a live source (built since T10a, which could only measure v1 by proxy) and the load's client on its own VM. Three VMs (`PAIR=t10b`: source and dest `n2-standard-8` with local NVMe as EXP-12's, client `n2-standard-4`; 20 vCPUs), about 45 minutes with set-up.
+Status: **done October 25, 2026 (grid 17:41–17:53 UTC, repeats 17:55–17:57; 22 runs, all counted; VMs deleted 18:00): v1 at 1 and 2 source workers cost a busy primary no more than one `pg_basebackup` stream, at both speeds; at 4 workers it missed O4 unthrottled. Live mode now defaults to at most 2 workers.** Pre-registered before any run. Ledger test T10b, lean: the one decision it serves, with v1 itself on a live source (built since T10a, which could only measure v1 by proxy) and the load's client on its own VM. Three VMs (`PAIR=t10b`: source and dest `n2-standard-8` with local NVMe as EXP-12's, client `n2-standard-4`; 20 vCPUs), about 45 minutes with set-up.
 
 ## Question
 
@@ -63,3 +63,53 @@ The smoke ran set-up and each arm once, unthrottled.
 - **The load was bound by the network, not the source.** With the client on its own VM, each of a transaction's five statements waits a round trip, and 32 clients reached only C = 7,277 transactions a second. Probes at closed loop: 64 clients gave 13,820 (the source 46% busy), 96 gave 19,325 (64%), 128 gave 21,126 (70%), 192 gave 21,439 (74%). Above 100 clients, PostgreSQL's default `max_connections` refused the connections.
 
 **Revision (rule 8, before the grid):** 128 load clients (and `max_connections = 300`), where C levels off and the source is the limit, as with EXP-12's 32 clients on the source itself. R stays 0.6 × C, measured at set-up. Nothing else changes.
+
+**Second smoke (17:33–17:40 UTC, not counted), after the revisions:**
+- every arm ran, at C = 21,891 and R = 13,100;
+- `pg_basebackup` took 4.4 s; v1 took 8.7, 5.4 and 3.7 s at 1, 2 and 4 workers;
+- the analysis read all five runs.
+
+The grid then reused this set-up (the cluster, B and C), skipping a second set-up.
+
+## Results
+
+22 runs, all counted: the 20 of the grid, plus the 2 extra runs at 2 Gbit/s that the rule gave v1 at 4 workers, whose D excess (0.027 over two runs) lay within 20% of δ_D. The load: 13,100 transactions a second from 128 clients on the client VM (0.6 × C, C = 21,891). Data: `docs/experiments/data/exp28-cells.csv`; raw `results/exp04/sets/t10b/exp28` and `exp28repeats`; figure `analysis/exp28.py`.
+
+![The load's loss and worst drop beyond load-only time, by arm and speed, and refresh time against the loss](../figures/exp28-slowdown.svg)
+
+*How to read it:* left and middle, O4's two numbers net of load-only time, per arm, unthrottled (blue) and at 2 Gbit/s (orange). The dashed lines are O4's bar: `pg_basebackup`'s value plus the tolerance (0.05 s, 0.03). Right, each arm's refresh time against the work it cost the load.
+
+| Arm | Speed | Runs | Refresh | Work lost, net (s) | Worst drop, net | p95 / p99 latency (ms) | Meets O4 (×0.5, ×1, ×2) |
+|---|---|---:|---:|---:|---:|---:|---|
+| load only | unthrottled | 2 | (8.0) | – | – | 5.3 / 6.6 | – |
+| `pg_basebackup` | unthrottled | 2 | 5.08 s | 0.000 | 0.000 | 6.4 / 9.3 | (the bar) |
+| v1, 1 worker | unthrottled | 2 | 8.71 s | 0.002 | 0.001 | 6.6 / 7.9 | yes, yes, yes |
+| v1, 2 workers | unthrottled | 2 | **5.17 s** | 0.000 | 0.000 | 7.4 / 11.3 | **yes, yes, yes** |
+| v1, 4 workers | unthrottled | 2 | 3.92 s | **0.073** | **0.047** | **74.3 / 114.6** | no, **no**, yes |
+| load only | 2 Gbit/s | 2 | (8.0) | – | – | 5.4 / 7.1 | – |
+| `pg_basebackup` | 2 Gbit/s | 2 | 11.09 s | 0.000 | 0.000 | 6.4 / 8.4 | (the bar) |
+| v1, 1 worker | 2 Gbit/s | 2 | 8.79 s | 0.000 | 0.001 | 7.0 / 8.6 | yes, yes, yes |
+| v1, 2 workers | 2 Gbit/s | 2 | **5.24 s** | 0.000 | 0.000 | 7.1 / 10.4 | **yes, yes, yes** |
+| v1, 4 workers | 2 Gbit/s | 4 | 3.96 s | 0.027 | 0.024 | 32.2 / 51.1 | no, yes, yes |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | `pg_basebackup` costs the load little: W_net under 0.1 s at both speeds | **Held:** 0.000 at both |
+| 2 | v1 at 1 and 2 workers meets O4 at both speeds | **Held,** even at half the tolerances |
+| 3 | **Deciding: v1 at 4 workers meets O4 at both speeds** | **Failed unthrottled:** 0.073 s of work over `pg_basebackup`'s against 0.05, and 0.047 of a worst drop against 0.03; it meets only at twice the tolerances. At 2 Gbit/s it meets (4 runs) |
+| 4 | v1's time falls with workers, and at 2 Gbit/s 4 workers beat `pg_basebackup` | **Held:** 8.7, 5.2 and 3.9 s unthrottled; at 2 Gbit/s 3.96 s against 11.09 |
+
+## What the records show
+
+- **Two workers are the sweet spot on this source.** v1 at 2 workers cost the load nothing measurable at either speed and took 5.2 s: as fast as `pg_basebackup` unthrottled (5.1 s), and 2.1 times faster at 2 Gbit/s (11.1 s), where `pg_basebackup` sends the whole 2.1 GB and v1 only `loaddb`'s changed pages.
+- **Four workers saturate the source.** On 8 vCPUs already about 45% busy with the load, 4 hashing workers plus the sender push the load's p95 latency from about 6 ms to 74 ms unthrottled, for a refresh 1.3 s shorter. Their cost varies widely run to run (work lost 0.013–0.114 s), with how their bursts overlap the load's.
+- **EXP-12's proxy miss wasn't only the client's wait.** With the load's client on its own VM, 4 workers still missed O4 unthrottled. EXP-12 had flagged its miss as possibly the client sharing the source's CPU; the source's own CPU is enough.
+
+## What follows
+
+- **Live mode defaults to at most 2 source workers** (`LIVE_MAX_DEFAULT_JOBS` in `pgdelta/cli.py`, for `send` and `local` with `--source-kind live`). A `--jobs` given explicitly is kept, so an operator who accepts the load's cost can ask for 4. The cap is the registered consequence of prediction 3 failing: the largest count that met O4 at both speeds. Tested in `tests/test_pgdelta_cli.py`.
+- **O4 is met at 2 workers** on this load, with the client off the source, at both speeds; the time cost against 4 workers is 1.3 s here (5.2 against 3.9 s).
+- **Still open:**
+  - EXP-12's moderate load and its large-dirty-set cluster;
+  - a larger source, so the cap isn't read from one machine shape (T10b's larger-source block);
+  - a second session, though no deciding cell is near its line.
