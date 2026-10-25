@@ -53,7 +53,7 @@ Owners are suggestions to confirm at the sync.
 
 ## Schedule to the presentation (October 25, 2026)
 
-This order follows the [rule 11 audit's](FIRMNESS.md#43-what-runs-at-once) waves, with the owner's decisions of October 24 and 25: experiments sized to what firm results need, two sessions per test on different days, no vCPU cap, a compiled hash allowed, and a freeze on November 30. It is a ranking by judgment, so under rule 11 it is provisional, and it moves as results come in. With the quota raised, waves that share a week run at once; within today's 32 vCPUs they run one after another, a few days later.
+This order follows the [rule 11 audit's](FIRMNESS.md#43-what-runs-at-once) waves, with the owner's decisions of October 24 and 25: experiments sized to what firm results need, two sessions per test on different days, no vCPU cap, a compiled hash allowed, and a freeze on November 30. It is a ranking by judgment, so under rule 11 it is provisional, and it moves as results come in. Every wave fits the project's 32 vCPUs (the owner chose to work within the quota): EXP-13's pair beside EXP-14's uses 32, and T10b's three VMs beside T5's extra one use 28.
 
 | Dates | Experiments (VMs) | Building (no VMs) |
 |---|---|---|

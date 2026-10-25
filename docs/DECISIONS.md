@@ -207,11 +207,18 @@ Three more, answered October 25:
 
 | # | Question | The owner's answer | What follows |
 |---|---|---|---|
-| K2 | Raise the vCPU quota? | **vCPUs should not be capped:** the owner holds the project, and the Google sponsor said to use as much as needed. | The project's quota (32 vCPUs across all regions, 8 external addresses per region) is Google's limit; the owner raises it in the console. Until then, waves run one after another within it. |
+| K2 | Raise the vCPU quota? | **Work within it for now.** The owner first asked for no cap; on hearing it is Google's quota, raised by a request from the console, chose to respect it. | Every wave fits 32 vCPUs across all regions and 8 external addresses per region; waves that don't fit together run one after another. The owner can request more from the console at any time. |
 | K5 | May pgdelta use a native package (keyed BLAKE3), or must it stay standard library only? | **A compiled hash library is allowed.** | D07's "standard library only" no longer binds the hash. Whether BLAKE3 replaces BLAKE2b is T5's to decide by measurement, with its packaging (a wheel for each CPU type in the sidecar image) part of what it records. |
 | K9 | Does the code freeze of about November 13 stand? | **No: the freeze moves to November 30,** before the presentation in the first week of December. | Features until November 30, then fixes only. Anything not firm by then is presented as provisional. See [PLAN.md](PLAN.md#schedule-to-the-presentation-october-25-2026). |
 
-Still open: K7 (how much lost work is material for O4, and whether latency counts), K8 (T13's fault classes) and K11 (D13's key design).
+Two more, answered October 25 by taking the recommendations as they stood "for now":
+
+| # | Question | The owner's answer | What follows |
+|---|---|---|---|
+| K7 | How much lost work is material for O4, and does latency count? | **Ask the sponsor; meanwhile keep EXP-12's tolerances (0.05 s of work, 0.03 in the worst second) and report every verdict at 0.5, 1 and 2 times them,** with p95 and p99 beside. | A verdict that changes across those multiples is provisional under rule 11 until the sponsor answers. |
+| K8 | Which fault classes matter for T13? | **All five in T13's list** (B changed during a copy, a wrong write offset, bit flips below the page cache, a corrupted buffer, the process killed mid-run), **with a question to the sponsor about disk-level corruption.** The crash test on Linux (T13c) runs early, as a correctness gate. | The verification default stays the re-read until T13 shows which method catches all five. |
+
+Still open: K11 (D13's key design), and the sponsor's answers for K7 and K8.
 
 ## What T3, T8a and T11 settled (October 24, 2026)
 
