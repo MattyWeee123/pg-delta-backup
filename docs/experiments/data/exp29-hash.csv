@@ -1,0 +1,7 @@
+host,cpu,simd,procs,blake2b_pages_per_s,blake3_pages_per_s,ratio
+Intel n2-standard-8,Intel(R) Xeon(R) CPU @ 2.80GHz,avx2 avx512f avx512vl sse4_1,1,73472,349440,4.756
+Intel n2-standard-8,Intel(R) Xeon(R) CPU @ 2.80GHz,avx2 avx512f avx512vl sse4_1,4,73280,348715,4.759
+AMD n2d-standard-8,AMD EPYC 7B13,avx2 sse4_1,1,77141,369749,4.793
+AMD n2d-standard-8,AMD EPYC 7B13,avx2 sse4_1,4,77653,370688,4.774
+Mac (Apple silicon),arm,,1,187904,294229,1.566
+Mac (Apple silicon),arm,,4,176363,280107,1.588
