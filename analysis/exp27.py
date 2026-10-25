@@ -45,6 +45,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--trials', default=str(ROOT / 'results' / 'correctness' / 'exp27' / 'trials.jsonl'))
     ap.add_argument('--figdir')
+    ap.add_argument('--tag', default='', help='suffix for the data and figure files (EXP-35: -exp35)')
     a = ap.parse_args(argv)
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
@@ -77,7 +78,7 @@ def main(argv=None):
     logical = Counter(logical_outcome(r.get('oracle') or {}) for r, c in judged
                       if c and c[1] == 'wrong' and (r.get('oracle') or {}).get('started'))
     print(f'  wrong copies compared logically: {dict(logical)}')
-    data = ROOT / 'docs' / 'experiments' / 'data' / 'exp27-summary.csv'
+    data = ROOT / 'docs' / 'experiments' / 'data' / f'exp27-summary{a.tag}.csv'
     with open(data, 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(['checks', 'oracle', 'trials'])
@@ -103,7 +104,7 @@ def main(argv=None):
     right.set_xlabel('stale pages, summed over the wrong copies that recovered')
     right.set_title('Where the broken read left stale pages', fontsize=10)
     fig.tight_layout()
-    print(plotting.save(fig, 'exp27-oracle'))
+    print(plotting.save(fig, f'exp27-oracle{a.tag}'))
 
 
 if __name__ == '__main__':
