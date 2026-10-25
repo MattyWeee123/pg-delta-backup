@@ -416,7 +416,7 @@ class Arms(unittest.TestCase):
         # EXP-13's arms (v1's side arms and parcopy16) stop the source as v1 and parcopy do (test_exp13_core).
         self.assertEqual(set(measure.SOURCE_STOP_METHODS), {'pgdelta_direct', 'pgdelta_direct_inplace',
                                                             'pgdelta_direct_inplace_j8', 'parcopy8', 'parcopy4',
-                                                            *measure.T12_METHODS})
+                                                            *measure.T12_METHODS, *measure.VS_V1_ARMS})
 
     def test_per_end_jobs(self):
         self.assertEqual(measure.PGDELTA_ENGINES['v1proxy'], measure.PGDELTA_ENGINES['pgdelta_direct_inplace'])

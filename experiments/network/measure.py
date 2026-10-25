@@ -58,13 +58,15 @@ T12_V1_ARMS = ('pgdelta_direct_inplace_w1', 'pgdelta_direct_inplace_w16', 'pgdel
 # EXP-23's follow-up: v1's path asking for BBR on its data socket (pgdelta send --congestion-control bbr). Kept
 # apart from EXP-13's registered side arms, which analysis/exp13.py reads as exactly four.
 CC_V1_ARMS = ('pgdelta_direct_inplace_bbr',)
+# EXP-31: v1 verifying only what it wrote (--verify-scope written), without the second pass over B.
+VS_V1_ARMS = ('pgdelta_direct_inplace_vw',)
 TLS_METHODS = ('pgdelta_direct_inplace_tls',)
 # T8a: the sender reads the cleanly stopped source's data directory; no capture. T2 (EXP-11) adds
 # v1's path at 8 jobs on each end, pgdelta_direct_inplace_j8. T10a's proxies take v1's path through
 # every dispatch too (they read the snapshot, method_paths' source_data, and never stop the source).
 # T12's side arms are v1's path too.
 PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
-                          *V1PROXY_METHODS, *T12_V1_ARMS, *CC_V1_ARMS)
+                          *V1PROXY_METHODS, *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS)
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
 PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
 # T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On
@@ -133,7 +135,7 @@ RSYNC_METHODS = ('rsync_8k', 'rsync_default')
 STAGED_METHODS = PGDELTA_STAGED_METHODS + RSYNC_METHODS
 # pgdelta refreshing B itself (--in-place) rather than writing a new copy O.
 IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', *V1PROXY_METHODS,
-                    *T12_V1_ARMS, *CC_V1_ARMS)
+                    *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS)
 # Methods that patch B, a copy of B0 made before the cache drop and not timed: in a real
 # refresh B already exists. The copy keeps B0 itself unchanged for the next method.
 BASIS_COPY_METHODS = IN_PLACE_METHODS + PGBACKREST_METHODS
@@ -254,6 +256,8 @@ PGDELTA_ENGINES.update({
     'pgdelta_direct_inplace_tls': {**_V1_ENGINE, 'transport': 'tls'},
     # EXP-23's follow-up: v1's engine asking for BBR on its data socket.
     'pgdelta_direct_inplace_bbr': {**_V1_ENGINE, 'congestion_control': 'bbr'},
+    # EXP-31: v1's engine verifying only the pages it wrote.
+    'pgdelta_direct_inplace_vw': {**_V1_ENGINE, 'verify_scope': 'written'},
 })
 del _V1_ENGINE
 
@@ -281,6 +285,8 @@ def pgdelta_args(engine: dict) -> dict:
         receive += ('--fsync', engine['fsync'])
     if engine.get('in_place'):
         receive += ('--in-place',)
+    if engine.get('verify_scope'):
+        receive += ('--verify-scope', engine['verify_scope'])
     send = args['send']
     if engine.get('source_kind'):
         send += ('--source-kind', engine['source_kind'])

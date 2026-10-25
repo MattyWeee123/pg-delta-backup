@@ -259,7 +259,7 @@ class MethodTables(unittest.TestCase):
         # EXP-13's arms (measure.T12_METHODS: v1's side arms and parcopy16) stop the source as v1 and parcopy do.
         self.assertEqual(set(measure.SOURCE_STOP_METHODS),
                          {'pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', 'parcopy8',
-                          'parcopy4', *measure.T12_METHODS})
+                          'parcopy4', *measure.T12_METHODS, *measure.VS_V1_ARMS})
         for method in ('full', 'full_nosync', 'full_syncfs', 'full_wb', 'probackup8', 'probackup4', 'parcopy8',
                        'parcopy4', 'pgdelta_direct_inplace_j8'):
             self.assertIn(method, measure.OUTPUT_START_METHODS)

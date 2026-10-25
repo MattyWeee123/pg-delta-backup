@@ -1955,7 +1955,7 @@ class NewMethodFlags(unittest.TestCase):
         self.assertEqual(set(measure.BASIS_COPY_METHODS),
                          {'pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
                           *measure.V1PROXY_METHODS, *measure.T12_V1_ARMS, *measure.CC_V1_ARMS,
-                          *measure.PGBACKREST_METHODS})
+                          *measure.VS_V1_ARMS, *measure.PGBACKREST_METHODS})
 
     def test_each_new_pgdelta_method_pins_its_flags(self):
         def receive(*middle, fsync='main', in_place=False):
