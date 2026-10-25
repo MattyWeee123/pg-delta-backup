@@ -1,6 +1,6 @@
 # EXP-17: Does v1's refresh ever produce a wrong copy? A randomized fault campaign
 
-Status: **done October 25, 2026: 1,000 trials, no wrong output** (results below). Pre-registered before running; its kill rule was revised twice after the campaign's stop rule fired on safe behaviour (both revisions are recorded below, before the run that counts). Local (a Mac, PostgreSQL 17); no VMs. It is the correctness campaign of the lean plan (rule 11 as clarified October 25): many cheap randomized trials with an independent check of every output, giving a stated bound on the failure rate instead of a handful of runs.
+Status: **done October 25, 2026: 10,000 trials, no wrong output: below 0.069% per refresh at 99.9% confidence** (results below; the first 1,000 and the extension). Pre-registered before running; its kill rule was revised twice after the campaign's stop rule fired on safe behaviour (both revisions are recorded below, before the run that counts). Local (a Mac, PostgreSQL 17); no VMs. It is the correctness campaign of the lean plan (rule 11 as clarified October 25): many cheap randomized trials with an independent check of every output, giving a stated bound on the failure rate instead of a handful of runs.
 
 ## Question
 
@@ -98,3 +98,22 @@ The same harness, checks and fault mix, continuing the seeds: trials 1000 to 999
 - **What it was:** reproduced with trial 2197's workload and kills at 90–250 ms. Up to 150 ms nothing in B had changed and B started; at 160–200 ms B held pgdelta's marker and `global/pg_control` had been renamed aside, no data file had changed, and B refused to start; at 250 ms data files were changing behind the block. pgdelta writes the marker first and renames `pg_control` second (`pgdelta/inplace.py`), and its documentation states the case: "a marker beside global/pg_control is a run that stopped before renaming it (B unchanged) or after the commit (B complete): B can start either way." A kill between the two steps leaves B the old copy plus one marker file, and it starts as the old database. That is the most likely state of trial 2197's B; the record didn't keep which files differed, so it can't be shown directly.
 - **The third revision, before the extension continues:** the kill's comparison ignores pgdelta's own marker (and its temporary file) at B's root: B is "old" if no other file differs, "new" if it equals S over the checked files, and "partial" otherwise, which must refuse to start. Each kill now records the files that differed (`diff_at_kill`), so any further trip is judged from them. The revision only narrows what counts as partial, so every trial that passed the stricter rule passes this one; trials 1000–2196 stand, and the extension continues from trial 2197 with its remaining budget.
 - **Read with care:** this rule has now been revised three times after seeing results, each time to match the contract pgdelta documents, each found by the stop rule, and none touching an output check. No wrong copy has appeared in 3,197 trials.
+
+## The extension's results (October 25, trials 1000–9999; 01:17–11:31 UTC on the Mac, with pauses)
+
+| Fault | Trials | Correct | Median refresh |
+|---|---:|---:|---:|
+| none | 3,570 | 3,570 | 0.48 s |
+| B diverged | 1,498 | 1,498 | 0.48 s |
+| killed part-way, then rerun | 2,536 | 2,536 | 1.06 s |
+| B corrupted | 943 | 943 | 0.48 s |
+| B truncated or a file deleted | 992 | 992 | 0.48 s |
+| foreign B | 461 | 461 refused, B unchanged | 0.34 s |
+| **all** | **10,000** | **10,000** | |
+
+The figure above now shows all 10,000 (`analysis/exp17.py`, one record per trial, the last).
+
+- **No wrong output and no harness error in 10,000 trials.** The bound is now **0.069% per refresh at 99.9% confidence (0.030% at 95%)**, for this mix of workloads and faults on a stopped source at 50 MB on macOS.
+- **Kills:** 557 landed before the process exited. At the kill B was partial in 333, the old copy in 183 (pgdelta's marker aside) and already the new copy in 41. **All 333 partial copies refused to start**; every rerun gave a correct copy.
+- **Foreign bases:** 461 of 461 refused with B byte-for-byte unchanged.
+- **How the trials were judged:** trials 0–999 and 2197–9999 under the final kill rule; trials 1000–2196 under the second, stricter one, which passes nothing the final rule would fail. The extension's 8-hour cap ran across a night in which the Mac also ran EXP-25 and the T8 build; timings here aren't claimed.
