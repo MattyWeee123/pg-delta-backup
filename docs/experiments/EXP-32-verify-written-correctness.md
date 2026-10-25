@@ -1,6 +1,6 @@
 # EXP-32: Is v1 still correct when it verifies only what it wrote?
 
-Status: **pre-registered October 25, 2026, before the counted campaign** (a 25-trial smoke checked the harness; see below). Local (the Mac, PostgreSQL 17.11), about an hour. It is the correctness test that `--verify-scope written` needs before it can be recommended. [EXP-31](EXP-31-ha-one-pass.md) measures its speed.
+Status: **done October 25, 2026 (15:35–16:22 local; 1,053 trials): no wrong output in 1,000 counted trials with `--verify-scope written` (below 0.69% per refresh at 99.9% confidence), and all 53 misplaced-write controls caught and then repaired.** Pre-registered before the counted campaign (a 25-trial smoke checked the harness; see below). Local (the Mac, PostgreSQL 17.11), about an hour. It is the correctness test that `--verify-scope written` needs before it can be recommended. [EXP-31](EXP-31-ha-one-pass.md) measures its speed.
 
 ## Question
 
@@ -45,3 +45,32 @@ Everything else is EXP-17's:
 ## Smoke (October 25, before the campaign; not counted)
 
 25 trials with controls every 10: 25 counted, no wrong output; 3 of 3 controls caught (exit 4, B blocked, start refused), each repaired by the next run.
+
+## Results
+
+1,053 trials, no harness error: 1,000 counted and 53 negative controls. Data: `docs/experiments/data/exp32-summary.csv`; raw `results/correctness/exp32/`; figure `analysis/exp32.py`.
+
+![1,000 refreshes with --verify-scope written, and the misplaced-write control](../figures/exp32-correctness.svg)
+
+| Fault | Counted | Correct |
+|---|---:|---:|
+| none | 358 | 358 |
+| B diverged | 164 | 164 |
+| killed part-way, then rerun | 242 | 242 |
+| B corrupted | 92 | 92 |
+| B truncated | 92 | 92 |
+| foreign B (refused, B untouched) | 52 | 52 |
+| **all** | **1,000** | **1,000** |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: no wrong output in 1,000 counted trials** | **Held:** below 0.69% per refresh at 99.9% confidence (0.30% at 95%) |
+| 2 | Every negative control caught | **Held:** 53 of 53, each with pgdelta's exit 4, B blocked and its start refused; each repaired by the next run |
+| 3 | Every part-way kill leaves B old, blocked or new | **Held:** of 48 kills before the exit, 16 left B old, 1 new, and 31 part-way, all 31 refusing to start |
+
+The harness passes `--verify-scope written` to every pgdelta run. EXP-17's harness keeps no per-trial pgdelta statistics, so whether the scope was in effect was checked only on the campaign's last run. Its statistics show the scope `written`: 1,044 nodes kept from B's digests, 90 rebuilt from its leaf digests and the written pages, none re-read whole, and 3,970 pages re-read, exactly the 3,970 pages sent.
+
+## What follows
+
+- **`--verify-scope written` is shown correct on EXP-17's fault mix,** at a tenth of EXP-17's 10,000 trials. A misplaced write is caught every time, as argued.
+- Whether it becomes v1's default for in-place refreshes is decided by [EXP-31](EXP-31-ha-one-pass.md)'s speed result. A default would also deserve EXP-25's live-source campaign with the scope on.
