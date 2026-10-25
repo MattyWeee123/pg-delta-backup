@@ -669,6 +669,23 @@ class VerifyScopeTests(InPlaceTestCase):
         self.assertTrue(os.path.lexists(self.basis / MARKER))
         settle(self)
 
+    def test_the_misplaced_write_switch_is_caught_by_either_scope(self):
+        # EXP-32's negative control: PGDELTA_TEST_MISPLACE_WRITE=1 writes one page run a page away.
+        for scope in ('written', 'all'):
+            with self.subTest(scope=scope):
+                shutil.rmtree(self.root / 'S', ignore_errors=True)
+                shutil.rmtree(self.root / 'B', ignore_errors=True)
+                pg_shapes(self.source, self.basis)
+                with mock.patch.dict(os.environ, {receiver_module.MISPLACE_ENV: '1'}):
+                    outcome = transfer(self.source, self.basis, None,
+                                       receiver_options={'in_place': True, 'verify_scope': scope})
+                self.assertIsInstance(outcome.receiver_error, VerificationError)
+                self.assertTrue(os.path.lexists(self.basis / MARKER))
+                self.assertFalse(os.path.lexists(self.basis / CONTROL_FILE))  # blocked from starting
+                rerun = transfer(self.source, self.basis, None, **self.options())
+                self.assert_refreshed(rerun)
+                settle(self)
+
     def test_written_scope_needs_in_place(self):
         pg_shapes(self.source, self.basis)
         before = snapshot(self.basis)

@@ -102,6 +102,9 @@ DEFAULT_VERIFY = 'pipelined'
 # that lost v1 the HA case beyond memory (EXP-22).
 VERIFY_SCOPES = ('all', 'written')
 DEFAULT_VERIFY_SCOPE = 'all'
+# EXP-32's negative control, a test switch only: with this set to 1 the receiver writes its first movable page
+# run one page away from where it belongs, so the verification must fail and B stay blocked.
+MISPLACE_ENV = 'PGDELTA_TEST_MISPLACE_WRITE'
 JOIN_SECONDS = 10.0
 HELLO_KEYS = frozenset(('protocol_version', 'block', 'node_blocks', 'key', 'source_identity',
                         'root_mode', 'directories', 'files'))
@@ -421,6 +424,7 @@ class _Receiver:
         # --verify-scope written: B's node digests from the basis thread and the leaf digests it answered leaf
         # requests with, by file index, kept until the file is verified; and what the verification did.
         self.verify_scope = verify_scope
+        self.misplace_pending, self.misplaced_write = os.environ.get(MISPLACE_ENV) == '1', None
         self.basis_nodes, self.basis_leaves = {}, {}
         self.written_verify = {'nodes_kept': 0, 'nodes_composed': 0, 'nodes_reread': 0, 'pages_reread': 0}
         # EXP-13's protocol timers, on the time.perf_counter() clock: publish_s counts from `launched` (the
@@ -959,7 +963,13 @@ class _Receiver:
             stop = min(max(offset, output.copied + COPY_AHEAD_BYTES), output.copy_limit)
             if stop > output.copied:
                 self._copy_basis(entry, output, stop)
-        _write_all(output.fd, data, offset)
+        target = offset
+        if self.misplace_pending and (end + self.block <= entry.size or offset >= self.block):
+            # The test switch (MISPLACE_ENV): one page further on, or one back at the file's end.
+            target = offset + self.block if end + self.block <= entry.size else offset - self.block
+            self.misplace_pending = False
+            self.misplaced_write = {'path': entry.path, 'offset': offset, 'written_at': target}
+        _write_all(output.fd, data, target)
         output.copied = max(output.copied, end)
         self._wrote(output, offset, length)
         self.rebuild_seconds += time.perf_counter() - started
@@ -1433,6 +1443,8 @@ class _Receiver:
             # Only off the default, so a default session's COMPLETE frame is byte-for-byte unchanged.
             stats['verify_scope'] = self.verify_scope
             stats['verify_written'] = dict(self.written_verify)
+        if self.misplaced_write is not None:
+            stats['test_misplaced_write'] = self.misplaced_write
         return stats
 
 

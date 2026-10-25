@@ -2,6 +2,13 @@
 
     .venv/bin/python experiments/correctness/campaign.py --out results/correctness/exp17 [--trials 1000]
         [--hours 3] [--first 0] [--pg-bin /opt/homebrew/opt/postgresql@17/bin] [--work DIR]
+        [--pgdelta-args "--verify-scope written"] [--negative-every 20]
+
+EXP-32 added two options. --pgdelta-args appends flags to every pgdelta run. With --negative-every N, the trial
+number half-way through each block of N is a negative control instead of a counted trial: fault none, and a first
+run with the receiver's test switch PGDELTA_TEST_MISPLACE_WRITE=1 (one page run written a page away), which must
+fail its verification (exit 4) and leave B blocked from starting; then a normal run must repair B, checked as any
+trial. A control that isn't caught stops the campaign (exit status 5).
 
 Each trial (seeded by its number) clones a template cluster into S and B, runs a random workload on S, takes S's
 logical digest, stops S, applies one random fault, refreshes B in place with `pgdelta local --in-place
@@ -16,6 +23,7 @@ import hashlib
 import json
 import os
 import random
+import shlex
 import shutil
 import signal
 import subprocess
@@ -33,6 +41,8 @@ EXCLUDED_FILES = {'postgresql.auto.conf.tmp', 'current_logfiles.tmp', 'backup_la
 EXCLUDED_DIRS = {'pg_stat_tmp', 'pg_replslot', 'pg_dynshmem', 'pg_notify', 'pg_serial', 'pg_snapshots',
                  'pg_subtrans', 'pg_wal', 'pg_logical'}
 PORT = 55470
+EXTRA_ARGS = []  # EXP-32: --pgdelta-args, appended to every pgdelta command
+MISPLACE_ENV = 'PGDELTA_TEST_MISPLACE_WRITE'
 def pgdelta_own(rel):
     """pgdelta's marker at B's root, and the temporary file it writes it through (pgdelta/inplace.py)."""
     return '/' not in rel and (rel == 'pgdelta-incomplete.json' or (rel.startswith('.pgdelta-') and rel.endswith('.tmp')))
@@ -167,7 +177,8 @@ def byte_check(s, b):
 
 def pgdelta(pg, s, b, stats):
     return [sys.executable, '-m', 'pgdelta', 'local', '--source', str(s), '--basis', str(b), '--in-place',
-            '--source-kind', 'datadir', '--pg-controldata', str(pg.bin / 'pg_controldata'), '--stats-json', str(stats)]
+            '--source-kind', 'datadir', '--pg-controldata', str(pg.bin / 'pg_controldata'), '--stats-json', str(stats),
+            *EXTRA_ARGS]
 
 
 def relation_files(root, rng, k):
@@ -176,9 +187,11 @@ def relation_files(root, rng, k):
     return rng.sample(rels, min(k, len(rels)))
 
 
-def trial(n, pg, template, foreign_template, work):
+def trial(n, pg, template, foreign_template, work, negative=False):
     rng = random.Random(n)
     fault = rng.choices([f for f, _ in FAULTS], weights=[w for _, w in FAULTS])[0]
+    if negative:
+        fault = 'none'  # EXP-32's negative control (--negative-every)
     s, b = work / 's', work / 'b'
     for d in (s, b):
         shutil.rmtree(d, ignore_errors=True)
@@ -244,6 +257,19 @@ def trial(n, pg, template, foreign_template, work):
             if started.returncode == 0:
                 pg.stop(b)
         rec['kill_delay'] = round(delay, 3)
+    if negative:
+        control = run(pgdelta(pg, s, b, stats), check=False, cwd=REPO, env=dict(os.environ, **{MISPLACE_ENV: '1'}))
+        blocked = (not os.path.lexists(b / 'global' / 'pg_control')
+                   and (b / 'global' / 'pg_control.pgdelta-incomplete').is_file()
+                   and (b / 'pgdelta-incomplete.json').is_file())
+        started = pg.start(b, check=False)
+        if started.returncode == 0:
+            pg.stop(b)
+        rec.update(negative_control=True, control_exit=control.returncode, control_blocked=blocked,
+                   control_refused_start=started.returncode != 0,
+                   control_stderr=control.stderr.strip()[-200:])
+        rec['caught'] = control.returncode == 4 and blocked and started.returncode != 0
+        t0 = time.perf_counter()  # the repair run below is timed and checked as a trial's
     p = run(pgdelta(pg, s, b, stats), check=False, cwd=REPO)
     rec.update(exit=p.returncode, seconds=round(time.perf_counter() - t0, 3))
     if p.returncode != 0:
@@ -270,7 +296,10 @@ def main(argv=None):
     ap.add_argument('--first', type=int, default=0)
     ap.add_argument('--pg-bin', default='/opt/homebrew/opt/postgresql@17/bin')
     ap.add_argument('--work')
+    ap.add_argument('--pgdelta-args', default='', help='flags appended to every pgdelta command (EXP-32)')
+    ap.add_argument('--negative-every', type=int, default=0, help='a misplaced-write control in each block of N')
     a = ap.parse_args(argv)
+    EXTRA_ARGS[:] = shlex.split(a.pgdelta_args)
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
     work = Path(a.work or tempfile.mkdtemp(prefix='exp17.'))
     sock = tempfile.mkdtemp(prefix='pgs.')
@@ -280,12 +309,13 @@ def main(argv=None):
         if not t.exists():
             make_template(pg, t)
     deadline = time.time() + a.hours * 3600
-    counted = wrong = errors = streak = 0
+    counted = wrong = errors = streak = negatives = caught = 0
     with open(out / 'trials.jsonl', 'a') as log:
         n = a.first
         while counted < a.trials and time.time() < deadline:
+            negative = a.negative_every > 0 and n % a.negative_every == a.negative_every // 2
             try:
-                rec = trial(n, pg, template, foreign, work)
+                rec = trial(n, pg, template, foreign, work, negative)
             except HarnessError as e:
                 rec = {'trial': n, 'harness_error': str(e)[-400:]}
                 errors += 1
@@ -296,17 +326,27 @@ def main(argv=None):
             if streak >= 10:
                 print(f'stopping: 10 harness errors in a row, the last: {rec["harness_error"][-300:]}', flush=True)
                 return 3
-            if 'pass' in rec:
+            if rec.get('negative_control'):
+                negatives += 1
+                caught += bool(rec['caught'])
+                if not rec['caught']:
+                    print(f'NEGATIVE CONTROL NOT CAUGHT at trial {n}: {rec}', flush=True)
+                    return 5
+                if not rec.get('pass'):
+                    print(f'REPAIR AFTER A CONTROL FAILED at trial {n}: {rec}', flush=True)
+                    return 2
+            elif 'pass' in rec:
                 counted += 1
                 if not rec['pass'] and rec.get('why') != 'harness':
                     wrong += 1
                     print(f'WRONG OUTPUT at trial {n}: {rec}', flush=True)
                     return 2
             if n % 25 == 0:
-                print(f'{time.strftime("%H:%M:%S")} trial {n}: counted {counted}, wrong {wrong}, harness errors {errors}',
-                      flush=True)
+                print(f'{time.strftime("%H:%M:%S")} trial {n}: counted {counted}, wrong {wrong}, harness errors {errors}, '
+                      f'controls caught {caught} of {negatives}', flush=True)
             n += 1
-    print(f'done: counted {counted}, wrong {wrong}, harness errors {errors}', flush=True)
+    print(f'done: counted {counted}, wrong {wrong}, harness errors {errors}, controls caught {caught} of {negatives}',
+          flush=True)
     return 0
 
 
