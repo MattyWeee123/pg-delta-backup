@@ -40,7 +40,8 @@ def main(argv=None):
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
     plotting.style()
-    rows = [json.loads(line) for line in open(a.trials)]
+    # One record per trial: a trial rerun after a rule's revision (EXP-17's stops) keeps only its last record.
+    rows = list({r['trial']: r for r in (json.loads(line) for line in open(a.trials))}.values())
     counted = [r for r in rows if 'pass' in r]
     errors = [r for r in rows if 'harness_error' in r]
     wrong = [r for r in counted if not r['pass']]
