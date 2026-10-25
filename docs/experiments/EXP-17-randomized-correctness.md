@@ -87,3 +87,7 @@ Data: [exp17-summary.csv](data/exp17-summary.csv); raw trials in `results/correc
 - **G1's crash promise held in every case seen:** 30 of 30 copies caught part-way refused to start, across the whole refresh, not just one moment (the kill times were drawn from 0.02–2 s, and the reproductions in the two sections above add 6 more).
 - **Detection of a bad basis:** corrupted, truncated, missing and diverged pages in B were all found and replaced from S (343 trials), as the design says every reused page is checked by its digest.
 - **Scope, unchanged from the limitations:** a stopped source, a 50 MB cluster, macOS's APFS, PostgreSQL 17, and process kills, not host crashes. It says nothing yet about v1 reading a live source (T8), large files, or a power loss (T13c).
+
+## Extension to 10,000 trials (pre-registered October 25, before running)
+
+The same harness, checks and fault mix, continuing the seeds: trials 1000 to 9999 (9,000 more), appended to the same record. It stops after 9,000 more counted trials or 8 hours, or at a wrong output, as before. The bound is then computed over every trial run with the final kill rule (the first 1,000 plus the extension). At 10,000 trials with no wrong output it would be 0.069% at 99.9% confidence.
