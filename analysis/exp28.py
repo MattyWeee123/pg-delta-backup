@@ -78,7 +78,9 @@ def runs_of(root, txs):
         w = float(np.maximum(0, s - x).sum()) / rate
         dmax = float(max(1 - xi / si for si, xi in zip(s, x) if si)) if s.any() else None
         inside = lat[(done >= t0) & (done < t1 + TAIL)]
-        out.append({**meta, 'run_dir': f'{d.parent.name}/{d.name}', 'seconds': t1 - t0, 'W': w, 'D': max(dmax, 0.0),
+        cpu_file = d / 'sender-cpu.txt'  # EXP-30: the sender's own CPU, its workers included
+        sender_cpu = sum(float(x) for x in cpu_file.read_text().split()) if cpu_file.exists() else None
+        out.append({**meta, 'sender_cpu_s': sender_cpu, 'run_dir': f'{d.parent.name}/{d.name}', 'seconds': t1 - t0, 'W': w, 'D': max(dmax, 0.0),
                     'p95_ms': float(np.percentile(inside, 95)) if inside.size else None,
                     'p99_ms': float(np.percentile(inside, 99)) if inside.size else None,
                     'cpu_s': cpu_seconds(meta['cpu0'], meta['cpu1']),
@@ -91,7 +93,9 @@ def cells(runs):
     for r in runs:
         if r['ok']:
             by[(r['arm'], r['speed'])].append(r)
-    med = lambda rs, k: statistics.median(r[k] for r in rs if r[k] is not None) if rs else None
+    def med(rs, k):
+        vals = [r[k] for r in rs if r.get(k) is not None]
+        return statistics.median(vals) if vals else None
     rows = []
     for speed in SPEEDS:
         base = by.get(('none', speed), [])
@@ -99,13 +103,13 @@ def cells(runs):
         full = by.get(('full', speed), [])
         wf = max(0.0, med(full, 'W') - w0) if full and base else None
         df = max(0.0, med(full, 'D') - d0) if full and base else None
-        for arm in ARMS:
+        for arm in ARMS + sorted({a for a, s in by if s == speed and a not in ARMS}):
             rs = by.get((arm, speed), [])
             if not rs:
                 continue
             row = {'arm': arm, 'speed': speed, 'runs': len(rs), 'seconds': med(rs, 'seconds'), 'W': med(rs, 'W'),
                    'D': med(rs, 'D'), 'p95_ms': med(rs, 'p95_ms'), 'p99_ms': med(rs, 'p99_ms'),
-                   'cpu_s': med(rs, 'cpu_s')}
+                   'cpu_s': med(rs, 'cpu_s'), 'sender_cpu_s': med(rs, 'sender_cpu_s')}
             if base:
                 row['W_net'] = max(0.0, row['W'] - w0)
                 row['D_net'] = max(0.0, row['D'] - d0)

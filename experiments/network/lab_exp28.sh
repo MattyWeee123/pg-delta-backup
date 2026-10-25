@@ -18,7 +18,7 @@ SEED=${4:-280}
 PLAN=${5:-full}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
-R=/data/exp04-results/exp28${PLAN/full/}
+R=${OUT:-/data/exp04-results/exp28${PLAN/full/}}
 mkdir -p "$R"
 KEY=$HOME/.ssh/exp04_ed25519
 # -n: inside the plan loop ssh must not read the plan from stdin. The source on the control port (outside wan.sh).
@@ -26,6 +26,9 @@ SSRC=(ssh -n -i "$KEY" -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=accept-
 SCLI=(ssh -n -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$CLI")
 export PATH="$PATH:/usr/sbin:/sbin"
 PGBIN=/usr/lib/postgresql/17/bin
+# EXP-30: BLAKE=1 runs pgdelta from a venv with the blake3 package on both ends, for the v1b3_jN arms (--hash blake3).
+PY=python3
+[ "${BLAKE:-0}" = 1 ] && PY=/data/hv/bin/python
 ROOT=/data/exp28/src
 B=/data/exp28/B
 FULL=/data/exp28/full
@@ -46,6 +49,13 @@ for role, text in zip(('dest', 'source', 'client'), sys.argv[1:]):
 print(json.dumps(out))
 EOF
 }
+
+if [ "${BLAKE:-0}" = 1 ]; then
+  for side in here source; do
+    cmd='[ -x /data/hv/bin/python ] || { sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q python3-venv > /dev/null && python3 -m venv /data/hv && /data/hv/bin/pip install -q blake3; }; /data/hv/bin/python -c "import blake3; print(blake3.__version__)"'
+    if [ $side = here ]; then echo "dest blake3 $(bash -c "$cmd")"; else echo "source blake3 $(on_src "$cmd")"; fi
+  done
+fi
 
 if [ "${SKIP_SETUP:-0}" != 1 ]; then
   echo "$(date -u +%T) set-up"
@@ -102,8 +112,8 @@ while read -r i arm speed k; do
     on_src "sudo bash infra/gcp/wan.sh off > /dev/null"
   fi
   rp=
-  if [ "${arm#v1_j}" != "$arm" ]; then  # the receiver listens before the clock starts
-    python3 -m pgdelta receive --basis "$B" --in-place --listen 0.0.0.0:7000 \
+  if [ "${arm#v1}" != "$arm" ]; then  # the receiver listens before the clock starts
+    $PY -m pgdelta receive --basis "$B" --in-place --listen 0.0.0.0:7000 \
       --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 > "$d/receive.log" 2>&1 &
     rp=$!
     for x in $(seq 100); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
@@ -115,16 +125,17 @@ while read -r i arm speed k; do
     none) sleep "$NONE_SECONDS"; status=0 ;;
     full) $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$FULL" -X stream -c fast > "$d/full.log" 2>&1
           status=$? ;;
-    v1_j*) on_src "python3 -m pgdelta send --source $ROOT/data --source-kind live \
-             --pg-conn 'host=$ROOT/s port=5432 user=study dbname=postgres' --connect $DEST:7000 \
-             --pg-controldata $PGBIN/pg_controldata --jobs ${arm#v1_j} --stats-json /tmp/exp28-send.json" \
+    v1*_j*) hash=blake2b; [ "${arm#v1b3}" != "$arm" ] && hash=blake3
+           on_src "$PY experiments/network/cpu_time.py /tmp/exp28-cpu.txt $PY -m pgdelta send --source $ROOT/data \
+             --source-kind live --pg-conn 'host=$ROOT/s port=5432 user=study dbname=postgres' --connect $DEST:7000 \
+             --pg-controldata $PGBIN/pg_controldata --jobs ${arm##*_j} --hash $hash --stats-json /tmp/exp28-send.json" \
              > "$d/send.log" 2>&1
            status=$?
            wait "$rp"; rstatus=$? ;;
   esac
   t1=$(date +%s.%N)
   cpu1=$(on_src "head -1 /proc/stat")
-  [ -n "$rp" ] && on_src "cat /tmp/exp28-send.json" > "$d/send.json"
+  [ -n "$rp" ] && on_src "cat /tmp/exp28-send.json" > "$d/send.json" && on_src "cat /tmp/exp28-cpu.txt" > "$d/sender-cpu.txt"
   printf '{"run": %s, "arm": "%s", "speed": "%s", "repeat": %s, "t0": %s, "t1": %s, "status": %s, "receiver_status": %s, "cpu0": "%s", "cpu1": "%s", "rate": %s}\n' \
     "$i" "$arm" "$speed" "$k" "$t0" "$t1" "$status" "${rstatus:-null}" "$cpu0" "$cpu1" "$RATE" > "$d/meta.json"
   rstatus=
