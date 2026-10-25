@@ -8,6 +8,17 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-25 (night): new defaults, each from a registered result
+
+- **`--hash auto` (the command line's default):** the sender offers BLAKE3 where it can use it, and the receiver picks the first it can use. Without the package nothing is offered, and the wire is as before. Tested, including a receiver without the package.
+- **`--verify-scope written` on the pipelined verifier:** lightly written nodes are composed, heavily written ones re-read whole on the worker pool.
+  - EXP-31's second session: the hot tie repeated, and the wait for verification fell to 0 s.
+  - EXP-32's rerun: 1,000 more trials, no wrong output.
+  - EXP-33, a live source with BLAKE3 and `written`: 1,000 trials, no wrong output, but its during-start control fell to 47 of 55, so no bound was claimed.
+  - EXP-35's oracle on that configuration: the checks caught 39 of 39 wrong copies.
+  - By EXP-35's registered rule, `--verify-scope written` is now the default in place (`--verify-scope auto`).
+- **A slip, caught:** the hash negotiation landed in the working tree while two campaigns ran from it. They were restarted from a frozen checkout, the first starts set aside. Campaigns now always run from one.
+
 ## 2026-10-25 (evening): access to the Google Cloud project, checked
 
 The owner's project `postgres-delta-backup` is reached through `gcloud`, signed in as the owner (the browser console goes through the university's sign-in, which only the owner completes). A read-only check:
