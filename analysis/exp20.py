@@ -67,6 +67,7 @@ def row(c, r):
 
 
 def main(argv=None):
+    global V1
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--sweep', default=str(ROOT / 'results' / 'exp04' / 'exp20'))
     ap.add_argument('--figdir')
@@ -76,7 +77,6 @@ def main(argv=None):
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
     plotting.style()
-    global V1
     V1 = a.v1
     c = cells(Path(a.sweep))
     conds = ['2:0:default', '2:20:default', '2:60:default', '2:120:default', '2:0:tuned', '2:60:tuned', '2:120:tuned']
