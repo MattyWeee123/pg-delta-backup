@@ -69,6 +69,6 @@ Medians of 5 repeats of 3 s, pages per second per process. Data: `docs/experimen
 pgdelta gets a BLAKE3 option, BLAKE2b staying the default until it is measured end to end:
 - v1's CPU and time per refresh, source and destination;
 - O4 at 4 workers on a busy primary (EXP-28's miss);
-- the HA scale model (EXP-22), where the destination's CPU decided the verdict.
+- the HA case on fast disks, where EXP-18 and EXP-19 found v1 bound by the destination's CPU. *Corrected October 25: an earlier version said the HA scale model (EXP-22) was decided by the destination's CPU. It wasn't: there v1 lost to two passes over B at the disk's rate, which a faster hash doesn't remove.*
 
 The option needs both ends to agree on the algorithm (the session's HELLO), and the `blake3` package where it is chosen; pgdelta stays standard-library only without it.
