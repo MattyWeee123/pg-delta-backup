@@ -82,3 +82,5 @@ EXP-31 found the first implementation's verification single-threaded and waited 
 - more heavily written nodes are re-read whole on the worker pool.
 
 That changes code this campaign judged, so it is rerun in full, with the same design, seeds and rules, to `results/correctness/exp32b/`. The registered predictions are the same. The first run's result above stands for the first implementation.
+
+**Restarted, October 25, 17:2x (before any result was read).** The rerun first started at 17:13. A minute later, `--hash auto` (the hash negotiation) landed in the working tree it ran from, and from then on its trials hashed with BLAKE3. It was stopped after 25 trials and set aside (`results/correctness/exp32b-aborted`, not counted). It restarts from a frozen checkout of commit c870b17 with `--pgdelta-args "--verify-scope written --hash blake2b"`, BLAKE2b pinned as at registration. EXP-33 covers BLAKE3.
