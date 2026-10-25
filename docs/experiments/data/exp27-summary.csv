@@ -1,0 +1,5 @@
+checks,oracle,trials
+caught,wrong,37
+caught,correct,0
+missed,correct,3
+missed,wrong,0

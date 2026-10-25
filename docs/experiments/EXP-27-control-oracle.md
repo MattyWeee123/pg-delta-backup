@@ -1,6 +1,6 @@
 # EXP-27: Were EXP-25's missed controls correct copies, or a gap in the checks?
 
-Status: **pre-registered October 25, 2026, before any counted run** (a 3-trial smoke checked the harness; see below). Local (the Mac, PostgreSQL 17.11), about 25 minutes. The question [EXP-25](EXP-25-live-correctness.md) left: its `during_start` negative control was missed in 5 of 55 trials, and nothing in their records told a correct copy from a wrong one the checks failed to see.
+Status: **done October 25, 2026 (12:52–13:15 local; 40 trials): all three predictions held. Each of the 3 missed controls was physically identical to the correct copy of its backup, and the checks caught all 37 wrong copies, flagging no correct one.** Pre-registered before any counted run (a 3-trial smoke checked the harness; see below). Local (the Mac, PostgreSQL 17.11), about 25 minutes. The question [EXP-25](EXP-25-live-correctness.md) left: its `during_start` negative control was missed in 5 of 55 trials, and nothing in their records told a correct copy from a wrong one the checks failed to see.
 
 ## Question
 
@@ -59,3 +59,32 @@ Three trials (seeds 9000–9002), after four harness fixes:
 - the stale pages are named by relation.
 
 All three were caught, and B2 passed every check each time. The oracle found B stale in two (2 and 21 pages, in tables, indexes and catalogs; queries on it then failed) and unable to recover in one ("WAL contains references to invalid pages").
+
+## Results
+
+40 trials, all judged by the oracle, no harness error. Data: `docs/experiments/data/exp27-summary.csv`; raw `results/correctness/exp27/`; figure `analysis/exp27.py`.
+
+![EXP-25's checks against the oracle, and where the stale pages were](../figures/exp27-oracle.svg)
+
+*How to read it:* left, each trial by what EXP-25's checks said (caught or missed) and what the oracle found (B identical to the correct copy of the same backup, or not). Right, where the wrong copies' stale pages were, by relation kind, summed over the 35 wrong copies that could recover.
+
+| EXP-25's checks | Oracle: B correct | Oracle: B wrong |
+|---|---:|---:|
+| caught | **0** | **37** |
+| missed | **3** | **0** |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | B2 passes every EXP-25 check | **Held:** 40 of 40 |
+| 2 | **Every missed B is physically identical to B2** | **Held:** trials 2023, 2032 and 2035 each had 0 stale pages and 0 differing bytes |
+| 3 | Every wrong B is caught | **Held:** 37 of 37; and no correct B was flagged |
+
+- **The variant made a wrong copy 37 times in 40** (93%). Two of them couldn't recover ("WAL contains references to invalid pages"). The other 35 had 1–26 stale pages each: 92 in indexes, 48 in tables, 37 in catalog indexes, 6 in catalog tables, 3 in shared catalogs.
+- **14 of the 35 had the same rows and schema as the correct copy.** Their stale pages were all in indexes or catalogs, and pg_amcheck alone caught every one of them. The bank and digest checks caught the 21 others (15 with rows or schema that differ, 6 whose catalog queries failed outright).
+- **The checks' sensitivity to this kind of fault:** 37 caught of 37 wrong, so the chance that they miss a wrong copy of this kind is below 7.8% at 95% confidence (17% at 99.9%). Their specificity: no correct copy was flagged in 3, and none in EXP-25's 1,000 counted trials.
+
+## What follows
+
+- **EXP-25's five misses were most likely correct copies, not a gap in the checks.** The mechanism is now shown directly: every miss here was a copy the WAL had fully repaired (full-page writes after the redo point). EXP-25's own five weren't recorded with the oracle, so they are explained by this measurement of the same variant, not proven one by one.
+- **The bound's premise holds for this fault:** a wrong copy of this kind is caught. pg_amcheck carries a large part of that: 14 of 37 wrong copies had correct rows and stale indexes only. It stays a required part of the checks.
+- **What it doesn't cover:** other kinds of wrong copy (a wrong WAL range, a wrong `backup_label`, a page torn in a way the WAL doesn't repair) are exercised by EXP-25's faults and the unit tests, not measured against an oracle here.
