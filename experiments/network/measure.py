@@ -2565,6 +2565,9 @@ PING_COUNT, PING_INTERVAL_S = 20, 0.05
 PING_MIN_SLACK_MS, PING_MEDIAN_SLACK_MS = 1.0, 2.0
 CONTROL_NOOPS, CONTROL_NOOP_SLACK_S = 5, 0.005
 MINRTT_SLACK_MS = 2.0
+# A real path's own round trip (run_exp04 --base-rtt-ms, EXP-15): the checks expect r plus it, with this share of
+# it again as slack for the path's own jitter.
+BASE_RTT_SLACK_SHARE = 0.05
 NETEM_BYTES_FRACTION = 0.98
 # The ss sampler: a sending socket carried at least this many bytes (acknowledged), and this share of all.
 SS_SENDING_MIN_BYTES, SS_SENDING_SHARE = 1 << 20, 0.01
@@ -3094,15 +3097,17 @@ def parse_ping(text: str, count: int = PING_COUNT) -> dict:
             'max_ms': max(times) if times else None}
 
 
-def ping_problems(pings: dict, rtt_ms: float) -> list[str]:
+def ping_problems(pings: dict, rtt_ms: float, base_ms: float = 0.0) -> list[str]:
     """The visit's ping check: every reply back, the minimum in [r, r + 1 ms], the median at most the minimum
-    + 2 ms."""
+    + 2 ms. On a real path (base_ms, its own round trip) the window is [r + base, r + base + 1 ms + 5% of base]."""
+    slack = PING_MIN_SLACK_MS + BASE_RTT_SLACK_SHARE * base_ms
+    rtt_ms = rtt_ms + base_ms
     problems = []
     if pings.get('replies') != pings.get('count'):
         problems.append(f"{pings.get('replies')} of {pings.get('count')} pings came back")
     low, middle = pings.get('min_ms'), pings.get('median_ms')
-    if low is None or not rtt_ms <= low <= rtt_ms + PING_MIN_SLACK_MS:
-        problems.append(f'the ping minimum {low} ms is outside [{rtt_ms:g}, {rtt_ms + PING_MIN_SLACK_MS:g}] ms')
+    if low is None or not rtt_ms <= low <= rtt_ms + slack:
+        problems.append(f'the ping minimum {low} ms is outside [{rtt_ms:g}, {rtt_ms + slack:g}] ms')
     if low is not None and (middle is None or middle > low + PING_MEDIAN_SLACK_MS):
         problems.append(f'the ping median {middle} ms is above the minimum + {PING_MEDIAN_SLACK_MS:g} ms')
     return problems
@@ -3532,6 +3537,9 @@ def network_checks(record: dict) -> dict:
     run's wire bytes from source to dest; the sysctl guard passed; and the sending sockets' minrtt is in [r,
     r + 2 ms]. ok is False with any problem, None while a reading is missing, True otherwise."""
     rtt = _get(record, 'condition', 'rtt_ms')
+    base = _get(record, 'condition', 'base_rtt_ms') or 0.0
+    if rtt is not None:
+        rtt += base
     problems, unknown = [], []
     values: dict = {}
     for host in ('source', 'dest'):
@@ -3565,9 +3573,9 @@ def network_checks(record: dict) -> dict:
     values['minrtt_ms_min'], values['minrtt_ms_max'] = low, high
     if rtt is None or low is None or high is None:
         unknown.append("the sending sockets' minrtt")
-    elif low < rtt or high > rtt + MINRTT_SLACK_MS:
+    elif low < rtt or high > rtt + MINRTT_SLACK_MS + BASE_RTT_SLACK_SHARE * base:
         problems.append(f"the sending sockets' minrtt [{low}, {high}] ms is outside [{rtt:g}, "
-                        f'{rtt + MINRTT_SLACK_MS:g}] ms')
+                        f'{rtt + MINRTT_SLACK_MS + BASE_RTT_SLACK_SHARE * base:g}] ms')
     return {'ok': False if problems else (None if unknown else True), 'problems': problems, 'unknown': unknown,
             **values}
 

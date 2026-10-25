@@ -1939,3 +1939,20 @@ class Csv(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class BaseRttTests(unittest.TestCase):
+    """EXP-15 on a real path: the checks expect the emulated r plus the path's own round trip."""
+
+    def test_ping_window_moves_with_the_base(self):
+        pings = {'count': 20, 'replies': 20, 'min_ms': 31.3, 'median_ms': 31.5}
+        self.assertTrue(measure.ping_problems(pings, 0.0))
+        self.assertEqual(measure.ping_problems(pings, 0.0, 31.0), [])
+        self.assertTrue(measure.ping_problems(pings, 0.0, 33.0))
+
+    def test_minrtt_check_reads_the_base_from_the_record(self):
+        record = {'condition': {'rtt_ms': 0.0, 'base_rtt_ms': 31.0}, 'ss': {'minrtt_ms_min': 31.3, 'minrtt_ms_max': 32.0}}
+        out = measure.network_checks(record)
+        self.assertFalse(any('minrtt' in p for p in out.get('problems', [])), out)
+        record['condition']['base_rtt_ms'] = 0.0
+        self.assertTrue(any('minrtt' in p for p in measure.network_checks(record).get('problems', [])))

@@ -696,6 +696,8 @@ class Orchestrator:
         self.calibration_speed = measure.parse_speed(getattr(args, 'calibration_speed', '2') or '2')
         # EXP-13 (T12), at the emulated WAN's conditions (--conditions); parse_args has checked its options.
         self.conditions: list = measure.parse_conditions(args.conditions) if getattr(args, 'conditions', '') else []
+        for condition in self.conditions:  # a real path's own round trip (EXP-15), carried into every record
+            condition['base_rtt_ms'] = float(getattr(args, 'base_rtt_ms', 0.0) or 0.0)
         self.t12_plan: dict = t12_plan(args) if self.conditions else {}
         self.condition: dict | None = None  # the condition visited now, with its visit's readings (set_condition)
         self.tcp_defaults: dict | None = None  # each VM's TCP settings as found at the start: host -> name -> value
@@ -1218,7 +1220,7 @@ class Orchestrator:
         bands['after_noops'] = self.band_counters()
         tcp = self.tcp_check(condition['host_tcp'])
         problems = {'tree': [f'{vm}: {problem}' for vm in tree for problem in tree[vm]['problems']],
-                    'pings': measure.ping_problems(pings, condition['rtt_ms']),
+                    'pings': measure.ping_problems(pings, condition['rtt_ms'], condition.get('base_rtt_ms', 0.0)),
                     'control_noops': measure.control_noop_problems(noops, self.control_reference),
                     'sysctl': [f'{vm}: {problem}' for vm, found in tcp['problems'].items() for problem in found]}
         return {'ok': not any(problems.values()), 'problems': problems, 'tree': tree, 'pings': pings,
@@ -1273,6 +1275,7 @@ class Orchestrator:
         zero = self.zero_delay.get(condition['gbit'], {})
         self.condition = {
             **{key: condition[key] for key in ('label', 'gbit', 'rtt_ms', 'delay_ms', 'host_tcp')},
+            'base_rtt_ms': condition.get('base_rtt_ms', 0.0),
             'visit_index': len(trial['visits']) - 1, 'ping_min_ms': ping_min, 'visit_one_stream_gbit': steady,
             'zero_delay_gbit': zero.get('one_stream'), 'zero_delay_bound_gbit': zero.get('bound'),
             # pgdelta's busy threshold: what the path holds without queueing, the visit's one-stream rate times
@@ -5983,6 +5986,9 @@ def parse_args(argv=None):
                      help="the SSH probe at each trial's first visit to a condition with r > 0, on this port (22)")
     wan.add_argument('--stunnel-link-test', default='', metavar='CONDITIONS',
                      help="a one-stream link test through the stunnel pair at the trial's first visit there")
+    wan.add_argument('--base-rtt-ms', type=float, default=0.0, metavar='MS',
+                     help="a real path's own round trip (EXP-15: VMs in two regions); the visit's ping check and each "
+                          "run's minrtt check expect the emulated r plus it, with 5%% of it as extra slack")
     wan.add_argument('--control-port', type=int, default=0,
                      help="the source's sshd port for the harness's control path (2222), which wan.sh leaves undelayed")
     wan.add_argument('--tuned-tcp-max-bytes', type=int, default=measure.TUNED_TCP_MAX_BYTES,
