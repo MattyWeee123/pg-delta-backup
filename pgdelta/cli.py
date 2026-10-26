@@ -160,8 +160,9 @@ def _jobs_option(parser, what, sides=1, live=False):
 def _compress_option(parser):
     parser.add_argument('--compress', choices=('off', 'zstd'), default='off',
                         help='compress the pages sent with zstd (level 3), where the receiver can decompress; '
-                             'otherwise they go plain. For links slower than one core compresses (about 0.5 GB/s, '
-                             'EXP-37), such as DR round trips; on a fast LAN it costs time (default: %(default)s)')
+                             'otherwise they go plain. The sender compresses in the thread that sends, about 140 MB/s '
+                             'on an n2 core (EXP-45): it pays only on links slower than about 0.7 Gbit/s, and made '
+                             'scattered changes 1.3-1.5x slower at 2 Gbit/s (default: %(default)s)')
 
 
 def _hash_option(parser):

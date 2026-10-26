@@ -8,6 +8,16 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-26 (afternoon): zstd on the wire, built and measured; it doesn't pay as built
+
+- **`--compress zstd` built:** negotiated like the hash, opt-in and tested with both zstd bindings. CI now installs `zstandard`, the binding the VMs use.
+- **EXP-45** measured it at DR round trips (2 Gbit/s, 60 and 120 ms, hex-filler data):
+  - it sent 2.78× fewer bytes for scattered changes, as EXP-37 predicted;
+  - but it made v1 1.30–1.48× slower, because the sender compresses in the thread that sends, and one VM core managed only about 140 MB/s. A serial model fits the loss;
+  - the deciding prediction failed, so the option stays off, and the next build moves compression onto the workers.
+- **A slip, caught and set apart:** the first session ran with cubic, not BBR. The `tcp_bbr` module wasn't loaded, so allowing BBR failed. pgdelta's statistics showed it (`effective: cubic`), and the session was set apart before the counted rerun, with BBR verified on every v1 run.
+- **A second slip:** zsh doesn't split a command held in a variable, so the counted run's first start never ran. It was rerun under bash. VMs deleted after the fetch.
+
 ## 2026-10-26 (midday): Omni's unlogged tables; Omni on Kubernetes (OMNI-2)
 
 - **EXP-43 (OMNI-1c):** Omni's own `pg_basebackup` leaves out an unlogged table's `_mintxid` fork, and pgdelta, which didn't know the fork's name, had copied it.

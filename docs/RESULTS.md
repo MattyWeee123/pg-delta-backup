@@ -44,7 +44,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | Question | Answer |
 |---|---|
 | Reuse after `VACUUM FULL` / `CLUSTER`? | **None, by any strategy:** cross-file page matching and content-defined chunking found nothing (EXP-37). Positional pages lose nothing |
-| Fewer bytes on slow links? | Two levers, not built: 512-byte blocks would send **5× fewer bytes** for scattered changes, and **zstd 2.8× fewer** at about 0.5 GB/s per core (EXP-37) |
+| Fewer bytes on slow links? | 512-byte blocks would send **5× fewer bytes** for scattered changes (EXP-37, not built). **zstd is built** (`--compress zstd`): 2.8× fewer bytes, but as built it made scattered changes 1.3–1.5× slower at 2 Gbit/s, since one core compresses only about 140 MB/s in the sending thread (EXP-45). It pays below about 0.7 Gbit/s, and moving it onto the workers is next |
 
 ![Bytes by strategy](figures/exp37-bytes.svg)
 
@@ -63,4 +63,4 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 - **Larger sizes:** extrapolated from scale models only; tests beyond them may need a disk-quota increase.
 - **The rest of the slowdown tests:** a moderate load, a large dirty set, a source near saturation at 16 vCPUs.
 - **The timing model's disk term.**
-- **The two bandwidth levers** (sub-page deltas, zstd), measured but not built.
+- **The bandwidth levers:** zstd on the workers (EXP-45's next step), and sub-page deltas, measured but not built.
