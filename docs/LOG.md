@@ -8,6 +8,14 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (late morning): zstd pays at 2 Gbit/s
+
+- **EXP-52 (two VM sessions, pre-registered):** with batched pool tasks, zstd took 0.86 of plain v1's time at 2 Gbit/s and 60 ms. That is 4.88 s against 5.68; one run per task had been even (1.05, 6.17 s).
+  - **Why two sessions:** the first gave 0.855, within 20% of the 0.90 bar, so rule 11 called for a second on fresh VMs. It gave 0.865.
+  - **The miss:** the receiver's writes still take 1.38× v1's, above that prediction's 1.3 bar.
+  - **Teardown:** both pairs were torn down; the project holds no VM or disk.
+- **Advice:** `--compress zstd` is now worth it on DR links up to 2 Gbit/s. The README, the deck (a new chart on the bandwidth slide) and the walkthrough (a 16th step) say so.
+
 ## 2026-10-27 (morning): what sets zstd's floor
 
 - **EXP-49 (local, pre-registered):** zstd's 6.1 s floor comes from pgdelta's thread pools, not the codec. On its small runs of pages (2.5 on average) each pool task costs about 12–13 µs, so neither pool gains past 4 threads (1.5–1.7 GB/s), while 1 MiB frames scale 3.8×. Beside 4 decompressing threads, each of the receiver's writes took 6.4× as long. The deciding prediction held; the other two failed and say so: compression scales better than decompression, and zstd's own cost on small frames is small (0.87 of its 1 MiB rate).

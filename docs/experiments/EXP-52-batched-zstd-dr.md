@@ -1,6 +1,6 @@
 # EXP-52: With batched pool tasks, does zstd beat plain v1 at 2 Gbit/s?
 
-Status: **pre-registered October 27, 2026, before any run.** One VM pair, about 45 minutes. The test on a DR link that EXP-51 called for: batching is now the default, and EXP-47's deciding cell is rerun with it.
+Status: **done October 27, 2026 (two sessions on fresh VMs, 12 runs, all passing; the deciding prediction held, prediction 2 failed). At 2 Gbit/s and 60 ms, v1 with zstd now takes 0.86 of plain v1's time (4.88 s against 5.68), where EXP-47 found it even (1.05, 6.17 s). It took 0.42 of `pg_basebackup`'s time.** Batched pool tasks took 1.3 s off zstd's floor on the VMs. The receiver's writes still took 1.38× v1's, above prediction 2's 1.3, though down from 2.1×. Pre-registered before any run. One VM pair, about 45 minutes. The test on a DR link that EXP-51 called for: batching is now the default, and EXP-47's deciding cell is rerun with it.
 
 ## Question
 
@@ -38,3 +38,40 @@ EXP-47's second session exactly (`results/exp04/exp47b`), with pgdelta as it now
 - **Where and what:** us-central1-a; BBR in effect on both v1 runs; batched tasks on both ends (560 and 796 tasks for 29,053 runs).
 - **Times:** zstd 4.89 s against v1's 5.72 s, **0.855** (EXP-47: 6.17 s, 1.05). Prediction 1's ratio is within 20% of its 0.90 bar, so the second session runs on fresh VMs (order seed 521), as registered. The verdict on every prediction will use both sessions' runs.
 - **The receiver's writes:** they took 1.41× v1's (1.08 s against 0.76; EXP-47: 2.1×), over prediction 2's 1.3.
+
+## Results (October 27)
+
+Both sessions ran in us-central1-a, on fresh VMs each time (order seeds 520 and 521). Every run passed. BBR was in effect on 4 of 4 v1 runs, and every zstd run used batched tasks on both ends: 560 and 796 tasks for 29,053 runs. Data: `docs/experiments/data/exp52-cells.csv`; raw `results/exp04/exp52` and `exp52b`; analysis and figure `analysis/exp52.py`.
+
+![Median seconds at 2 Gbit/s and 60 ms: EXP-47 (one run per task) beside EXP-52 (batched tasks)](../figures/exp52-batched-dr.svg)
+
+| Uniform 1%, 2 Gbit/s, 60 ms (median) | `pg_basebackup` | v1 | v1 + zstd | zstd ÷ v1 |
+|---|---|---|---|---|
+| EXP-47, one run per task (two sessions) | 11.64 s | 5.89 s | 6.17 s | 1.05 |
+| **EXP-52, batched tasks, first session** | 11.60 s | 5.72 s | 4.89 s | 0.855 |
+| **EXP-52, second session** | 11.75 s | 5.64 s | 4.88 s | 0.865 |
+| **EXP-52, both (4 runs each)** | 11.66 s | 5.68 s | **4.88 s** | **0.859** |
+
+zstd sent 219 MB against v1's 610 MB (2.79× fewer). The receiver's `rebuild` took 1.08 s with zstd against 0.78 s for v1 (EXP-47: 1.60 against 0.76).
+
+| # | Prediction | Verdict (both sessions) |
+|---|---|---|
+| 1 | **Deciding: zstd takes at most 0.90 of v1 at 2 Gbit/s** | **Held:** 0.859 (0.855 and 0.865) |
+| 2 | The receiver's `rebuild` with zstd at most 1.3× v1's | **Failed:** 1.38× (EXP-47: 2.1×) |
+| 3 | Batched tasks on every zstd run; BBR on every v1 run | **Held:** 560 and 796 tasks per 29,053 runs; BBR on 4 of 4 |
+| 4 | Bytes at least 2.5× fewer; zstd faster than one `pg_basebackup` | **Held:** 2.79×; 0.42 |
+
+## What it means
+
+- **zstd's floor fell from about 6.1 s to 4.9 s,** about what the projection from the local cut gave (4.8 s). The cause was the one EXP-49 found: the pools' cost per task. zstd now pays at 2 Gbit/s, where it didn't.
+- **The receiver still pays some of it:** its writes take 0.3 s longer with zstd than without, down from 0.85 s. On 8 vCPUs shared with 4 hashing processes, the remaining handoffs cost more than on the Mac (1.20× there).
+- **The break-even is now above 2 Gbit/s, but not measured:**
+  - **Low end, about 3.7 Gbit/s:** if zstd's time stays at about 4.9 s on faster links, plain v1 reaches it there, by EXP-47's fit (3.7 s + 4.4 s ÷ Gbit/s).
+  - **High end, about 9 Gbit/s:** zstd's time can fall by at most its own 0.9 s on the wire at 2 Gbit/s, which puts the break-even no higher than that.
+
+  A run at a faster rate would place it.
+- **The advice changes:** use `--compress zstd` on DR links of 2 Gbit/s and slower. It was measured faster there:
+  - 0.52 at 0.5 Gbit/s and 0.75 at 1 Gbit/s, with one run per task (EXP-46, EXP-47), which batching can only help;
+  - 0.86 at 2 Gbit/s, batched.
+
+  Above 2 Gbit/s it is unmeasured. It stays opt-in: it costs the source CPU, and EXP-26's fairness finding concerns BBR, which these runs used.

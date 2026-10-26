@@ -80,7 +80,7 @@ def figure(after, before):
     fig, ax = plt.subplots(figsize=(7, 4))
     methods = ((FULL, 'pg_basebackup', COLORS['grey']), (V1, 'v1', COLORS['blue']), (V1Z, 'v1 + zstd', COLORS['red']))
     for g, (label, t) in enumerate((('EXP-47: one run per task\n(two sessions)', before),
-                                    ('EXP-52: batched tasks', after))):
+                                    ('EXP-52: batched tasks\n(two sessions)', after))):
         for i, (m, name, color) in enumerate(methods):
             x = g * 4 + i
             value = t.get((CONDITION, m))
