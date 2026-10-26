@@ -165,6 +165,12 @@ def _compress_option(parser):
                              'pages. For DR links below about 4 Gbit/s: scattered changes took 0.52 of the time at '
                              '0.5 Gbit/s, 0.75 at 1, 0.86 at 2, 0.95 at 3 and 1.06 at 5 (EXP-46, EXP-47, EXP-52, '
                              'EXP-53) (default: %(default)s)')
+    parser.add_argument('--subpage', action='store_true',
+                        help='send only the 512-byte blocks of each changed page that differ from B\'s page there, '
+                             'where the receiver builds on B\'s bytes (in place or copy-patch; otherwise pages go '
+                             'whole). B\'s block digests come back with its leaf digests, so no round trip is '
+                             'added. With --compress zstd, scattered changes sent 0.21 of zstd\'s bytes by '
+                             'measurement (EXP-54, EXP-55); its time on a DR link is EXP-56\'s')
 
 
 def _hash_option(parser):
@@ -495,7 +501,8 @@ def _sender_kwargs(args, identity):
             'pg_controldata': args.pg_controldata, 'pg_conn': args.pg_conn, 'psql': args.psql,
             'live_timeout': args.live_timeout, 'hash_algorithm': args.hash,
             'compress': None if getattr(args, 'compress', 'off') == 'off' else args.compress,
-            'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT}
+            'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
+            'subpage': getattr(args, 'subpage', False)}
 
 
 def _source_identity(args):

@@ -153,6 +153,18 @@ def _worker_hash_nodes(path, identity, size, block, node_blocks, keep_leaves, no
         os.close(fd)
 
 
+def _worker_block_digests(path, identity, size, block, node_blocks, nodes):
+    """[block digests of each page] for `nodes` of the file at `path`, in a worker process (--subpage)."""
+    fd = open_regular(path)
+    try:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != identity:
+            raise OSError(errno.ESTALE, 'the file was replaced while it was hashed', path)
+        return [_block_node(fd, size, _WORKER.hasher, block, node_blocks, node) for node in nodes]
+    finally:
+        os.close(fd)
+
+
 # --- the pool ---------------------------------------------------------------------------------------
 
 class HashPool:
@@ -322,6 +334,23 @@ class HashPool:
             pool = self
         task = functools.partial(_hash_node, fd, size, hasher, block, node_blocks, keep_leaves)
         return pool.map(task, nodes, stop=stop, window=window)
+
+    def block_digests(self, path, fd, size, hasher, block, node_blocks, nodes, *, stop=None):
+        """[the block digests of each page of `node`, concatenated, for node in nodes] (--subpage), as
+        node_digests: on the worker processes when there is more than one task's worth."""
+        nodes = list(nodes)
+        if self.backend == 'process' and len(nodes) > 1:
+            if hasher.key != self.key:
+                raise ValueError('the hasher and the hash pool use different keys')
+            per_task = max(1, min(TASK_BYTES // (block * node_blocks), -(-len(nodes) // self.jobs)))
+            chunks = [tuple(nodes[start:start + per_task]) for start in range(0, len(nodes), per_task)]
+            if len(chunks) > 1:
+                info = os.fstat(fd)
+                task = functools.partial(_worker_block_digests, os.fspath(path), (info.st_dev, info.st_ino), size,
+                                         block, node_blocks)
+                return [part for chunk in self.map(task, chunks, stop=stop) for part in chunk]
+        pool = SERIAL if self.backend == 'process' else self
+        return pool.map(functools.partial(_block_node, fd, size, hasher, block, node_blocks), nodes, stop=stop)
 
     def close(self):
         """Stop the workers, after the tasks already running finish. Safe while another thread uses the pool."""
@@ -510,6 +539,20 @@ def _hash_node(fd, size, hasher, block, node_blocks, keep_leaves, node):
         offset += length
     leaves = b''.join(parts)
     return hasher.node(leaves), leaves if keep_leaves else b''
+
+
+def _block_node(fd, size, hasher, block, node_blocks, node):
+    """The block digests of each page of one node of a file of `size` bytes, concatenated (--subpage)."""
+    offset = node * block * node_blocks
+    end = min(offset + block * node_blocks, size)
+    piece = _piece_bytes(block)
+    parts = []
+    while offset < end:
+        length = min(piece, end - offset)
+        view = _read_span(fd, length, offset)
+        parts += [hasher.blocks(view[start:start + block]) for start in range(0, length, block)]
+        offset += length
+    return b''.join(parts)
 
 
 def hash_file(path, key, block=BLOCK, node_blocks=NODE_BLOCKS, *, keep_leaves=True, hasher=None,

@@ -77,12 +77,13 @@ import tempfile
 import threading
 import time
 
-from pgdelta import __version__, flush, inplace, placement, protocol
+from pgdelta import __version__, flush, inplace, placement, protocol, subpage
 from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
 from pgdelta.flush import DEFAULT_FSYNC, FSYNC_MODES, WRITEBACK_BYTES
-from pgdelta.hashing import ALGORITHMS, DEFAULT_ALGORITHM, DIGEST_SIZE, KEY_SIZE, FilesDigest, Hasher, usable
+from pgdelta.hashing import (ALGORITHMS, DEFAULT_ALGORITHM, DIGEST_SIZE, KEY_SIZE, SUB_BLOCK, FilesDigest, Hasher,
+                             usable)
 from pgdelta.identity import gate, read_identity, reuse_policy
 from pgdelta.inventory import MODE_MASK, parse_entries, require_plain, scan
 from pgdelta.protocol import ChannelClosed
@@ -114,7 +115,7 @@ HELLO_KEYS = frozenset(('protocol_version', 'block', 'node_blocks', 'key', 'sour
 # Only a live source's HELLO has it (pgdelta.live): files follow in one APPEND before COMPLETE.
 # hash: the digest algorithm, absent for BLAKE2b (EXP-29); hash_offer: what a sender with --hash auto can use,
 # preferred first, of which this receiver picks the first it can use and names it in ACCEPT.
-HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer', 'compress_offer'))
+HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer', 'compress_offer', 'subpage_offer'))
 _CREATE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0)
                  | getattr(os, 'O_NOFOLLOW', 0))
 _KERNEL_COPY = sys.platform.startswith('linux') and hasattr(os, 'copy_file_range')
@@ -446,6 +447,10 @@ class _Receiver:
         self.decompressor, self.decompressing, self.gathered, self.gathered_bytes = None, deque(), [], 0
         self.decompress_counts = {'runs': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0, 'wait_seconds': 0.0,
                                   'threads': 0, 'tasks': 0}
+        # --subpage (pgdelta.subpage): the HELLO's offer, and whether this end took it (it builds on B's bytes).
+        self.subpage_offer, self.subpage = None, False
+        self.subpage_counts = {'pages_partial': 0, 'pages_whole': 0, 'pages_same': 0, 'blocks_received': 0,
+                               'block_digest_bytes': 0, 'hash_seconds': 0.0}
         # EXP-13's protocol timers, on the time.perf_counter() clock: publish_s counts from `launched` (the
         # receive command's start) and hello_wait_s from `listening` (its listener's), each else from here.
         started = time.perf_counter()
@@ -670,6 +675,11 @@ class _Receiver:
             accept['hash'] = self.hasher.algorithm  # the receiver's pick of the sender's hash_offer
         if getattr(self, 'codec', None) is not None:
             accept['compress'] = 'zstd'  # the sender's compress_offer, which this end can decompress
+        # Sub-page deltas need B's bytes under every page written: in place, or copied first (copy-patch).
+        self.subpage = (self.subpage_offer == SUB_BLOCK and self.reuse and self.block == subpage.PAGE
+                        and (self.in_place or self.rebuild == 'copy-patch'))
+        if self.subpage:
+            accept['subpage'] = SUB_BLOCK
         self.channel.send_json(protocol.ACCEPT, accept)
         self._start_pool()
         self._start_fsync()
@@ -683,8 +693,12 @@ class _Receiver:
             self.basis_thread.start()
         handlers = {protocol.LEAF_REQUEST: self._leaf_request, protocol.PAGE_DATA: self._page_data,
                     protocol.FILE_DONE: self._file_done}
+        if self.subpage:
+            handlers[protocol.PAGE_DELTA] = self._page_delta
         if getattr(self, 'codec', None) is not None:
             handlers[protocol.PAGE_DATA_ZSTD] = self._page_data_zstd
+            if self.subpage:
+                handlers[protocol.PAGE_DELTA_ZSTD] = self._page_delta_zstd
             threads = max(1, self.jobs)
             self.decompressor = ThreadPoolExecutor(threads, thread_name_prefix='pgdelta-unzstd')
             self.decompress_counts['threads'] = threads
@@ -694,7 +708,8 @@ class _Receiver:
             waited = time.perf_counter()
             code, payload = self._recv()
             self.recv_wait_seconds += time.perf_counter() - waited
-            if (self.decompressing or self.gathered) and code not in (protocol.PAGE_DATA_ZSTD, protocol.LEAF_REQUEST):
+            if (self.decompressing or self.gathered) and code not in (protocol.PAGE_DATA_ZSTD, protocol.PAGE_DELTA_ZSTD,
+                                                                       protocol.LEAF_REQUEST):
                 # Plain pages, a file's end, an append and the end: every queued run is written first.
                 self._drain_decompressed()
             if code == protocol.COMPLETE:
@@ -749,6 +764,10 @@ class _Receiver:
         # Accepted only where this end can decompress; otherwise the sender sends plain PAGE_DATA.
         self.codec = compression.Codec() if offer and compression.usable(offer[0]) else None
         self.compress_offer = offer
+        sub_offer = hello.get('subpage_offer')
+        if sub_offer is not None and type(sub_offer) is not int:
+            raise ProtocolError('HELLO subpage_offer must be an integer')
+        self.subpage_offer = sub_offer
         identity = hello['source_identity']
         if identity is not None and not isinstance(identity, dict):
             raise ProtocolError('HELLO source_identity must be an object or null')
@@ -878,6 +897,26 @@ class _Receiver:
         if self.verify_scope == 'written':
             self.basis_leaves.setdefault(index, {}).update(entries)  # B's, before the file is written
         self.channel.send(protocol.LEAF_DIGESTS, protocol.encode_leaf_digests(index, entries))
+        if self.subpage:
+            self._send_block_digests(index, size, path, nodes)
+
+    def _send_block_digests(self, index, size, path, nodes):
+        """--subpage: B's block digests for the nodes just answered, hashed on the workers."""
+        started = time.perf_counter()
+        try:
+            fd = open_regular(self.setup.basis / path)
+            try:
+                blobs = self.pool.block_digests(self.setup.basis / path, fd, size, self.hasher, self.block,
+                                                self.node_blocks, nodes, stop=self.stop)
+            finally:
+                os.close(fd)
+        except _SizeChanged:
+            raise TransferError(f'basis file {path} changed size during the run; B must be immutable') from None
+        except OSError as exc:
+            raise TransferError(f'cannot read basis file {path}: {exc}') from exc
+        self.subpage_counts['hash_seconds'] += time.perf_counter() - started
+        self.subpage_counts['block_digest_bytes'] += sum(len(blob) for blob in blobs)
+        self.channel.send(protocol.BLOCK_DIGESTS, protocol.encode_block_digests(index, list(zip(nodes, blobs))))
 
     def _output_path(self, path):
         """Where the source file `path` is written: in the staging directory, or in B itself (in place)."""
@@ -993,14 +1032,18 @@ class _Receiver:
         self.counts.basis_copy_bytes += stop - start
         self.counts.basis_copies += 1
 
-    def _page_data_zstd(self, payload):
+    def _page_data_zstd(self, payload, delta=False):
         """A compressed run (--compress zstd): gathered into a task for the pool, decompressed within what the
-        file can still hold, and written in order (at most two tasks per thread wait)."""
+        file can still hold, and written in order (at most two tasks per thread wait). `delta`: PAGE_DELTA_ZSTD,
+        whose body holds a 2-byte bitmap per page besides the pages' bytes."""
         index, first, packed = protocol.decode_page_data(payload)
         if index >= len(self.files):
-            raise ProtocolError(f'PAGE_DATA_ZSTD for unknown file {index}')
-        limit = max(0, min(self.files[index].size - first * self.block, protocol.MAX_FRAME))
-        self.gathered.append((index, first, bytes(packed), limit))
+            raise ProtocolError(f'{"PAGE_DELTA_ZSTD" if delta else "PAGE_DATA_ZSTD"} for unknown file {index}')
+        left = max(0, self.files[index].size - first * self.block)
+        if delta:
+            left += 2 * page_count(left, self.block)
+        limit = min(left, protocol.MAX_FRAME)
+        self.gathered.append((index, first, bytes(packed), limit, delta))
         self.gathered_bytes += len(packed)
         if self.gathered_bytes >= compression.TASK_BYTES // 4:
             self._submit_gathered()
@@ -1016,7 +1059,7 @@ class _Receiver:
     def _decompress_task(self, runs):
         """Each run's bytes, in order, ending at the ValueError of the first that is refused."""
         started, out = time.perf_counter(), []
-        for _, _, packed, limit in runs:
+        for _, _, packed, limit, _ in runs:
             try:
                 out.append(self.codec.decompress(packed, limit))
             except ValueError as exc:
@@ -1038,18 +1081,94 @@ class _Receiver:
         counts['wait_seconds'] += time.perf_counter() - started
         counts['seconds'] += seconds
         counts['tasks'] += 1
-        for (index, first, packed, _), data in zip(runs, results):
+        for (index, first, packed, _, delta), data in zip(runs, results):
             if isinstance(data, ValueError):
-                raise ProtocolError(f'PAGE_DATA_ZSTD for {self.files[index].path} does not decompress within the '
-                                    f'file: {data}') from None
+                raise ProtocolError(f'{"PAGE_DELTA_ZSTD" if delta else "PAGE_DATA_ZSTD"} for '
+                                    f'{self.files[index].path} does not decompress within the file: {data}') from None
             counts['runs'] += 1
             counts['wire_bytes'] += len(packed)
             counts['raw_bytes'] += len(data)
-            self._write_run(index, first, memoryview(data))
+            if delta:
+                self._apply_delta(index, first, memoryview(data))
+            else:
+                self._write_run(index, first, memoryview(data))
 
     def _page_data(self, payload):
         index, first, data = protocol.decode_page_data(payload)
         self._write_run(index, first, data)
+
+    def _page_delta(self, payload):
+        index, first, body = protocol.decode_page_data(payload)
+        self._apply_delta(index, first, body)
+
+    def _page_delta_zstd(self, payload):
+        self._page_data_zstd(payload, delta=True)
+
+    def _apply_delta(self, index, first, body):
+        """A PAGE_DELTA body (pgdelta.subpage): whole pages written as runs, the rest block by block."""
+        if index >= len(self.files):
+            raise ProtocolError(f'PAGE_DELTA for unknown file {index}')
+        entry, counts = self.files[index], self.subpage_counts
+        run_first, run = None, []
+        for page, bits, data in subpage.decode(body, first, entry.size, entry.path):
+            if bits == subpage.WHOLE:
+                if run_first is None:
+                    run_first = page
+                run.append(data)
+                counts['pages_whole'] += 1
+                continue
+            if run:
+                self._write_run(index, run_first, b''.join(run))
+                run_first, run = None, []
+            if bits:
+                self._write_blocks(index, page, bits, data)
+                counts['pages_partial'] += 1
+            else:
+                self._skip_page(index, page)
+                counts['pages_same'] += 1
+        if run:
+            self._write_run(index, run_first, b''.join(run))
+
+    def _skip_page(self, index, page):
+        """A page the sender found equal to B's: nothing is written, but the order is still checked."""
+        output, entry = self._open(index), self.files[index]
+        basis_size = self.basis_files.get(index)
+        if page < output.next_page or basis_size is None or (page + 1) * self.block > min(basis_size, entry.size):
+            raise ProtocolError(f'PAGE_DELTA for {entry.path} keeps page {page} as B\'s, which it cannot be')
+        output.next_page = page + 1
+
+    def _write_blocks(self, index, page, bits, data):
+        """Write a page's changed blocks into B's page (in place) or into O over B's copied page (copy-patch).
+        The page counts as written, so verification re-hashes it whole."""
+        output, entry = self._open(index), self.files[index]
+        basis_size = self.basis_files.get(index)
+        offset, end = page * self.block, (page + 1) * self.block
+        if (page < output.next_page or page >= output.pages or basis_size is None
+                or end > min(basis_size, entry.size)):
+            raise ProtocolError(f'PAGE_DELTA for {entry.path} patches page {page}, which B or the file does not '
+                                f'hold whole, or out of order')
+        started = time.perf_counter()
+        if output.basis_fd is not None and end > output.copied:
+            # B's bytes go in first, through the end of this page at least, as _write_run does for whole runs.
+            stop = min(max(end, output.copied + COPY_AHEAD_BYTES), output.copy_limit)
+            if stop > output.copied:
+                self._copy_basis(entry, output, stop)
+        at = 0
+        for block, count in subpage.groups(bits):
+            length = count * SUB_BLOCK
+            _write_all(output.fd, data[at:at + length], offset + block * SUB_BLOCK)
+            at += length
+        output.copied = max(output.copied, end)
+        self._wrote(output, offset, self.block)
+        self.rebuild_seconds += time.perf_counter() - started
+        if output.runs and output.runs[-1][0] + output.runs[-1][1] == page:
+            output.runs[-1] = (output.runs[-1][0], output.runs[-1][1] + 1)
+        else:
+            output.runs.append((page, 1))
+        output.next_page = page + 1
+        self.counts.pages_received += 1
+        self.counts.page_bytes_received += len(data)
+        self.subpage_counts['blocks_received'] += bits.bit_count()
 
     def _write_run(self, index, first, data):
         if index >= len(self.files):
@@ -1565,6 +1684,11 @@ class _Receiver:
                                  'backend': None if self.codec is None else self.codec.backend,
                                  **{key: round(value, 6) if isinstance(value, float) else value
                                     for key, value in self.decompress_counts.items()}}
+        if self.subpage_offer is not None:
+            # Only when offered, so a session without --subpage keeps its COMPLETE frame's bytes.
+            stats['subpage'] = {'offered': self.subpage_offer, 'accepted': self.subpage,
+                                **{key: round(value, 6) if isinstance(value, float) else value
+                                   for key, value in self.subpage_counts.items()}}
         if self.misplaced_write is not None:
             stats['test_misplaced_write'] = self.misplaced_write
         return stats

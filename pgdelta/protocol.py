@@ -27,6 +27,12 @@ APPEND = 10
 # --compress zstd (pgdelta.compress): a run of pages compressed, its head as PAGE_DATA's. Sent only after the
 # receiver accepted the HELLO's compress_offer, so no other session's bytes change.
 PAGE_DATA_ZSTD = 11
+# --subpage (pgdelta.subpage): after each LEAF_DIGESTS, B's 512-byte block digests for the same nodes; then runs as
+# a bitmap and the changed blocks per page, plain or compressed. Sent only after the receiver accepted the HELLO's
+# subpage_offer, so no other session's bytes change.
+BLOCK_DIGESTS = 12
+PAGE_DELTA = 13
+PAGE_DELTA_ZSTD = 14
 MESSAGES = {
     HELLO: ('HELLO', 'control'),
     ACCEPT: ('ACCEPT', 'control'),
@@ -39,6 +45,9 @@ MESSAGES = {
     ERROR: ('ERROR', 'control'),
     APPEND: ('APPEND', 'control'),
     PAGE_DATA_ZSTD: ('PAGE_DATA_ZSTD', 'page_data'),
+    BLOCK_DIGESTS: ('BLOCK_DIGESTS', 'leaf_digests'),
+    PAGE_DELTA: ('PAGE_DELTA', 'page_data'),
+    PAGE_DELTA_ZSTD: ('PAGE_DELTA_ZSTD', 'page_data'),
 }
 CATEGORIES = ('control', 'node_digests', 'leaf_digests', 'page_data')
 
@@ -256,6 +265,31 @@ def decode_leaf_digests(payload):
             raise ProtocolError('truncated LEAF_DIGESTS entry')
         entries.append((node, bytes(payload[offset:end])))
         offset = end
+    return index, entries
+
+
+def encode_block_digests(index, entries):
+    """entries: (node index, the block digests of B's pages in that node, concatenated) pairs."""
+    parts = [_INDEX.pack(index)]
+    for node, blob in entries:
+        parts += [_NODE_HEAD.pack(node, len(blob)), blob]
+    return b''.join(parts)
+
+
+def decode_block_digests(payload):
+    if len(payload) < _INDEX.size:
+        raise ProtocolError('malformed BLOCK_DIGESTS')
+    index = _INDEX.unpack_from(payload)[0]
+    offset, entries = _INDEX.size, []
+    while offset < len(payload):
+        if offset + _NODE_HEAD.size > len(payload):
+            raise ProtocolError('truncated BLOCK_DIGESTS entry')
+        node, length = _NODE_HEAD.unpack_from(payload, offset)
+        offset += _NODE_HEAD.size
+        if offset + length > len(payload):
+            raise ProtocolError('truncated BLOCK_DIGESTS entry')
+        entries.append((node, bytes(payload[offset:offset + length])))
+        offset += length
     return index, entries
 
 

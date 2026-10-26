@@ -28,18 +28,19 @@ import os
 import threading
 import time
 
-from pgdelta import __version__, datadir, live, matching, protocol, transport, waits
+from pgdelta import __version__, datadir, live, matching, protocol, subpage, transport, waits
 from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
-from pgdelta.hashing import BLOCK, DEFAULT_ALGORITHM, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key, offer
+from pgdelta.hashing import (BLOCK, DEFAULT_ALGORITHM, DIGEST_SIZE, NODE_BLOCKS, SUB_BLOCK, FilesDigest, Hasher,
+                             new_key, offer)
 from pgdelta.identity import check_major
 from pgdelta.inplace import COMMITTED
 from pgdelta.inventory import require_plain, scan
 from pgdelta.protocol import ChannelClosed
 from pgdelta.receiver import RECEIPT_SUFFIX
 from pgdelta.tree import (BACKENDS, DEFAULT_BACKEND, DEFAULT_JOBS, HashPool, hash_file, node_count, open_regular,
-                          pread_exact)
+                          pread_exact, span_length)
 
 STATS_SCHEMA_VERSION = 1
 DEFAULT_WINDOW = 4
@@ -62,7 +63,8 @@ class Inbox:
         self.channel = channel
         self.cond = threading.Condition()
         self.accept = self.complete = self.error = None
-        self.basis, self.leaves = {}, {}
+        self.basis, self.leaves, self.blocks = {}, {}, {}
+        self.subpage = False  # set once ACCEPT took the subpage_offer: BLOCK_DIGESTS may arrive
         self.closed = False
         # The sender's protocol timers (pgdelta.waits.WaitTimers); without them waits aren't timed.
         self.timers = timers
@@ -141,6 +143,10 @@ class Inbox:
             index, entries = protocol.decode_leaf_digests(payload)
             for node, blob in entries:
                 self.leaves[(index, node)] = blob
+        elif code == protocol.BLOCK_DIGESTS and self.subpage:
+            index, entries = protocol.decode_block_digests(payload)
+            for node, blob in entries:
+                self.blocks[(index, node)] = blob
         elif code == protocol.COMPLETE:
             self.complete = protocol.decode_json(payload, 'COMPLETE')
         else:
@@ -282,7 +288,7 @@ class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
-                 hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT):
+                 hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False):
         self.started = time.perf_counter()
         self.hash_algorithm = hash_algorithm
         # --compress zstd: offered in HELLO; the codec exists once the receiver accepted it (pgdelta.compress).
@@ -293,6 +299,10 @@ class _Sender:
         self.compressor, self.compressing, self.queued, self.queued_bytes = None, deque(), [], 0
         self.compress_counts = {'runs': 0, 'runs_compressed': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0,
                                 'wait_seconds': 0.0, 'threads': 0, 'tasks': 0}
+        # --subpage (pgdelta.subpage): offered in HELLO; used once the receiver accepted it.
+        self.subpage, self.subpage_used = subpage, False
+        self.subpage_counts = {'pages_whole': 0, 'pages_partial': 0, 'pages_same': 0, 'blocks_sent': 0,
+                               'block_digest_bytes': 0, 'hash_seconds': 0.0}
         self.channel, self.source, self.identity = channel, Path(source), identity
         self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
         # A live source (pgdelta.live): its backup session, and how its files are read; the files appended
@@ -474,6 +484,8 @@ class _Sender:
             hello['hash'] = self.hash_algorithm  # EXP-29: absent means BLAKE2b, so older receivers still match
         if self.compress is not None:
             hello['compress_offer'] = [self.compress]
+        if self.subpage:
+            hello['subpage_offer'] = SUB_BLOCK
         self._send_json(protocol.HELLO, hello)
         accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
         if offered is not None:
@@ -494,6 +506,11 @@ class _Sender:
                 self.compress_counts['threads'] = threads
         elif 'compress' in accept:
             raise ProtocolError('ACCEPT compress without a compress_offer')
+        if 'subpage' in accept:
+            # A receiver that can't build on B's bytes accepts without it, and runs go as PAGE_DATA.
+            if not self.subpage or accept['subpage'] != SUB_BLOCK:
+                raise ProtocolError(f'ACCEPT subpage {accept["subpage"]!r} without a matching subpage_offer')
+            self.subpage_used = self.inbox.subpage = True
         self.reuse, self.reason, self.policy, self.basis_identity, self.basis_sizes = _parse_accept(
             accept, len(inventory.files))
         self.in_place = accept.get('in_place', False)
@@ -640,7 +657,7 @@ class _Sender:
 
     def _finish(self, job):
         tree, plan = job.tree, job.plan
-        pages = []
+        pages, blocks = [], {}
         for node in plan.descend:
             blob = self.inbox.wait(lambda: self.inbox.leaves.pop((job.index, node), None),
                                    f'leaf digests of {job.path}', 'leaf')
@@ -648,19 +665,44 @@ class _Sender:
             if len(blob) != expected * DIGEST_SIZE:
                 raise ProtocolError(f'LEAF_DIGESTS for {job.path} node {node} has the wrong length')
             pages += matching.changed_pages(tree, node, job.basis_size, blob)
+            if self.subpage_used:
+                blocks[node] = self._block_digests(job, node, expected)
         for node in plan.whole:
             pages += matching.node_pages(tree, node)
         pages.sort()
+        old = self._old_blocks(job, blocks) if self.subpage_used else None
         if self.reader is not None:
-            sent_bytes = self._send_live_pages(job, pages) if pages else 0
+            sent_bytes = self._send_live_pages(job, pages, old) if pages else 0
         else:
-            sent_bytes = self._send_pages(job, pages) if pages else 0
+            sent_bytes = self._send_pages(job, pages, old) if pages else 0
         digest = job.digest or tree.digest
         self._send(protocol.FILE_DONE, protocol.encode_file_done(job.index, tree.size, digest))
         self.files_digest.add(job.path, tree.size, digest)
         self._count(job, len(pages), sent_bytes)
 
-    def _send_pages(self, job, pages):
+    def _block_digests(self, job, node, basis_pages):
+        """B's block digests for the pages of `node` (--subpage), checked against the pages B has there."""
+        blob = self.inbox.wait(lambda: self.inbox.blocks.pop((job.index, node), None),
+                               f'block digests of {job.path}', 'leaf')
+        first = node * self.node_blocks
+        expected = sum(subpage.digest_bytes(span_length(page, self.block, job.basis_size))
+                       for page in range(first, first + basis_pages))
+        if len(blob) != expected:
+            raise ProtocolError(f'BLOCK_DIGESTS for {job.path} node {node} has the wrong length')
+        self.subpage_counts['block_digest_bytes'] += len(blob)
+        return blob
+
+    def _old_blocks(self, job, blocks):
+        """page -> B's block digests of that page, or None where B has no full page there (it goes whole)."""
+        def old(page):
+            node, at = divmod(page, self.node_blocks)
+            blob = blocks.get(node)
+            if blob is None or self.block != subpage.PAGE or (page + 1) * self.block > job.basis_size:
+                return None
+            return blob[at * subpage.DIGESTS_PER_PAGE:(at + 1) * subpage.DIGESTS_PER_PAGE]
+        return old
+
+    def _send_pages(self, job, pages, old=None):
         sent = 0
         try:
             fd = open_regular(self._source_file(job.path))
@@ -675,14 +717,14 @@ class _Sender:
                 except OSError as exc:
                     raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
                 self.inbox.check()
-                self._send_run(job.index, first, data)
+                self._send_run(job.index, first, data, old)
                 sent += length
             self._drain_runs()
         finally:
             os.close(fd)
         return sent
 
-    def _send_live_pages(self, job, pages):
+    def _send_live_pages(self, job, pages, old=None):
         """Live: send the pages as read now, each hashed again, and keep the digest of what was sent in job.digest.
 
         A page may have changed since the file was hashed; the copy is made of
@@ -714,7 +756,7 @@ class _Sender:
                                                     f'must not change once pg_backup_stop has returned')
                         changed[page] = leaf
                 self.inbox.check()
-                self._send_run(job.index, first, data)
+                self._send_run(job.index, first, data, old)
                 sent += length
             self._drain_runs()
         finally:
@@ -724,12 +766,16 @@ class _Sender:
             job.digest = live.composite_digest(tree, self.hasher, changed)
         return sent
 
-    def _send_run(self, index, first, data):
-        """One run of pages: PAGE_DATA at once, or, with compression accepted, queued for the compressing pool."""
+    def _send_run(self, index, first, data, old=None):
+        """One run of pages: PAGE_DATA at once, or, with compression accepted, queued for the compressing pool.
+        With --subpage accepted, the run goes as PAGE_DELTA: each page's changed blocks against `old`."""
+        head, plain, packed = protocol.page_data_head(index, first), protocol.PAGE_DATA, protocol.PAGE_DATA_ZSTD
+        if self.subpage_used:
+            data, plain, packed = self._delta(first, data, old), protocol.PAGE_DELTA, protocol.PAGE_DELTA_ZSTD
         if self.codec is None:
-            self._send(protocol.PAGE_DATA, protocol.page_data_head(index, first), data)
+            self._send(plain, head, data)
             return
-        self.queued.append((index, first, data))
+        self.queued.append((head, data, plain, packed))
         self.queued_bytes += len(data)
         if self.queued_bytes >= compression.TASK_BYTES:
             self._submit_queued()
@@ -743,9 +789,19 @@ class _Sender:
         while len(self.compressing) > 2 * self.compress_counts['threads']:
             self._send_compressed()
 
+    def _delta(self, first, data, old):
+        """A run's PAGE_DELTA body (pgdelta.subpage): every page against B's block digests where B has it."""
+        started, parts, view = time.perf_counter(), [], memoryview(data)
+        for at in range(0, len(data), self.block):
+            page = first + at // self.block
+            parts += subpage.encode_page(view[at:at + self.block], old(page) if old else None, self.hasher,
+                                         self.subpage_counts)
+        self.subpage_counts['hash_seconds'] += time.perf_counter() - started
+        return b''.join(parts)
+
     def _compress_task(self, runs):
         started = time.perf_counter()
-        packed = [self.codec.compress(data) for _, _, data in runs]
+        packed = [self.codec.compress(data) for _, data, _, _ in runs]
         return packed, time.perf_counter() - started
 
     def _drain_runs(self):
@@ -763,17 +819,16 @@ class _Sender:
         counts['wait_seconds'] += time.perf_counter() - started
         counts['seconds'] += seconds
         counts['tasks'] += 1
-        for (index, first, data), frame in zip(runs, packed):
+        for (head, data, plain, packed_code), frame in zip(runs, packed):
             counts['runs'] += 1
             counts['raw_bytes'] += len(data)
-            head = protocol.page_data_head(index, first)
             if len(frame) < len(data):
                 counts['runs_compressed'] += 1
                 counts['wire_bytes'] += len(frame)
-                self._send(protocol.PAGE_DATA_ZSTD, head, frame)
+                self._send(packed_code, head, frame)
             else:
                 counts['wire_bytes'] += len(data)
-                self._send(protocol.PAGE_DATA, head, data)
+                self._send(plain, head, data)
 
     def _send(self, code, *parts):
         """Send one frame, counting the time send() blocked: page_send_s for page data, other_send_s else."""
@@ -898,6 +953,9 @@ class _Sender:
             **({'compress': {'requested': self.compress, 'used': None if self.codec is None else self.compress,
                              'backend': None if self.codec is None else self.codec.backend,
                              **self.compress_counts}} if self.compress is not None else {}),
+            **({'subpage': {'requested': True, 'used': self.subpage_used,
+                            **{k: round(v, 6) if isinstance(v, float) else v for k, v in self.subpage_counts.items()}}}
+               if self.subpage else {}),
         }
 
 
@@ -905,7 +963,7 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
-               hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT):
+               hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -934,7 +992,9 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     change. `compress` "zstd" offers zstd for the pages sent (pgdelta.compress);
     a receiver that can't use it accepts without, and the pages go plain.
     `checkpoint` ("fast" or "spread") is pg_backup_start's for a live source.
+    `subpage` offers sub-page deltas (pgdelta.subpage): with them accepted, each page sent carries only its
+    512-byte blocks that differ from B's.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
-                   pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint).run()
+                   pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage).run()

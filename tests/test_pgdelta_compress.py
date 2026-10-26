@@ -170,7 +170,7 @@ class SessionTests(unittest.TestCase):
     def test_a_compressed_run_without_the_offer_is_refused(self):
         codec = compression.Codec()
 
-        def forced(self, index, first, data):
+        def forced(self, index, first, data, old=None):
             self._send(protocol.PAGE_DATA_ZSTD, protocol.page_data_head(index, first), codec.compress(data))
 
         with mock.patch.object(sender_module._Sender, '_send_run', forced):
@@ -182,7 +182,7 @@ class SessionTests(unittest.TestCase):
     def test_a_run_that_decompresses_past_its_file_is_refused(self):
         codec = compression.Codec()
 
-        def oversized(self, index, first, data):
+        def oversized(self, index, first, data, old=None):
             self._send(protocol.PAGE_DATA_ZSTD, protocol.page_data_head(index, first),
                        codec.compress(bytes(data) + b'\0' * (64 * PAGE)))
 

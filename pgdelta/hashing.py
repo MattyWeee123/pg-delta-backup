@@ -20,6 +20,12 @@ LEAF_PERSON = b'pgdelta-leaf'
 NODE_PERSON = b'pgdelta-node'
 FILE_PERSON = b'pgdelta-file'
 FILES_PERSON = b'pgdelta-files'
+# --subpage (pgdelta.subpage): a page's 512-byte blocks, each with an 8-byte keyed digest, always BLAKE2b (faster
+# than BLAKE3 at this size through Python, EXP-55). A wrong match only costs a failed verification, never a
+# wrong copy: the page and file digests still have to match S's.
+SUB_BLOCK = 512
+SUB_DIGEST_SIZE = 8
+SUB_PERSON = b'pgdelta-subblock'
 ALGORITHMS = ('blake2b', 'blake3')
 DEFAULT_ALGORITHM = 'blake2b'
 BLAKE3_CONTEXTS = ('pgdelta 2026-10-25 leaf digest key', 'pgdelta 2026-10-25 node digest key',
@@ -74,6 +80,7 @@ class Hasher:
             self._leaf = hashlib.blake2b(key=key, person=LEAF_PERSON, digest_size=DIGEST_SIZE)
             self._node = hashlib.blake2b(key=key, person=NODE_PERSON, digest_size=DIGEST_SIZE)
             self._file = hashlib.blake2b(key=key, person=FILE_PERSON, digest_size=DIGEST_SIZE)
+        self._sub = hashlib.blake2b(key=key, person=SUB_PERSON, digest_size=SUB_DIGEST_SIZE)
 
     def _digest(self, state):
         return state.digest(length=DIGEST_SIZE) if self._blake3 else state.digest()
@@ -88,6 +95,15 @@ class Hasher:
         state = self._node.copy()
         state.update(leaf_digests)
         return self._digest(state)
+
+    def blocks(self, page):
+        """The concatenated digests of `page`'s SUB_BLOCK-byte blocks (a short page: of the blocks it has)."""
+        parts = []
+        for start in range(0, len(page), SUB_BLOCK):
+            state = self._sub.copy()
+            state.update(page[start:start + SUB_BLOCK])
+            parts.append(state.digest())
+        return b''.join(parts)
 
     def file(self, size, node_digests):
         """Digest of the file size (8 bytes, big-endian) and the concatenated node digests."""
