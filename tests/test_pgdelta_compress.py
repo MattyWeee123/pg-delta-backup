@@ -92,7 +92,8 @@ class SessionTests(unittest.TestCase):
             new[page * PAGE + 7:page * PAGE + 30] = rng.randbytes(23)
         write_tree(self.source, {'base/1/9': bytes(new)})
         write_tree(self.basis, {'base/1/9': old})
-        outcome = transfer(self.source, self.basis, self.output, compress='zstd', jobs=3, receiver_jobs=3)
+        with mock.patch.object(compression, 'TASK_BYTES', 1 << 20):  # EXP-50's batched tasks
+            outcome = transfer(self.source, self.basis, self.output, compress='zstd', jobs=3, receiver_jobs=3)
         self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
         self.assertIsNone(outcome.receiver_error, repr(outcome.receiver_error))
         self.assertEqual(snapshot(self.output), snapshot(self.source))
@@ -104,7 +105,7 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(received['threads'], 3)
         self.assertEqual(received['runs'], stats['runs_compressed'])
         self.assertGreaterEqual(stats['wait_seconds'], 0)
-        # EXP-50: the runs travel to the pools in tasks of many, not one each.
+        # EXP-50: with TASK_BYTES set, the runs travel to the pools in tasks of many, not one each.
         self.assertLess(stats['tasks'], stats['runs'] // 10)
         self.assertLess(received['tasks'], received['runs'] // 10)
 

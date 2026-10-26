@@ -13,6 +13,10 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 - **EXP-49 (local, pre-registered):** zstd's 6.1 s floor comes from pgdelta's thread pools, not the codec. On its small runs of pages (2.5 on average) each pool task costs about 12–13 µs, so neither pool gains past 4 threads (1.5–1.7 GB/s), while 1 MiB frames scale 3.8×. Beside 4 decompressing threads, each of the receiver's writes took 6.4× as long. The deciding prediction held; the other two failed and say so: compression scales better than decompression, and zstd's own cost on small frames is small (0.87 of its 1 MiB rate).
   - **Why local:** EXP-47's own statistics pointed at the receiver (the sender blocked longer than the link needed, and the receiver's writes doubled), and the cloud sign-in had lapsed. A Mac with 15 cores separates pool costs from the VMs' CPU limits.
   - **Next:** batch consecutive runs per pool task, test locally, then re-measure at 2 Gbit/s once the owner signs in to gcloud again.
+- **EXP-50 (local, pre-registered):** pool tasks of up to 1 MiB of pages cut zstd's extra time over plain v1 from 0.81 s to 0.36 s end to end (`pgdelta local`, scale 70), and the receiver's writes from 1.74× plain's to 1.20×.
+  - **Prediction 3 failed on its own criterion.** I compared files digests across runs, but they are keyed per session and differ every time, even plain against plain.
+  - **The registered rule was applied, not reinterpreted:** the default went back to one run per task, with batching behind a switch.
+- **EXP-51** is the second session that rule 11 asks for (0.44 was within 20% of 0.5). It checks every copy byte for byte against S, with a negative control.
 - **The deck and the walkthrough** now include EXP-48 (a 15th step).
 - **EXP-48's VMs are deleted:** once the owner signed in to gcloud again, `teardown.sh` removed both VMs and their four disks. The project holds no VM or disk.
 

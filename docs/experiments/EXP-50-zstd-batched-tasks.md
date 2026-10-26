@@ -1,6 +1,6 @@
 # EXP-50: Do larger pool tasks lower zstd's floor?
 
-Status: **pre-registered October 27, 2026, before the change was measured.** Local (the Mac), end to end with `pgdelta local`. Lean: 10 runs of a few seconds each, after a template build. The fix EXP-49 pointed to.
+Status: **done October 27, 2026 (10 local runs; 1 and 2 held, 3 failed on a flawed criterion). Batching the pools' tasks cut zstd's extra time over plain v1 from 0.81 s to 0.36 s (0.44 of it; the bar was 0.5), and the receiver's writes from 1.74× plain's to 1.20×.** Prediction 3 compared files digests, which are keyed per session and differ on every run, even plain against plain, so it could not hold. Its registered rule applies anyway: **the default is back to one run per task,** and batching waits, behind its switch, for EXP-51. That is a second session (rule 11: 0.44 is within 20% of its bar) with a byte-for-byte check against S. Local (the Mac), end to end with `pgdelta local`. The fix EXP-49 pointed to.
 
 ## Question
 
@@ -50,3 +50,42 @@ EXP-49 found that zstd's floor comes from pgdelta's thread pools, not the codec.
   - The VM re-measure at 2 Gbit/s (EXP-47's cells) waits for the cloud sign-in. Its registered prediction will be that zstd at 2 Gbit/s falls below plain v1's 5.9 s.
 - **If 1 fails or is undecided:** the batching is reverted, and what remains is reported. Candidates are the per-run work inside each task and each end's main thread.
 - **If 3 fails anywhere,** the change is reverted, whatever 1 says.
+
+## Results (October 27)
+
+One local session: the warm-up and 3 repeats per arm, in the rotated order. Every run completed with pgdelta's own verification. Each zstd run sent the same 29,114 runs (EXP-47: 29,060) as 212.7 MB on the wire. Data: `docs/experiments/data/exp50-runs.csv`; raw `results/bytes/exp50/runs.jsonl`; analysis and figure `analysis/exp50.py`.
+
+![pgdelta's total and the receiver's time writing pages, per arm](../figures/exp50-batched-tasks.svg)
+
+| Median of 3 | plain v1 | zstd, one run per task | zstd, batched tasks |
+|---|---|---|---|
+| pgdelta's total | 1.38 s | 2.18 s (+0.81) | **1.73 s (+0.36)** |
+| the receiver writing pages (`rebuild`) | 0.72 s | 1.25 s (1.74×) | **0.86 s (1.20×)** |
+| pool tasks, sender / receiver | none | 29,114 / 29,114 | 548 / 783 |
+| waiting for the pool, sender / receiver | none | 0.08 / 0.03 s | 0.006 / 0.003 s |
+
+The repeats agreed within 0.06 s in every arm.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: batching cuts zstd's extra time over plain by at least half** | **Held:** 0.36 of 0.81 s remains (0.44); the per-run arm was 0.81 s slower, enough to decide locally |
+| 2 | `rebuild`: at least 1.5× plain's per run, at most 1.3× batched | **Held:** 1.74× and 1.20× |
+| 3 | Every run complete, one files digest across all runs | **Failed as written:** all 10 complete, but 10 different digests |
+
+**Why 3 failed:** the files digest combines per-file digests keyed with the session's random key (`pgdelta/hashing.py`, `FilesDigest`), so it names one run's verified content and differs on every run. The 4 plain runs differ from each other too. The criterion was wrong, not, as far as this shows, the copies. But the registered rule said a failed 3 reverts the change, whatever 1 says, so it is applied rather than reinterpreted.
+
+## What it means
+
+- **Larger tasks remove most of zstd's extra time locally.** The pools went from 29,114 tasks to 548 and 783, waiting for them almost vanished, and the receiver's writes lost most of their slowdown. That is the mechanism EXP-49 found.
+- **What remains, 0.36 s,** is compression and decompression themselves and the per-run work inside each task.
+- **This is the Mac, end to end over loopback.** Whether it lowers the 6.1 s floor at 2 Gbit/s on VMs is a separate question.
+
+## What was done
+
+- **The default is back to one run per task** (`compress.TASK_BYTES` defaults to 0, EXP-47's path), as the rule says. The batching code stays, off by default, behind `PGDELTA_ZSTD_TASK_BYTES`; its tests run it explicitly.
+- **EXP-51,** pre-registered next:
+  - a second local session of the same comparison;
+  - every refreshed copy's relation files compared byte for byte with S's;
+  - a negative control: B before the refresh must differ.
+
+  If both hold, batching becomes the default, and the VM test at 2 Gbit/s follows.

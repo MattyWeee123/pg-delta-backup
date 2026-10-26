@@ -14,10 +14,11 @@ import threading
 ALGORITHMS = ('zstd',)
 LEVEL = 3
 # EXP-49: a pool task costs about 12 µs whatever it holds, so one task per 2.5-page run capped both pools at
-# 1.5-1.7 GB/s on the Mac. A task takes runs up to this many bytes of pages instead (the receiver: a quarter of it
-# in frames, about as many pages at zstd's 2.8x); each run is still its own frame. 0 means one run per task,
-# EXP-47's path (PGDELTA_ZSTD_TASK_BYTES, for EXP-50's comparison).
-TASK_BYTES = max(0, int(os.environ.get('PGDELTA_ZSTD_TASK_BYTES', 1 << 20)))
+# 1.5-1.7 GB/s on the Mac. With TASK_BYTES > 0 a task takes runs up to that many bytes of pages instead (the
+# receiver: a quarter of it in frames, about as many pages at zstd's 2.8x); each run is still its own frame.
+# EXP-50 measured 1 MiB cutting zstd's extra time to 0.44 of it, but its correctness criterion was flawed, so by its
+# rule the default stays 0, one run per task (EXP-47's path), until EXP-51 (PGDELTA_ZSTD_TASK_BYTES sets it).
+TASK_BYTES = max(0, int(os.environ.get('PGDELTA_ZSTD_TASK_BYTES', 0)))
 
 
 def _backend():
