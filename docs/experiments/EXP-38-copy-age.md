@@ -1,6 +1,6 @@
 # EXP-38: How old can the copy be before pgdelta stops beating a full copy at DR?
 
-Status: **done October 26, 2026 (scale 20, 52 s; all three predictions held): for TPC-B-like OLTP, scattered evenly, the changed share reached the DR crossover against one `pg_basebackup` (75%) after about 58,000 transactions; for hot, local changes it was 5% after 300,000.** Pre-registered before the counted run (a smoke at scale 2 checked the script). Ledger test T11b, lean: the pitch by the age of the old copy. Local (the Mac): bytes measured, DR time projected from EXP-24's measurements.
+Status: **done October 26, 2026 (scale 20, 52 s; all three predictions held): for TPC-B-like OLTP, scattered evenly, the changed share reached the DR crossover against one `pg_basebackup` (75%) after about 58,000 transactions; for hot, local changes it was 5% after 300,000. The count scales with the table's size: about 1.75 updated rows per page.** Pre-registered before the counted run (a smoke at scale 2 checked the script). Ledger test T11b, lean: the pitch by the age of the old copy. Local (the Mac): bytes measured, DR time projected from EXP-24's measurements.
 
 ## Question
 
@@ -60,6 +60,6 @@ Data: `docs/experiments/data/exp38-age.csv`; raw `results/bytes/exp38/results.js
 
 - **The pitch, by workload, at DR round trips:**
   - **for local changes,** pgdelta's lead holds at any age measured: 300,000 transactions changed 5% of the database;
-  - **for evenly scattered OLTP,** the old copy must be recent: about 58,000 transactions behind (a minute at a thousand a second) before pgdelta and one `pg_basebackup` stream take the same time, and 36,000 against a parallel copy. Past that it is up to 15% slower, since it still hashes both copies.
+  - **for evenly scattered OLTP,** the old copy must be recent: about 58,000 transactions behind (a minute at a thousand a second) before pgdelta and one `pg_basebackup` stream take the same time, and 36,000 against a parallel copy. Past that it is up to 15% slower, since it still hashes both copies. That count belongs to this database's size: TPC-B updates one row per transaction, spread evenly over `pgbench_accounts`' about 33,000 pages at scale 20, so the crossover comes at about **1.75 updated rows per page of the table**, and a database ten times larger takes about ten times as many transactions (for 100 GB of such a table, some 20 million).
 - **For an operator:** the crossover is a share of pages changed, about 65–75% at DR, which WAL volume or `pg_stat` counters can estimate. A tool could even switch to a full copy when its own first pass finds most nodes changed. That isn't built.
 - **Real OLTP sits between these two:** most production tables are hot in parts and cold in others. EXP-01's change-pattern study measured some of that range.

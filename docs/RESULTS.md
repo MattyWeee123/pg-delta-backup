@@ -23,7 +23,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | **DR (20–120 ms round trips): faster than the full copies?** | **Yes**, with BBR on pgdelta's socket: 0.33–0.75 of the fastest parallel copy (EXP-20, -24), confirmed on a real 31 ms link (EXP-15) | Three emulated sessions and a real link |
 | **DR: faster than native incremental, where history exists?** | **As fast or faster:** v1 was faster by 14–74% on ext4, and the two tied on XFS with reflinks (EXP-36) | XFS tie at two sessions |
 | HA (fast links): faster? | Only for small data on a fast, idle destination. Beyond memory on a capped disk, at best a tie for local changes (EXP-22, -31), and a design that reads all of S can't do better there | Two sessions |
-| How old can the copy be? | **For local changes, any age measured**; for evenly scattered OLTP, about **58,000 transactions** behind before a full copy is as fast at DR (EXP-38) | Bytes measured, time projected |
+| How old can the copy be? | **For local changes, any age measured**; for evenly scattered OLTP, about **1.75 updated rows per page** behind (58,000 transactions at 345 MB) before a full copy is as fast at DR (EXP-38) | Bytes measured, time projected |
 | On a busy primary? | At 2 source workers v1 costs the load no more than `pg_basebackup`. **With BLAKE3 it refreshes 2.1× faster than `pg_basebackup`** (EXP-28, -30) | Two sessions (4 workers missed in one of them) |
 
 ![v1 against native incremental at DR](figures/exp36-incremental-b.svg)
