@@ -131,6 +131,8 @@ def trial_spec(args) -> dict:
             '--hot-percent', repr(args.hot_percent), '--batch-size', str(args.batch_size)]
     if args.events_rows is not None:
         argv += ['--events-rows', str(args.events_rows)]
+    if getattr(args, 'hex_filler', False):
+        argv += ['--hex-filler']
     study_args, _ = run_study.parse_args(argv)
     [spec] = run_study.trial_specs(study_args)
     return spec
@@ -741,6 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument('--hot-percent', type=float, default=1.0)
         sub.add_argument('--events-rows', type=int)
         sub.add_argument('--batch-size', type=int, default=100)
+        sub.add_argument('--hex-filler', action='store_true')
 
     sub = commands.add_parser('setup')
     trial_options(sub)

@@ -45,7 +45,11 @@ SERVER_CONFIG = {
     'summarize_wal': 'on',
 }
 VARIANT_FLAGS = {'checkpoint': 'checkpoint', 'vacuum': 'vacuum', 'read-scan': 'read_scan',
-                 'no-checksums': 'no_checksums', 'no-load-vacuum': 'no_load_vacuum'}
+                 'no-checksums': 'no_checksums', 'no-load-vacuum': 'no_load_vacuum', 'hex-filler': 'hex_filler'}
+# EXP-45: pgbench's blank filler compresses far better than real rows, so for a compression test the accounts'
+# filler is overwritten with hex text after the load, as EXP-37 did (its 2.83x for zstd is on this data).
+HEX_FILLER_SQL = ("UPDATE pgbench_accounts SET filler = md5(aid::text) || md5((aid::bigint * 7919)::text) || "
+                  "substr(md5((aid::bigint * 31)::text), 1, 20);\nVACUUM FULL pgbench_accounts;")
 USER_TABLES = ('pgbench_accounts', 'pgbench_branches', 'pgbench_tellers', 'pgbench_history',
                'events')
 
@@ -315,6 +319,8 @@ class Trial:
         scale = self.spec['scale']
         self.run('pgbench', ['-i', '-q', '-s', scale, '-h', self.socket, '-p', PORT, '-U', USER,
                              DATABASE], label='pgbench-init', timeout=3600)
+        if self.spec.get('hex_filler'):
+            self.sql(HEX_FILLER_SQL, label='hex-filler')
         self.sql(workloads.EVENTS_DDL + '\n' + workloads.events_prefill_sql(self.spec['events_rows']),
                  label='events-prefill')
         if self.spec['load_vacuum']:
@@ -674,6 +680,8 @@ def trial_specs(args) -> list[dict]:
             'checkpoint': flags['checkpoint'], 'vacuum': flags['vacuum'],
             'read_scan': flags['read_scan'],
             'compare_methods': args.compare_methods, 'rsync': args.rsync,
+            # Only when set, so every other trial's spec (and its record) is unchanged.
+            **({'hex_filler': True} if flags['hex_filler'] else {}),
         }
         if pattern == 'hot':
             workloads.select_aids('hot', k, accounts_rows, spec['seed'], args.hot_percent)
@@ -777,6 +785,8 @@ def parse_args(argv=None):
     parser.add_argument('--read-scan', action='store_true',
                         help='SELECT count(*) on each table after the workload')
     parser.add_argument('--no-checksums', action='store_true', help='initdb without checksums')
+    parser.add_argument('--hex-filler', action='store_true',
+                        help="overwrite pgbench_accounts' blank filler with hex text after the load (EXP-45)")
     parser.add_argument('--no-load-vacuum', action='store_true',
                         help='skip VACUUM ANALYZE and row counts before B0, leaving the events '
                              'prefill without hint bits (makes --read-scan effects visible)')

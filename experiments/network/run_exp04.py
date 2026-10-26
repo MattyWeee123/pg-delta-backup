@@ -3428,6 +3428,8 @@ class Orchestrator:
                 '--batch-size', str(self.args.batch_size)]
         if self.args.events_rows is not None:
             argv += ['--events-rows', str(self.args.events_rows)]
+        if getattr(self.args, 'hex_filler', False):
+            argv += ['--hex-filler']
         return argv
 
     def take_b0(self, trial: dict) -> None:
@@ -5880,6 +5882,8 @@ def parse_args(argv=None):
     parser.add_argument('--seed', type=int, default=20261022, help="workload seed (EXP-01's)")
     parser.add_argument('--hot-percent', type=float, default=1.0)
     parser.add_argument('--events-rows', type=int)
+    parser.add_argument('--hex-filler', action='store_true',
+                        help="EXP-45: pgbench_accounts' filler as hex text, not blanks (realistic compression)")
     parser.add_argument('--batch-size', type=int, default=100)
     parser.add_argument('--speeds', default=DEFAULT_SPEEDS,
                         help='comma list of Gbit/s values and/or "unthrottled"')
