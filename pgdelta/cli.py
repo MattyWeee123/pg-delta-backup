@@ -161,8 +161,9 @@ def _compress_option(parser):
     parser.add_argument('--compress', choices=('off', 'zstd'), default='off',
                         help='compress the pages sent with zstd (level 3), where the receiver can decompress; '
                              'otherwise they go plain. Runs are compressed on --jobs threads beside the sending '
-                             'thread. For DR links of about 1 Gbit/s and slower: at 0.5 Gbit/s it made scattered '
-                             'changes 1.9x faster, at 2 Gbit/s it was even (EXP-46) (default: %(default)s)')
+                             'thread, and decompressed on the receiver's --jobs threads. For DR links below about '
+                             '1.8 Gbit/s: scattered changes took 0.52 of the time at 0.5 Gbit/s, 0.75 at 1, and '
+                             'were even at 2 (EXP-46, EXP-47) (default: %(default)s)')
 
 
 def _hash_option(parser):

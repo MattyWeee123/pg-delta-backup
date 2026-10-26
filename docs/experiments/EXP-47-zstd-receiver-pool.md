@@ -1,6 +1,12 @@
 # EXP-47: With decompression pipelined on the receiver too, where does zstd pay?
 
-Status: **pre-registered October 26, 2026, before any run.** EXP-46's next lever. One VM pair, 12 timed runs, about 45 minutes with set-up.
+Status: **done October 26, 2026 (12 runs, all passing; BBR on all 8 v1 runs).**
+- **The receiver's pool did its job:** it waited 0.07–0.08 s for decompressed runs, not 0.9–1.2 s.
+- **zstd still doesn't pay at 2 Gbit/s:** 1.04 of v1, so the deciding prediction failed, near the line.
+- **At 1 Gbit/s it took 0.75 of v1** (prediction 3, at most 0.75, missed by 0.003).
+- **zstd's time was about 6.1 s at both link rates,** a floor that doesn't depend on the link. Plain v1 is already under it at 2 Gbit/s (5.91 s). Interpolated within the session, the break-even is about **1.8 Gbit/s**.
+
+Pre-registered before any run. EXP-46's next lever. One VM pair, 12 timed runs, about 45 minutes with set-up.
 
 ## Question
 
@@ -36,3 +42,35 @@ EXP-46's harness command and VMs (the default `n2-standard-8` pair, the first us
 ## Limitations
 
 One session, uniform changes only, 60 ms only, hex-filler data, level 3. The receiver's pool adds CPU on the destination.
+
+## Results
+
+Data: `docs/experiments/data/exp47-cells.csv`; raw `results/exp04/exp47/`; analysis and figure `analysis/exp47.py`. The pair ran in us-central1-a; BBR in effect on 8 of 8 v1 runs; `zstandard` 0.20 on both ends.
+
+![zstd ÷ v1 against the link rate](../figures/exp47-zstd-rate.svg)
+
+| Uniform 1% (scattered), 60 ms | `pg_basebackup` | v1 | v1 + zstd (both pools) | zstd ÷ v1 | zstd ÷ `pg_basebackup` |
+|---|---:|---:|---:|---:|---:|
+| 2 Gbit/s | 11.62 s | 5.91 s | 6.17 s | **1.04** | 0.53 |
+| 1 Gbit/s | 20.38 s | 8.11 s | 6.11 s | **0.75** | 0.30 |
+| 0.5 Gbit/s (EXP-46, the sender's pool only) | 36.87 s | 13.12 s | 6.84 s | 0.52 | 0.19 |
+
+**The receiver:** it waited 0.07–0.08 s for decompressed runs, with 2.1–2.4 s of decompressing summed over its 4 threads. EXP-46 spent 0.9–1.2 s in its main loop.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: 2 Gbit/s, at most 0.90 of v1** | **Failed:** 1.04 (within 20% of the bar, so provisional by rule 11; see below) |
+| 2 | the receiver waits at most 0.3 s | **Held:** 0.07–0.08 s |
+| 3 | 1 Gbit/s, at most 0.75 of v1 | **Failed, by 0.003:** 0.753 |
+| 4 | bytes at least 2-fold fewer; faster than `pg_basebackup` | **Held:** 2.78×; 0.30 and 0.53 |
+
+## Why it stops at 2 Gbit/s, and the break-even (after the fact)
+
+- **zstd has a floor.** v1 with zstd took 6.17 s at 2 Gbit/s and 6.11 s at 1 Gbit/s: its time hardly depends on the link, so something other than the network bounds it. The candidates are the source's CPU (4 hashing workers and 4 compressing threads on 8 vCPUs) and per-frame costs. Neither is diagnosed here.
+- **Plain v1's time does depend on the link.** It fits 3.71 s + 4.4 s ÷ (Gbit/s): 5.91 s at 2, 8.11 at 1, and 12.5 projected at 0.5 against EXP-46's measured 13.1. It crosses zstd's 6.1 s floor at about **1.8 Gbit/s**. That is the break-even, interpolated within one session, not measured.
+- **No second session (K10), and why:** to meet the deciding bar at 2 Gbit/s, zstd would need at most 5.32 s. That is below the 6.11 s it took in the same session on half the link rate, so a replicate couldn't reach the bar unless the floor itself moves. This departs from K10 (a second session for a deciding cell near its line). It is recorded here for the owner to overrule.
+
+## What follows
+
+- **`--compress zstd` is recommended beside BBR for DR links below about 1.8 Gbit/s,** opt-in. Measured: 0.52 of v1 at 0.5 Gbit/s, 0.75 at 1, and even at 2. The help text and README now give these numbers rather than a judgment.
+- **Lowering zstd's floor** would extend it to faster links, starting by finding what the 6.1 s is spent on. It isn't scheduled: v1 alone already takes about half of `pg_basebackup`'s time at 2 Gbit/s.

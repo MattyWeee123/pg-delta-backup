@@ -8,6 +8,16 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-26 (night): zstd on both ends: break-even about 1.8 Gbit/s
+
+- **The receiver now decompresses on a pool too,** writing in order; tested, CI green.
+- **EXP-47** (uniform changes, 60 ms, BBR verified on all 8 v1 runs):
+  - the receiver waited 0.08 s for decompressed runs, not 0.9–1.2;
+  - zstd took 1.04 of v1's time at 2 Gbit/s and 0.75 at 1 Gbit/s;
+  - its own time was about 6.1 s at both rates, a floor that plain v1 already beats at 2 Gbit/s. Interpolated, the break-even is about 1.8 Gbit/s.
+- **The recommendation is now in numbers:** `--compress zstd` for DR links below about 1.8 Gbit/s (0.52 of v1's time at 0.5 Gbit/s, 0.75 at 1).
+- **No second session for the near-line 2 Gbit/s cell,** a stated departure from K10: zstd at half the link rate already sits above the bar. VMs deleted after the fetch.
+
 ## 2026-10-26 (evening): zstd on a pool: even at 2 Gbit/s, 1.9× faster at 0.5 Gbit/s
 
 - **The sender now compresses on a pool of `--jobs` threads** beside its sending thread, in order. Measured first on real hex-filler pages: 4 threads compress as fast as 4 processes, since zstd releases Python's lock while it compresses.

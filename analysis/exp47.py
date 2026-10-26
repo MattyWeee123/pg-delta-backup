@@ -87,10 +87,11 @@ def main(argv=None):
             label="EXP-47: and decompressing on the receiver's pool")
     ax.axhline(1, color=COLORS['black'], lw=0.8)
     ax.annotate('even with v1', (0.45, 1.0), textcoords='offset points', xytext=(0, 3), fontsize=8)
-    for g, r in pts46 + pts47:
-        ax.annotate(f'{r:.2f}', (g, r), textcoords='offset points', xytext=(5, -10), fontsize=8)
+    for (g, r), dy in [*((p, 6) for p in pts46), *((p, -12) for p in pts47)]:
+        ax.annotate(f'{r:.2f}', (g, r), textcoords='offset points', xytext=(-22 if g == 2 else 6, dy), fontsize=8)
     ax.set_xscale('log')
     ax.set_xticks([0.5, 1, 2], ['0.5', '1', '2'])
+    ax.xaxis.set_minor_formatter(plt.NullFormatter())
     ax.set_xlabel('link rate (Gbit/s), 60 ms round trip')
     ax.set_ylabel('v1 + zstd time ÷ v1 time')
     ax.set_title('Where zstd pays: scattered 1% changes, 2.1 GB (hex filler)', fontsize=10)
