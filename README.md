@@ -6,8 +6,9 @@ A CMU student project with Google's AlloyDB team: a tool that brings an older ph
 - **v1** refreshes an old copy in place from the running server, in backup mode.
 - **No wrong copy** in 14,000 randomized refreshes, from stopped and live sources (10,000 + 2,000 stopped, 1,000 + 1,000 live). A power loss mid-refresh left the copy blocked or complete in 16 of 16 resets.
 - **Faster than the full copies at DR round trips**, with BBR on its socket. **As fast or faster than PostgreSQL's native incremental** there, even where its history exists.
-- **On a busy primary** it costs the load no more than `pg_basebackup` at its default of 2 source workers, and with BLAKE3 it is 2.1× faster.
-- **Not a speed win for HA** beyond memory on capped disks: at best a tie.
+- **On a busy primary** it costs the load no more than `pg_basebackup` at its default of one source worker per 4 CPUs (2 on 8 vCPUs, 4 on 16), and with BLAKE3 it is about 2.1× faster.
+- **On AlloyDB Omni 17** it refreshes data directories correctly, stopped and live: 20 of 20 live refreshes under load. Omni's own `_mintxid` fork goes through the WAL like a page, and unlogged tables are copied as Omni's `pg_basebackup` copies them. Only PostgreSQL 17 and 18 are accepted; Omni 16 is refused.
+- **Not a speed win for HA** beyond memory on capped disks (at best a tie). On Omni's Kubernetes operator an HA failover deletes the old copy's disk, so HA there would need the operator to keep and refresh it. **DR is pgdelta's case.**
 
 The status below is October 24's, kept as it was.
 

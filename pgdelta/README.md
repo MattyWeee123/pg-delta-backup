@@ -6,7 +6,7 @@ Three switches added for T3 and T8a change that, each off by default: `--in-plac
 
 Python 3.10+, standard library only, POSIX (Linux, macOS). Design: [docs/SPEC.md](../docs/SPEC.md) sections 2 and 4 to 7.
 
-**Status:** tested on synthetic directory pairs and on small PostgreSQL 17 clusters. The cluster tests are skipped when the binaries are missing; set `PGDELTA_TEST_PG_BIN` to point at them. They cover:
+**Status:** tested on synthetic directory pairs, on small PostgreSQL 17 clusters, and on AlloyDB Omni 17.10's data directories (stopped and live, [EXP-40](../docs/experiments/EXP-40-omni-probe.md), [EXP-42](../docs/experiments/EXP-42-omni-live.md), [EXP-43](../docs/experiments/EXP-43-omni-unlogged.md)). The cluster tests are skipped when the binaries are missing; set `PGDELTA_TEST_PG_BIN` to point at them. They cover:
 - identity parsing;
 - a copy of the same cluster, where every page is reused;
 - full mode against a different cluster;
