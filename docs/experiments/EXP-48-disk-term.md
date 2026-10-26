@@ -36,6 +36,13 @@ EXP-31's second session, at a new size:
 - **If 1 holds:** the disk term stands at two sizes and memory ratios. The HA verdict beyond memory projects to any size from a disk's read rate and operations limit. A DR projection takes the larger of the network term (EXP-24) and this disk term. RESULTS.md and the deck say so, with the formula.
 - **If 1 fails:** which term missed is reported, and larger sizes stay labelled as extrapolation.
 
+## Revision before any run (October 26, rule 8)
+
+**The machine type changes to `n2d-highcpu-8`.** The first attempt found no `n2-highcpu-8` available in us-central1-a, -b, -c or -f; nothing was created. `n2d-highcpu-8` has the same 8 vCPUs and 8 GB, on AMD, so the data still runs at 2.25× memory, and it fits the project's 16 N2D vCPUs.
+- **Unchanged:** the disks (150 GiB balanced persistent disks), the model, its constants and every prediction.
+- **Why that's sound:** v1's time beyond memory is set by the disk, not the CPU (EXP-22, EXP-31).
+- **If prediction 1 fails,** the CPU family is one more candidate cause, and is reported as such.
+
 ## Limitations
 
 One disk type and size (so one operations limit), two data sizes, pgbench-shaped data; the model's operations term is one fitted constant, not derived from the disk's published limits.
