@@ -1,6 +1,6 @@
 # EXP-51: Does batching hold in a second session, with every copy byte-identical to S?
 
-Status: **pre-registered October 27, 2026, before any run of this session.** Local (the Mac), end to end with `pgdelta local`, as EXP-50. Lean: 10 runs of a few seconds each. Rule 11 (K10): EXP-50's deciding ratio, 0.44, was within 20% of its 0.5 bar.
+Status: **done October 27, 2026 (10 local runs; all three predictions held). Batching kept 0.45 of zstd's extra time over plain v1, in this session alone and with both sessions together (EXP-50: 0.44). All 10 refreshed copies were byte-identical to S in every one of the 1,278 files pgdelta sends, and the control found 12 that differ in B beforehand.** By the registered rule, batching is now the default. Pre-registered before any run of this session. Local (the Mac), end to end with `pgdelta local`, as EXP-50. Lean: 10 runs of a few seconds each. Rule 11 (K10): EXP-50's deciding ratio, 0.44, was within 20% of its 0.5 bar.
 
 ## Question
 
@@ -35,3 +35,27 @@ The analysis, committed before the data: `analysis/exp51.py`.
 - **If 1 and 2 hold:** batching becomes the default (`TASK_BYTES` 1 MiB). The README notes it, and a VM test at 2 Gbit/s of EXP-47's cells is pre-registered next. Its prediction: zstd falls below plain v1's time there.
 - **If 2 fails:** batching stays off and the difference is investigated, whatever 1 says.
 - **If 1 fails:** batching stays off. The two sessions are reported side by side.
+
+## Results (October 27)
+
+The same harness, template and update statement as EXP-50. S was rebuilt by that statement, which picks the same rows (`REPEATABLE (37)`) and gives them new random balances, so the same pages change. Every run completed with pgdelta's own verification. Data: `docs/experiments/data/exp51-runs.csv`; raw `results/bytes/exp51/runs.jsonl`; analysis `analysis/exp51.py`.
+
+| Median | plain v1 | zstd, one run per task | zstd, batched tasks | batched keeps |
+|---|---|---|---|---|
+| this session (3 repeats) | 1.37 s | 2.16 s (+0.79) | 1.73 s (+0.36) | **0.45** |
+| EXP-50 (3 repeats) | 1.38 s | 2.18 s (+0.81) | 1.73 s (+0.36) | 0.44 |
+| both (6 repeats) | 1.38 s | 2.16 s (+0.79) | 1.73 s (+0.36) | **0.45** |
+
+The repeats of each arm agreed within 0.04 s.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: batched keeps at most half of the extra time, in this session and in both** | **Held:** 0.45 and 0.45 |
+| 2 | Every copy byte-identical to S; the control differs | **Held:** 10 of 10 copies identical in all 1,278 files; B before: 12 files differ |
+| 3 | `rebuild`: at least 1.5× plain's per run, at most 1.3× batched | **Held:** 1.74× and 1.20× |
+
+## What was done
+
+- **Batching is the default:** `compress.TASK_BYTES` is 1 MiB. `PGDELTA_ZSTD_TASK_BYTES=0` still gives one run per task.
+- **The README's `--compress` row** says so.
+- **Next, on VMs:** EXP-47's cells at 2 Gbit/s, pre-registered before any run. The question is whether zstd now beats plain v1 where it was even.

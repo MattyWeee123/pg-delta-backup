@@ -1,0 +1,12 @@
+session,label,arm,repeat,status,total_s,rebuild_s,files_checked,files_differing
+2,control,,,,,,1278,12
+2,warmup,plain,,complete,1.430061,0.726297,1278,0
+2,r0-zstd_per_run,zstd_per_run,0,complete,2.162039,1.223731,1278,0
+2,r0-zstd_batched,zstd_batched,0,complete,1.724282,0.847375,1278,0
+2,r0-plain,plain,0,complete,1.358198,0.695875,1278,0
+2,r1-zstd_batched,zstd_batched,1,complete,1.728325,0.858738,1278,0
+2,r1-plain,plain,1,complete,1.374889,0.70712,1278,0
+2,r1-zstd_per_run,zstd_per_run,1,complete,2.133921,1.212768,1278,0
+2,r2-plain,plain,2,complete,1.368617,0.704389,1278,0
+2,r2-zstd_per_run,zstd_per_run,2,complete,2.165677,1.231072,1278,0
+2,r2-zstd_batched,zstd_batched,2,complete,1.725033,0.838757,1278,0

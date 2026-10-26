@@ -16,7 +16,11 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 - **EXP-50 (local, pre-registered):** pool tasks of up to 1 MiB of pages cut zstd's extra time over plain v1 from 0.81 s to 0.36 s end to end (`pgdelta local`, scale 70), and the receiver's writes from 1.74× plain's to 1.20×.
   - **Prediction 3 failed on its own criterion.** I compared files digests across runs, but they are keyed per session and differ every time, even plain against plain.
   - **The registered rule was applied, not reinterpreted:** the default went back to one run per task, with batching behind a switch.
-- **EXP-51** is the second session that rule 11 asks for (0.44 was within 20% of 0.5). It checks every copy byte for byte against S, with a negative control.
+- **EXP-51,** the second session that rule 11 asks for (0.44 was within 20% of 0.5), held on all three predictions:
+  - batching kept 0.45 of zstd's extra time;
+  - all 10 copies were byte-identical to S in 1,278 files, and the negative control (B before) differed in 12.
+
+  So batching is now the default. Next: a VM test at 2 Gbit/s of EXP-47's cells, where zstd was even with plain v1.
 - **The deck and the walkthrough** now include EXP-48 (a 15th step).
 - **EXP-48's VMs are deleted:** once the owner signed in to gcloud again, `teardown.sh` removed both VMs and their four disks. The project holds no VM or disk.
 
