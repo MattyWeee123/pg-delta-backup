@@ -28,6 +28,7 @@ import threading
 import time
 
 from pgdelta import __version__, datadir, live, matching, protocol, transport, waits
+from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
 from pgdelta.hashing import BLOCK, DEFAULT_ALGORITHM, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key, offer
@@ -280,9 +281,12 @@ class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
-                 hash_algorithm=DEFAULT_ALGORITHM):
+                 hash_algorithm=DEFAULT_ALGORITHM, compress=None):
         self.started = time.perf_counter()
         self.hash_algorithm = hash_algorithm
+        # --compress zstd: offered in HELLO; the codec exists once the receiver accepted it (pgdelta.compress).
+        self.compress, self.codec = compress, None
+        self.compress_counts = {'runs': 0, 'runs_compressed': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0}
         self.channel, self.source, self.identity = channel, Path(source), identity
         self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
         # A live source (pgdelta.live): its backup session, and how its files are read; the files appended
@@ -425,6 +429,12 @@ class _Sender:
                                f'not {self.busy_inflight_bytes!r}')
         if self.hash_backend not in BACKENDS:
             raise InvalidInput(f'hash backend must be one of {", ".join(BACKENDS)}, not {self.hash_backend!r}')
+        if self.compress not in (None, *compression.ALGORITHMS):
+            raise InvalidInput(f'compress must be one of {", ".join(compression.ALGORITHMS)} or None, '
+                               f'not {self.compress!r}')
+        if self.compress is not None and not compression.usable(self.compress):
+            raise InvalidInput(f'--compress {self.compress} needs Python 3.14 (compression.zstd) or the zstandard '
+                               f'package here')
         inventory = prepare_source(self.source) if self.selection is None else self.selection.inventory
         self.directory_count, self.file_count = len(inventory.directories), len(inventory.files)
         key = self.key or new_key()
@@ -453,6 +463,8 @@ class _Sender:
             hello['hash_offer'] = offered
         elif self.hash_algorithm != DEFAULT_ALGORITHM:
             hello['hash'] = self.hash_algorithm  # EXP-29: absent means BLAKE2b, so older receivers still match
+        if self.compress is not None:
+            hello['compress_offer'] = [self.compress]
         self._send_json(protocol.HELLO, hello)
         accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
         if offered is not None:
@@ -461,6 +473,14 @@ class _Sender:
                 raise ProtocolError(f'ACCEPT hash must be one of the offered {offered}, not {chosen!r}')
             self.hash_algorithm = chosen
             self._start_hashing(key)
+        if self.compress is not None:
+            # A receiver without zstd accepts without it, and the pages go plain.
+            chosen = accept.get('compress')
+            if chosen not in (None, self.compress):
+                raise ProtocolError(f'ACCEPT compress must be {self.compress!r} or absent, not {chosen!r}')
+            self.codec = compression.Codec() if chosen else None
+        elif 'compress' in accept:
+            raise ProtocolError('ACCEPT compress without a compress_offer')
         self.reuse, self.reason, self.policy, self.basis_identity, self.basis_sizes = _parse_accept(
             accept, len(inventory.files))
         self.in_place = accept.get('in_place', False)
@@ -641,7 +661,7 @@ class _Sender:
                 except OSError as exc:
                     raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
                 self.inbox.check()
-                self._send(protocol.PAGE_DATA, protocol.page_data_head(job.index, first), data)
+                self._send_run(job.index, first, data)
                 sent += length
         finally:
             os.close(fd)
@@ -679,7 +699,7 @@ class _Sender:
                                                     f'must not change once pg_backup_stop has returned')
                         changed[page] = leaf
                 self.inbox.check()
-                self._send(protocol.PAGE_DATA, protocol.page_data_head(job.index, first), data)
+                self._send_run(job.index, first, data)
                 sent += length
         finally:
             handle.close()
@@ -688,11 +708,31 @@ class _Sender:
             job.digest = live.composite_digest(tree, self.hasher, changed)
         return sent
 
+    def _send_run(self, index, first, data):
+        """One run of pages: PAGE_DATA, or PAGE_DATA_ZSTD when compression was accepted and the run shrank."""
+        head = protocol.page_data_head(index, first)
+        if self.codec is None:
+            self._send(protocol.PAGE_DATA, head, data)
+            return
+        started = time.perf_counter()
+        packed = self.codec.compress(data)
+        counts = self.compress_counts
+        counts['seconds'] += time.perf_counter() - started
+        counts['runs'] += 1
+        counts['raw_bytes'] += len(data)
+        if len(packed) < len(data):
+            counts['runs_compressed'] += 1
+            counts['wire_bytes'] += len(packed)
+            self._send(protocol.PAGE_DATA_ZSTD, head, packed)
+        else:
+            counts['wire_bytes'] += len(data)
+            self._send(protocol.PAGE_DATA, head, data)
+
     def _send(self, code, *parts):
         """Send one frame, counting the time send() blocked: page_send_s for page data, other_send_s else."""
         started = time.perf_counter()
         self.channel.send(code, *parts)
-        self.waits.sent(code == protocol.PAGE_DATA, time.perf_counter() - started)
+        self.waits.sent(code in (protocol.PAGE_DATA, protocol.PAGE_DATA_ZSTD), time.perf_counter() - started)
 
     def _send_json(self, code, value):
         started = time.perf_counter()
@@ -807,6 +847,10 @@ class _Sender:
             'timings_seconds': {key: None if value is None else round(value, 6)
                                 for key, value in timings.items()},
             'receiver': self.receiver_stats,
+            # --compress: what was asked, what the receiver accepted, and what it saved; absent without it.
+            **({'compress': {'requested': self.compress, 'used': None if self.codec is None else self.compress,
+                             'backend': None if self.codec is None else self.codec.backend,
+                             **self.compress_counts}} if self.compress is not None else {}),
         }
 
 
@@ -814,7 +858,7 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
-               hash_algorithm=DEFAULT_ALGORITHM):
+               hash_algorithm=DEFAULT_ALGORITHM, compress=None):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -840,8 +884,9 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     `busy_inflight_bytes` (EXP-13): over TCP on Linux, a wait counts as busy
     while bytes are unsent, or while more than this many are in flight;
     without it, only unsent bytes do (pgdelta.waits). Only the statistics
-    change.
+    change. `compress` "zstd" offers zstd for the pages sent (pgdelta.compress);
+    a receiver that can't use it accepts without, and the pages go plain.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
-                   pg_conn, psql, live_timeout, hash_algorithm).run()
+                   pg_conn, psql, live_timeout, hash_algorithm, compress).run()

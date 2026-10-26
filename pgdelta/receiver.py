@@ -76,6 +76,7 @@ import threading
 import time
 
 from pgdelta import __version__, flush, inplace, placement, protocol
+from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
 from pgdelta.flush import DEFAULT_FSYNC, FSYNC_MODES, WRITEBACK_BYTES
@@ -111,7 +112,7 @@ HELLO_KEYS = frozenset(('protocol_version', 'block', 'node_blocks', 'key', 'sour
 # Only a live source's HELLO has it (pgdelta.live): files follow in one APPEND before COMPLETE.
 # hash: the digest algorithm, absent for BLAKE2b (EXP-29); hash_offer: what a sender with --hash auto can use,
 # preferred first, of which this receiver picks the first it can use and names it in ACCEPT.
-HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer'))
+HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer', 'compress_offer'))
 _CREATE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0)
                  | getattr(os, 'O_NOFOLLOW', 0))
 _KERNEL_COPY = sys.platform.startswith('linux') and hasattr(os, 'copy_file_range')
@@ -435,6 +436,9 @@ class _Receiver:
         self.misplace_pending, self.misplaced_write = os.environ.get(MISPLACE_ENV) == '1', None
         self.basis_nodes, self.basis_leaves = {}, {}
         self.written_verify = {'nodes_kept': 0, 'nodes_composed': 0, 'nodes_reread': 0, 'pages_reread': 0}
+        # --compress zstd, when the sender offered it: the codec if this end can decompress, and what it did.
+        self.codec = self.compress_offer = None
+        self.decompress_counts = {'runs': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0}
         # EXP-13's protocol timers, on the time.perf_counter() clock: publish_s counts from `launched` (the
         # receive command's start) and hello_wait_s from `listening` (its listener's), each else from here.
         started = time.perf_counter()
@@ -655,6 +659,8 @@ class _Receiver:
             accept['in_place'] = True
         if getattr(self, 'hash_offer', None) is not None:
             accept['hash'] = self.hasher.algorithm  # the receiver's pick of the sender's hash_offer
+        if getattr(self, 'codec', None) is not None:
+            accept['compress'] = 'zstd'  # the sender's compress_offer, which this end can decompress
         self.channel.send_json(protocol.ACCEPT, accept)
         self._start_pool()
         self._start_fsync()
@@ -668,6 +674,8 @@ class _Receiver:
             self.basis_thread.start()
         handlers = {protocol.LEAF_REQUEST: self._leaf_request, protocol.PAGE_DATA: self._page_data,
                     protocol.FILE_DONE: self._file_done}
+        if getattr(self, 'codec', None) is not None:
+            handlers[protocol.PAGE_DATA_ZSTD] = self._page_data_zstd
         if self.appends:
             handlers[protocol.APPEND] = self._append
         while True:
@@ -719,6 +727,13 @@ class _Receiver:
             self.hasher = Hasher(key, algorithm)
         except ImportError as exc:
             raise InvalidInput(f'the sender hashes with {algorithm}: {exc}') from exc
+        offer = hello.get('compress_offer')
+        if offer is not None and (not isinstance(offer, list) or not offer
+                                  or any(item not in compression.ALGORITHMS for item in offer)):
+            raise ProtocolError(f'HELLO compress_offer must be a list of {", ".join(compression.ALGORITHMS)}')
+        # Accepted only where this end can decompress; otherwise the sender sends plain PAGE_DATA.
+        self.codec = compression.Codec() if offer and compression.usable(offer[0]) else None
+        self.compress_offer = offer
         identity = hello['source_identity']
         if identity is not None and not isinstance(identity, dict):
             raise ProtocolError('HELLO source_identity must be an object or null')
@@ -963,8 +978,29 @@ class _Receiver:
         self.counts.basis_copy_bytes += stop - start
         self.counts.basis_copies += 1
 
+    def _page_data_zstd(self, payload):
+        """A compressed run (--compress zstd): decompressed within what the file can still hold, then as PAGE_DATA."""
+        index, first, packed = protocol.decode_page_data(payload)
+        if index >= len(self.files):
+            raise ProtocolError(f'PAGE_DATA_ZSTD for unknown file {index}')
+        limit = max(0, min(self.files[index].size - first * self.block, protocol.MAX_FRAME))
+        started = time.perf_counter()
+        try:
+            data = self.codec.decompress(packed, limit)
+        except ValueError as exc:
+            raise ProtocolError(f'PAGE_DATA_ZSTD for {self.files[index].path} does not decompress within the '
+                                f'file: {exc}') from None
+        self.decompress_counts['seconds'] += time.perf_counter() - started
+        self.decompress_counts['runs'] += 1
+        self.decompress_counts['wire_bytes'] += len(packed)
+        self.decompress_counts['raw_bytes'] += len(data)
+        self._write_run(index, first, memoryview(data))
+
     def _page_data(self, payload):
         index, first, data = protocol.decode_page_data(payload)
+        self._write_run(index, first, data)
+
+    def _write_run(self, index, first, data):
         if index >= len(self.files):
             raise ProtocolError(f'PAGE_DATA for unknown file {index}')
         output, entry = self._open(index), self.files[index]
@@ -1472,6 +1508,12 @@ class _Receiver:
             # Only off the default, so a default session's COMPLETE frame is byte-for-byte unchanged.
             stats['verify_scope'] = self.verify_scope
             stats['verify_written'] = dict(self.written_verify)
+        if self.compress_offer is not None:
+            # Only when offered, so a session without --compress keeps its COMPLETE frame's bytes.
+            stats['compress'] = {'offered': self.compress_offer, 'accepted': self.codec is not None,
+                                 'backend': None if self.codec is None else self.codec.backend,
+                                 **{key: round(value, 6) if isinstance(value, float) else value
+                                    for key, value in self.decompress_counts.items()}}
         if self.misplaced_write is not None:
             stats['test_misplaced_write'] = self.misplaced_write
         return stats

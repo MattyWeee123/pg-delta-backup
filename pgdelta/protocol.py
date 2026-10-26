@@ -24,6 +24,9 @@ HELLO, ACCEPT, BASIS_NODES, LEAF_REQUEST, LEAF_DIGESTS, PAGE_DATA, FILE_DONE, CO
 # after pg_backup_stop, when every listed file has been sent. Its HELLO says so ("appends": true), and APPEND
 # then lists those files once, before COMPLETE. No other session sends either, so their bytes are unchanged.
 APPEND = 10
+# --compress zstd (pgdelta.compress): a run of pages compressed, its head as PAGE_DATA's. Sent only after the
+# receiver accepted the HELLO's compress_offer, so no other session's bytes change.
+PAGE_DATA_ZSTD = 11
 MESSAGES = {
     HELLO: ('HELLO', 'control'),
     ACCEPT: ('ACCEPT', 'control'),
@@ -35,6 +38,7 @@ MESSAGES = {
     COMPLETE: ('COMPLETE', 'control'),
     ERROR: ('ERROR', 'control'),
     APPEND: ('APPEND', 'control'),
+    PAGE_DATA_ZSTD: ('PAGE_DATA_ZSTD', 'page_data'),
 }
 CATEGORIES = ('control', 'node_digests', 'leaf_digests', 'page_data')
 

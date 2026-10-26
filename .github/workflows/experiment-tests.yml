@@ -5,6 +5,8 @@ name: Experiment tests
 # - only for pushes and pull requests that change what the tests read: code, infra, and the few documents and data
 #   files the tests check (FIRMNESS.md against its CSV, three experiment specs, docs/experiments/data);
 # - no blake3, on purpose: this is where --hash auto's BLAKE2b fallback is tested (the Mac has blake3);
+# - the zstandard package, the zstd binding the VMs' Python 3.11 uses for --compress zstd (the Mac's 3.14 has
+#   compression.zstd too);
 # - no PostgreSQL: the tests that start real clusters run on the Mac before each push and in the VM experiments.
 on:
   push:
@@ -51,7 +53,7 @@ jobs:
           python-version: '3.11'
           cache: pip
           cache-dependency-path: analysis/requirements.txt
-      - run: python -m pip install -r analysis/requirements.txt
+      - run: python -m pip install -r analysis/requirements.txt zstandard
       - run: python -m py_compile benchmarks/benchmark.py
       - run: python -m unittest discover -s tests -v
       - run: python experiments/chunk_demo.py

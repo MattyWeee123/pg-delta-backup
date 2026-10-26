@@ -1,0 +1,72 @@
+"""zstd for the pages sent (--compress zstd): negotiated in HELLO and ACCEPT, off unless the sender asks.
+
+EXP-37 measured zstd at level 3 on the pages pgdelta sends for scattered updates: 2.83 times fewer bytes, at
+548 MiB/s per core. That pays where the link is slower than one core compresses (DR round trips), and costs where
+it is faster (a fast LAN), so it is opt-in, like BBR. Either the standard library's compression.zstd (Python 3.14)
+or the zstandard package serves; both ends need one, and a receiver without either refuses nothing: it accepts
+without compression, and the sender sends plain PAGE_DATA.
+"""
+from __future__ import annotations
+
+ALGORITHMS = ('zstd',)
+LEVEL = 3
+
+
+def _backend():
+    """('stdlib' | 'zstandard', module), or (None, None) when neither imports."""
+    try:
+        from compression import zstd  # Python 3.14
+        return 'stdlib', zstd
+    except ImportError:
+        pass
+    try:
+        import zstandard
+        return 'zstandard', zstandard
+    except ImportError:
+        return None, None
+
+
+def usable(algorithm='zstd'):
+    return algorithm in ALGORITHMS and _backend()[0] is not None
+
+
+class Codec:
+    """One end's zstd: compress() a run of pages, decompress() one back within a size limit."""
+
+    def __init__(self, level=LEVEL):
+        self.backend, module = _backend()
+        if module is None:
+            raise ImportError('zstd needs Python 3.14 (compression.zstd) or the zstandard package')
+        self.level, self._module = level, module
+        if self.backend == 'zstandard':
+            # The frame records its content size, so decompress() can check it before allocating.
+            self._compressor = module.ZstdCompressor(level=level, write_content_size=True)
+            self._decompressor = module.ZstdDecompressor()
+
+    def compress(self, data):
+        if self.backend == 'stdlib':
+            return self._module.compress(bytes(data), level=self.level)
+        return self._compressor.compress(bytes(data))
+
+    def decompress(self, data, limit):
+        """The bytes of one compressed frame; ValueError if malformed, trailed by more data, or over `limit`."""
+        try:
+            if self.backend == 'stdlib':
+                decompressor = self._module.ZstdDecompressor()
+                out = decompressor.decompress(bytes(data), max_length=limit + 1)
+                if not decompressor.eof or decompressor.unused_data or len(out) > limit:
+                    raise ValueError('not one complete frame within the limit')
+                return out
+            # The declared size first, so nothing over the limit is allocated; then one frame, nothing after it.
+            size = self._module.frame_content_size(bytes(data))
+            if size < 0 or size > limit:
+                raise ValueError('no content size, or over the limit')
+            stream = self._decompressor.decompressobj()
+            out = stream.decompress(bytes(data))
+            if not getattr(stream, 'eof', True) or getattr(stream, 'unused_data', b'') or len(out) != size:
+                raise ValueError('not one complete frame of its declared size')
+            return out
+        except ValueError:
+            raise
+        except Exception as exc:  # each backend's own error type
+            raise ValueError(str(exc)) from exc

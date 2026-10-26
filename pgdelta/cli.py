@@ -157,6 +157,13 @@ def _jobs_option(parser, what, sides=1, live=False):
     parser.add_argument('--hash-backend', choices=BACKENDS, default=DEFAULT_BACKEND, help=argparse.SUPPRESS)
 
 
+def _compress_option(parser):
+    parser.add_argument('--compress', choices=('off', 'zstd'), default='off',
+                        help='compress the pages sent with zstd (level 3), where the receiver can decompress; '
+                             'otherwise they go plain. For links slower than one core compresses (about 0.5 GB/s, '
+                             'EXP-37), such as DR round trips; on a fast LAN it costs time (default: %(default)s)')
+
+
 def _hash_option(parser):
     parser.add_argument('--hash', choices=('auto', *ALGORITHMS), default='auto',
                         help='the keyed digest for pages, nodes and files. auto offers blake3 where the blake3 '
@@ -362,6 +369,7 @@ def build_parser():
     _source_kind_option(send)
     _jobs_option(send, 'S', live=True)
     _hash_option(send)
+    _compress_option(send)
     send.set_defaults(func=cmd_send)
 
     local = commands.add_parser('local', help='run both ends on this host, receiver as a child process')
@@ -374,6 +382,7 @@ def build_parser():
     _basis_controldata_option(local)
     _jobs_option(local, 'S, and in the receiver B and O (N on each side)', sides=2, live=True)
     _hash_option(local)
+    _compress_option(local)
     _rebuild_options(local)
     local.set_defaults(func=cmd_local)
     return parser
@@ -474,7 +483,8 @@ def _sender_kwargs(args, identity):
             'high_churn_node_fraction': args.high_churn_node_fraction, 'window': args.window, 'jobs': args.jobs,
             'hash_backend': args.hash_backend, 'source_kind': args.source_kind,
             'pg_controldata': args.pg_controldata, 'pg_conn': args.pg_conn, 'psql': args.psql,
-            'live_timeout': args.live_timeout, 'hash_algorithm': args.hash}
+            'live_timeout': args.live_timeout, 'hash_algorithm': args.hash,
+            'compress': None if getattr(args, 'compress', 'off') == 'off' else args.compress}
 
 
 def _source_identity(args):
