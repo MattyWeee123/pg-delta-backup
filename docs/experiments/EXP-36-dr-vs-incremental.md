@@ -1,6 +1,6 @@
 # EXP-36: Where history exists, does native incremental beat v1 at DR round trips too?
 
-Status: **pre-registered October 25, 2026, before any run.** Ledger test INC, lean: D02's question at the DR condition pgdelta is positioned for. One VM pair (the default set: two `n2-standard-8` with local NVMe, as EXP-20 and EXP-24), about an hour.
+Status: **done October 26, 2026 (two parts; 84 runs, all verified; VMs deleted): at DR round trips, where history exists, native incremental is not faster than v1. On ext4, v1 with BBR was faster in every cell (1.14–1.74×), because `pg_combinebackup` writes a whole new copy. On XFS, with `pg_combinebackup --copy-file-range` sharing blocks, the two tied (incremental 0.96–1.10× v1, provisional by rule 11).** Part A was pre-registered before any run, part B after part A and before it ran. Ledger test INC, lean: D02's question at the DR condition pgdelta is positioned for. One VM pair (the default set: two `n2-standard-8` with local NVMe, as EXP-20 and EXP-24), about an hour.
 
 ## Question
 
@@ -73,3 +73,35 @@ Data: `docs/experiments/data/exp36-cells.csv`; raw `results/exp04/exp36`; figure
 **What follows (B):**
 - **If 2 holds:** D02 reads as follows. Where history exists and B0's filesystem supports reflinks, native incremental is faster at DR too. On ext4 (no reflinks), v1 in place is faster, because `pg_combinebackup` has to write a whole new copy. pgdelta's DR role is the copy without history, plus ext4 destinations.
 - **If not:** v1's DR lead over incremental holds on XFS too, and D02 changes. Where history exists, v1 is still faster at DR round trips, and native incremental's advantage is its bytes alone.
+
+## Part B: results (00:16–00:36 UTC, dest on XFS with reflinks; 48 runs, all verified)
+
+Data: `docs/experiments/data/exp36-cells-b.csv`; raw `results/exp04/exp36b`; figure `analysis/exp36.py --tag=-b`.
+
+![Native incremental (both combine modes) against v1 at DR round trips, XFS](../figures/exp36-incremental-b.svg)
+
+| Workload, condition | one `pg_basebackup` | incremental `--copy` | **incremental `--copy-file-range`** | **v1 (BBR)** | `--copy-file-range` ÷ v1 |
+|---|---:|---:|---:|---:|---:|
+| hot, 60 ms default | 43.7 s | 5.3 s | **3.7 s** | **3.9 s** | 0.96 |
+| hot, 60 ms tuned | 11.7 | 5.2 | **3.5** | **3.5** | 1.02 |
+| hot, 120 ms tuned | 14.3 | 7.0 | **5.2** | **4.7** | 1.10 |
+| uniform 1%, 60 ms default | 44.2 | 17.4 | **15.8** | **16.2** | 0.97 |
+| uniform 1%, 60 ms tuned | 11.7 | 7.9 | **6.4** | **6.5** | 0.99 |
+| uniform 1%, 120 ms tuned | 13.4 | 9.9 | **8.3** | **8.6** | 0.96 |
+
+`pg_combinebackup --copy-file-range` took 1.51–1.60 s on XFS (with `--copy` on ext4, 3.85–4.04 s). The captures were as in part A.
+
+| # | Prediction (B) | Verdict |
+|---|---|---|
+| 1 | `incremental_cfr`'s combine under 1 s | **Failed:** 1.5–1.6 s. Sharing blocks still means walking and writing the new copy's files and metadata |
+| 2 | **Deciding: `incremental_cfr` at most v1's time in every hot cell** | **Failed narrowly:** 0.96 at 60 ms on default hosts, but 1.02 and 1.10 on tuned ones |
+| 3 | For uniform on tuned hosts, `incremental_cfr` at most v1's time | **Held:** 0.99 and 0.96 |
+
+## What follows (both parts)
+
+- **D02 changes: where history exists, native incremental is not faster than v1 at DR round trips.**
+  - On ext4, v1 with BBR was 14–74% faster: incremental's `pg_combinebackup` writes a whole new copy, and v1 patches in place.
+  - On XFS with reflinks, the two tie: within 10% either way, every ratio within 20% of 1, so provisional by rule 11 (K10 asks a second session for a deciding cell near its line).
+  - Incremental sends fewer bytes for local changes (17 MB against 29) and the same for scattered ones.
+- **pgdelta's DR role is therefore wider than the copy without history.** Where history does exist, it is as fast or faster than native incremental at 60–120 ms, and it needs no history: no `summarize_wal`, no chain of manifests, and no full backup as the base. Native incremental keeps its advantages at LAN round trips (EXP-04b) and in bytes for local changes.
+- **Next for D02:** a second session on the XFS cells (the deciding ones, near their line), and the source's CPU for each, which isn't compared here.

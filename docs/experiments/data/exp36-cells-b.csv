@@ -1,0 +1,7 @@
+pattern,condition,full_s,full_runs,full_mb,incremental_s,incremental_runs,incremental_mb,incremental_cfr_s,incremental_cfr_runs,incremental_cfr_mb,v1_s,v1_runs,v1_mb,inc_over_v1,cfr_over_v1
+hot,2:60:default,43.74,2,2105.4,5.34,2,17.2,3.7,2,17.4,3.87,2,29.2,1.38,0.956
+hot,2:60:tuned,11.71,2,2102.1,5.21,2,17.3,3.53,2,17.4,3.47,2,29.2,1.501,1.017
+hot,2:120:tuned,14.31,2,2102.2,6.99,2,17.3,5.17,2,17.2,4.71,2,29.2,1.484,1.098
+uniform,2:60:default,44.22,2,2111.6,17.37,2,604.9,15.76,2,604.9,16.2,2,610.8,1.072,0.973
+uniform,2:60:tuned,11.65,2,2108.9,7.89,2,602.8,6.43,2,602.6,6.51,2,610.2,1.212,0.988
+uniform,2:120:tuned,13.39,2,2108.7,9.85,2,602.9,8.3,2,602.8,8.63,2,610.4,1.141,0.962
