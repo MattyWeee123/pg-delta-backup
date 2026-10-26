@@ -1,0 +1,37 @@
+cell,backend,op,frames,threads,median,unit
+pool,stdlib,compress,1MiB,1,569.9,MB/s
+pool,stdlib,compress,1MiB,2,1120.8,MB/s
+pool,stdlib,compress,1MiB,4,2215.5,MB/s
+pool,stdlib,compress,1MiB,8,3780.3,MB/s
+pool,stdlib,compress,runs,1,481.2,MB/s
+pool,stdlib,compress,runs,2,972.1,MB/s
+pool,stdlib,compress,runs,4,1444.2,MB/s
+pool,stdlib,compress,runs,8,1370.0,MB/s
+pool,stdlib,decompress,1MiB,1,1670.7,MB/s
+pool,stdlib,decompress,1MiB,2,3277.8,MB/s
+pool,stdlib,decompress,1MiB,4,6221.9,MB/s
+pool,stdlib,decompress,1MiB,8,8099.0,MB/s
+pool,stdlib,decompress,runs,1,1147.3,MB/s
+pool,stdlib,decompress,runs,2,1673.2,MB/s
+pool,stdlib,decompress,runs,4,1711.0,MB/s
+pool,stdlib,decompress,runs,8,1613.4,MB/s
+pool,zstandard,compress,1MiB,1,578.6,MB/s
+pool,zstandard,compress,1MiB,2,1130.1,MB/s
+pool,zstandard,compress,1MiB,4,2225.2,MB/s
+pool,zstandard,compress,1MiB,8,3798.5,MB/s
+pool,zstandard,compress,runs,1,504.2,MB/s
+pool,zstandard,compress,runs,2,980.3,MB/s
+pool,zstandard,compress,runs,4,1553.7,MB/s
+pool,zstandard,compress,runs,8,1463.6,MB/s
+pool,zstandard,decompress,1MiB,1,1635.7,MB/s
+pool,zstandard,decompress,1MiB,2,3188.6,MB/s
+pool,zstandard,decompress,1MiB,4,6150.6,MB/s
+pool,zstandard,decompress,1MiB,8,6243.9,MB/s
+pool,zstandard,decompress,runs,1,1137.7,MB/s
+pool,zstandard,decompress,runs,2,1626.0,MB/s
+pool,zstandard,decompress,runs,4,1735.7,MB/s
+pool,zstandard,decompress,runs,8,1642.3,MB/s
+receiver,stdlib,no pool,runs,0,2.13,us in pwrite per run
+receiver,stdlib,pool,runs,4,14.42,us in pwrite per run
+receiver,zstandard,no pool,runs,0,2.28,us in pwrite per run
+receiver,zstandard,pool,runs,4,14.52,us in pwrite per run

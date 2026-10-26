@@ -64,5 +64,4 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 - **HA on Omni's Kubernetes operator:** the operator deletes the old instance's disks on a failover and reseeds with `pg_basebackup` (EXP-44), so pgdelta's HA role there needs the operator to keep and refresh the old disk. DR is unaffected.
 - **Larger sizes:** beyond memory, a two-term disk model (read B, then the scattered writes) fixed at 12 GB predicted 18 GB within 4.4% (EXP-48). Other disks' page-write rates still need measuring; sizes past a few times memory remain projection.
 - **The rest of the slowdown tests:** a moderate load, a large dirty set, a source near saturation at 16 vCPUs.
-- **The timing model's disk term.**
-- **The bandwidth levers:** zstd's own time floor (about 6.1 s here, which keeps it even at 2 Gbit/s; EXP-47, not diagnosed), and sub-page deltas, measured but not built.
+- **The bandwidth levers:** zstd's own time floor (about 6.1 s here, which keeps it even at 2 Gbit/s; EXP-47). EXP-49 traced it to the thread pools' cost per task on pgdelta's small runs (about 12–13 µs each, and 12 µs more for each of the receiver's writes), not to the codec. Batching runs per task is the fix to test; its effect at 2 Gbit/s needs VMs. Sub-page deltas are measured but not built.

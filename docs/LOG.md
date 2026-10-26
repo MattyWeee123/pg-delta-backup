@@ -8,6 +8,13 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (morning): what sets zstd's floor
+
+- **EXP-49 (local, pre-registered):** zstd's 6.1 s floor comes from pgdelta's thread pools, not the codec. On its small runs of pages (2.5 on average) each pool task costs about 12–13 µs, so neither pool gains past 4 threads (1.5–1.7 GB/s), while 1 MiB frames scale 3.8×. Beside 4 decompressing threads, each of the receiver's writes took 6.4× as long. The deciding prediction held; the other two failed and say so: compression scales better than decompression, and zstd's own cost on small frames is small (0.87 of its 1 MiB rate).
+  - **Why local:** EXP-47's own statistics pointed at the receiver (the sender blocked longer than the link needed, and the receiver's writes doubled), and the cloud sign-in had lapsed. A Mac with 15 cores separates pool costs from the VMs' CPU limits.
+  - **Next:** batch consecutive runs per pool task, test locally, then re-measure at 2 Gbit/s once the owner signs in to gcloud again.
+- **The deck and the walkthrough** now include EXP-48 (a 15th step).
+
 ## 2026-10-27 (early): the timing model's disk term; the evidence walkthrough
 
 - **EXP-48:** a two-term disk model for v1 beyond memory (read B, then the scattered writes at the disk's page-write rate), fixed from EXP-31's 12 GB session, predicted every cell at 18 GB (2.25× memory) within 4.4%. All three predictions held. Larger sizes now project from a disk's numbers instead of guesses.

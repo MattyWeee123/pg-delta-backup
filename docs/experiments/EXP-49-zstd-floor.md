@@ -1,6 +1,6 @@
 # EXP-49: What sets zstd's 6.1 s floor?
 
-Status: **pre-registered October 26, 2026, before any run.** Local (the Mac): no network and no VMs, only pgdelta's codec, its thread pools and the page data. Lean: one script, about two minutes of runs. The open item from EXP-47 ("a floor that doesn't depend on the link ... Neither is diagnosed here").
+Status: **done October 27, 2026 (one local session, 3 repeats; the deciding prediction held, 2 and 3 failed). With 4 threads decompressing, the receiver's main thread spent 6.4× as long in each write (14.5 µs against 2.3). Neither codec is the bound: on pgdelta's small runs both pools stop gaining at about 1.5–1.7 GB/s, whatever the thread count, while 1 MiB frames scale almost linearly.** The bound is the pool's cost per task, about 12–13 µs here. Pre-registered before any run. Local (the Mac): no network and no VMs, only pgdelta's codec, its thread pools and the page data. Lean: one script, about two minutes of runs. The open item from EXP-47 ("a floor that doesn't depend on the link ... Neither is diagnosed here").
 
 ## Question
 
@@ -50,3 +50,48 @@ The standard library's binding is measured beside `zstandard`, with no predictio
 - **If 1 holds:** the floor is attributed to the receiver's GIL handoffs, reproduced without the VMs' CPU limits. The fix to test is fewer, larger handoffs: several runs per compressed frame, or per pool task. It is tested locally first. The re-measure at 2 Gbit/s needs VMs, so it waits for the cloud sign-in.
 - **If 1 fails:** the receiver's slowdown is not reproduced on an unconstrained CPU. The remaining candidate is the VMs' CPU: each end of EXP-47 ran 4 hashing processes, 4 codec threads and a main thread on 8 vCPUs. That can only be tested on VMs.
 - **2 and 3** say whether small frames cost on their own, apart from the GIL. Either way, the result goes in RESULTS.md's list of bandwidth levers.
+
+## Results (October 27)
+
+One session on the Mac, 3 repeats per cell in a fixed order; the repeats agreed within about 7%. The data: 4,187 runs, 2.47 pages each on average (EXP-47: 2.56), 84.8 MB. zstd shrank them 2.83× on both bindings, as in EXP-37. Data: `docs/experiments/data/exp49-cells.csv`; raw `results/bytes/exp49/results.json`; analysis and figure `analysis/exp49.py`.
+
+![The pools' throughput against threads, and the receiver's time in pwrite per run](../figures/exp49-zstd-floor.svg)
+
+| MB/s of pages (zstandard, median) | 1 thread | 2 | 4 | 8 |
+|---|---|---|---|---|
+| compress, pgdelta's runs | 504 | 980 | **1,554** | 1,464 |
+| compress, 1 MiB frames | 579 | 1,130 | 2,225 | 3,799 |
+| decompress, pgdelta's runs | 1,138 | 1,626 | **1,736** | 1,642 |
+| decompress, 1 MiB frames | 1,636 | 3,189 | 6,151 | 6,244 |
+
+The standard library's binding matched within about 7% in every cell but one, decompressing 1 MiB frames on 8 threads (8,099).
+
+**The receiver's loop,** emulated: 4 threads decompress while the main thread writes each run in order.
+
+| zstandard | in `pwrite`, per run | the whole loop |
+|---|---|---|
+| no pool (bytes already decompressed) | 2.3 µs | 8.7 GB/s |
+| 4 threads decompressing | **14.5 µs** | 1.06 GB/s |
+
+The standard library's binding: 2.1 µs and 14.4 µs (6.8×).
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: with the pool, the receiver's writes take at least 1.5× as long** | **Held:** 6.4× (the standard library's binding: 6.8×) |
+| 2 | On pgdelta's runs, 4 threads reach under 2.5× one thread's throughput, compressing and decompressing | **Failed:** decompression held (1.53×), compression didn't (3.08×) |
+| 3 | One thread compresses pgdelta's runs at no more than 0.7× its rate on 1 MiB frames | **Failed:** 0.87× |
+
+## What it means
+
+- **The codec isn't the floor.** One thread compresses pgdelta's runs at 0.87× its 1 MiB rate, so zstd's own cost per frame is small.
+- **The pool's cost per task is the floor.** On pgdelta's runs both pools stop gaining past 4 threads, at about 77,000 compressions and 86,000 decompressions a second: about 13 and 12 µs of main-thread time per run. Given 1 MiB frames, the same pools scale 3.8× at 4 threads.
+- **The receiver's own work pays for it too.** Every write waits about 12 µs longer while the pool runs, consistent with the main thread winning back the interpreter's lock from the pool's threads after each system call. On the VMs, EXP-47's `rebuild` grew in the same way, 0.76 s to 1.6 s (2.1×).
+- **How much of the 6.1 s it explains** isn't measured here. On the Mac these per-run costs add up to about 1.1 s for EXP-47's 29,060 runs: about 13 µs at the sender, plus 12 + 12 µs at the receiver. The VMs' vCPUs are slower, and each end shared 8 of them with 4 hashing processes, so it is likely more there, by a factor this experiment doesn't give.
+- **The standard library's binding behaves the same,** so changing binding doesn't help.
+
+## What follows
+
+- **The fix to test:** fewer, larger handoffs. A pool task would take consecutive runs up to about 1 MiB of pages: about 50 runs instead of 1 at EXP-47's run length. Nothing on the wire has to change, since each run can stay its own frame.
+  - Locally, the pools should then approach their 1 MiB rates (2.2 and 6.2 GB/s at 4 threads), and the receiver's writes should lose most of their 12 µs.
+  - Whether that lowers the floor at 2 Gbit/s needs the VMs, so it waits for the cloud sign-in.
+- **zstd stays opt-in for links below about 1.8 Gbit/s** until then; nothing here changes EXP-47's verdict.
