@@ -8,6 +8,14 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-26 (after midnight): D02 changes; native incremental is not faster than v1 at DR
+
+**EXP-36 (INC, lean)** compared native incremental (`pg_basebackup --incremental` with `pg_combinebackup`), v1 with BBR on the new defaults, and one `pg_basebackup` stream, at 60 and 120 ms. I predicted incremental would win everywhere; it didn't.
+- **On ext4,** v1 was 14–74% faster in all six cells: incremental's combine writes a whole new 2.1 GB copy (about 4 s), while v1 patches in place.
+- **Part B on XFS,** registered after part A: with `--copy-file-range` sharing blocks (a 1.5 s combine), the two tie (0.96–1.10, provisional).
+
+D02 now reads: where history exists, pgdelta is as fast or faster at DR round trips without needing that history. Native incremental keeps the LAN case and fewer bytes for local changes.
+
 ## 2026-10-25 (night): new defaults, each from a registered result
 
 - **`--hash auto` (the command line's default):** the sender offers BLAKE3 where it can use it, and the receiver picks the first it can use. Without the package nothing is offered, and the wire is as before. Tested, including a receiver without the package.
