@@ -2,7 +2,7 @@
 
 Status: **done October 26, 2026 (12 runs, all passing; BBR on all 8 v1 runs).**
 - **The receiver's pool did its job:** it waited 0.07–0.08 s for decompressed runs, not 0.9–1.2 s.
-- **zstd still doesn't pay at 2 Gbit/s:** 1.04 of v1, so the deciding prediction failed, near the line.
+- **zstd still doesn't pay at 2 Gbit/s:** 1.04 of v1, then 1.05 with the second session's runs added (K10), so the deciding prediction failed, firmly.
 - **At 1 Gbit/s it took 0.75 of v1** (prediction 3, at most 0.75, missed by 0.003).
 - **zstd's time was about 6.1 s at both link rates,** a floor that doesn't depend on the link. Plain v1 is already under it at 2 Gbit/s (5.91 s). Interpolated within the session, the break-even is about **1.8 Gbit/s**.
 
@@ -68,7 +68,7 @@ Data: `docs/experiments/data/exp47-cells.csv`; raw `results/exp04/exp47/`; analy
 
 - **zstd has a floor.** v1 with zstd took 6.17 s at 2 Gbit/s and 6.11 s at 1 Gbit/s: its time hardly depends on the link, so something other than the network bounds it. The candidates are the source's CPU (4 hashing workers and 4 compressing threads on 8 vCPUs) and per-frame costs. Neither is diagnosed here.
 - **Plain v1's time does depend on the link.** It fits 3.71 s + 4.4 s ÷ (Gbit/s): 5.91 s at 2, 8.11 at 1, and 12.5 projected at 0.5 against EXP-46's measured 13.1. It crosses zstd's 6.1 s floor at about **1.8 Gbit/s**. That is the break-even, interpolated within one session, not measured.
-- **No second session (K10), and why:** to meet the deciding bar at 2 Gbit/s, zstd would need at most 5.32 s. That is below the 6.11 s it took in the same session on half the link rate, so a replicate couldn't reach the bar unless the floor itself moves. This departs from K10 (a second session for a deciding cell near its line). It is recorded here for the owner to overrule.
+- **The second session (K10)** was argued against at first: to meet the bar zstd would need at most 5.32 s, below the 6.11 s it took on half the link rate. It was then run anyway, on fresh VMs (BBR on all 4 v1 runs): v1 5.71 and 5.87 s, zstd 5.95 and 6.25 s. With all 4 runs per arm, zstd takes **1.05** of v1 at 2 Gbit/s (`docs/experiments/data/exp47-cells.csv`). The failure is firm, and the floor held (6.1 s).
 
 ## Revision: the second session after all (October 26, K10)
 

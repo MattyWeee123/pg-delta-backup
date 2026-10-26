@@ -248,7 +248,7 @@ z
    </g>
    <g id="line2d_24">
     <path d="M 285.127283 143.27948 
-L 503.061994 33.741171 
+L 503.061994 32.23549 
 " clip-path="url(#p0ca9a88c3c)" style="fill: none; stroke: #0072b2; stroke-width: 1.5; stroke-linecap: square"/>
     <defs>
      <path id="m6d9aca7e87" d="M -3 3 
@@ -260,7 +260,7 @@ z
     </defs>
     <g clip-path="url(#p0ca9a88c3c)">
      <use xlink:href="#m6d9aca7e87" x="285.127283" y="143.27948" style="fill: #0072b2; stroke: #0072b2; stroke-linejoin: miter"/>
-     <use xlink:href="#m6d9aca7e87" x="503.061994" y="33.741171" style="fill: #0072b2; stroke: #0072b2; stroke-linejoin: miter"/>
+     <use xlink:href="#m6d9aca7e87" x="503.061994" y="32.23549" style="fill: #0072b2; stroke: #0072b2; stroke-linejoin: miter"/>
     </g>
    </g>
    <g id="line2d_25">
@@ -285,7 +285,7 @@ L 524.855465 240.520781
     <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="481.061994" y="24.785817" transform="rotate(-0 481.061994 24.785817)">1.05</text>
    </g>
    <g id="text_14">
-    <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="481.061994" y="45.741171" transform="rotate(-0 481.061994 45.741171)">1.04</text>
+    <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="481.061994" y="44.23549" transform="rotate(-0 481.061994 44.23549)">1.05</text>
    </g>
    <g id="text_15">
     <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="291.127283" y="155.27948" transform="rotate(-0 291.127283 155.27948)">0.75</text>

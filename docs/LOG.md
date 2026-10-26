@@ -16,7 +16,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - zstd took 1.04 of v1's time at 2 Gbit/s and 0.75 at 1 Gbit/s;
   - its own time was about 6.1 s at both rates, a floor that plain v1 already beats at 2 Gbit/s. Interpolated, the break-even is about 1.8 Gbit/s.
 - **The recommendation is now in numbers:** `--compress zstd` for DR links below about 1.8 Gbit/s (0.52 of v1's time at 0.5 Gbit/s, 0.75 at 1).
-- **No second session for the near-line 2 Gbit/s cell,** a stated departure from K10: zstd at half the link rate already sits above the bar. VMs deleted after the fetch.
+- **The near-line 2 Gbit/s cell got its second session (K10),** after I had first argued it couldn't change the verdict. It didn't: 1.05 with all 4 runs per arm, the floor again 6.1 s. VMs deleted after each fetch.
 - **A slip, caught by CI:** EXP-47's commit pushed a help string whose apostrophe ended its quotes, so `pgdelta/cli.py` didn't import. My commit chain printed the failing test but didn't stop on it. It was fixed about ten minutes later (full suite and CI green), and commits now run only after the tests pass.
 
 ## 2026-10-26 (evening): zstd on a pool: even at 2 Gbit/s, 1.9× faster at 0.5 Gbit/s
