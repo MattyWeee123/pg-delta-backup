@@ -113,3 +113,20 @@ Data: `docs/experiments/data/exp36-cells-b.csv`; raw `results/exp04/exp36b`; fig
 **What runs:** part B's design on a fresh default pair, dest reformatted to XFS, with methods `full`, `incremental_cfr` and `pgdelta_direct_inplace_bbr`, order seed 362, to `exp36c`.
 
 **Prediction:** `incremental_cfr` ÷ v1 again lies between 0.90 and 1.10 in every cell, so the tie stands at two sessions. If either tool is faster by more than 10% in a cell in both sessions, that cell's verdict follows the two sessions.
+
+## Second session: results (00:40–01:00 UTC, fresh VMs, XFS; 36 runs, all verified; deleted)
+
+Data: `docs/experiments/data/exp36-cells-c.csv`; raw `results/exp04/exp36c`.
+
+| Workload, condition | `incremental_cfr` ÷ v1, session 1 | **session 2** |
+|---|---:|---:|
+| hot, 60 ms default | 0.96 | **1.03** (3.91 against 3.79 s) |
+| hot, 60 ms tuned | 1.02 | **1.07** (3.76 / 3.51) |
+| hot, 120 ms tuned | 1.10 | **1.16** (5.56 / 4.79) |
+| uniform 1%, 60 ms default | 0.97 | **0.98** (16.05 / 16.34) |
+| uniform 1%, 60 ms tuned | 0.99 | **0.99** (6.54 / 6.63) |
+| uniform 1%, 120 ms tuned | 0.96 | **0.98** (8.50 / 8.71) |
+
+**The prediction** (every ratio between 0.90 and 1.10) **held in five cells and failed in one:** hot at 120 ms on tuned hosts, where v1 was 16% faster. By the registered rule a cell's verdict follows the two sessions only if one tool is faster by more than 10% in both. v1 was ahead by 10% and 16%, so that cell is a tie leaning to v1.
+
+**The verdict at two sessions:** on XFS with `--copy-file-range`, native incremental and v1 tie at DR round trips, within 4% for scattered changes. For local changes v1 is level or ahead (by 3–16% in the second session). On ext4, v1 was faster everywhere (part A). D02 stands as part A and B's results read: where history exists, native incremental is not faster than v1 at 60–120 ms.
