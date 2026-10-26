@@ -288,11 +288,11 @@ class _Sender:
         # --compress zstd: offered in HELLO; the codec exists once the receiver accepted it (pgdelta.compress).
         self.compress, self.codec = compress, None
         # EXP-46: runs are compressed on a pool of `jobs` threads (zstd releases the GIL) while this thread reads
-        # and sends; up to two per thread wait, in order. `seconds` sums the compressing, `wait_seconds` is the
-        # time this thread waited for the oldest run.
-        self.compressor, self.compressing = None, deque()
+        # and sends; EXP-50: queued into tasks of compress.TASK_BYTES, up to two tasks per thread wait, in order.
+        # `seconds` sums the compressing, `wait_seconds` is the time this thread waited for the oldest task.
+        self.compressor, self.compressing, self.queued, self.queued_bytes = None, deque(), [], 0
         self.compress_counts = {'runs': 0, 'runs_compressed': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0,
-                                'wait_seconds': 0.0, 'threads': 0}
+                                'wait_seconds': 0.0, 'threads': 0, 'tasks': 0}
         self.channel, self.source, self.identity = channel, Path(source), identity
         self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
         # A live source (pgdelta.live): its backup session, and how its files are read; the files appended
@@ -727,37 +727,51 @@ class _Sender:
         if self.codec is None:
             self._send(protocol.PAGE_DATA, protocol.page_data_head(index, first), data)
             return
-        self.compressing.append((index, first, data, self.compressor.submit(self._compress_run, data)))
+        self.queued.append((index, first, data))
+        self.queued_bytes += len(data)
+        if self.queued_bytes >= compression.TASK_BYTES:
+            self._submit_queued()
+
+    def _submit_queued(self):
+        """The queued runs as one task for the compressing pool (EXP-50); at most two tasks per thread wait."""
+        if not self.queued:
+            return
+        self.compressing.append((self.queued, self.compressor.submit(self._compress_task, self.queued)))
+        self.queued, self.queued_bytes = [], 0
         while len(self.compressing) > 2 * self.compress_counts['threads']:
             self._send_compressed()
 
-    def _compress_run(self, data):
+    def _compress_task(self, runs):
         started = time.perf_counter()
-        return self.codec.compress(data), time.perf_counter() - started
+        packed = [self.codec.compress(data) for _, _, data in runs]
+        return packed, time.perf_counter() - started
 
     def _drain_runs(self):
         """Send every queued run, in order: a file's pages all precede its FILE_DONE."""
+        self._submit_queued()
         while self.compressing:
             self._send_compressed()
 
     def _send_compressed(self):
-        """The oldest queued run: PAGE_DATA_ZSTD if it shrank, else PAGE_DATA."""
-        index, first, data, future = self.compressing.popleft()
+        """The oldest task's runs, in order: each PAGE_DATA_ZSTD if it shrank, else PAGE_DATA."""
+        runs, future = self.compressing.popleft()
         counts = self.compress_counts
         started = time.perf_counter()
         packed, seconds = future.result()
         counts['wait_seconds'] += time.perf_counter() - started
         counts['seconds'] += seconds
-        counts['runs'] += 1
-        counts['raw_bytes'] += len(data)
-        head = protocol.page_data_head(index, first)
-        if len(packed) < len(data):
-            counts['runs_compressed'] += 1
-            counts['wire_bytes'] += len(packed)
-            self._send(protocol.PAGE_DATA_ZSTD, head, packed)
-        else:
-            counts['wire_bytes'] += len(data)
-            self._send(protocol.PAGE_DATA, head, data)
+        counts['tasks'] += 1
+        for (index, first, data), frame in zip(runs, packed):
+            counts['runs'] += 1
+            counts['raw_bytes'] += len(data)
+            head = protocol.page_data_head(index, first)
+            if len(frame) < len(data):
+                counts['runs_compressed'] += 1
+                counts['wire_bytes'] += len(frame)
+                self._send(protocol.PAGE_DATA_ZSTD, head, frame)
+            else:
+                counts['wire_bytes'] += len(data)
+                self._send(protocol.PAGE_DATA, head, data)
 
     def _send(self, code, *parts):
         """Send one frame, counting the time send() blocked: page_send_s for page data, other_send_s else."""

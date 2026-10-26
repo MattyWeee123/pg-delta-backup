@@ -14,6 +14,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - **Why local:** EXP-47's own statistics pointed at the receiver (the sender blocked longer than the link needed, and the receiver's writes doubled), and the cloud sign-in had lapsed. A Mac with 15 cores separates pool costs from the VMs' CPU limits.
   - **Next:** batch consecutive runs per pool task, test locally, then re-measure at 2 Gbit/s once the owner signs in to gcloud again.
 - **The deck and the walkthrough** now include EXP-48 (a 15th step).
+- **EXP-48's VMs are deleted:** once the owner signed in to gcloud again, `teardown.sh` removed both VMs and their four disks. The project holds no VM or disk.
 
 ## 2026-10-27 (early): the timing model's disk term; the evidence walkthrough
 

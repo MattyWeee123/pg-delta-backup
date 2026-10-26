@@ -8,10 +8,16 @@ without compression, and the sender sends plain PAGE_DATA.
 """
 from __future__ import annotations
 
+import os
 import threading
 
 ALGORITHMS = ('zstd',)
 LEVEL = 3
+# EXP-49: a pool task costs about 12 µs whatever it holds, so one task per 2.5-page run capped both pools at
+# 1.5-1.7 GB/s on the Mac. A task takes runs up to this many bytes of pages instead (the receiver: a quarter of it
+# in frames, about as many pages at zstd's 2.8x); each run is still its own frame. 0 means one run per task,
+# EXP-47's path (PGDELTA_ZSTD_TASK_BYTES, for EXP-50's comparison).
+TASK_BYTES = max(0, int(os.environ.get('PGDELTA_ZSTD_TASK_BYTES', 1 << 20)))
 
 
 def _backend():

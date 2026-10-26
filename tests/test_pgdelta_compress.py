@@ -104,6 +104,36 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(received['threads'], 3)
         self.assertEqual(received['runs'], stats['runs_compressed'])
         self.assertGreaterEqual(stats['wait_seconds'], 0)
+        # EXP-50: the runs travel to the pools in tasks of many, not one each.
+        self.assertLess(stats['tasks'], stats['runs'] // 10)
+        self.assertLess(received['tasks'], received['runs'] // 10)
+
+    def test_task_sizes_change_no_byte(self):
+        # EXP-50: tasks of a few runs each (many tasks, more than two per thread waiting) and one run per task
+        # (compress.TASK_BYTES = 0, EXP-47's path) build the same copy, in order.
+        rng = random.Random(13)
+        old = b''.join(text_page(rng, n) for n in range(200))
+        new = bytearray(old)
+        for page in range(0, 200, 2):
+            new[page * PAGE + 5:page * PAGE + 40] = rng.randbytes(35)
+        write_tree(self.source, {'base/1/9': bytes(new)})
+        write_tree(self.basis, {'base/1/9': old})
+        for task_bytes, label in ((3 * PAGE, 'small'), (0, 'one run each')):
+            with self.subTest(tasks=label), mock.patch.object(compression, 'TASK_BYTES', task_bytes):
+                output = Path(self.temp.name) / f'O-{task_bytes}'
+                outcome = transfer(self.source, self.basis, output, compress='zstd', jobs=2, receiver_jobs=2)
+                self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+                self.assertIsNone(outcome.receiver_error, repr(outcome.receiver_error))
+                self.assertEqual(snapshot(output), snapshot(self.source))
+                stats, received = outcome.sender['compress'], outcome.sender['receiver']['compress']
+                self.assertEqual(received['runs'], stats['runs_compressed'])
+                if task_bytes:
+                    self.assertGreater(stats['tasks'], 2 * stats['threads'])
+                    self.assertLess(stats['tasks'], stats['runs'])
+                    self.assertLess(received['tasks'], received['runs'])
+                else:
+                    self.assertEqual(stats['tasks'], stats['runs'])
+                    self.assertEqual(received['tasks'], received['runs'])
 
     def test_a_receiver_without_zstd_takes_plain_pages(self):
         # The receiver's own view of the module (the sender shares the real one, which can compress).
