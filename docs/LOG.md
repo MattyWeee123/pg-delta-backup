@@ -8,6 +8,15 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-26 (early morning): the XFS tie repeats; what pages leave on the table; how old the copy can be
+
+- **EXP-36's second session:** the tie between native incremental (`--copy-file-range`) and v1 on XFS repeated on fresh VMs. Scattered changes were within 4%, and for local changes v1 was level or ahead by up to 16%. D02 now rests on two sessions.
+- **EXP-37 (T4):**
+  - after `VACUUM FULL` or `CLUSTER`, no strategy (cross-file page matching, content-defined chunking) found a reusable byte, so pgdelta's positional pages lose nothing and D18 closes;
+  - for scattered updates, 512-byte blocks would send 5.0× fewer bytes and zstd 2.8× fewer (D17, D35: two levers, not built).
+- **EXP-38 (T11b):** for evenly scattered OLTP, the old copy can be about 1.75 updated rows per page behind (58,000 transactions at 345 MB) before a full copy is as fast at DR; for local changes, any age measured.
+- **[docs/RESULTS.md](RESULTS.md):** a new one-page summary of the evidence, with its figures; the README's status points to it.
+
 ## 2026-10-26 (after midnight): D02 changes; native incremental is not faster than v1 at DR
 
 **EXP-36 (INC, lean)** compared native incremental (`pg_basebackup --incremental` with `pg_combinebackup`), v1 with BBR on the new defaults, and one `pg_basebackup` stream, at 60 and 120 ms. I predicted incremental would win everywhere; it didn't.
