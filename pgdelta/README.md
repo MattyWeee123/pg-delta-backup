@@ -201,7 +201,11 @@ The output then holds `backup_label` at its root and that WAL in `pg_wal`, so it
 - **`fast`** writes every dirty buffer at once, so reading starts as soon as it returns;
 - **`spread`** paces those writes over `checkpoint_completion_target` of `checkpoint_timeout`. That is gentler on a busy primary, but the refresh can start minutes later.
 
-`pg_basebackup` defaults to `spread`. pgdelta keeps `fast` until a test decides it. Every slowdown measured so far (EXP-28, -30, -39) took the fast checkpoint on a small dirty set (128 MB of shared buffers); a large one hasn't been tested (C-ckpt in docs/FIRMNESS.md). The statistics record the mode (`live.checkpoint`).
+`pg_basebackup` defaults to `spread`; pgdelta defaults to `fast`. **On a large dirty set either one costs a busy primary heavily** ([EXP-57](../docs/experiments/EXP-57-checkpoint-burst.md): about 4.9 GB of dirty buffers on a balanced persistent disk, TPC-B at 0.6 of capacity):
+- **`fast`** nearly stalled the load (its worst second 94% short) for about 30 s, and lost 27.5 s of work;
+- **`spread`** ran it about half short for 4.5 minutes, and lost 51.8 s.
+
+So spread is not gentler in total, only shallower, and it delays the refresh by minutes. This is the checkpoint's cost, not pgdelta's: EXP-28 measured pgdelta's own reading at about 0.05 s of lost work, on a small dirty set. The statistics record the mode (`live.checkpoint`).
 
 **The negative controls.** `PGDELTA_TEST_READ_BEFORE_START` in the environment (not an option, and not in `--help`) switches on one of two deliberately broken variants: with `1`, the sender lists the data directory and copies its files to a scratch directory before calling `pg_backup_start`; with `during`, it sends `pg_backup_start` (asking for a spread checkpoint, `fast := false`, since an immediate one can end before the listing does), then lists and copies the files while it runs, and reads its answer after. Either way the files are sent from that copy. Any other value is refused (exit 2). The outputs are expected to be wrong; [EXP-25](../docs/experiments/EXP-25-live-correctness.md)'s checks must catch them. So that a stray environment variable can't pass for a good copy, `send` and `local` print a `WARNING` when such a run starts and when it ends, and exit 4 with status `failed` even when the receiver published or committed the output; the statistics carry everything a complete run's would. `live.read_before_start` and `live.test_variant` (`before_start`, `during_start` or null) record it.
 

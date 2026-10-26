@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (night): the start checkpoint on a large dirty set
+
+- **EXP-57 (one VM, pre-registered):** with about 4.9 GB of dirty buffers on a balanced persistent disk and a TPC-B load at 0.6 of capacity:
+  - a fast start checkpoint (pgdelta's default) nearly stalled the load for 30 s, losing 27.5 s of work;
+  - a spread one (`pg_basebackup`'s default) ran it about half short for 4.5 minutes, losing 51.8 s.
+
+  The deciding prediction failed: I had expected spread to lose far less, not more.
+  - **Why this one:** the owner hadn't answered, and this was the plan's C-ckpt row cut down to one VM and one question, with no redesign of O4's load.
+  - **What changed:** the default stays fast, by the registered rule. The README and `--checkpoint`'s help give both modes' measured costs; FIRMNESS, RESULTS and DECISIONS are updated.
+  - **Teardown:** the VM pair was torn down; the project holds no VM or disk.
+- **For the owner:** O4's two numbers now disagree. Against `pg_basebackup`'s default, pgdelta's fast start loses less work (27.5 s against 51.8) but has a deeper worst second (0.94 against 0.45). Which should govern?
+
 ## 2026-10-27 (evening): sub-page deltas built, and slower as built
 
 - **Why this one:** the owner hadn't chosen between the two large items after several asks, and the standing rules say not to stall. Sub-page deltas were opt-in, harmless to everyone else, and local until the last stage; the large-dirty-set test stays parked (it redesigns O4's load).

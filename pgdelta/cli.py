@@ -261,8 +261,10 @@ def _source_kind_option(parser):
                         help='--source-kind live: the checkpoint pg_backup_start takes, as pg_basebackup\'s -c. '
                              'fast starts reading at once but writes every dirty buffer in a burst; spread paces '
                              'those writes over checkpoint_completion_target of checkpoint_timeout, gentler on a '
-                             'busy primary with a large dirty set, and slower to start. pg_basebackup defaults to '
-                             'spread; pgdelta\'s slowdown tests so far used fast on a small dirty set (default: '
+                             'busy primary\'s worst second, but on a large dirty set it lost more work in total '
+                             '(EXP-57: about 4.9 GB dirty on a balanced persistent disk, fast nearly stalled the '
+                             'load for 30 s and lost 27.5 s of work, spread ran it half short for 4.5 minutes and '
+                             'lost 51.8 s). pg_basebackup defaults to spread (default: '
                              f'{live.DEFAULT_CHECKPOINT})')
 
 

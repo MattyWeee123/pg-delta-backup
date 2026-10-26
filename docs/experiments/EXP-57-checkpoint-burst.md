@@ -1,6 +1,10 @@
 # EXP-57: Does a fast start checkpoint on a large dirty set hurt a busy primary?
 
-Status: **pre-registered October 27, 2026, before any run.** One VM (about an hour), no network. The C-ckpt row of `docs/FIRMNESS.md`, sized to its one question.
+Status: **done October 27, 2026 (one VM, 6 runs after a smoke; 1 and 3 held, the deciding 2 failed). On a busy primary with about 5 GB of dirty buffers on a balanced persistent disk, both start checkpoints cost the load heavily, and the spread one was not gentler in total:**
+- **fast:** the load nearly stalled (worst second 94% short) for about 30 s, and lost 27.5 s of work;
+- **spread:** it ran about half short for 4.5 minutes, and lost 51.8 s.
+
+By the registered rule fast stays the default. O4's two numbers now disagree between pgdelta's start (fast) and `pg_basebackup`'s default (spread), so that is put to the owner. Pre-registered before any run. One VM (about an hour), no network. The C-ckpt row of `docs/FIRMNESS.md`, sized to its one question.
 
 ## Question
 
@@ -56,3 +60,46 @@ Every slowdown test so far (EXP-12, -28, -30, -39) used a load database of about
   - **The default:** goes to the owner. O4's bar ("no worse than `pg_basebackup`") points to spread, `pg_basebackup`'s own default.
 - **If 2 fails:** fast stays the default, with this measurement behind it.
 - **If 1 fails:** the dirty set wasn't large, and nothing is concluded about it.
+
+## Results (October 27)
+
+One `n2-standard-8` in us-central1-f (a and c had no capacity), with its 150 GiB balanced persistent disk.
+- **The smoke** (scale 20, 307 MB) ran every arm once, end to end.
+- **The registered run:** a 5,989 MB database, all of it prewarmed into shared buffers; C = 10,517 TPC-B transactions a second, so the load ran at R = 6,310.
+
+Data: `docs/experiments/data/exp57-runs.csv`; raw `results/exp04/exp57` (pgbench logs, 685 MB, not in git); analysis and figure `analysis/exp57.py`.
+
+![Completed ÷ scheduled transactions per second around the arm, one line per run](../figures/exp57-checkpoint-burst.svg)
+
+| Median of 2 | dirty at t0 | buffers the checkpoint wrote | `pg_backup_start` blocked | worst-second drop D (net) | work lost W (net) | p99 latency in the window |
+|---|---|---|---|---|---|---|
+| none | 5.07 GB | none | none | 0.00 | 0.0 s | 2.3 ms |
+| **fast** | 4.94 GB | 603,850 (4.9 GB), written in 30.4 s | **30.8 s** | **0.94** | **27.5 s** | 27.6 s |
+| **spread** | 4.86 GB | 594,632 (4.9 GB), written in 269.7 s | 270.1 s | 0.45 | **51.8 s** | 51.1 s |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | At least 1 GB dirty at t0 in every trial | **Held:** 4.7–5.1 GB |
+| 2 | **Deciding: fast's net D at least 0.30, and fast's net W at least 2× spread's** | **Failed:** D held (0.94), but fast lost about half as much work as spread (27.5 s against 51.8), not twice as much |
+| 3 | A fast start blocks at least 20 s | **Held:** 29–32 s (spread: 270 s) |
+
+## What it means
+
+- **A start checkpoint on a large dirty set is costly either way on this disk.** Writing about 4.9 GB of scattered pages to a balanced persistent disk that also holds the WAL:
+  - **fast:** the load nearly stops for about 30 s, while the disk writes at about 20,000 pages a second, then catches up over about 50 s;
+  - **spread:** the load runs normally for about 90 s, then slides to about 55% of its rate until the checkpoint ends at 270 s.
+
+  So the spread checkpoint trades a deep, short stall for a long, shallow loss, and lost more work in total.
+- **Why spread's loss deepens late** isn't diagnosed. It writes at only about 2,200 pages a second. Candidates are the kernel's write-back throttling as the checkpoint's buffered writes accumulate, and the WAL's flushes queuing behind them on the same disk.
+- **For pgdelta:** this cost is the checkpoint's, not pgdelta's read. EXP-28 measured pgdelta's own reading at about 0.05–0.07 s of lost work.
+  - **Against `pg_basebackup -c fast`,** pgdelta's start is the same checkpoint.
+  - **Against `pg_basebackup`'s default (spread),** pgdelta's fast start loses about half the work (27.5 s against 51.8), with a far deeper worst second (0.94 against 0.45).
+
+  O4's bar ("no worse than `pg_basebackup`") reads both numbers, so they split here. Which matters more is the owner's call.
+- **Every slowdown result before this one** (EXP-12, -28, -30, -39) measured a primary whose start checkpoint had about 30 MB to write. On a large dirty set the checkpoint dominates whatever pgdelta itself costs. The README now says so.
+
+## What was done
+
+- **The default stays `fast`,** as the registered rule says for a failed 2.
+- **The README and `--checkpoint`'s help** state the measured costs of both modes on a large dirty set, and that neither avoids it: one takes a short near-stall, the other a long partial slowdown with more work lost.
+- **C-ckpt in FIRMNESS.md** is updated, and **the owner's question** is in the log: whether O4 should weigh the worst second or the work lost when they disagree.
