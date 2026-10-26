@@ -1,0 +1,9 @@
+measure,on_request,up_front
+pages,71188,134072
+digest_bytes,9112064,17161216
+blake3_cpu_s,0.863,1.647
+blake2b_cpu_s,0.796,1.464
+write_seconds_pages_median,0.8032,
+write_seconds_blocks_median,0.8611,
+blocks_zstd_bytes,34604545,
+positional_zstd_bytes,210285354,

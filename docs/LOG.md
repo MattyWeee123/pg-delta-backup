@@ -13,6 +13,12 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 - **EXP-54 (local, pre-registered):** do sub-page deltas still pay now that zstd ships? Yes: 512-byte blocks plus zstd sent 43.7 MB against zstd alone's 210.3 MB (0.21), 13.6× fewer than whole pages, counting B's block digests. All three predictions held.
   - **Why now:** the owner hadn't yet picked among the large open items. This cheap check decides whether the largest of them, a protocol change, is worth building at all.
   - **Next:** building them waits for the owner's go-ahead.
+- **EXP-55 (local, pre-registered):** the costs beyond bytes are small, and all three predictions held:
+  - B's block digests can travel up front with the leaf digests, with no extra round trip; in all, 0.25 of zstd's bytes;
+  - hashing the blocks takes 1.46 CPU-seconds;
+  - block writes took 1.07× whole runs, every patched copy byte-identical to S.
+
+  The design is set. Building it is the owner's call.
 
 ## 2026-10-27 (midday): zstd's break-even, about 4 Gbit/s
 
