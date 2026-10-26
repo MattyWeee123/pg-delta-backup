@@ -10,6 +10,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 ## 2026-10-27 (late afternoon): a checkpoint switch for live sources
 
+- **What the large-dirty-set test needs (C-ckpt), found while sizing it.**
+  - **The gap:** the slowdown harness's load (`lab_exp28.sh`, EXP-12's bank scripts) writes to `loaddb`, built by `pgbench -i -s 2`: 200,000 accounts, about 30 MB. So in EXP-12, -28, -30 and -39, pg_backup_start's fast checkpoint never had more than about 30 MB of the load's pages to write. Raising shared_buffers alone can't change that.
+  - **A test of the burst needs:**
+    - a load database of several GB (`pgbench -s 400` or more);
+    - shared_buffers of 8 GB, which needs a restart;
+    - max_wal_size raised, so time-based checkpoints set the pace;
+    - a fixed dirtying period of load before each arm;
+    - the backup checkpoint's buffers written, read from `log_checkpoints` as the measured dirty set;
+    - arms `none`, `pg_basebackup -c fast`, and v1 with `--checkpoint fast` and `spread`.
+  - **Its cost:** the load's capacity C has to be measured again on the larger database, so O4's numbers there aren't comparable with EXP-28's. The source's local SSD absorbs bursts better than a persistent disk would.
+  - **Status:** that's a redesign of the O4 measurement, not a routine run, so it waits for the owner's go-ahead.
+
 - **`--checkpoint fast|spread`** for `--source-kind live`, as `pg_basebackup -c`. The default stays `fast` (no behaviour change), and the statistics record the mode.
   - **Why:** pgdelta asks `pg_backup_start` for a fast checkpoint, which writes every dirty buffer at once, while `pg_basebackup` defaults to spread. Every slowdown test so far had only 128 MB of shared buffers, so that burst on a large dirty set is untested (C-ckpt).
   - **What the switch does:** it is that row's own interim step. Until the large-dirty-set slowdown block decides the default, an operator can choose `spread`.
