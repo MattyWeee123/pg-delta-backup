@@ -4,7 +4,7 @@ A CMU student project with Google's AlloyDB team: a tool that brings an older ph
 
 **Status, October 26, 2026:** see **[what the evidence says](docs/RESULTS.md)**, a one-page summary with its figures. In short:
 - **v1** refreshes an old copy in place from the running server, in backup mode.
-- **No wrong copy** in 13,000 randomized refreshes, from stopped and live sources. A power loss mid-refresh left the copy blocked or complete in 16 of 16 resets.
+- **No wrong copy** in 14,000 randomized refreshes, from stopped and live sources (10,000 + 2,000 stopped, 1,000 + 1,000 live). A power loss mid-refresh left the copy blocked or complete in 16 of 16 resets.
 - **Faster than the full copies at DR round trips**, with BBR on its socket. **As fast or faster than PostgreSQL's native incremental** there, even where its history exists.
 - **On a busy primary** it costs the load no more than `pg_basebackup` at its default of 2 source workers, and with BLAKE3 it is 2.1× faster.
 - **Not a speed win for HA** beyond memory on capped disks: at best a tie.
