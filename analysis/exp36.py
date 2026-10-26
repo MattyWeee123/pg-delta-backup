@@ -19,7 +19,7 @@ import plotting
 from plotting import COLORS, plt
 
 ROOT = Path(__file__).resolve().parents[1]
-V1, INC, FULL = 'pgdelta_direct_inplace_bbr', 'incremental', 'full'
+V1, INC, CFR, FULL = 'pgdelta_direct_inplace_bbr', 'incremental', 'incremental_cfr', 'full'
 CONDITIONS = ['2:60:default', '2:60:tuned', '2:120:tuned']
 
 
@@ -27,6 +27,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--sweep', default=str(ROOT / 'results' / 'exp04' / 'exp36'))
     ap.add_argument('--figdir')
+    ap.add_argument('--tag', default='', help='suffix for the data and figure files (part B on XFS: -b)')
     a = ap.parse_args(argv)
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
@@ -45,12 +46,14 @@ def main(argv=None):
     for p in ('hot', 'uniform'):
         for c in CONDITIONS:
             row = {'pattern': p, 'condition': c}
-            for m, name in ((FULL, 'full'), (INC, 'incremental'), (V1, 'v1')):
+            for m, name in ((FULL, 'full'), (INC, 'incremental'), (CFR, 'incremental_cfr'), (V1, 'v1')):
                 row[f'{name}_s'] = round(med[(p, c, m)], 2) if (p, c, m) in med else None
                 row[f'{name}_runs'] = len(times.get((p, c, m), []))
                 row[f'{name}_mb'] = round(mb[(p, c, m)], 1) if (p, c, m) in mb else None
             if row['incremental_s'] and row['v1_s']:
                 row['inc_over_v1'] = round(row['incremental_s'] / row['v1_s'], 3)
+            if row['incremental_cfr_s'] and row['v1_s']:
+                row['cfr_over_v1'] = round(row['incremental_cfr_s'] / row['v1_s'], 3)
             rows.append(row)
             print(row)
     keys = list(rows[0])
@@ -58,7 +61,7 @@ def main(argv=None):
         for k in r:
             if k not in keys:
                 keys.append(k)
-    with open(ROOT / 'docs' / 'experiments' / 'data' / 'exp36-cells.csv', 'w', newline='') as f:
+    with open(ROOT / 'docs' / 'experiments' / 'data' / f'exp36-cells{a.tag}.csv', 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys)
         w.writeheader()
         w.writerows(rows)
@@ -66,11 +69,15 @@ def main(argv=None):
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.2), sharey=True)
     x = np.arange(len(CONDITIONS))
     for ax, p in zip(axes, ('hot', 'uniform')):
-        for i, (key, label, color) in enumerate((('full_s', 'one pg_basebackup', COLORS['grey']),
-                                                  ('incremental_s', 'native incremental + pg_combinebackup', COLORS['green']),
-                                                  ('v1_s', 'v1 (BBR, one-pass verification)', COLORS['blue']))):
+        arms = [('full_s', 'one pg_basebackup', COLORS['grey']),
+                ('incremental_s', 'native incremental + pg_combinebackup --copy', COLORS['green']),
+                ('incremental_cfr_s', 'native incremental + pg_combinebackup --copy-file-range', COLORS['sky']),
+                ('v1_s', 'v1 (BBR, one-pass verification)', COLORS['blue'])]
+        arms = [arm for arm in arms if any(r[arm[0]] for r in rows)]
+        width = 0.8 / len(arms)
+        for i, (key, label, color) in enumerate(arms):
             vals = [next((r[key] for r in rows if r['pattern'] == p and r['condition'] == c), None) or 0 for c in CONDITIONS]
-            bars = ax.bar(x + (i - 1) * 0.27, vals, 0.27, color=color, label=label)
+            bars = ax.bar(x + (i - (len(arms) - 1) / 2) * width, vals, width, color=color, label=label)
             for bar, v in zip(bars, vals):
                 ax.annotate(f'{v:.1f}', (bar.get_x() + bar.get_width() / 2, v), textcoords='offset points',
                             xytext=(0, 2), ha='center', fontsize=7.5)
@@ -79,7 +86,7 @@ def main(argv=None):
     axes[0].set_ylabel('refresh time (s), median')
     axes[0].legend(fontsize=8)
     fig.tight_layout()
-    print(plotting.save(fig, 'exp36-incremental'))
+    print(plotting.save(fig, f'exp36-incremental{a.tag}'))
 
 
 if __name__ == '__main__':

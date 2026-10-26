@@ -36,6 +36,29 @@ EXP-24's harness command (`run_exp04.py`) with:
 - Incremental's cost of keeping history (`summarize_wal` on, a manifest kept) isn't measured.
 - Incremental runs as released: the host's cubic and default buffers on default hosts. The comparison is of the tools as they ship.
 
+## Part A: results (23:58–00:15 UTC, ext4; 36 runs, all verified)
+
+Data: `docs/experiments/data/exp36-cells.csv`; raw `results/exp04/exp36`; figure `analysis/exp36.py`.
+
+![Native incremental against v1 at DR round trips, ext4](../figures/exp36-incremental.svg)
+
+| Workload, condition | one `pg_basebackup` | native incremental | **v1 (BBR)** | incremental ÷ v1 | bytes: incremental / v1 |
+|---|---:|---:|---:|---:|---:|
+| hot, 60 ms default | 44.2 s | 6.0 s | **3.8 s** | 1.56 | 17 / 29 MB |
+| hot, 60 ms tuned | 11.7 | 5.8 | **3.4** | 1.74 | 17 / 29 MB |
+| hot, 120 ms tuned | 13.3 | 7.5 | **4.8** | 1.58 | 17 / 29 MB |
+| uniform 1%, 60 ms default | 45.2 | 18.3 | **16.0** | 1.14 (provisional: within 20% of 1) | 605 / 611 MB |
+| uniform 1%, 60 ms tuned | 11.8 | 8.8 | **6.4** | 1.37 | 603 / 610 MB |
+| uniform 1%, 120 ms tuned | 13.2 | 10.6 | **8.6** | 1.23 | 603 / 610 MB |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: incremental takes at most v1's time in every cell** | **Failed:** v1 was faster in all 6 cells (incremental 1.14–1.74× v1) |
+| 2 | For hot, incremental sends at most a third of v1's bytes | **Failed:** 17 MB against 29 (0.59) |
+| 3 | For uniform at 60 ms on default hosts, both bound by one window-limited stream | **Held:** 16.0 and 18.3 s, both near 45 s ÷ 2.8 of the full copy's |
+
+**Why:** incremental's time is its capture plus `pg_combinebackup`, one after the other. The capture alone was 2.0–3.7 s for hot and 4.7–14.2 s for uniform, shorter than v1 in most cells. But `pg_combinebackup --copy` then wrote a whole new 2.1 GB copy on ext4, in 3.9–4.0 s every time. v1 patches B in place and writes only the changed pages. So part A's result rests on how the combine copies, which part B tests.
+
 ## Part B, registered after part A's results and before it ran (October 26)
 
 **Why:** in part A, incremental's time was its capture plus `pg_combinebackup`, which writes a whole new copy. On ext4 that took 3.9–4.0 s for 2.1 GB, and it decided the comparison: incremental's capture alone (2.0–3.7 s hot, 4.7–14.2 s uniform) was shorter than v1's time in most cells. The firmness audit's INC plan already called for the fair version: the destination on XFS, where `pg_combinebackup --copy-file-range` shares unchanged blocks with the previous backup instead of copying them (`incremental_cfr`).
