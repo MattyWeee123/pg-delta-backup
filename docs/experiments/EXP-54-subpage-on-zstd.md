@@ -65,7 +65,7 @@ One run of `experiments/bytes/exp54.py` over EXP-51's scale-70 data: 72,449 chan
   - zstd squeezes the whole page, mostly the 15 of 16 blocks an update leaves alone.
   - Sub-page deltas drop those blocks.
   - What's left, the changed blocks, still compresses 3.2×.
-- **The digests become the largest part of what's left.** B's block digests, 8 bytes for each of a page's 16 blocks, are random, so they don't compress. They're 21% of the total. A design could shrink them: send them only for pages the source already knows differ, or use fewer bytes per block, since the page and file digests verify the result anyway.
+- **The digests become the largest part of what's left.** B's block digests, 8 bytes for each of a page's 16 blocks, are random, so they don't compress. They're 21% of the total. They are already counted only for changed pages. A design could still shrink them, with fewer bytes per block digest (the page and file digests verify the result anyway) or larger blocks.
 - **On the link alone** (a projection: bytes ÷ rate), sub-page plus zstd would take 0.70 s at 0.5 Gbit/s against zstd's 3.37 s, 0.35 s against 1.68 at 1 Gbit/s, and 0.18 s against 0.84 at 2.
   - **What that means for time:** the saving shows where the link dominates. At 0.5 Gbit/s, zstd took 6.8 s in all against v1's 13.1 (EXP-46).
   - **Where it doesn't:** from about 3 Gbit/s up, zstd's time is set by its CPU floor, not the link (EXP-53), so fewer bytes buy nothing there.
