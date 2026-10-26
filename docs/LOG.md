@@ -8,6 +8,20 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (evening): sub-page deltas built, and slower as built
+
+- **Why this one:** the owner hadn't chosen between the two large items after several asks, and the standing rules say not to stall. Sub-page deltas were opt-in, harmless to everyone else, and local until the last stage; the large-dirty-set test stays parked (it redesigns O4's load).
+- **The build, `--subpage`:** B's 512-byte block digests travel after each LEAF_DIGESTS (BLOCK_DIGESTS), and pages go as a bitmap and their changed blocks (PAGE_DELTA, PAGE_DELTA_ZSTD).
+  - It is accepted only where the receiver builds on B's bytes.
+  - A patched page counts as written, so verification re-hashes it.
+  - 8 new tests: in place, copy-patch, zstd on worker processes, the fallback, two refusals, and a corrupted block caught. The full suite and CI are green.
+- **EXP-56 stage 1 (local) held:** every copy was byte-identical (13 of 13), and the bytes came as EXP-54/55 projected (37.0 MB plus 17.2 MB of digests against zstd's 212.8).
+- **Stage 2 (one VM session) failed:** 1.16× v1 + zstd's time at 0.5 Gbit/s and 1.44× at 1, with 3.5× fewer bytes.
+  - **Why:** the timers show the link wait gone (0.0 s), replaced by 2.2 s of block hashing on the sender's main thread and 0.6–0.9 s of extra waiting for the receiver's digests.
+  - **Status:** `--subpage` stays opt-in and off. The README says so.
+  - **The revision to test:** move the hashing onto the workers.
+  - **Teardown:** the VMs were torn down; the project holds no VM or disk.
+
 ## 2026-10-27 (late afternoon): a checkpoint switch for live sources
 
 - **What the large-dirty-set test needs (C-ckpt), found while sizing it.**

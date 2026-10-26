@@ -170,7 +170,9 @@ def _compress_option(parser):
                              'where the receiver builds on B\'s bytes (in place or copy-patch; otherwise pages go '
                              'whole). B\'s block digests come back with its leaf digests, so no round trip is '
                              'added. With --compress zstd, scattered changes sent 0.21 of zstd\'s bytes by '
-                             'measurement (EXP-54, EXP-55); its time on a DR link is EXP-56\'s')
+                             'measurement (EXP-54, EXP-55), but as built it was slower than zstd alone at 0.5 and '
+                             '1 Gbit/s on 8-vCPU VMs, its block hashing costing more than the link time saved '
+                             '(EXP-56). Leave it off')
 
 
 def _hash_option(parser):

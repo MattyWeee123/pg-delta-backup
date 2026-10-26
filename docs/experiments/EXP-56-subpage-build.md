@@ -1,6 +1,11 @@
 # EXP-56: Do sub-page deltas, as built, deliver EXP-54's bytes and time on a DR link?
 
-Status: **pre-registered October 27, 2026, before any measurement of the build.** The build of the design EXP-55 settled, then two stages: a local check (`pgdelta local`, scale 70) and one VM session at 0.5 and 1 Gbit/s. The local stage gates the VM stage.
+Status: **done October 27, 2026. Stage 1 held (every copy byte-identical; bytes as projected); stage 2's deciding prediction failed. On VMs, v1 + zstd + sub-page took 1.16× v1 + zstd's time at 0.5 Gbit/s (7.89 s against 6.79) and 1.44× at 1 Gbit/s, while sending 3.5× fewer bytes.** The diagnosis:
+- the sender's block hashing, about 2.2 s on its main thread, is new serial work;
+- the receiver computes block digests (0.8 s) before it answers a leaf request, which delays the sender by 0.6–0.9 s;
+- the link time saved, 1–2 s, is less than the sum.
+
+By the registered rule `--subpage` stays, opt-in, with these numbers. Pre-registered before any measurement of the build. The build of the design EXP-55 settled, then two stages: a local check (`pgdelta local`, scale 70) and one VM session at 0.5 and 1 Gbit/s. The local stage gates the VM stage.
 
 ## Why
 
@@ -83,3 +88,45 @@ Rule 11 applies to 3: a ratio within 20% of 0.80 gets a second session on fresh 
 At 0.5 Gbit/s, zstd's 213 MB take about 3.4 s on the link, and zstd plus sub-page's 37 MB about 0.6 s. With tuned TCP buffers of up to 128 MiB the delta stream fits in the socket buffer, so the sender's hashing should mostly overlap the link. Stage 2 runs as registered: its gate (prediction 1) held.
 
 **The stage 2 arm:** `pgdelta_direct_inplace_bbr_zs` (EXP-52's v1 engine with BBR, `--compress zstd` and `--subpage`), added to the harness with its analysis, `analysis/exp56_vm.py`, before the run.
+
+## Stage 2 results (October 27)
+
+One VM session (us-central1-a, order seed 560). All 12 runs passed, with BBR in effect on 8 of 8 v1 runs. Every sub-page run used it: 70,214 partial pages and 4,128 whole. Data: `docs/experiments/data/exp56-vm-cells.csv`; raw `results/exp04/exp56`; analysis and figure `analysis/exp56_vm.py`.
+
+![Median seconds and bytes per method at 0.5 and 1 Gbit/s](../figures/exp56-vm.svg)
+
+| Uniform 1%, 60 ms (median of 2) | `pg_basebackup` | v1 + zstd | v1 + zstd + sub-page | sub-page ÷ zstd |
+|---|---|---|---|---|
+| 0.5 Gbit/s | 36.8 s (2,110 MB) | 6.79 s (218 MB) | 7.89 s (62 MB) | **1.16** |
+| 1 Gbit/s | 20.2 s (2,109 MB) | 5.35 s (218 MB) | 7.69 s (62 MB) | **1.44** |
+
+The bytes are source to dest on the wire. The VM's data (the study's hex filler) differs from the Mac's (EXP-37's md5 filler), so 62 MB here stands against stage 1's 37 MB.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 3 | **Deciding: at 0.5 Gbit/s, sub-page at most 0.80 of zstd's time** | **Failed:** 1.16 (outside rule 11's 20%, so no second session) |
+| 4 | At 1 Gbit/s, at most 0.95 | **Failed:** 1.44 |
+| 5 | Every run passes; BBR on every v1 run | **Held** |
+
+## What it means
+
+**pgdelta's own timers, per run:**
+
+| | v1 + zstd | v1 + zstd + sub-page |
+|---|---|---|
+| sender blocked on the link (`page_send`) | 0.68–2.16 s | **0.0 s** (62 MB fit in the 128 MiB socket buffers) |
+| sender's block hashing, on its main thread | none | **2.15–2.23 s** (0.9 s on the Mac) |
+| sender waiting for the receiver's digests (`leaf_wait`) | 0.95–1.21 s | **1.63–1.97 s** |
+| receiver's block hashing | none | 0.79–0.81 s, before each leaf answer |
+
+- **The bound moved from the link to the CPU.** Sub-page removed the sender's waits on the link entirely, but added about 2.2 s of block hashing on the sender's main thread and 0.6–0.9 s of extra waiting for answers. Its time, about 7.7 s, hardly depends on the link: a floor, as zstd's was before EXP-50.
+- **Stage 1 couldn't show this:** over loopback there was no link time to trade against, and the Mac's cores hash 2.4× faster.
+- **Where it would pay as built:** the bytes it saves (155 MB) are worth 1.24 s ÷ the rate in Gbit/s. Against about 2.9 s of added work, that projects a break-even near 0.4 Gbit/s; it didn't measure faster at 0.5. That's a projection, not a measurement.
+- **What a revision would change,** each its own experiment:
+  - hash S's changed pages in blocks on the sender's worker processes instead of its main thread;
+  - send BLOCK_DIGESTS without holding up the leaf answer;
+  - or use a cheaper per-block digest, since a wrong match only costs a failed verification.
+
+## What was done
+
+`--subpage` stays in the code, opt-in, off by default, as the rule says. The README's row says it was measured slower on these VMs at 0.5 and 1 Gbit/s, and why. The advice stays `--compress zstd` alone.
