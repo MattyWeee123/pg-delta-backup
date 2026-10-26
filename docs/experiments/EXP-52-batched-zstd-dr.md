@@ -32,3 +32,9 @@ EXP-47's second session exactly (`results/exp04/exp47b`), with pgdelta as it now
 
 - **If 1 holds:** zstd's floor no longer keeps it even at 2 Gbit/s. The README's "below about 1.8 Gbit/s" is re-derived from the new numbers. The break-even moves up, and a run at a faster link rate would place it. zstd stays opt-in either way, because EXP-26's fairness finding is about BBR, and compression costs the source CPU.
 - **If 1 fails:** batching stands on its local evidence, but the floor on VMs is set by something else. Each end's 8 vCPUs, shared with 4 hashing processes, are the first candidate, testable with `--jobs`.
+
+## First session (October 27), before the second
+
+- **Where and what:** us-central1-a; BBR in effect on both v1 runs; batched tasks on both ends (560 and 796 tasks for 29,053 runs).
+- **Times:** zstd 4.89 s against v1's 5.72 s, **0.855** (EXP-47: 6.17 s, 1.05). Prediction 1's ratio is within 20% of its 0.90 bar, so the second session runs on fresh VMs (order seed 521), as registered. The verdict on every prediction will use both sessions' runs.
+- **The receiver's writes:** they took 1.41× v1's (1.08 s against 0.76; EXP-47: 2.1×), over prediction 2's 1.3.
