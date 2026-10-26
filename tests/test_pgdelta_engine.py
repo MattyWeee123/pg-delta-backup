@@ -580,7 +580,10 @@ class MidRunFailureTests(EngineTestCase):
             def send(self, code, *parts):
                 if code == protocol.PAGE_DATA:
                     for child in multiprocessing.active_children():
-                        os.kill(child.pid, signal.SIGKILL)
+                        try:
+                            os.kill(child.pid, signal.SIGKILL)
+                        except ProcessLookupError:  # it exited between the listing and the kill
+                            pass
                 super().send(code, *parts)
         for label in ('A+B+C N=3', 'A only N=2'):
             with self.subTest(config=label):
