@@ -71,6 +71,7 @@ def figure(rows, digests):
     for i, r in enumerate(rows):
         left.annotate(f"{r['total_bytes'] / 1e6:.0f} MB\n{r['fewer_than_pages']:.1f}×", (i, r['total_bytes'] / 1e6),
                       textcoords='offset points', xytext=(0, 3), ha='center', fontsize=8)
+    left.set_ylim(0, max(r['total_bytes'] for r in rows) / 1e6 * 1.18)
     left.set_xticks(list(x), names, fontsize=8, rotation=12)
     left.set_ylabel('MB per refresh (uniform 1%, scale 70)')
     left.set_title('Bytes on the wire', fontsize=10)

@@ -1,0 +1,5 @@
+scheme,source_to_dest_bytes,dest_to_source_bytes,total_bytes,fewer_than_pages,link_s_at_0.5g,link_s_at_1g,link_s_at_2g
+positional,593502208,0,593502208,1.0,9.496,4.748,2.374
+positional_zstd,210285354,0,210285354,2.822,3.365,1.682,0.841
+subpage,109760002,9112064,118872066,4.993,1.902,0.951,0.475
+subpage_zstd,34604545,9112064,43716609,13.576,0.699,0.35,0.175

@@ -8,6 +8,12 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (afternoon): sub-page deltas multiply with zstd
+
+- **EXP-54 (local, pre-registered):** do sub-page deltas still pay now that zstd ships? Yes: 512-byte blocks plus zstd sent 43.7 MB against zstd alone's 210.3 MB (0.21), 13.6× fewer than whole pages, counting B's block digests. All three predictions held.
+  - **Why now:** the owner hadn't yet picked among the large open items. This cheap check decides whether the largest of them, a protocol change, is worth building at all.
+  - **Next:** building them waits for the owner's go-ahead.
+
 ## 2026-10-27 (midday): zstd's break-even, about 4 Gbit/s
 
 - **EXP-53 (three VM sessions, pre-registered):** with batched tasks, zstd took 0.95 of v1's time at 3 Gbit/s, 0.97 at 4 and 1.06 at 5 (60 ms). Its break-even is about 4 Gbit/s (interpolated, 3.9–4.35). All four predictions held.

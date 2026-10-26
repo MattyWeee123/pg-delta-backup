@@ -1,6 +1,6 @@
 # EXP-54: Do sub-page deltas still pay on top of zstd?
 
-Status: **pre-registered October 27, 2026, before any run.** Local (the Mac): only bytes and CPU, no network. Lean: one script over existing data, a few minutes. It decides whether sub-page deltas, the largest open lever, are worth building.
+Status: **done October 27, 2026 (one local run over EXP-51's data; all three predictions held). Sub-page deltas plus zstd send 0.21 of what zstd alone sends for scattered updates:** 43.7 MB against 210.3 MB, 13.6× fewer than whole pages, counting B's block digests on the way back. Compressing them took a fifth of zstd's CPU (0.26 s against 1.21). So sub-page deltas are worth building for slow DR links. Pre-registered before any run. Local (the Mac): only bytes and CPU, no network. Lean: one script over existing data, a few minutes. It decides whether sub-page deltas, the largest open lever, are worth building.
 
 ## Question
 
@@ -39,3 +39,43 @@ Is that still worth building, once the blocks are compressed too? If sub-page pl
 
 - **If 1 holds:** sub-page deltas are worth building for DR links. The analysis projects what they save at 0.5, 1 and 2 Gbit/s from bytes alone, labeled as projection, and a design and its own experiment get pre-registered.
 - **If 1 fails:** zstd already captures most of what sub-page deltas would. They are set aside, and RESULTS.md says so with the numbers.
+
+## Results (October 27)
+
+One run of `experiments/bytes/exp54.py` over EXP-51's scale-70 data: 72,449 changed pages in 29,106 runs. B had 71,188 of those pages, so the block digests come to 9.1 MB. Data: `docs/experiments/data/exp54-bytes.csv`; raw `results/bytes/exp54/results.json`; analysis and figure `analysis/exp54.py`.
+
+![Bytes per scheme by direction, and the projected time on the link alone](../figures/exp54-subpage-on-zstd.svg)
+
+| Scheme (uniform 1%, scale 70) | source → dest | dest → source | total | fewer than pages | zstd CPU, compress + decompress |
+|---|---|---|---|---|---|
+| pages (v1) | 593.5 MB | none | 593.5 MB | 1.0× | none |
+| pages + zstd (today) | 210.3 MB | none | 210.3 MB | 2.82× | 1.21 + 0.42 s |
+| 512-byte blocks | 109.8 MB | 9.1 MB | 118.9 MB | 4.99× | none |
+| **512-byte blocks + zstd** | **34.6 MB** | 9.1 MB | **43.7 MB** | **13.6×** | 0.26 + 0.10 s |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: sub-page + zstd + digests at most 0.5 of zstd alone** | **Held:** 0.208 |
+| 2 | Sub-page alone within 15% of EXP-37's 5.0× | **Held:** 4.99× |
+| 3 | zstd alone within 10% of EXP-37's 2.83× | **Held:** 2.82× |
+
+## What it means
+
+- **zstd and sub-page deltas remove different redundancy, so they multiply.**
+  - zstd squeezes the whole page, mostly the 15 of 16 blocks an update leaves alone.
+  - Sub-page deltas drop those blocks.
+  - What's left, the changed blocks, still compresses 3.2×.
+- **The digests become the largest part of what's left.** B's block digests, 8 bytes for each of a page's 16 blocks, are random, so they don't compress. They're 21% of the total. A design could shrink them: send them only for pages the source already knows differ, or use fewer bytes per block, since the page and file digests verify the result anyway.
+- **On the link alone** (a projection: bytes ÷ rate), sub-page plus zstd would take 0.70 s at 0.5 Gbit/s against zstd's 3.37 s, 0.35 s against 1.68 at 1 Gbit/s, and 0.18 s against 0.84 at 2.
+  - **What that means for time:** the saving shows where the link dominates. At 0.5 Gbit/s, zstd took 6.8 s in all against v1's 13.1 (EXP-46).
+  - **Where it doesn't:** from about 3 Gbit/s up, zstd's time is set by its CPU floor, not the link (EXP-53), so fewer bytes buy nothing there.
+- **The costs this doesn't measure:**
+  - the receiver hashing B's changed pages in 512-byte blocks;
+  - an extra exchange to get those digests to the source, a round trip that the window would have to hide at 60 ms;
+  - the receiver writing 512-byte pieces into B's pages in place.
+
+  A design has to price each one, and its own experiment has to measure the whole.
+
+## What follows
+
+Per the registered rule, sub-page deltas are worth building for DR links. That's a protocol change, the largest piece of work left, so it waits for the owner's go-ahead. Its design and experiment would be pre-registered first.
