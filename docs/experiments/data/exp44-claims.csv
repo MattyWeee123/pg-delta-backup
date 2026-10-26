@@ -1,0 +1,5 @@
+claim,volume,claim_after,claim_phase_after,used_by_after,volume_after,reclaim_policy,disk_after
+backupdisk-al-3d63-omni2-0,pvc-bd432d8a-0fe7-494e-bb75-9e2928f1356a,False,,,False,,False
+datadisk-al-3d63-omni2-0,pvc-4b2ed5d0-44e6-4153-8517-2e5cb8268d0d,False,,,False,,False
+logdisk-al-3d63-omni2-0,pvc-c0a080e2-8e82-4185-81b5-6ceb560056a0,False,,,False,,False
+obsdisk-al-3d63-omni2-0,pvc-e946ba2a-6e06-42bf-8e02-ecd4ecf4772e,False,,,False,,False

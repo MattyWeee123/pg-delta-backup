@@ -1,6 +1,10 @@
 # EXP-44: On Kubernetes, does Omni leave an old copy to refresh, and can pgdelta run beside it?
 
-Status: **pre-registered October 26, 2026, before any run.** OMNI-2, lean, allowed by K4 (GKE), on the owner's go-ahead the same day. About an hour, mostly waiting for the cluster. The owner accepted Omni's license terms for this research use on October 26.
+Status: **done October 26, 2026.**
+- **(a)** On Omni's Kubernetes operator, an unplanned failover leaves no old copy: the old primary's four disks were deleted about 40 s after the standby's promotion, and the new standby got new disks and a full `pg_basebackup`. Every instance the operator replaced lost its disks the same way.
+- **(b)** A sidecar runs on the primary and the standby, reads PGDATA read-only as the database's user, and gets a real cgroup CPU quota. On a new standby it arrives by a pod restart after the seeding, so prediction 3 failed at its registered check and held 6 s later.
+
+Pre-registered before any run. OMNI-2, lean, allowed by K4 (GKE), on the owner's go-ahead the same day. About an hour, mostly waiting for the cluster. The owner accepted Omni's license terms for this research use on October 26.
 
 ## Question
 
@@ -50,3 +54,85 @@ What the operator does with a disk shouldn't depend on zones or machine types. A
 ## Limitations
 
 One cluster, one failover, one zone; Omni 18.4 under operator 1.9.0. A real deployment's storage class or the operator's settings may keep or delete disks differently, and are recorded as found.
+
+## Results
+
+Data: `docs/experiments/data/exp44-claims.csv`; raw `results/omni/exp44/` (steps, every snapshot's kubectl JSON, the failover timeline, the operator's and the standbys' logs, events); analysis `analysis/exp44.py`, committed before the data. GKE 1.36, operator 1.9.0, Omni 18.4.0, cert-manager v1.16.3.
+
+![The failover's timeline](../figures/exp44-failover.svg)
+
+### What the operator builds
+
+- **Each instance** is a StatefulSet of one pod (`database`, `logrotate-agent`, `monitoring-agent`) plus a node-manager pod.
+- **Each instance has four claims:** data, log, backup and observability disks.
+  - each claim is owned by the instance's `Instance` resource, so it goes when the instance goes;
+  - every storage class on the cluster deletes its disk with its claim (`reclaimPolicy: Delete`).
+- **A standby is seeded** by the operator's agent running `pg_basebackup` into `/mnt/disks/pgsql/tmp_basebackup`, which is then moved to `/mnt/disks/pgsql/18/db`: 2.2 s at set-up and 3.5 s at the reseed, on a near-empty database. Its flags aren't logged (`cmd={}`).
+- **Omni 18.4's settings under the operator differ from the 17.10 container's (EXP-40):**
+
+| Setting | Operator (18.4) | Container (17.10, EXP-40) |
+|---|---|---|
+| `data_checksums` | **on** | off |
+| `wal_log_hints` | **on** | off |
+| `summarize_wal` | off | off |
+| `ssl` | on | (not read) |
+| replication | synchronous, `FIRST 1` | (none) |
+| preloaded libraries | adds `google_db_advisor`, `google_insights`, `pg_stat_statements`, `pglogical`, `pgaudit` | 5 Google libraries |
+
+- **The nodes (GKE's image):** `vm.dirty_ratio` 20, `dirty_background_ratio` 10, `dirty_expire_centisecs` 3000; cubic congestion control; TCP buffers up to 6 MiB (receive) and 4 MiB (send).
+
+### (a) The failover
+
+The primary's node VM was deleted at 0 s; the probe sampled every 20–30 s.
+
+| When | What |
+|---|---|
+| by 116 s | the standby was promoted, the marker row intact on it. The new standby's four claims appeared (8 claims became 12) |
+| 137 s | the old primary's pod still listed (its node gone), beside the two live instances |
+| **157 s** | **the old primary's four claims were gone, with their volumes and persistent disks** |
+| 179–223 s | the new standby was seeded by `pg_basebackup` (3.5 s) and running |
+
+| The old primary's claim | After the failover |
+|---|---|
+| data, log, backup, observability | claim deleted, volume deleted, persistent disk deleted |
+
+**The same happened outside the failover.** Attaching the sidecar restarted the pods. The restarted standby then failed its health checks, and the operator replaced it three times (`58d4`, `0f80`, `9431`), each with four new disks. That went on until a fourth node gave the pods room. The log doesn't show why the restart failed: memory, most likely, since the sidecar's 256 MiB pushed the pod over what a node had left. Either way, **in 4 replacements no instance's disk survived it.**
+
+### (b) The sidecar
+
+| Instance | Sidecar | uid | `cpu.max` | Reads `PG_VERSION` (18) | Write refused |
+|---|---|---|---|---|---|
+| primary | yes | 999 (the database's) | `50000 100000` (500m) | yes | yes |
+| standby | yes | 999 | `50000 100000` | yes | yes |
+| promoted primary, after the failover | yes | | | | |
+| new standby, at 03:19:58 | **no** | | | | |
+| new standby, at 03:20:04 | yes, by a pod restart; same claims | | | | |
+
+The data disk is the volume `datadisk`, mounted at `/mnt/disks/pgsql` in the database container; PGDATA is `18/db` under it.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Recorded, the deciding question: the old primary's disk** | **Deleted, claim, volume and disk alike, about 40 s after the promotion; the new standby got new disks and a full `pg_basebackup`** |
+| 2 | The sidecar runs on the standby too, reads PGDATA, is refused a write, and has a 500m quota | **Held** |
+| 3 | After the failover, both instances have the sidecar | **Failed at the registered check:** the new standby got it 6 s later, by a pod restart after its seeding |
+| 4 | Recorded: settings, node, seeding | Above |
+
+## What follows
+
+- **The HA case's B doesn't exist on Omni's operator as shipped.** After an unplanned failover, or any replacement of an instance, the operator deletes the old instance's disks and seeds a new one with a full `pg_basebackup`. O1's HA premise is refuted for Kubernetes.
+  - pgdelta's HA role there needs an operator change: keep the old primary's data disk and refresh it, in place of the new standby's `pg_basebackup`. That is for the integrator, not something pgdelta can do from outside.
+  - The rebuild it would replace is exactly the one measured: `pg_basebackup` into a side directory, then a move.
+- **`pg_rewind`'s preconditions hold under the operator** (checksums and `wal_log_hints` on), but its HA failover doesn't use them: it deletes and reseeds. EXP-40's "no `pg_rewind`" holds for the container only.
+- **DR stays pgdelta's case on Omni:** cross-region secondaries are seeded and re-seeded by the operator's `Replication` resource, not tested here. DR was already pgdelta's strongest result (EXP-20, -24, -36).
+- **The sidecar is a workable deployment (O3), with two costs:**
+  - **It works:** it runs on every instance as the database's user, reads PGDATA read-only, and its CPU limit is a cgroup quota, so live mode's source cap can be the sidecar's limit;
+  - **A new standby gets it only after its seeding,** by a restart, so a sidecar can't take part in that seeding;
+  - **Adding one restarts the pods,** and on a tight cluster that cost a standby replacement, a full reseed.
+- **The nodes' dirty-page settings** (20 / 10) are what the HA-qualifier's "Debian's write-back" assumed (FIRMNESS.md), so that reading carries to GKE's nodes.
+
+## Deviations
+
+- **A fourth node** (`e2-standard-4`, 16 vCPUs in all) was added when the standby couldn't be scheduled with the sidecar.
+- **The sidecar phase ran twice:** the first pass lost the standby mid-check as it was replaced, and the second ran once both instances were Ready.
+- **The probe's operator-log capture** used a label selector that matched no pod, so the operator's logs were pulled by pod name before teardown (`operator-all.log`).
+- **Prediction 3 is scored at its registered moment** (failed). The recheck 6 s later is reported beside it, not instead of it.
