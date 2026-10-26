@@ -23,12 +23,13 @@ omni_up() {  # NAME IMAGE DATADIR PORT
   # The data directory at the same path inside as on the host (PGDATA): pgdelta's live mode checks that the server's
   # data_directory is the --source it reads, as a sidecar mounting PGDATA at the same path would see it.
   docker rm -f "$1" > /dev/null 2>&1
-  docker run -d --name "$1" -e POSTGRES_PASSWORD="$PW" -e PGDATA="$3" -v "$3":"$3" -p "127.0.0.1:$4:5432" "$2" > /dev/null
-  for i in $(seq 120); do psql -h 127.0.0.1 -p "$4" -U postgres -d postgres -Atc 'select 1' > /dev/null 2>&1 && return 0; sleep 1; done
+  docker run -d --name "$1" --shm-size=1g -e POSTGRES_PASSWORD="$PW" -e PGDATA="$3" -v "$3":"$3" \
+    -p "127.0.0.1:$4:5432" "$2" > /dev/null
+  for i in $(seq 120); do $PGBIN/psql -h 127.0.0.1 -p "$4" -U postgres -d postgres -Atc 'select 1' > /dev/null 2>&1 && return 0; sleep 1; done
   docker logs "$1" 2>&1 | tail -20; return 1
 }
 omni_down() { docker stop -t 120 "$1" > /dev/null; docker rm "$1" > /dev/null; }  # SIGTERM: a smart shutdown, then fast
-q() { psql -h 127.0.0.1 -p "$1" -U postgres -d "${3:-postgres}" -AtXc "$2"; }
+q() { $PGBIN/psql -h 127.0.0.1 -p "$1" -U postgres -d "${3:-postgres}" -AtXc "$2"; }
 ctl_wrapper() {  # pg_controldata from the Omni image, for pgdelta's --pg-controldata
   cat > "$W/pg_controldata-$1" <<EOF
 #!/bin/bash
@@ -39,6 +40,7 @@ EOF
   chmod +x "$W/pg_controldata-$1"
 }
 
+command -v docker > /dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -q docker.io > /dev/null
 rm -rf "$W" && mkdir -p "$W"
 docker pull -q $IMG17 > /dev/null && docker pull -q $IMG16 > /dev/null
 ctl_wrapper 17 $IMG17
@@ -48,13 +50,23 @@ ctl_wrapper 16 $IMG16
 mkdir -p $W/s && omni_up omni-s $IMG17 $W/s 5440 || exit 1
 settings=$(q 5440 "select json_object_agg(name, setting) from pg_settings where name in ('server_version','server_version_num','data_checksums','wal_log_hints','summarize_wal','full_page_writes','wal_level','shared_preload_libraries','block_size','wal_segment_size','data_directory')")
 step settings "$settings"
-files=$(cd $W/s && find . -maxdepth 2 -mindepth 1 | sort | python3 -c "import json,sys; print(json.dumps({'entries': [l.strip() for l in sys.stdin]}))")
-step layout "$files"
+# The layout against community PostgreSQL 17's (initdb from the VM's own packages): what Omni adds or leaves out.
+mkdir -p $W/ref && chown postgres $W/ref && sudo -u postgres $PGBIN/initdb -D $W/ref/data > /dev/null
+layout=$(python3 - $W/s $W/ref/data <<'PY'
+import json, os, sys
+def entries(root):
+    return {os.path.relpath(os.path.join(d, n), root) for d, dirs, files in os.walk(root) for n in dirs + files
+            if os.path.relpath(os.path.join(d, n), root).count(os.sep) < 2}
+omni, ref = entries(sys.argv[1]), entries(sys.argv[2])
+print(json.dumps({'omni_only': sorted(omni - ref), 'community_only': sorted(ref - omni), 'shared': len(omni & ref)}))
+PY
+)
+step layout "$layout"
 q 5440 'create database bench'
-pgbench -i -q -s 20 -h 127.0.0.1 -p 5440 -U postgres bench > /dev/null 2>&1 && q 5440 'checkpoint'
+$PGBIN/pgbench -i -q -s 20 -h 127.0.0.1 -p 5440 -U postgres bench > /dev/null 2>&1 && q 5440 'checkpoint'
 omni_down omni-s
 sudo cp -a $W/s $W/b0  # the old copy: the initialised cluster, stopped
-omni_up omni-s $IMG17 $W/s 5440 && pgbench -n -c 4 -j 2 -t 5000 -h 127.0.0.1 -p 5440 -U postgres bench > /dev/null 2>&1
+omni_up omni-s $IMG17 $W/s 5440 && $PGBIN/pgbench -n -c 4 -j 2 -t 1250 -h 127.0.0.1 -p 5440 -U postgres bench > /dev/null 2>&1
 want=$(q 5440 "select json_build_object('accounts', (select sum(abalance) from pgbench_accounts), 'history', (select count(*) from pgbench_history))" bench)
 omni_down omni-s
 step source_state "$want"
@@ -70,7 +82,8 @@ secs=$(python3 -c "import time; print(round(time.time() - $started, 2))")
 same=$(sudo python3 experiments/network/crash_t13c.py manifest $W/s | sudo python3 -c "
 import json, subprocess, sys
 s = json.loads(sys.stdin.read()); b = json.loads(subprocess.run(['python3', 'experiments/network/crash_t13c.py', 'manifest', '$W/b'], capture_output=True, text=True).stdout)
-print(json.dumps({'identical': s == b, 'differ': len(set(s) ^ set(b) | {k for k in set(s) & set(b) if s[k] != b[k]})}))")
+d = sorted(set(s) ^ set(b) | {k for k in set(s) & set(b) if s[k] != b[k]})
+print(json.dumps({'identical': s == b, 'files': len(s), 'differ': len(d), 'examples': d[:8]}))")
 omni_up omni-b $IMG17 $W/b 5441 && got=$(q 5441 "select json_build_object('accounts', (select sum(abalance) from pgbench_accounts), 'history', (select count(*) from pgbench_history))" bench) || got=null
 omni_down omni-b 2>/dev/null
 step stopped_source "{\"exit\": $rc, \"seconds\": $secs, \"bytes\": $same, \"b_starts_with\": ${got:-null}, \"matches_source\": $( [ "$got" = "$want" ] && echo true || echo false )}"

@@ -36,6 +36,16 @@ Every result so far is on community PostgreSQL 17. Omni is Google's PostgreSQL-c
 - **If either fails:** what Omni does differently is found and reported. Omni stays unsupported until it is handled.
 - **The settings** inform D02b (`pg_rewind` needs checksums or `wal_log_hints`) and native incremental's prerequisite (`summarize_wal`).
 
+## Revisions
+
+- **October 26, before any run (rule 8).** The script now matches the design:
+  - it ran 20,000 transactions (`-t 5000` per client on 4 clients) against the design's 5,000, so it runs 1,250 per client;
+  - it calls `psql` and `pgbench` by their PostgreSQL 17 paths;
+  - it gives each container 1 GB of `/dev/shm`;
+  - it lists a community PostgreSQL 17 `initdb` beside Omni's directory, so prediction 5 compares the two.
+
+  A look at the image before the run found the community Docker image's conventions: the `docker-entrypoint.sh` entrypoint, `PGDATA` taken from the environment, stop on SIGINT (a fast shutdown), postgres as uid 999, and binaries in `/usr/lib/postgresql/17/bin`.
+
 ## Limitations
 
 - Omni in a container on one VM, not Omni on Kubernetes (OMNI-2, which needs GKE).
