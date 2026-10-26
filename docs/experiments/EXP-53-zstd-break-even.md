@@ -36,3 +36,11 @@ EXP-52's command and VMs, at two new rates:
 - **The advice uses the measured crossing:** zstd for DR links below the break-even, interpolated linearly between the measured rates on either side and rounded down to 0.5 Gbit/s. It is labeled as interpolated in the README, the CLI help and RESULTS.md.
 - **If zstd is still faster at 5 Gbit/s,** the advice becomes "up to 5 Gbit/s, measured", and the break-even stays above that, unmeasured.
 - **If it is already slower at 3 Gbit/s,** the break-even lies between 2 and 3 Gbit/s, interpolated.
+
+## Revision before any result was read (October 27, rule 8)
+
+**A third session at 4 Gbit/s.**
+- **Why:** the owner asked for the break-even to be placed at 3 and 4 Gbit/s. That request arrived after this experiment was registered and started at 3 and 5, while the first session's results had been fetched but not read.
+- **What it adds:** `4:60:tuned` on fresh VMs after the second session, otherwise the same command (2 repeats, order seed 532).
+- **Unchanged:** the conditions of the first two sessions and every prediction.
+- **How it is used:** the analysis reports the 4 Gbit/s cell beside the others, and the break-even is interpolated across 2, 3, 4 and 5 Gbit/s. With one session there, the 4 Gbit/s cell is reported as one session's.

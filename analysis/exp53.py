@@ -24,7 +24,7 @@ from exp47 import FULL, V1, V1Z, medians
 from plotting import COLORS, plt
 
 ROOT = Path(__file__).resolve().parents[1]
-RATES = {'3:60:tuned': 3.0, '5:60:tuned': 5.0}
+RATES = {'3:60:tuned': 3.0, '4:60:tuned': 4.0, '5:60:tuned': 5.0}  # 4: the third session (the rule 8 revision)
 EXP52 = [str(ROOT / 'results' / 'exp04' / s) for s in ('exp52', 'exp52b')]
 EARLIER = [(0.5, 0.52, 'EXP-46'), (1.0, 0.753, 'EXP-47')]  # one run per task, uniform 1% at 60 ms
 
@@ -56,7 +56,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--sweep', action='append')
     a = ap.parse_args(argv)
-    sweeps = a.sweep or [str(ROOT / 'results' / 'exp04' / s) for s in ('exp53', 'exp53b')]
+    sweeps = a.sweep or [str(ROOT / 'results' / 'exp04' / s) for s in ('exp53', 'exp53b', 'exp53c')]
     sweeps = [s for s in sweeps if (Path(s) / 'summary.csv').exists()]
     rows = cells(sweeps, RATES)
     two = cells(EXP52, {'2:60:tuned': 2.0})
