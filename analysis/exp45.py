@@ -28,6 +28,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--sweep', default=str(ROOT / 'results' / 'exp04' / 'exp45'))
     ap.add_argument('--figdir')
+    ap.add_argument('--tag', default='', help='suffix for the data and figure files (EXP-46: -pool)')
     a = ap.parse_args(argv)
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
@@ -75,7 +76,7 @@ def main(argv=None):
         if n.startswith('1'):
             near = ' (provisional: within 20% of 0.90)' if any(r['zstd_over_v1'] and abs(r['zstd_over_v1'] / 0.90 - 1) < 0.2 for r in uni) else ''
         print(f"{n}. {'HELD' if held else 'FAILED'}: {text}{near}")
-    with open(ROOT / 'docs' / 'experiments' / 'data' / 'exp45-cells.csv', 'w', newline='') as f:
+    with open(ROOT / 'docs' / 'experiments' / 'data' / f'exp45-cells{a.tag}.csv', 'w', newline='') as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
@@ -101,7 +102,7 @@ def main(argv=None):
     axes[0].set_ylabel('refresh time (s), median')
     axes[0].legend(fontsize=8)
     fig.tight_layout()
-    print(plotting.save(fig, 'exp45-zstd'))
+    print(plotting.save(fig, f'exp45-zstd{a.tag}'))
 
 
 if __name__ == '__main__':
