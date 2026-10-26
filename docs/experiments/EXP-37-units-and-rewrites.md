@@ -69,7 +69,7 @@ Data: `docs/experiments/data/exp37-bytes.csv`; raw `results/bytes/exp37/results.
 
 ## What follows
 
-- **D18 closes:** positional matching stays. A rewritten table changes every tuple's header, so neither cross-file matching nor content-defined chunking finds old bytes. A rewrite is sent whole by any such tool.
+- **D18 closes:** positional matching stays. Neither cross-file matching nor content-defined chunking found old bytes, most likely because a rewrite gives every tuple a new header (its `t_ctid` and visibility fields), a few bytes in every hundred or so. That cause isn't checked here. A rewrite is sent whole by any such tool.
 - **D17 and D35 open two bandwidth levers for DR's slow or billed links.** Neither is built:
   - **a sub-page delta** (512-byte blocks: about 5× fewer bytes for scattered changes, at the cost of one more round of block digests from B per differing page, which matters at DR round trips);
   - **zstd on the wire** (about 2.8× on this data, at about 0.5 GB/s per core, well above the 2 Gbit/s DR link).
