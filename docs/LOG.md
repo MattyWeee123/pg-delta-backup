@@ -8,6 +8,14 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-26 (morning): live mode's worker cap scales with the source; the Omni probe registered
+
+- **EXP-39 (T10b's larger source):** on a 16-vCPU busy primary (three VMs, 28 vCPUs, 10 runs in 6 minutes), v1 with BLAKE3 at 4 workers met O4 and refreshed in 2.01 s, 20% faster than at 2 (2.52 s) and 2.1× faster than `pg_basebackup` (4.15 s). All three predictions held, so by the registered rule live mode's default `--jobs` is now at most the source's CPUs ÷ 4, from 1 to 4 (`pgdelta/cli.py`, tested).
+  - The test was easy for every arm: the source had about 7 idle vCPUs at 0.6 of its capacity, and not even `pg_basebackup` cost the load measurable work.
+  - 8 workers also met O4 but raised the load's p95 latency to 11 ms, so the cap stays at 4.
+  - The VMs were deleted after the fetch.
+- **EXP-40 (OMNI-1, lean) pre-registered** after the owner accepted the AlloyDB Omni container's license terms for this research use. It covers Omni 17.10's settings and layout, v1 from a stopped and a running Omni, and the version gates on Omni 16.14, all on one VM.
+
 ## 2026-10-26 (early morning): the XFS tie repeats; what pages leave on the table; how old the copy can be
 
 - **EXP-36's second session:** the tie between native incremental (`--copy-file-range`) and v1 on XFS repeated on fresh VMs. Scattered changes were within 4%, and for local changes v1 was level or ahead by up to 16%. D02 now rests on two sessions.

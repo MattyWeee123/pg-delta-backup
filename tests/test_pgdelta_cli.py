@@ -229,9 +229,23 @@ class CliTests(CliTestCase):
                 self.assertEqual(cli.build_parser().parse_args([command, *args, '--jobs', '1']).jobs, 1)
                 self.assertIn(f'min(4, {share})', ' '.join(run(command, '--help').stdout.split()))
 
-    def test_a_live_source_defaults_to_two_jobs_at_most(self):
-        # EXP-28: on a busy primary 4 source workers slowed the load more than pg_basebackup; 1 and 2 didn't.
-        self.assertEqual(cli.LIVE_MAX_DEFAULT_JOBS, 2)
+    def test_a_live_source_defaults_to_one_job_per_four_cpus(self):
+        # EXP-28: on a busy 8-vCPU primary 4 source workers slowed the load more than pg_basebackup; 1 and 2
+        # didn't. EXP-39: on 16 vCPUs 4 workers cost the load nothing measurable and were faster than 2.
+        self.assertEqual(cli.LIVE_CPUS_PER_JOB, 4)
+        self.assertEqual([cli.live_max_jobs(cpus) for cpus in (1, 3, 4, 7, 8, 12, 15, 16, 64)],
+                         [1, 1, 1, 1, 2, 3, 3, 4, 4])
+        with mock.patch.object(cli, 'available_cpus', return_value=16):
+            parser = cli.build_parser()
+            send = ['send', '--source', 'S', '--connect', 'h:1', '--source-kind', 'live']
+            self.assertEqual(cli.resolve_jobs(parser.parse_args(send)).jobs, 4)
+            local = ['local', '--source', 'S', '--basis', 'B', '--in-place', '--source-kind', 'live']
+            self.assertEqual(cli.resolve_jobs(parser.parse_args(local)).jobs, 4)
+        with mock.patch.object(cli, 'available_cpus', return_value=4):
+            parser = cli.build_parser()
+            send = ['send', '--source', 'S', '--connect', 'h:1', '--source-kind', 'live']
+            self.assertEqual(cli.resolve_jobs(parser.parse_args(send)).jobs, 1)
+            self.assertEqual(cli.resolve_jobs(parser.parse_args([*send, '--jobs', '2'])).jobs, 2)
         with mock.patch.object(cli, 'available_cpus', return_value=8):
             parser = cli.build_parser()
             send = ['send', '--source', 'S', '--connect', 'h:1']
@@ -245,7 +259,8 @@ class CliTests(CliTestCase):
         with mock.patch.object(cli, 'available_cpus', return_value=1):
             live = cli.build_parser().parse_args(['send', '--source', 'S', '--connect', 'h:1', '--source-kind', 'live'])
             self.assertEqual(cli.resolve_jobs(live).jobs, 1)
-        self.assertIn('with --source-kind live at most 2', ' '.join(run('send', '--help').stdout.split()))
+        self.assertIn(f'with --source-kind live at most CPUs / 4, here {cli.live_max_jobs()}',
+                      ' '.join(run('send', '--help').stdout.split()))
 
     def test_local_splits_the_cpus_between_its_two_ends(self):
         # `local` runs N workers on each side: on 4-7 CPUs min(4, CPUs) per side would start up to 8

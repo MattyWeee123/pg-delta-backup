@@ -31,10 +31,12 @@ from pgdelta.tree import BACKENDS, DEFAULT_BACKEND
 # in-process engine. Library callers (run_sender, run_receiver) still default to one job, since more
 # needs the main-module guard of multiprocessing.
 MAX_DEFAULT_JOBS = 4
-# Reading a running primary (--source-kind live), the default is at most 2 (EXP-28): on a busy primary, its
-# load's client on another host, 1 and 2 workers cost the load no more than one pg_basebackup stream, while 4
-# lost 0.073 s of its work and raised its p95 latency to 74 ms unthrottled. --jobs given explicitly is kept.
-LIVE_MAX_DEFAULT_JOBS = 2
+# Reading a running primary (--source-kind live), the default is at most one worker per 4 of the source's CPUs
+# (EXP-28, EXP-39): on a busy 8-vCPU primary, its load's client on another host, 1 and 2 workers cost the load no
+# more than one pg_basebackup stream, while 4 lost 0.073 s of its work and raised its p95 latency to 74 ms
+# unthrottled; on a 16-vCPU primary at the same share of its capacity, 4 workers cost the load nothing measurable
+# and refreshed 20% faster than 2. --jobs given explicitly is kept.
+LIVE_CPUS_PER_JOB = 4
 
 
 def log(message):
@@ -131,6 +133,12 @@ def default_jobs(cpus=None, sides=1):
     return max(1, min(MAX_DEFAULT_JOBS, (available_cpus() if cpus is None else cpus) // sides))
 
 
+def live_max_jobs(cpus=None):
+    """The most workers --jobs's default starts reading a live primary: CPUs // LIVE_CPUS_PER_JOB, from 1 to
+    MAX_DEFAULT_JOBS (2 on 8 CPUs, 4 on 16)."""
+    return max(1, min(MAX_DEFAULT_JOBS, (available_cpus() if cpus is None else cpus) // LIVE_CPUS_PER_JOB))
+
+
 class _DefaultJobs(int):
     """--jobs's default, told apart from the same number given on the command line (resolve_jobs)."""
 
@@ -142,8 +150,9 @@ def _jobs_option(parser, what, sides=1, live=False):
                              f'single-threaded in this process. The digests, the bytes sent and the '
                              f'output are the same for any N (default: min({MAX_DEFAULT_JOBS}, {share}), '
                              f'here %(default)s'
-                             + (f'; with --source-kind live at most {LIVE_MAX_DEFAULT_JOBS}, which slows a busy '
-                                f'primary no more than pg_basebackup (EXP-28)' if live else '') + ')')
+                             + (f'; with --source-kind live at most CPUs / {LIVE_CPUS_PER_JOB}, here '
+                                f'{live_max_jobs()}, which slowed a busy primary no more than pg_basebackup '
+                                f'(EXP-28, EXP-39)' if live else '') + ')')
     # Experiment switch (EXP-06): worker threads instead of processes, as measured in EXP-05.
     parser.add_argument('--hash-backend', choices=BACKENDS, default=DEFAULT_BACKEND, help=argparse.SUPPRESS)
 
@@ -157,11 +166,11 @@ def _hash_option(parser):
 
 
 def resolve_jobs(args):
-    """--jobs's default for a live source: at most LIVE_MAX_DEFAULT_JOBS; a --jobs given explicitly is kept."""
+    """--jobs's default for a live source: at most live_max_jobs(); a --jobs given explicitly is kept."""
     jobs = getattr(args, 'jobs', None)
     if isinstance(jobs, _DefaultJobs):
         live = getattr(args, 'source_kind', None) == 'live'
-        args.jobs = min(int(jobs), LIVE_MAX_DEFAULT_JOBS) if live else int(jobs)  # a plain int from here on
+        args.jobs = min(int(jobs), live_max_jobs()) if live else int(jobs)  # a plain int from here on
     return args
 
 

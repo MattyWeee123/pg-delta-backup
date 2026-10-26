@@ -24,7 +24,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | **DR: faster than native incremental, where history exists?** | **As fast or faster:** v1 was faster by 14–74% on ext4, and the two tied on XFS with reflinks (EXP-36) | XFS tie at two sessions |
 | HA (fast links): faster? | Only for small data on a fast, idle destination. Beyond memory on a capped disk, at best a tie for local changes (EXP-22, -31), and a design that reads all of S can't do better there | Two sessions |
 | How old can the copy be? | **For local changes, any age measured**; for evenly scattered OLTP, about **1.75 updated rows per page** behind (58,000 transactions at 345 MB) before a full copy is as fast at DR (EXP-38) | Bytes measured, time projected |
-| On a busy primary? | At 2 source workers v1 costs the load no more than `pg_basebackup`. **With BLAKE3 it refreshes 2.1× faster than `pg_basebackup`** (EXP-28, -30) | Two sessions (4 workers missed in one of them) |
+| On a busy primary? | At 2 source workers on 8 vCPUs, and 4 on 16, v1 costs the load no more than `pg_basebackup`. **With BLAKE3 it refreshes 2.1× faster than `pg_basebackup` on 8 vCPUs, and 2.1× on 16 at 4 workers** (EXP-28, -30, -39) | Three sessions (4 workers on 8 vCPUs missed in one of them) |
 
 ![v1 against native incremental at DR](figures/exp36-incremental-b.svg)
 
@@ -35,7 +35,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | Question | Answer |
 |---|---|
 | Is BBR fair to other traffic? | **No: it stays opt-in.** On a shared bottleneck it took 81–96% of the link from cubic flows when the queue held a round trip or less (EXP-26) |
-| Slowdown of the source's load? | Within `pg_basebackup`'s, at the default of 2 source workers in live mode (EXP-28, -30) |
+| Slowdown of the source's load? | Within `pg_basebackup`'s, at live mode's default of one source worker per 4 CPUs (EXP-28, -30, -39) |
 
 ## What's left on the table
 
@@ -52,13 +52,13 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 |---|---|---|
 | `--hash` | `auto`: BLAKE3 where both ends have the package, else BLAKE2b | EXP-29 (4.8× per core), EXP-30 |
 | `--verify-scope` | `written` in place, `all` for a new copy | EXP-31, -32, -33, -35 |
-| `--jobs` with `--source-kind live` | at most 2 | EXP-28, -30 |
+| `--jobs` with `--source-kind live` | at most CPUs ÷ 4, from 1 to 4 | EXP-28, -30, -39 |
 | `--congestion-control` | the host's default; `bbr` opt-in | EXP-24 (speed), EXP-26 (fairness) |
 
 ## Still open
 
 - **Omni:** none of this has run on AlloyDB Omni yet; the probe likely needs the owner to accept Google's license terms.
 - **Larger sizes:** extrapolated from scale models only; tests beyond them may need a disk-quota increase.
-- **The rest of the slowdown tests:** a moderate load, a large dirty set, a larger source.
+- **The rest of the slowdown tests:** a moderate load, a large dirty set, a source near saturation at 16 vCPUs.
 - **The timing model's disk term.**
 - **The two bandwidth levers** (sub-page deltas, zstd), measured but not built.
