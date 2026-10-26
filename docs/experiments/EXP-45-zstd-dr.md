@@ -35,6 +35,15 @@ EXP-36's harness command (`run_exp04.py`) and VMs (the default `n2-standard-8` p
 - **If 1 fails while 3 holds:** the bytes fell but the time didn't. The sender's single compressing thread is then the bottleneck. Moving compression onto the hashing workers is the next build, and the option stays off.
 - **If 3 fails:** these pages don't compress as EXP-37's did, which is reported, and the option stays as it is.
 
+## Revision before the counted run (October 26, rule 8)
+
+**The first session is set apart: BBR was not in effect.**
+- The step that allows BBR on the source failed: the `tcp_bbr` module wasn't loaded, so the kernel answered "No such file or directory".
+- pgdelta's statistics show every v1 run requested BBR and got cubic.
+- The session's 24 runs (`results/exp04/exp45`) are reported apart, as EXP-25's first run was. They don't test the registered question, since cubic's slow mode at long round trips (EXP-24) varies run to run.
+
+**The counted run uses the same VMs** with the module loaded (`modprobe tcp_bbr`), BBR allowed, and an unprivileged socket checked to get it. The command and order seed are unchanged (`results/exp04/exp45b`). Every v1 run must report `effective: bbr`, or it is set apart too.
+
 ## Limitations
 
 One session, one data shape (pgbench with hex filler), 2 repeats, two round trips at one link rate. Compression at level 3 only. Real rows compress more or less than these.
