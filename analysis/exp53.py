@@ -98,22 +98,27 @@ def main(argv=None):
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(two + rows)
-    figure(two + rows, crossing)
+    sessions = [cells([s], {'2:60:tuned': 2.0}) for s in EXP52] + [cells([s], RATES) for s in sweeps]
+    figure(two + rows, crossing, sessions)
 
 
-def figure(rows, crossing):
-    """Left: median seconds against the link rate. Right: zstd / v1, with the earlier one-run-per-task points."""
+def figure(rows, crossing, sessions):
+    """Left: each session's medians against the link rate, joined within a session (VM pairs differ by up to
+    0.6 s, so times compare within a session). Right: zstd / v1, with the earlier one-run-per-task points."""
     plotting.style()
     fig, (left, right) = plt.subplots(1, 2, figsize=(10, 4.2))
     xs = [r['gbit'] for r in rows]
     for key, name, color in (('full_s', 'pg_basebackup', COLORS['grey']), ('v1_s', 'v1', COLORS['blue']),
                              ('v1_zstd_s', 'v1 + zstd (batched tasks)', COLORS['red'])):
-        left.plot(xs, [r[key] for r in rows], marker='o', color=color, label=name)
+        for i, session in enumerate(sessions):
+            left.plot([r['gbit'] for r in session], [r[key] for r in session], marker='o', ms=4, lw=1,
+                      color=color, label=name if i == 0 else None)
+    left.plot([], [], color=COLORS['black'], lw=1, label='a line joins one session’s rates')
     left.set_xlabel('link rate (Gbit/s), 60 ms round trip')
-    left.set_ylabel('median seconds, uniform 1%')
+    left.set_ylabel('median seconds per session, uniform 1%')
     left.set_ylim(0, None)
-    left.legend(fontsize=8)
-    left.set_title('Time against the link rate', fontsize=10)
+    left.legend(fontsize=7.5)
+    left.set_title('Time against the link rate, by session', fontsize=10)
     right.axhline(1.0, color=COLORS['black'], lw=0.8)
     right.plot([x for x, _, _ in EARLIER], [y for _, y, _ in EARLIER], '--', marker='o', color=COLORS['sky'],
                label='one run per pool task (EXP-46, -47)')

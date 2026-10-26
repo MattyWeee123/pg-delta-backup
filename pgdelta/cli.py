@@ -162,8 +162,9 @@ def _compress_option(parser):
                         help='compress the pages sent with zstd (level 3), where the receiver can decompress; '
                              'otherwise they go plain. Runs are compressed on --jobs threads beside the sending '
                              'thread, and decompressed on --jobs threads at the receiver, in tasks of up to 1 MiB of '
-                             'pages. For DR links up to 2 Gbit/s: scattered changes took 0.52 of the time at '
-                             '0.5 Gbit/s, 0.75 at 1 and 0.86 at 2 (EXP-46, EXP-47, EXP-52) (default: %(default)s)')
+                             'pages. For DR links below about 4 Gbit/s: scattered changes took 0.52 of the time at '
+                             '0.5 Gbit/s, 0.75 at 1, 0.86 at 2, 0.95 at 3 and 1.06 at 5 (EXP-46, EXP-47, EXP-52, '
+                             'EXP-53) (default: %(default)s)')
 
 
 def _hash_option(parser):

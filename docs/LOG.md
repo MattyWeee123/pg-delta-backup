@@ -8,6 +8,14 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (midday): zstd's break-even, about 4 Gbit/s
+
+- **EXP-53 (three VM sessions, pre-registered):** with batched tasks, zstd took 0.95 of v1's time at 3 Gbit/s, 0.97 at 4 and 1.06 at 5 (60 ms). Its break-even is about 4 Gbit/s (interpolated, 3.9–4.35). All four predictions held.
+  - **The 4 Gbit/s session:** the owner asked for 3 and 4 Gbit/s after I had registered and started 3 and 5. It was added by a dated revision, before any result was read.
+  - **Within each session zstd's time is flat from 3 Gbit/s up,** while v1's keeps falling. VM pairs differ by up to 0.6 s, so every ratio is taken within a session.
+  - **Teardown:** every pair was torn down; the project holds no VM or disk.
+- **The advice is now zstd below about 4 Gbit/s, chiefly at 2 Gbit/s and slower.** The README, the CLI help, the deck and the walkthrough say so.
+
 ## 2026-10-27 (late morning): zstd pays at 2 Gbit/s
 
 - **EXP-52 (two VM sessions, pre-registered):** with batched pool tasks, zstd took 0.86 of plain v1's time at 2 Gbit/s and 60 ms. That is 4.88 s against 5.68; one run per task had been even (1.05, 6.17 s).
