@@ -15,6 +15,29 @@ import subprocess
 
 from pgdelta.errors import InvalidInput
 
+# D08: pgdelta's scope is PostgreSQL 17 and 18. EXP-40 found that nothing enforced it (pgdelta refreshed an AlloyDB
+# Omni 16.14 data directory), so a data directory or server of another major version is refused.
+SUPPORTED_MAJORS = (17, 18)
+SUPPORTED_NOTE = 'pgdelta supports PostgreSQL 17 and 18 only (D08)'
+
+
+def check_major(root, what):
+    """Refuse a data directory whose PG_VERSION names a major version outside SUPPORTED_MAJORS.
+
+    A directory without PG_VERSION is left to the other checks: v0 copies any
+    directory tree, and --in-place and --source-kind datadir or live demand
+    a data directory of their own accord.
+    """
+    path = Path(root) / 'PG_VERSION'
+    try:
+        text = path.read_text(encoding='ascii', errors='replace').strip()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise InvalidInput(f'cannot read {path}: {exc.strerror}') from exc
+    if not text.isdigit() or int(text) not in SUPPORTED_MAJORS:
+        raise InvalidInput(f'{what} {root} is PostgreSQL {text[:20]!r} by its PG_VERSION: {SUPPORTED_NOTE}')
+
 FIELDS = {
     'Database system identifier': ('system_identifier', str),
     'pg_control version number': ('pg_control_version', int),

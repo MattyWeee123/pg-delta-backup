@@ -94,7 +94,7 @@ import time
 from pgdelta import datadir
 from pgdelta.errors import InvalidInput, PgDeltaError, TransferError, VerificationError
 from pgdelta.hashing import DIGEST_SIZE
-from pgdelta.identity import read_identity
+from pgdelta.identity import SUPPORTED_MAJORS, SUPPORTED_NOTE, read_identity
 from pgdelta.inventory import MODE_MASK, FileEntry
 from pgdelta.tree import SERIAL, FileTree, _SizeChanged, hash_stream, node_count, open_regular, pread_exact
 
@@ -108,7 +108,6 @@ CONTROL_FILE = 'global/pg_control'
 BACKUP_LABEL = 'backup_label'
 WAL_DIRECTORY = 'pg_wal'
 SLOT_PREFIX = 'pgdelta_'
-MIN_SERVER_VERSION = 150000  # pg_backup_start and pg_backup_stop (PostgreSQL 15)
 MIN_SEGMENT_SIZE, MAX_SEGMENT_SIZE = 1 << 20, 1 << 30
 CONTROL_SAFE_SIZE = 512  # PG_CONTROL_MAX_SAFE_SIZE: the CRC lies within the first 512 bytes
 CONTROL_READS = 50
@@ -517,9 +516,8 @@ class LiveSource:
         server = self.server
         if not isinstance(server, dict):
             raise TransferError('unexpected answer from the server')
-        if type(server.get('version')) is not int or server['version'] < MIN_SERVER_VERSION:
-            raise InvalidInput(f'server version {server.get("version")} has no pg_backup_start; '
-                               f'--source-kind live needs PostgreSQL 15 or later')
+        if type(server.get('version')) is not int or server['version'] // 10000 not in SUPPORTED_MAJORS:
+            raise InvalidInput(f'server version {server.get("version")}: {SUPPORTED_NOTE}')
         if server.get('in_recovery') is not False:
             raise InvalidInput('the server is in recovery (a standby): --source-kind live reads a primary only')
         try:

@@ -263,6 +263,8 @@ ACCEPT and the statistics record the policy (`reuse_policy`), the decision (`mod
 
 The sender refuses an S that contains symlinks, special files, anything in `pg_tblspc`, or a `postmaster.pid`. v0 supports plain-format backups only.
 
+**PostgreSQL 17 and 18 only (D08).** An S whose `PG_VERSION` names another major version is refused (exit 2), as is a live server whose `server_version_num` does, and an in-place B whose `PG_VERSION` does; B is untouched. A directory without `PG_VERSION` is copied as any tree. [EXP-40](../docs/experiments/EXP-40-omni-probe.md) found this missing (an AlloyDB Omni 16.14 directory was refreshed) and confirmed it on Omni 16.14. AlloyDB Omni 17 data directories work like community PostgreSQL 17's.
+
 The receiver refuses in these cases:
 - O already exists.
 - O's parent directory is missing.

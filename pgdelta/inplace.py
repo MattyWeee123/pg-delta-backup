@@ -35,6 +35,7 @@ import stat
 
 from pgdelta import __version__
 from pgdelta.errors import InvalidInput, TransferError
+from pgdelta.identity import check_major
 from pgdelta.inventory import scan
 from pgdelta.tree import open_regular
 
@@ -169,6 +170,7 @@ def check_postgresql(basis, inventory, marker):
         raise InvalidInput(f'basis {basis} is not a copy of a PostgreSQL data directory (it has no '
                            f'{" and no ".join(missing)}, and no {MARKER}): an in-place refresh deletes what the '
                            f'source lacks, so it refuses this directory; B is untouched')
+    check_major(basis, 'basis')
 
 
 def check_links(basis, inventory):

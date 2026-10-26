@@ -31,6 +31,7 @@ from pgdelta import __version__, datadir, live, matching, protocol, transport, w
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
 from pgdelta.hashing import BLOCK, DEFAULT_ALGORITHM, DIGEST_SIZE, NODE_BLOCKS, FilesDigest, Hasher, new_key, offer
+from pgdelta.identity import check_major
 from pgdelta.inplace import COMMITTED
 from pgdelta.inventory import require_plain, scan
 from pgdelta.protocol import ChannelClosed
@@ -404,6 +405,7 @@ class _Sender:
         if self.source_kind not in datadir.SOURCE_KINDS:
             raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
                                f'not {self.source_kind!r}')
+        check_major(self.source, 'source')
         if self.source_kind == 'datadir':
             # Refuses unless the cluster is cleanly shut down; lists only what pg_basebackup would send.
             self.selection = datadir.select(self.source, self.pg_controldata)

@@ -95,7 +95,10 @@ EXCLUDED_DIRECTORIES = {'base/pgsql_tmp': 'temporary', 'pg_replslot/slot': 'dire
 
 def build_datadir(root):
     rng = random.Random(70)
-    write_tree(root, {path: rng.randbytes(PAGE * (1 + len(path) % 3)) for path in TREE}, EMPTY_DIRECTORIES)
+    files = {path: rng.randbytes(PAGE * (1 + len(path) % 3)) for path in TREE}
+    # PG_VERSION as initdb writes it: pgdelta refuses a major version other than 17 or 18 (D08, EXP-40).
+    files.update({path: b'17\n' for path in files if path.rsplit('/', 1)[-1] == 'PG_VERSION'})
+    write_tree(root, files, EMPTY_DIRECTORIES)
     return root
 
 

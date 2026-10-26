@@ -815,7 +815,7 @@ class StubSessionTests(StubServerTestCase):
             'does not run on': {'data_directory': str(self.root)},
             'in recovery (a standby)': {'in_recovery': True},
             'system identifier 42': {'system_identifier': '42'},
-            'PostgreSQL 15 or later': {'version': 140010},
+            'supports PostgreSQL 17 and 18 only': {'version': 160014},
             'WAL segment size': {'wal_segment_size': 2 * SEGMENT},
             'tablespace_map': {'spcmapfile': '16400 /somewhere\n'},
             'no such server': {'refuse_connect': True},
@@ -892,6 +892,9 @@ class StallTests(StubServerTestCase):
         super().setUp()
         self.release = threading.Event()  # lets the stalled stand-in receivers go at the end
         self.addCleanup(self.release.set)
+        # More data than loopback buffers hold, so a receiver that stops reading blocks the sender before the end
+        # whatever the stand-in data directory's size (with PG_VERSION as initdb writes it, it shrank by 24 KiB).
+        (self.datadir / 'base' / '1' / '16999').write_bytes(bytes(range(256)) * (16 << 10))
 
     def run_against(self, receive, timeout=1.0):
         """The live sender over TCP to the stand-in `receive(conn)`: (outcome, seconds until it gave up)."""

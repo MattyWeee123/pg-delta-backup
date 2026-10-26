@@ -10,7 +10,7 @@ import tempfile
 import unittest
 
 from pgdelta.errors import InvalidInput
-from pgdelta.identity import gate, parse_controldata, read_identity, reuse_policy
+from pgdelta.identity import check_major, gate, parse_controldata, read_identity, reuse_policy
 
 from pgdelta_support import (REPO_ROOT, differing_pages, python_command, snapshot, staging_dirs,
                              subprocess_env, total_pages, transfer, write_tree)
@@ -522,6 +522,47 @@ class PgUpgradeTests(unittest.TestCase):
             self.assertEqual(sql(PG18_BIN, 'select count(*), sum(length(v)) from t'), expected)
         finally:
             server(PG18_BIN, output, 'stop')
+
+
+
+class MajorVersionGateTests(unittest.TestCase):
+    """D08: PostgreSQL 17 and 18 only. EXP-40 found pgdelta refreshing an AlloyDB Omni 16.14 directory."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def tree(self, name, version):
+        files = {'base/1/rel': b'x' * 8192, 'global/pg_control': b'c' * 8192}
+        if version is not None:
+            files['PG_VERSION'] = version
+        return write_tree(self.root / name, files)
+
+    def test_check_major(self):
+        for version in (b'17\n', b'18\n', None):
+            with self.subTest(version=version):
+                check_major(self.tree(f'ok{version}', version), 'source')
+        for version in (b'16\n', b'19\n', b'9.6\n', b'', b'seventeen\n'):
+            with self.subTest(version=version):
+                with self.assertRaisesRegex(InvalidInput, r'supports PostgreSQL 17 and 18 only \(D08\)'):
+                    check_major(self.tree(f'bad{version}', version), 'source')
+
+    def test_the_cli_refuses_a_source_or_an_in_place_basis_of_another_major(self):
+        cases = (('source', b'16\n', b'17\n', 'source'), ('basis', b'17\n', b'16\n', 'basis'))
+        for name, s_version, b_version, what in cases:
+            with self.subTest(refused=name):
+                source, basis = self.tree(f'S-{name}', s_version), self.tree(f'B-{name}', b_version)
+                before = snapshot(basis)
+                result = cli('local', '--source', source, '--basis', basis, '--in-place')
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(f'{what} {source if what == "source" else basis} is PostgreSQL', result.stderr)
+                self.assertIn('supports PostgreSQL 17 and 18 only', result.stderr)
+                self.assertEqual(snapshot(basis), before)
+        # A tree without PG_VERSION is still copied as before (v0 copies any directory tree).
+        source, basis = self.tree('S-plain', None), self.tree('B-plain', None)
+        result = cli('local', '--source', source, '--basis', basis, '--output', self.root / 'O')
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 if __name__ == '__main__':
