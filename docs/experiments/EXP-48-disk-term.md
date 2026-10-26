@@ -1,6 +1,6 @@
 # EXP-48: Does a two-term disk model predict v1 beyond memory at a size it never saw?
 
-Status: **pre-registered October 26, 2026, before any run.** The timing model's missing disk term (EXP-19: "the disk term is still missing"). One VM pair, about 1.5 hours with the data load.
+Status: **done October 26, 2026 (8 runs, all passing; all three predictions held). A two-term disk model fixed at 12 GB predicted every cell at 18 GB (2.25× memory) within 4.4%:** v1 hot +0.4%, v1 uniform +4.2%, the full copy −4.4%. Pre-registered before any run. The timing model's missing disk term (EXP-19: "the disk term is still missing"). One VM pair, about 1.5 hours with the data load.
 
 ## Question
 
@@ -46,3 +46,31 @@ EXP-31's second session, at a new size:
 ## Limitations
 
 One disk type and size (so one operations limit), two data sizes, pgbench-shaped data; the model's operations term is one fitted constant, not derived from the disk's published limits.
+
+## Results
+
+Data: `docs/experiments/data/exp48-model.csv`; raw `results/exp04/sets/ha/exp48-s600/`; analysis and figure `analysis/exp48.py`. Two `n2d-highcpu-8` in us-central1-a and -b. The session's own disk test on dest: read 209.5 MB/s, write 197.6 MB/s.
+
+![Model against measured, both sessions](../figures/exp48-disk-model.svg)
+
+| 18 GB (2.25× memory) | Model (s) | Measured (s), 2 runs | Error |
+|---|---:|---:|---:|
+| v1, hot (13,935 pages written) | 87.1 | 87.5, 87.5 | **+0.4%** |
+| v1, uniform (619,856 pages written) | 177.2 | 184.2, 185.0 | **+4.2%** |
+| one `pg_basebackup`, hot | 94.7 | 90.5, 90.5 | **−4.4%** |
+| one `pg_basebackup`, uniform | 95.0 | 90.8, 90.8 | **−4.4%** |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: every cell within 15% of the model** | **Held:** within 4.4% |
+| 2 | hot: v1 ties the full copy within 10% | **Held:** 0.97 (12 GB: 0.96) |
+| 3 | uniform: v1 at least 1.8× the full copy | **Held:** 2.03× (12 GB: 1.92×) |
+
+**A practical note:** the session's fetch failed when gcloud's sign-in expired. The results were fetched over SSH with the project's key, and the VMs waited for the owner to sign in again before teardown.
+
+## What follows
+
+- **The disk term stands at two sizes and two memory ratios,** on one disk type: beyond memory, v1 in place takes about **|B| ÷ read rate + pages written ÷ the disk's page-write rate**. Here that rate was 6,750 pages/s on a 150 GiB balanced disk. A full copy takes about |S| ÷ write rate.
+- **The HA verdict beyond memory now projects to any size** without new runs. For local changes v1 ties a full copy, since both are one pass over the disk. For scattered changes v1 is slower by the scattered-write term. The page-write rate of another disk (larger disks allow more operations per second) has to be measured, not assumed; a one-minute random-write test gives it.
+- **DR at larger sizes** takes the larger of this disk term and the network term (EXP-24: changed bytes ÷ the link). On slow links the network term dominates, so pgdelta's DR lead carries to large databases; on fast links the disk term is the floor.
+- **The uniform cell ran 4.2% over the model,** the largest error, in the direction of more pages per second being slower at the larger size. With one disk size this is noted, not explained.

@@ -25,6 +25,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | **DR (20–120 ms round trips): faster than the full copies?** | **Yes**, with BBR on pgdelta's socket: 0.33–0.75 of the fastest parallel copy (EXP-20, -24), confirmed on a real 31 ms link (EXP-15) | Three emulated sessions and a real link |
 | **DR: faster than native incremental, where history exists?** | **As fast or faster:** v1 was faster by 14–74% on ext4, and the two tied on XFS with reflinks (EXP-36) | XFS tie at two sessions |
 | HA (fast links): faster? | Only for small data on a fast, idle destination. Beyond memory on a capped disk, at best a tie for local changes (EXP-22, -31), and a design that reads all of S can't do better there | Two sessions |
+| Can we project beyond memory? | **Yes, on this disk type:** v1 ≈ \|B\| ÷ read rate + pages written ÷ page-write rate; fixed at 12 GB, it predicted 18 GB within 4.4% (EXP-48) | Two sizes, one disk |
 | How old can the copy be? | **For local changes, any age measured**; for evenly scattered OLTP, about **1.75 updated rows per page** behind (58,000 transactions at 345 MB) before a full copy is as fast at DR (EXP-38) | Bytes measured, time projected |
 | On a busy primary? | At 2 source workers on 8 vCPUs, and 4 on 16, v1 costs the load no more than `pg_basebackup`. **With BLAKE3 it refreshes 2.1× faster than `pg_basebackup` on 8 vCPUs, and 2.1× on 16 at 4 workers** (EXP-28, -30, -39) | Three sessions (4 workers on 8 vCPUs missed in one of them) |
 
@@ -61,7 +62,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 ## Still open
 
 - **HA on Omni's Kubernetes operator:** the operator deletes the old instance's disks on a failover and reseeds with `pg_basebackup` (EXP-44), so pgdelta's HA role there needs the operator to keep and refresh the old disk. DR is unaffected.
-- **Larger sizes:** extrapolated from scale models only; tests beyond them may need a disk-quota increase.
+- **Larger sizes:** beyond memory, a two-term disk model (read B, then the scattered writes) fixed at 12 GB predicted 18 GB within 4.4% (EXP-48). Other disks' page-write rates still need measuring; sizes past a few times memory remain projection.
 - **The rest of the slowdown tests:** a moderate load, a large dirty set, a source near saturation at 16 vCPUs.
 - **The timing model's disk term.**
 - **The bandwidth levers:** zstd's own time floor (about 6.1 s here, which keeps it even at 2 Gbit/s; EXP-47, not diagnosed), and sub-page deltas, measured but not built.

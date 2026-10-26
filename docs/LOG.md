@@ -8,6 +8,13 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (early): the timing model's disk term; the evidence walkthrough
+
+- **EXP-48:** a two-term disk model for v1 beyond memory (read B, then the scattered writes at the disk's page-write rate), fixed from EXP-31's 12 GB session, predicted every cell at 18 GB (2.25× memory) within 4.4%. All three predictions held. Larger sizes now project from a disk's numbers instead of guesses.
+  - **Practicalities:** no `n2-highcpu-8` was available in us-central1, so it ran on `n2d-highcpu-8` (same vCPUs and memory), recorded before the run.
+  - gcloud's sign-in expired before the fetch, so the results came over SSH. The VMs await the owner's sign-in for teardown.
+- **A walkthrough page** tells the story as 14 evidence-driven decisions, on an animated decision tree and a changing system schematic; a draft deck exists too (both private artifacts).
+
 ## 2026-10-26 (night): zstd on both ends: break-even about 1.8 Gbit/s
 
 - **The receiver now decompresses on a pool too,** writing in order; tested, CI green.

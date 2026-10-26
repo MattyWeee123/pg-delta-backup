@@ -82,6 +82,39 @@ def main(argv=None):
         w = csv.DictWriter(f, fieldnames=list(rows[0]))
         w.writeheader()
         w.writerows(rows)
+    figure(session(a.fit), rows)
+
+
+def figure(fit_rows, test_rows):
+    """Predicted against measured, both sessions, with the registered 15% band (drawn after the verdict)."""
+    import plotting
+    from plotting import COLORS, plt
+    plotting.style()
+    fig, ax = plt.subplots(figsize=(6.4, 5.2))
+    top = 200
+    ax.plot([0, top], [0, top], color=COLORS['black'], lw=0.8)
+    ax.fill_between([0, top], [0, top * 0.85], [0, top * 1.15], color=COLORS['grey'], alpha=0.15, lw=0,
+                    label='within 15% (the registered bar)')
+    for rows, marker, name in ((fit_rows, 'o', '12 GB (fitted)'), (test_rows, 's', '18 GB (predicted beforehand)')):
+        for r in rows:
+            for arm, color in (('v1', COLORS['blue']), ('full', COLORS['grey'])):
+                ax.scatter(r[f'{arm}_model_s'], r[f'{arm}_s'], marker=marker, s=60, color=color,
+                           facecolor='none' if marker == 'o' else color, zorder=3)
+                if arm == 'v1':
+                    ax.annotate(f"v1, {r['pattern']}", (r['v1_model_s'], r['v1_s']), textcoords='offset points',
+                                xytext=(-56, 6), fontsize=7.5)
+        # The two full copies of a size take the same time (hot or uniform): one label.
+        ax.annotate('pg_basebackup', (rows[0]['full_model_s'], rows[0]['full_s']), textcoords='offset points',
+                    xytext=(8, -14), fontsize=7.5)
+        ax.scatter([], [], marker=marker, color=COLORS['black'], facecolor='none' if marker == 'o' else COLORS['black'], label=name)
+    ax.set_xlim(40, top)
+    ax.set_ylim(40, top)
+    ax.set_xlabel('model (s): |B| / read rate + pages written / 6,750 per s')
+    ax.set_ylabel('measured (s), median')
+    ax.set_title('Beyond memory on a 150 GiB balanced disk: model against measured', fontsize=10)
+    ax.legend(fontsize=8, loc='upper left')
+    fig.tight_layout()
+    print(plotting.save(fig, 'exp48-disk-model'))
 
 
 if __name__ == '__main__':
