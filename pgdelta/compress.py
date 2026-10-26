@@ -8,6 +8,8 @@ without compression, and the sender sends plain PAGE_DATA.
 """
 from __future__ import annotations
 
+import threading
+
 ALGORITHMS = ('zstd',)
 LEVEL = 3
 
@@ -39,14 +41,20 @@ class Codec:
             raise ImportError('zstd needs Python 3.14 (compression.zstd) or the zstandard package')
         self.level, self._module = level, module
         if self.backend == 'zstandard':
-            # The frame records its content size, so decompress() can check it before allocating.
-            self._compressor = module.ZstdCompressor(level=level, write_content_size=True)
+            # A zstandard compressor serves one thread at a time, so each compressing thread has its own
+            # (the sender compresses on a pool, EXP-46). The frame records its content size, so decompress()
+            # can check it before allocating.
+            self._local = threading.local()
             self._decompressor = module.ZstdDecompressor()
 
     def compress(self, data):
         if self.backend == 'stdlib':
             return self._module.compress(bytes(data), level=self.level)
-        return self._compressor.compress(bytes(data))
+        compressor = getattr(self._local, 'compressor', None)
+        if compressor is None:
+            compressor = self._local.compressor = self._module.ZstdCompressor(level=self.level,
+                                                                              write_content_size=True)
+        return compressor.compress(bytes(data))
 
     def decompress(self, data, limit):
         """The bytes of one compressed frame; ValueError if malformed, trailed by more data, or over `limit`."""

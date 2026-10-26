@@ -82,6 +82,25 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(outcome.sender['receiver']['compress']['raw_bytes'],
                          stats['raw_bytes'] - (stats['wire_bytes'] - outcome.sender['receiver']['compress']['wire_bytes']))
 
+    def test_runs_compress_on_a_pool_and_arrive_in_order(self):
+        # EXP-46: with jobs > 1 runs are compressed on that many threads, sent in order. The receiver refuses a
+        # run that overlaps or precedes one already written, so a matching copy shows the order held.
+        rng = random.Random(11)
+        old = b''.join(text_page(rng, n) for n in range(300))
+        new = bytearray(old)
+        for page in range(0, 300, 2):  # many short runs
+            new[page * PAGE + 7:page * PAGE + 30] = rng.randbytes(23)
+        write_tree(self.source, {'base/1/9': bytes(new)})
+        write_tree(self.basis, {'base/1/9': old})
+        outcome = transfer(self.source, self.basis, self.output, compress='zstd', jobs=3)
+        self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+        self.assertIsNone(outcome.receiver_error, repr(outcome.receiver_error))
+        self.assertEqual(snapshot(self.output), snapshot(self.source))
+        stats = outcome.sender['compress']
+        self.assertEqual(stats['threads'], 3)
+        self.assertGreater(stats['runs'], 100)
+        self.assertGreaterEqual(stats['wait_seconds'], 0)
+
     def test_a_receiver_without_zstd_takes_plain_pages(self):
         # The receiver's own view of the module (the sender shares the real one, which can compress).
         without = types.SimpleNamespace(ALGORITHMS=compression.ALGORITHMS, Codec=compression.Codec,

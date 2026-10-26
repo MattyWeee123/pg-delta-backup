@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 import os
@@ -286,7 +287,12 @@ class _Sender:
         self.hash_algorithm = hash_algorithm
         # --compress zstd: offered in HELLO; the codec exists once the receiver accepted it (pgdelta.compress).
         self.compress, self.codec = compress, None
-        self.compress_counts = {'runs': 0, 'runs_compressed': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0}
+        # EXP-46: runs are compressed on a pool of `jobs` threads (zstd releases the GIL) while this thread reads
+        # and sends; up to two per thread wait, in order. `seconds` sums the compressing, `wait_seconds` is the
+        # time this thread waited for the oldest run.
+        self.compressor, self.compressing = None, deque()
+        self.compress_counts = {'runs': 0, 'runs_compressed': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0,
+                                'wait_seconds': 0.0, 'threads': 0}
         self.channel, self.source, self.identity = channel, Path(source), identity
         self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
         # A live source (pgdelta.live): its backup session, and how its files are read; the files appended
@@ -339,6 +345,8 @@ class _Sender:
             self._close_live()
             if self.pool is not None:
                 self.pool.close()
+            if self.compressor is not None:
+                self.compressor.shutdown(wait=False, cancel_futures=True)
         if self.live is not None and self.live.variant is not None:
             raise self._wrong_by_design(stats)
         return stats
@@ -479,6 +487,10 @@ class _Sender:
             if chosen not in (None, self.compress):
                 raise ProtocolError(f'ACCEPT compress must be {self.compress!r} or absent, not {chosen!r}')
             self.codec = compression.Codec() if chosen else None
+            if self.codec is not None:
+                threads = max(1, self.jobs)
+                self.compressor = ThreadPoolExecutor(threads, thread_name_prefix='pgdelta-zstd')
+                self.compress_counts['threads'] = threads
         elif 'compress' in accept:
             raise ProtocolError('ACCEPT compress without a compress_offer')
         self.reuse, self.reason, self.policy, self.basis_identity, self.basis_sizes = _parse_accept(
@@ -663,6 +675,7 @@ class _Sender:
                 self.inbox.check()
                 self._send_run(job.index, first, data)
                 sent += length
+            self._drain_runs()
         finally:
             os.close(fd)
         return sent
@@ -701,6 +714,7 @@ class _Sender:
                 self.inbox.check()
                 self._send_run(job.index, first, data)
                 sent += length
+            self._drain_runs()
         finally:
             handle.close()
         if changed:
@@ -709,17 +723,34 @@ class _Sender:
         return sent
 
     def _send_run(self, index, first, data):
-        """One run of pages: PAGE_DATA, or PAGE_DATA_ZSTD when compression was accepted and the run shrank."""
-        head = protocol.page_data_head(index, first)
+        """One run of pages: PAGE_DATA at once, or, with compression accepted, queued for the compressing pool."""
         if self.codec is None:
-            self._send(protocol.PAGE_DATA, head, data)
+            self._send(protocol.PAGE_DATA, protocol.page_data_head(index, first), data)
             return
+        self.compressing.append((index, first, data, self.compressor.submit(self._compress_run, data)))
+        while len(self.compressing) > 2 * self.compress_counts['threads']:
+            self._send_compressed()
+
+    def _compress_run(self, data):
         started = time.perf_counter()
-        packed = self.codec.compress(data)
+        return self.codec.compress(data), time.perf_counter() - started
+
+    def _drain_runs(self):
+        """Send every queued run, in order: a file's pages all precede its FILE_DONE."""
+        while self.compressing:
+            self._send_compressed()
+
+    def _send_compressed(self):
+        """The oldest queued run: PAGE_DATA_ZSTD if it shrank, else PAGE_DATA."""
+        index, first, data, future = self.compressing.popleft()
         counts = self.compress_counts
-        counts['seconds'] += time.perf_counter() - started
+        started = time.perf_counter()
+        packed, seconds = future.result()
+        counts['wait_seconds'] += time.perf_counter() - started
+        counts['seconds'] += seconds
         counts['runs'] += 1
         counts['raw_bytes'] += len(data)
+        head = protocol.page_data_head(index, first)
         if len(packed) < len(data):
             counts['runs_compressed'] += 1
             counts['wire_bytes'] += len(packed)
