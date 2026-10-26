@@ -8,6 +8,14 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-26 (midday): Omni's unlogged tables; OMNI-2 started
+
+- **EXP-43 (OMNI-1c):** Omni's own `pg_basebackup` leaves out an unlogged table's `_mintxid` fork, and pgdelta, which didn't know the fork's name, had copied it.
+  - Every copy still behaved: started, the unlogged table empty and writable, every index and heap clean before and after `VACUUM (FREEZE)`.
+  - By the registered rule, pgdelta now treats `_mintxid` as a fork (`pgdelta/datadir.py`, tested). Rerun, its copies hold what Omni's backup holds and pass again.
+  - us-central1 was short of small N2 VMs, so the set's idle second VM ran as an `e2-standard-2`.
+- **EXP-44 (OMNI-2) pre-registered and started,** on the owner's go-ahead: Omni's Kubernetes operator on a 3-node GKE cluster. Does the old primary's disk survive an unplanned failover, and does a Sidecar run on standbys?
+
 ## 2026-10-26 (late morning): v1 on a busy Omni; CI green again and kept up to date
 
 - **EXP-42 (OMNI-1b):** does live mode's recovery repair Omni's own `_mintxid` fork?

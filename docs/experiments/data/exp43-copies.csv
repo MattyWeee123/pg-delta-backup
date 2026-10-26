@@ -1,0 +1,4 @@
+copy,u_forks,started,u_rows_at_start,u_rows_after_insert,heap_corruptions,freeze_rc,heap_corruptions_after_freeze,behaves
+Omni's pg_basebackup,_init,True,0,50000,0,0,0,True
+"v1, stopped S",_init main,True,0,50000,0,0,0,True
+"v1, running S",_init,True,0,50000,0,0,0,True

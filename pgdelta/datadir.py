@@ -16,7 +16,8 @@ as sendDir applies them:
 - "unlogged_relations": in a relation directory (a database directory
   base/<oid>, or global/, which PostgreSQL 17's sendDir also treats as
   one), every fork of an unlogged relation except its _init fork; a
-  relation is unlogged when <relfilenode>_init exists beside it;
+  relation is unlogged when <relfilenode>_init exists beside it. AlloyDB
+  Omni's _mintxid counts as a fork, as Omni's own sendDir treats it;
 - "temporary_relations": in a database directory only, temporary relation
   files (t<backend>_<relfilenode>...);
 - "directory_contents": the contents of pg_stat_tmp, pg_replslot,
@@ -90,9 +91,11 @@ WAL_DIRECTORY = 'pg_wal'
 WAL_KEPT_DIRECTORIES = ('archive_status', 'summaries')
 RULES = ('temporary', 'macos', 'named_files', 'unlogged_relations', 'temporary_relations',
          'directory_contents', 'wal')
-# PostgreSQL's parse_filename_for_nontemp_relation and looks_like_temp_rel_name.
-_RELATION = re.compile(r'([1-9][0-9]*)(?:_(fsm|vm|init))?(?:\.[1-9][0-9]*)?')
-_TEMPORARY_RELATION = re.compile(r't[0-9]+_[0-9]+(?:_(?:fsm|vm|init))?(?:\.[0-9]+)?')
+# PostgreSQL's parse_filename_for_nontemp_relation and looks_like_temp_rel_name, with AlloyDB Omni's own fork,
+# _mintxid: Omni's pg_basebackup leaves an unlogged relation's _mintxid fork out like its other forks (EXP-43), so
+# pgdelta does too.
+_RELATION = re.compile(r'([1-9][0-9]*)(?:_(fsm|vm|init|mintxid))?(?:\.[1-9][0-9]*)?')
+_TEMPORARY_RELATION = re.compile(r't[0-9]+_[0-9]+(?:_(?:fsm|vm|init|mintxid))?(?:\.[0-9]+)?')
 _DATABASE_DIRECTORY = re.compile(r'base/[0-9]+')
 GLOBAL_DIRECTORY = 'global'
 _WAL_FILE_NAME = re.compile(r'[0-9A-F]{24}')

@@ -159,7 +159,7 @@ What is sent follows PostgreSQL 17's base-backup exclusions (`src/backend/backup
 | `named_files` | `postgresql.auto.conf.tmp`, `current_logfiles.tmp`, `backup_label`, `tablespace_map`, `backup_manifest`, `postmaster.pid`, `postmaster.opts`, and every name starting with `pg_internal.init` |
 | `temporary` | files and directories whose names start with `pgsql_tmp` |
 | `temporary_relations` | in a database directory (`base/<oid>`) only, temporary relation files (`t<backend>_<relfilenode>...`) |
-| `unlogged_relations` | in a database directory and in `global/` (PostgreSQL 17's `sendDir` treats both as relation directories), every fork of an unlogged relation except its `_init` fork; a relation is unlogged when `<relfilenode>_init` exists beside it |
+| `unlogged_relations` | in a database directory and in `global/` (PostgreSQL 17's `sendDir` treats both as relation directories), every fork of an unlogged relation except its `_init` fork; a relation is unlogged when `<relfilenode>_init` exists beside it. AlloyDB Omni's own `_mintxid` fork counts as a fork, as Omni's `pg_basebackup` treats it ([EXP-43](../docs/experiments/EXP-43-omni-unlogged.md)) |
 | `macos` | `.DS_Store` |
 | `wal` | everything in `pg_wal/` but the segment named by `Latest checkpoint's REDO WAL file`, which after a clean shutdown holds the shutdown checkpoint record; `pg_wal/archive_status/` and `pg_wal/summaries/` are sent empty |
 

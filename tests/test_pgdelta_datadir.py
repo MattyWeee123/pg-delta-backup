@@ -65,6 +65,9 @@ TREE = {
     'base/5/16384': None, 'base/5/16384_fsm': None, 'base/5/16384_vm': None,  # logged relation
     'base/5/16385': 'unlogged_relations', 'base/5/16385.1': 'unlogged_relations',
     'base/5/16385_fsm': 'unlogged_relations', 'base/5/16385_vm': 'unlogged_relations',
+    # AlloyDB Omni's own fork (EXP-43): left out of an unlogged relation, as Omni's pg_basebackup does; sent otherwise.
+    'base/5/16385_mintxid': 'unlogged_relations', 'base/5/16384_mintxid': None,
+    'base/5/t3_16390_mintxid': 'temporary_relations',
     'base/5/16385_init': None,  # the init fork of the unlogged relation is sent
     'base/5/16390_init': None,  # an init fork alone
     'base/5/016385': None,  # a leading zero: not a relation file
