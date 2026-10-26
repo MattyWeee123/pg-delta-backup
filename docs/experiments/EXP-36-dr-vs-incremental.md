@@ -105,3 +105,11 @@ Data: `docs/experiments/data/exp36-cells-b.csv`; raw `results/exp04/exp36b`; fig
   - Incremental sends fewer bytes for local changes (17 MB against 29) and the same for scattered ones.
 - **pgdelta's DR role is therefore wider than the copy without history.** Where history does exist, it is as fast or faster than native incremental at 60–120 ms, and it needs no history: no `summarize_wal`, no chain of manifests, and no full backup as the base. Native incremental keeps its advantages at LAN round trips (EXP-04b) and in bytes for local changes.
 - **Next for D02:** a second session on the XFS cells (the deciding ones, near their line), and the source's CPU for each, which isn't compared here.
+
+## Second session on XFS, pre-registered (October 26, before it ran)
+
+**Why:** every XFS cell's ratio lies within 20% of 1, and the D02 verdict rests on them, so rule 11 (K10, as narrowed) asks for a second session on fresh VMs.
+
+**What runs:** part B's design on a fresh default pair, dest reformatted to XFS, with methods `full`, `incremental_cfr` and `pgdelta_direct_inplace_bbr`, order seed 362, to `exp36c`.
+
+**Prediction:** `incremental_cfr` ÷ v1 again lies between 0.90 and 1.10 in every cell, so the tie stands at two sessions. If either tool is faster by more than 10% in a cell in both sessions, that cell's verdict follows the two sessions.
