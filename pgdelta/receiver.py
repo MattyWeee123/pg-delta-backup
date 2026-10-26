@@ -60,6 +60,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
@@ -438,7 +440,11 @@ class _Receiver:
         self.written_verify = {'nodes_kept': 0, 'nodes_composed': 0, 'nodes_reread': 0, 'pages_reread': 0}
         # --compress zstd, when the sender offered it: the codec if this end can decompress, and what it did.
         self.codec = self.compress_offer = None
-        self.decompress_counts = {'runs': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0}
+        # EXP-47: compressed runs are decompressed on a pool of `jobs` threads as they arrive and written in order;
+        # `seconds` sums the decompressing, `wait_seconds` is the time this loop waited for the oldest run.
+        self.decompressor, self.decompressing = None, deque()
+        self.decompress_counts = {'runs': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0, 'wait_seconds': 0.0,
+                                  'threads': 0}
         # EXP-13's protocol timers, on the time.perf_counter() clock: publish_s counts from `launched` (the
         # receive command's start) and hello_wait_s from `listening` (its listener's), each else from here.
         started = time.perf_counter()
@@ -523,6 +529,8 @@ class _Receiver:
             if self.pool is not None:
                 # Safe even if a thread above is still inside the pool: its calls are cancelled, not hung.
                 self.pool.close()
+            if self.decompressor is not None:
+                self.decompressor.shutdown(wait=False, cancel_futures=True)
             if self.current is not None:
                 os.close(self.current.fd)
                 if self.current.basis_fd is not None:
@@ -676,12 +684,18 @@ class _Receiver:
                     protocol.FILE_DONE: self._file_done}
         if getattr(self, 'codec', None) is not None:
             handlers[protocol.PAGE_DATA_ZSTD] = self._page_data_zstd
+            threads = max(1, self.jobs)
+            self.decompressor = ThreadPoolExecutor(threads, thread_name_prefix='pgdelta-unzstd')
+            self.decompress_counts['threads'] = threads
         if self.appends:
             handlers[protocol.APPEND] = self._append
         while True:
             waited = time.perf_counter()
             code, payload = self._recv()
             self.recv_wait_seconds += time.perf_counter() - waited
+            if self.decompressing and code not in (protocol.PAGE_DATA_ZSTD, protocol.LEAF_REQUEST):
+                # Plain pages, a file's end, an append and the end: every queued run is written first.
+                self._drain_decompressed()
             if code == protocol.COMPLETE:
                 return self._complete(payload)
             if code not in handlers:
@@ -979,21 +993,40 @@ class _Receiver:
         self.counts.basis_copies += 1
 
     def _page_data_zstd(self, payload):
-        """A compressed run (--compress zstd): decompressed within what the file can still hold, then as PAGE_DATA."""
+        """A compressed run (--compress zstd): queued for the pool, decompressed within what the file can still
+        hold, and written in order (at most two per thread wait)."""
         index, first, packed = protocol.decode_page_data(payload)
         if index >= len(self.files):
             raise ProtocolError(f'PAGE_DATA_ZSTD for unknown file {index}')
         limit = max(0, min(self.files[index].size - first * self.block, protocol.MAX_FRAME))
+        future = self.decompressor.submit(self._decompress_run, bytes(packed), limit)
+        self.decompressing.append((index, first, len(packed), future))
+        while len(self.decompressing) > 2 * self.decompress_counts['threads']:
+            self._write_decompressed()
+
+    def _decompress_run(self, packed, limit):
+        started = time.perf_counter()
+        return self.codec.decompress(packed, limit), time.perf_counter() - started
+
+    def _drain_decompressed(self):
+        while self.decompressing:
+            self._write_decompressed()
+
+    def _write_decompressed(self):
+        """The oldest queued run, written as PAGE_DATA would be."""
+        index, first, packed_length, future = self.decompressing.popleft()
+        counts = self.decompress_counts
         started = time.perf_counter()
         try:
-            data = self.codec.decompress(packed, limit)
+            data, seconds = future.result()
         except ValueError as exc:
             raise ProtocolError(f'PAGE_DATA_ZSTD for {self.files[index].path} does not decompress within the '
                                 f'file: {exc}') from None
-        self.decompress_counts['seconds'] += time.perf_counter() - started
-        self.decompress_counts['runs'] += 1
-        self.decompress_counts['wire_bytes'] += len(packed)
-        self.decompress_counts['raw_bytes'] += len(data)
+        counts['wait_seconds'] += time.perf_counter() - started
+        counts['seconds'] += seconds
+        counts['runs'] += 1
+        counts['wire_bytes'] += packed_length
+        counts['raw_bytes'] += len(data)
         self._write_run(index, first, memoryview(data))
 
     def _page_data(self, payload):

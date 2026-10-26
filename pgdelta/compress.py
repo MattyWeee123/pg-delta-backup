@@ -45,7 +45,6 @@ class Codec:
             # (the sender compresses on a pool, EXP-46). The frame records its content size, so decompress()
             # can check it before allocating.
             self._local = threading.local()
-            self._decompressor = module.ZstdDecompressor()
 
     def compress(self, data):
         if self.backend == 'stdlib':
@@ -69,7 +68,10 @@ class Codec:
             size = self._module.frame_content_size(bytes(data))
             if size < 0 or size > limit:
                 raise ValueError('no content size, or over the limit')
-            stream = self._decompressor.decompressobj()
+            decompressor = getattr(self._local, 'decompressor', None)
+            if decompressor is None:  # one per thread, as the compressors (the receiver decompresses on a pool)
+                decompressor = self._local.decompressor = self._module.ZstdDecompressor()
+            stream = decompressor.decompressobj()
             out = stream.decompress(bytes(data))
             if not getattr(stream, 'eof', True) or getattr(stream, 'unused_data', b'') or len(out) != size:
                 raise ValueError('not one complete frame of its declared size')

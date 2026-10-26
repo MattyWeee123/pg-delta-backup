@@ -92,13 +92,17 @@ class SessionTests(unittest.TestCase):
             new[page * PAGE + 7:page * PAGE + 30] = rng.randbytes(23)
         write_tree(self.source, {'base/1/9': bytes(new)})
         write_tree(self.basis, {'base/1/9': old})
-        outcome = transfer(self.source, self.basis, self.output, compress='zstd', jobs=3)
+        outcome = transfer(self.source, self.basis, self.output, compress='zstd', jobs=3, receiver_jobs=3)
         self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
         self.assertIsNone(outcome.receiver_error, repr(outcome.receiver_error))
         self.assertEqual(snapshot(self.output), snapshot(self.source))
         stats = outcome.sender['compress']
         self.assertEqual(stats['threads'], 3)
         self.assertGreater(stats['runs'], 100)
+        # EXP-47: the receiver decompresses on its own pool, and writes in order too.
+        received = outcome.sender['receiver']['compress']
+        self.assertEqual(received['threads'], 3)
+        self.assertEqual(received['runs'], stats['runs_compressed'])
         self.assertGreaterEqual(stats['wait_seconds'], 0)
 
     def test_a_receiver_without_zstd_takes_plain_pages(self):
