@@ -8,7 +8,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
-## 2026-10-26 (late morning): v1 on a busy Omni; CI green again
+## 2026-10-26 (late morning): v1 on a busy Omni; CI green again and kept up to date
 
 - **EXP-42 (OMNI-1b):** does live mode's recovery repair Omni's own `_mintxid` fork?
   - **Yes:** Omni logs that fork with PostgreSQL's generic WAL records, with full-page images (16,631 references and 56 images in 10 s of pgbench).
@@ -18,7 +18,13 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - the hash refusal test patched the wrong name, so it passed only where `blake3` is installed (my Mac), not on GitHub's runner;
   - a `parcopy` test raced on which of two correct refusals fired first.
 
-  Both are fixed and the workflow is green (1,539 tests, 239 skipped there). From now on I check CI after code pushes. Whether to update CI or remove it is the owner's call.
+  Both are fixed and the workflow is green. From now on I check CI after code pushes.
+- **CI kept up to date (owner's decision):**
+  - Python 3.11, as on the Debian 12 VMs;
+  - numpy and matplotlib installed, so the analysis and figure tests run there too (skipped tests fell from 239 to 63);
+  - it runs only for changes the tests read: code, `infra/`, and the few documents and data files the tests check.
+
+  No `blake3` there, on purpose: that is where `--hash auto`'s BLAKE2b fallback gets tested. The tests that start real PostgreSQL clusters still run on the Mac and in the VM experiments, not on GitHub.
 
 ## 2026-10-26 (morning): live mode's worker cap scales with the source; the first run on Omni; checksums don't change the bytes
 
