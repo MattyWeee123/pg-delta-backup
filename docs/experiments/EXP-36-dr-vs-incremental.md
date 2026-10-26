@@ -116,7 +116,7 @@ Data: `docs/experiments/data/exp36-cells-b.csv`; raw `results/exp04/exp36b`; fig
 
 ## Second session: results (00:40–01:00 UTC, fresh VMs, XFS; 36 runs, all verified; deleted)
 
-Data: `docs/experiments/data/exp36-cells-c.csv`; raw `results/exp04/exp36c`.
+Data: `docs/experiments/data/exp36-cells-c.csv`; raw `results/exp04/exp36c`; figure `analysis/exp36.py --tag=-c` (`docs/figures/exp36-incremental-c.svg`).
 
 | Workload, condition | `incremental_cfr` ÷ v1, session 1 | **session 2** |
 |---|---:|---:|
