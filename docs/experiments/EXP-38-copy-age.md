@@ -1,6 +1,6 @@
 # EXP-38: How old can the copy be before pgdelta stops beating a full copy at DR?
 
-Status: **pre-registered October 26, 2026, before the counted run** (a smoke at scale 2 checked the script). Ledger test T11b, lean: the pitch by the age of the old copy. Local (the Mac): bytes measured, DR time projected from EXP-24's measurements.
+Status: **done October 26, 2026 (scale 20, 52 s; all three predictions held): for TPC-B-like OLTP, scattered evenly, the changed share reached the DR crossover against one `pg_basebackup` (75%) after about 58,000 transactions; for hot, local changes it was 5% after 300,000.** Pre-registered before the counted run (a smoke at scale 2 checked the script). Ledger test T11b, lean: the pitch by the age of the old copy. Local (the Mac): bytes measured, DR time projected from EXP-24's measurements.
 
 ## Question
 
@@ -33,3 +33,33 @@ pgdelta sends the pages that changed since the old copy was taken. The older the
 - One synthetic workload per pattern; real OLTP mixes hot and cold data.
 - Bytes are measured, and time is projected from one condition's model, not measured at each age.
 - The projection is for BBR v1 on EXP-24's VMs; BLAKE3 would shorten c and move the crossover up.
+
+## Results (scale 20: 345–365 MB of relation files)
+
+Data: `docs/experiments/data/exp38-age.csv`; raw `results/bytes/exp38/results.jsonl`; figure `analysis/exp38.py`.
+
+![Changed pages against transactions, and the DR crossovers](../figures/exp38-age.svg)
+
+| Transactions | 1,000 | 3,000 | 10,000 | 30,000 | 100,000 | 300,000 |
+|---|---:|---:|---:|---:|---:|---:|
+| tpcb: share pgdelta sends | 4.7% | 12.5% | 31.6% | 60.5% | **87.6%** | 91.4% |
+| tpcb: projected v1 at DR ÷ one `pg_basebackup` | 0.34 | 0.42 | 0.59 | 0.86 | 1.11 | 1.15 |
+| hot: share pgdelta sends | 0.2% | 0.2% | 0.4% | 0.7% | 1.9% | **5.0%** |
+
+**Crossovers** (interpolated in log transactions):
+- **tpcb** reaches 75.3% (v1 = one `pg_basebackup` at DR) at about **58,000 transactions**, and 64.7% (v1 = the parallel copy) at about **36,000**;
+- **hot** never reaches either.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: tpcb's share reaches 75% within 100,000 transactions** | **Held:** about 58,000 |
+| 2 | hot stays under 10% through 300,000 | **Held:** 5.0% |
+| 3 | tpcb grows past 75% without reaching 100% | **Held:** 91.4% at 300,000 |
+
+## What follows
+
+- **The pitch, by workload, at DR round trips:**
+  - **for local changes,** pgdelta's lead holds at any age measured: 300,000 transactions changed 5% of the database;
+  - **for evenly scattered OLTP,** the old copy must be recent: about 58,000 transactions behind (a minute at a thousand a second) before pgdelta and one `pg_basebackup` stream take the same time, and 36,000 against a parallel copy. Past that it is up to 15% slower, since it still hashes both copies.
+- **For an operator:** the crossover is a share of pages changed, about 65–75% at DR, which WAL volume or `pg_stat` counters can estimate. A tool could even switch to a full copy when its own first pass finds most nodes changed. That isn't built.
+- **Real OLTP sits between these two:** most production tables are hot in parts and cold in others. EXP-01's change-pattern study measured some of that range.
