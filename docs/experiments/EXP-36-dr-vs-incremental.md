@@ -35,3 +35,18 @@ EXP-24's harness command (`run_exp04.py`) with:
 - One session, 2 repeats, 2.1 GB, local NVMe.
 - Incremental's cost of keeping history (`summarize_wal` on, a manifest kept) isn't measured.
 - Incremental runs as released: the host's cubic and default buffers on default hosts. The comparison is of the tools as they ship.
+
+## Part B, registered after part A's results and before it ran (October 26)
+
+**Why:** in part A, incremental's time was its capture plus `pg_combinebackup`, which writes a whole new copy. On ext4 that took 3.9–4.0 s for 2.1 GB, and it decided the comparison: incremental's capture alone (2.0–3.7 s hot, 4.7–14.2 s uniform) was shorter than v1's time in most cells. The firmness audit's INC plan already called for the fair version: the destination on XFS, where `pg_combinebackup --copy-file-range` shares unchanged blocks with the previous backup instead of copying them (`incremental_cfr`).
+
+**What runs:** the same VM pair, dest's `/data` reformatted as XFS with reflinks (`infra/gcp/reformat_dest_xfs.sh`), and the same command with methods `full`, `incremental` (`--copy`), `incremental_cfr` and `pgdelta_direct_inplace_bbr`, order seed 361.
+
+**Predictions (B):**
+1. `incremental_cfr`'s combine takes under 1 s at every cell.
+2. **Deciding: `incremental_cfr` takes at most v1's time in every hot cell** (its capture alone was 2.0–3.7 s against v1's 3.4–4.8 s).
+3. For uniform, `incremental_cfr` takes at most v1's time at 60 and 120 ms on tuned hosts. At 60 ms on default hosts both are bound by one window-limited stream, so it is provisional either way.
+
+**What follows (B):**
+- **If 2 holds:** D02 reads as follows. Where history exists and B0's filesystem supports reflinks, native incremental is faster at DR too. On ext4 (no reflinks), v1 in place is faster, because `pg_combinebackup` has to write a whole new copy. pgdelta's DR role is the copy without history, plus ext4 destinations.
+- **If not:** v1's DR lead over incremental holds on XFS too, and D02 changes. Where history exists, v1 is still faster at DR round trips, and native incremental's advantage is its bytes alone.
