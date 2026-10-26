@@ -1,9 +1,46 @@
 name: Experiment tests
+# Kept up to date (owner's decision, October 26, 2026):
+# - Python 3.11, as on the Debian 12 VMs that run pgdelta in the experiments (the Mac runs a newer one);
+# - the analysis packages, so the figure scripts' tests run instead of skipping;
+# - only for pushes and pull requests that change what the tests read: code, infra, and the few documents and data
+#   files the tests check (FIRMNESS.md against its CSV, three experiment specs, docs/experiments/data);
+# - no blake3, on purpose: this is where --hash auto's BLAKE2b fallback is tested (the Mac has blake3);
+# - no PostgreSQL: the tests that start real clusters run on the Mac before each push and in the VM experiments.
 on:
   push:
+    paths:
+      - 'pgdelta/**'
+      - 'tests/**'
+      - 'experiments/**'
+      - 'analysis/**'
+      - 'benchmarks/**'
+      - 'infra/**'
+      - 'docs/FIRMNESS.md'
+      - 'docs/experiments/EXP-11-full-copy-baseline.md'
+      - 'docs/experiments/EXP-12-source-slowdown.md'
+      - 'docs/experiments/EXP-13-latency-transport.md'
+      - 'docs/experiments/data/**'
+      - '.github/workflows/experiment-tests.yml'
   pull_request:
+    paths:
+      - 'pgdelta/**'
+      - 'tests/**'
+      - 'experiments/**'
+      - 'analysis/**'
+      - 'benchmarks/**'
+      - 'infra/**'
+      - 'docs/FIRMNESS.md'
+      - 'docs/experiments/EXP-11-full-copy-baseline.md'
+      - 'docs/experiments/EXP-12-source-slowdown.md'
+      - 'docs/experiments/EXP-13-latency-transport.md'
+      - 'docs/experiments/data/**'
+      - '.github/workflows/experiment-tests.yml'
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: experiment-tests-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -11,7 +48,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: analysis/requirements.txt
+      - run: python -m pip install -r analysis/requirements.txt
       - run: python -m py_compile benchmarks/benchmark.py
       - run: python -m unittest discover -s tests -v
       - run: python experiments/chunk_demo.py
