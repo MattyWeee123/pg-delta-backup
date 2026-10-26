@@ -44,7 +44,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | Question | Answer |
 |---|---|
 | Reuse after `VACUUM FULL` / `CLUSTER`? | **None, by any strategy:** cross-file page matching and content-defined chunking found nothing (EXP-37). Positional pages lose nothing |
-| Fewer bytes on slow links? | 512-byte blocks would send **5× fewer bytes** for scattered changes (EXP-37, not built). **zstd is built** (`--compress zstd`): 2.8× fewer bytes, but as built it made scattered changes 1.3–1.5× slower at 2 Gbit/s, since one core compresses only about 140 MB/s in the sending thread (EXP-45). It pays below about 0.7 Gbit/s, and moving it onto the workers is next |
+| Fewer bytes on slow links? | 512-byte blocks would send **5× fewer bytes** for scattered changes (EXP-37, not built). **zstd is built** (`--compress zstd`, opt-in): 2.8× fewer bytes. Compressed on a pool beside sending, **it made scattered changes 1.9× faster at 0.5 Gbit/s** (6.8 s against 13.1; `pg_basebackup` 36.9) and was even at 2 Gbit/s (EXP-45, -46). For DR links of about 1 Gbit/s and slower |
 
 ![Bytes by strategy](figures/exp37-bytes.svg)
 
@@ -56,6 +56,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | `--verify-scope` | `written` in place, `all` for a new copy | EXP-31, -32, -33, -35 |
 | `--jobs` with `--source-kind live` | at most CPUs ÷ 4, from 1 to 4 | EXP-28, -30, -39 |
 | `--congestion-control` | the host's default; `bbr` opt-in | EXP-24 (speed), EXP-26 (fairness) |
+| `--compress` | `off`; `zstd` opt-in for DR links of about 1 Gbit/s and slower | EXP-37, -45, -46 |
 
 ## Still open
 
@@ -63,4 +64,4 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 - **Larger sizes:** extrapolated from scale models only; tests beyond them may need a disk-quota increase.
 - **The rest of the slowdown tests:** a moderate load, a large dirty set, a source near saturation at 16 vCPUs.
 - **The timing model's disk term.**
-- **The bandwidth levers:** zstd on the workers (EXP-45's next step), and sub-page deltas, measured but not built.
+- **The bandwidth levers:** decompression pipelined on the receiver (what limits zstd at 2 Gbit/s, EXP-46), and sub-page deltas, measured but not built.

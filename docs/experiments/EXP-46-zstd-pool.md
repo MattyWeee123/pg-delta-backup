@@ -1,6 +1,10 @@
 # EXP-46: With compression on a pool beside sending, does zstd make v1 faster at DR?
 
-Status: **session 1 done October 26, 2026; provisional, a second session due (K10).** The pool took compression off the sending thread (it waited 0.35 s, not 4+ s). But for scattered changes zstd took 1.04 and 0.97 of v1's time at 60 and 120 ms, missing the deciding ≤ 0.90; both lie within 20% of the bar. Pre-registered before any run. EXP-45's registered next step: its deciding prediction failed because the sender compressed in the thread that sends. EXP-45's design and VMs, about an hour.
+Status: **done October 26, 2026 (two sessions, 60 runs, 12 of them on the exploratory link; all passing; BBR in effect on all 40 v1 runs).**
+- **The deciding prediction failed, firmly:** at 2 Gbit/s, compressing on the pool made scattered changes neither faster nor slower: 1.05 and 0.97 of v1's time at 60 and 120 ms, both sessions alike. The pool did remove EXP-45's penalty, and the sending thread waited only 0.3–0.5 s.
+- **The exploratory 0.5 Gbit/s link is where zstd pays:** scattered changes took 0.52 of v1's time, 6.84 s against 13.12, and 0.19 of `pg_basebackup`'s.
+
+Pre-registered before any run. EXP-45's registered next step: its deciding prediction failed because the sender compressed in the thread that sends. EXP-45's design and VMs, about an hour.
 
 ## Question
 
@@ -81,3 +85,38 @@ Data: `docs/experiments/data/exp46-cells-s1.csv`; raw `results/exp04/exp46/`; an
 - **An exploratory condition is added** and doesn't touch the decision: `0.5:60:tuned` (0.5 Gbit/s, 60 ms). There the network dominates, and the same arms are run.
   - **Registered now for it:** for uniform at 0.5 Gbit/s, v1 with zstd takes at most 0.70 of v1. Sending 610 MB at about 60 MB/s takes about 10 s; 219 MB takes about 3.6 s, and decompressing about 1 s.
 - **The verdict on prediction 1** combines both sessions' medians per cell (4 runs). If both sessions miss 0.90, it fails firmly.
+
+## Results: both sessions
+
+Data: `docs/experiments/data/exp46-cells.csv` (medians of all runs per cell; each session's ratio beside them); raw `results/exp04/exp46/` and `results/exp04/exp46b/`; analysis `analysis/exp46.py --sweep results/exp04/exp46 --sweep results/exp04/exp46b`. Session 2 ran on fresh VMs, also in us-central1-a, and its 24 v1 runs all report BBR.
+
+![Both sessions, with the exploratory 0.5 Gbit/s link](../figures/exp46-zstd.svg)
+
+| Uniform 1% (scattered) | `pg_basebackup` | v1 | v1 + zstd on the pool | zstd ÷ v1 | session 1 | session 2 |
+|---|---:|---:|---:|---:|---:|---:|
+| 2 Gbit/s, 60 ms | 11.58 s | 5.77 s | 6.07 s | **1.05** | 1.04 | 1.07 |
+| 2 Gbit/s, 120 ms | 13.19 s | 7.49 s | 7.29 s | **0.97** | 0.97 | 0.97 |
+| **0.5 Gbit/s, 60 ms** (exploratory) | 36.87 s | 13.12 s | **6.84 s** | **0.52** | – | 0.52 |
+
+| Hot 1% (local) | `pg_basebackup` | v1 | v1 + zstd | zstd ÷ v1 |
+|---|---:|---:|---:|---:|
+| 2 Gbit/s, 60 ms | 11.59 s | 3.42 s | 3.35 s | 0.98 |
+| 2 Gbit/s, 120 ms | 13.40 s | 4.50 s | 4.33 s | 0.96 |
+| 0.5 Gbit/s, 60 ms | 36.69 s | 3.66 s | 3.41 s | 0.93 |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Deciding: uniform at most 0.90 of v1 at both round trips (2 Gbit/s)** | **Failed:** 1.05 and 0.97, both sessions alike (the revision's rule: both sessions miss, so it fails firmly) |
+| 2 | hot within 10% of v1 | **Held:** 0.96–0.98 |
+| 3 | uniform: the sending thread waits at most 1.1 s | **Held:** 0.28–0.52 s in both sessions |
+| 4 | bytes at least 2-fold fewer; faster than `pg_basebackup` everywhere | **Held:** 2.78×; 0.19–0.57 of it |
+| exploratory | uniform at 0.5 Gbit/s at most 0.70 of v1 | **Held:** 0.52 |
+
+## What follows
+
+- **`--compress zstd` is recommended for DR links of about 1 Gbit/s and slower, beside BBR, and stays off by default.**
+  - At 0.5 Gbit/s it made scattered changes 1.9× faster: 13.1 s became 6.8 s, against 36.9 s for `pg_basebackup`.
+  - At 2 Gbit/s it gains nothing, and loses nothing.
+  - The break-even lies between the two and wasn't measured. "About 1 Gbit/s" is a judgment from the two points, not a measurement.
+- **Why it stops paying at 2 Gbit/s** (session 1's timers, after the fact): the bytes saved shorten the sending by 0.5–0.9 s, and the receiver spends about as long decompressing in its main loop. Pipelining decompression on the receiver, as the sender now compresses, is the next lever, if a fast-link win matters.
+- **For the pitch:** at DR, pgdelta was already 0.50–0.57 of one `pg_basebackup` stream at 2 Gbit/s for scattered changes. On a 0.5 Gbit/s link it is 0.36 without compression and **0.19 with it**.

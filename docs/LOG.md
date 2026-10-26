@@ -8,6 +8,17 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-26 (evening): zstd on a pool: even at 2 Gbit/s, 1.9× faster at 0.5 Gbit/s
+
+- **The sender now compresses on a pool of `--jobs` threads** beside its sending thread, in order. Measured first on real hex-filler pages: 4 threads compress as fast as 4 processes, since zstd releases Python's lock while it compresses.
+- **EXP-46**, two sessions on fresh VMs, BBR verified on all 40 v1 runs:
+  - **at 2 Gbit/s** the pool removed EXP-45's penalty (the sender waited 0.3–0.5 s, not 4+), but scattered changes took 1.05 and 0.97 of v1's time. The deciding prediction failed in both sessions. The receiver's decompression, in its main loop, costs about what the smaller sending saves;
+  - **at 0.5 Gbit/s** (exploratory, registered before the session) scattered changes took 0.52 of v1's time, 6.8 s against 13.1, against `pg_basebackup`'s 36.9.
+  - So `--compress zstd` is recommended for DR links of about 1 Gbit/s and slower, opt-in.
+- **Practicalities:**
+  - us-central1-b was out of `n2-standard-8` with local SSDs, so both sessions ran in us-central1-a;
+  - one background job had hung on a stray `python -` reading its input, and was stopped. VMs deleted after each fetch.
+
 ## 2026-10-26 (afternoon): zstd on the wire, built and measured; it doesn't pay as built
 
 - **`--compress zstd` built:** negotiated like the hash, opt-in and tested with both zstd bindings. CI now installs `zstandard`, the binding the VMs use.
