@@ -2,6 +2,9 @@
 
 Status: **done October 26, 2026 (scale 10, 30 s; all four predictions held): after a rewrite, neither cross-file page matching nor content-defined chunking found a single reusable byte, so positional pages lose nothing there. For scattered updates, 512-byte blocks would send 5.0× fewer bytes and zstd 2.8× fewer, at 520–550 MiB/s per core.** Pre-registered before the counted run (a smoke at scale 2 informed the predictions, and says so). Ledger test T4, lean: its three open rows. Local (the Mac); no network, only bytes and CPU.
 
+*Noted October 26, from EXP-41: this experiment's clusters came from PostgreSQL 17's `initdb` with its defaults, so data checksums were off; its documents didn't say so. EXP-41 found checksums change pgdelta's positional page counts by at most 0.16 points.*
+
+
 ## Questions (the ledger's open rows)
 
 - **D17:** pgdelta sends whole 8 KiB pages. How many fewer bytes would a sub-page delta send?

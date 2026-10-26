@@ -9,7 +9,7 @@ pgdelta sends the pages that changed since the old copy was taken. The older the
 ## Design
 
 `experiments/bytes/exp38.py`:
-- **The template:** `pgbench -i -s 20` (about 300 MB of relation files).
+- **The template:** `pgbench -i -s 20` (about 300 MB of relation files), from PostgreSQL 17's `initdb` with its defaults, so data checksums off (*noted October 26, from EXP-41: this wasn't said before; EXP-41 found checksums change these shares by at most 0.16 points*).
 - **Per workload:** a clone is B0, the old copy, and S runs the workload in steps to 1,000, 3,000, 10,000, 30,000, 100,000 and 300,000 transactions (8 clients). After each step S is checkpointed and stopped, and the bytes pgdelta would send (its positional page comparison) are measured against B0.
 - **Workloads:**
   - **tpcb:** pgbench's built-in TPC-B-like script, every account equally likely;

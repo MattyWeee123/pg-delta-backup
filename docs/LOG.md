@@ -8,7 +8,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
-## 2026-10-26 (morning): live mode's worker cap scales with the source; the first run on Omni
+## 2026-10-26 (morning): live mode's worker cap scales with the source; the first run on Omni; checksums don't change the bytes
 
 - **EXP-39 (T10b's larger source):** on a 16-vCPU busy primary (three VMs, 28 vCPUs, 10 runs in 6 minutes), v1 with BLAKE3 at 4 workers met O4 and refreshed in 2.01 s, 20% faster than at 2 (2.52 s) and 2.1× faster than `pg_basebackup` (4.15 s). All three predictions held, so by the registered rule live mode's default `--jobs` is now at most the source's CPUs ÷ 4, from 1 to 4 (`pgdelta/cli.py`, tested).
   - The test was easy for every arm: the source had about 7 idle vCPUs at 0.6 of its capacity, and not even `pg_basebackup` cost the load measurable work.
@@ -18,6 +18,8 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - v1 refreshed Omni 17.10 data directories correctly, with Omni's own binaries. From a stopped Omni B came out byte-identical to S; from a running Omni, Omni recovered B from its `backup_label`. Both started with S's data.
   - **A failed prediction, and a fix:** pgdelta didn't refuse an Omni 16.14 directory, although D08 limits it to PostgreSQL 17 and 18. Nothing in the code checked the major version. It now refuses an S, a live server or an in-place B of another major version (tested; rerun on the VM, Omni 16.14 was refused and 17.10 still refreshed).
   - Omni's container ships with data checksums and `wal_log_hints` off (no `pg_rewind` after a failover) and `summarize_wal` off. Its directory adds a `_mintxid` relation fork, 8 shared catalogs, 2 databases, an internal log and telemetry; pgdelta copies them as plain files.
+- **EXP-41 (Checksums-Omni):** since Omni ships with data checksums off, EXP-38's workloads ran with checksums on and off, paired. The shares of pages sent matched within 0.16 points in all 6 cells, so byte results carry to Omni's container.
+  - **A correction found on the way:** EXP-37 and EXP-38 had run with checksums off (PostgreSQL 17's `initdb` default) without saying so. FIRMNESS.md's "all with data checksums on" was wrong for them. Both documents now say it.
 
 ## 2026-10-26 (early morning): the XFS tie repeats; what pages leave on the table; how old the copy can be
 

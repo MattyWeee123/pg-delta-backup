@@ -12,7 +12,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | Wrong copies from a live, busy source? | **None in 1,000 trials** (EXP-25), and **1,000 more** with BLAKE3 and one-pass verification (EXP-33) | EXP-25: below 0.69% at 99.9%. EXP-33 claims no bound: a control fell below its bar |
 | Would the checks catch a wrong copy? | **Yes: 76 of 76** wrong copies of the read-during-start kind were caught, and no correct copy was flagged (EXP-27, EXP-35, with an oracle) | Measured for that kind of fault |
 | A killed refresh? | B is always left untouched, blocked from starting, or complete (EXP-17, -25, -32, -33) | Several hundred kills |
-| On AlloyDB Omni? | **Omni 17.10, yes:** stopped, B came out byte-identical; live, Omni recovered B; both started with S's data (EXP-40). Omni 16 is now refused, which the probe found missing | One refresh of each kind, in a container |
+| On AlloyDB Omni? | **Omni 17.10, yes:** stopped, B came out byte-identical; live, Omni recovered B; both started with S's data (EXP-40). Omni 16 is now refused, which the probe found missing. Omni ships with data checksums off, which doesn't change the bytes sent (EXP-41: within 0.16 points) | One refresh of each kind, in a container |
 | A power loss? | **16 of 16 hard resets** left B blocked (refusing to start) or complete, never wrong (EXP-34) | An existence check |
 
 ![1,000 live refreshes](figures/exp25-live.svg)
@@ -58,7 +58,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 
 ## Still open
 
-- **Omni beyond the probe:** a live campaign on Omni (whether its `_mintxid` fork is repaired by recovery like a page), Omni on Kubernetes (OMNI-2), and byte counts with data checksums off, as Omni's container ships.
+- **Omni beyond the probe:** a live campaign on Omni (whether its `_mintxid` fork is repaired by recovery like a page), and Omni on Kubernetes (OMNI-2).
 - **Larger sizes:** extrapolated from scale models only; tests beyond them may need a disk-quota increase.
 - **The rest of the slowdown tests:** a moderate load, a large dirty set, a source near saturation at 16 vCPUs.
 - **The timing model's disk term.**
