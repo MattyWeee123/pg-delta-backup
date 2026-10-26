@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pgdelta import hashing, protocol, receiver as receiver_module
+from pgdelta import hashing, protocol, receiver as receiver_module, sender as sender_module
 from pgdelta.errors import InvalidInput, ProtocolError
 
 from pgdelta_support import PAGE, snapshot, transfer, write_tree
@@ -63,7 +63,9 @@ class NegotiationTests(unittest.TestCase):
         self.assertEqual(outcome.sender['hash'], 'blake2b')
 
     def test_a_receiver_that_can_use_nothing_offered_refuses(self):
-        with mock.patch.object(hashing, 'offer', lambda: ['blake3']), \
+        # The sender's own name for offer(): patching hashing.offer alone left the real one in place, so without
+        # the blake3 package (CI) nothing was offered and nothing refused.
+        with mock.patch.object(sender_module, 'offer', lambda: ['blake3']), \
                 mock.patch.object(receiver_module, 'usable', lambda algorithm: False):
             outcome = self.run_auto()
         self.assertIsInstance(outcome.receiver_error, InvalidInput)

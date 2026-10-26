@@ -515,7 +515,9 @@ class Copies(unittest.TestCase):
             parcopy.Sender(self.datadir, self.stub, 3, MIB).run(f'{host}:{port}')
         thread.join(60)
         self.assertIsInstance(outcome['error'], ProtocolError)
-        self.assertIn('the sender has 3 streams, this receiver 2', str(outcome['error']))
+        # Either check may fire first: the header's stream count, or the third data stream arriving before the
+        # control connection (the accept order is the network's).
+        self.assertRegex(str(outcome['error']), r'the sender has 3 streams, this receiver 2|unexpected data stream 2 \(of 2\)')
 
     def test_the_command_line_end_to_end(self):
         output, stats = self.root / 'O-cli', self.root / 'stats'
