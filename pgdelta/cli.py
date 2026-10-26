@@ -161,7 +161,7 @@ def _compress_option(parser):
     parser.add_argument('--compress', choices=('off', 'zstd'), default='off',
                         help='compress the pages sent with zstd (level 3), where the receiver can decompress; '
                              'otherwise they go plain. Runs are compressed on --jobs threads beside the sending '
-                             'thread, and decompressed on the receiver's --jobs threads. For DR links below about '
+                             'thread, and decompressed on --jobs threads at the receiver. For DR links below about '
                              '1.8 Gbit/s: scattered changes took 0.52 of the time at 0.5 Gbit/s, 0.75 at 1, and '
                              'were even at 2 (EXP-46, EXP-47) (default: %(default)s)')
 
