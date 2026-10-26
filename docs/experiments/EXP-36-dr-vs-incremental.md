@@ -55,7 +55,7 @@ Data: `docs/experiments/data/exp36-cells.csv`; raw `results/exp04/exp36`; figure
 |---|---|---|
 | 1 | **Deciding: incremental takes at most v1's time in every cell** | **Failed:** v1 was faster in all 6 cells (incremental 1.14–1.74× v1) |
 | 2 | For hot, incremental sends at most a third of v1's bytes | **Failed:** 17 MB against 29 (0.59) |
-| 3 | For uniform at 60 ms on default hosts, both bound by one window-limited stream | **Held:** 16.0 and 18.3 s, both near 45 s ÷ 2.8 of the full copy's |
+| 3 | For uniform at 60 ms on default hosts, both bound by one window-limited stream | **Held:** the full copy moved 2.1 GB in 45 s there (about 47 MB/s, one window-limited stream); at that rate either tool's 605 MB takes about 13 s, and they took 16.0 (v1) and 18.3 s (incremental, 4 s of it the combine) |
 
 **Why:** incremental's time is its capture plus `pg_combinebackup`, one after the other. The capture alone was 2.0–3.7 s for hot and 4.7–14.2 s for uniform, shorter than v1 in most cells. But `pg_combinebackup --copy` then wrote a whole new 2.1 GB copy on ext4, in 3.9–4.0 s every time. v1 patches B in place and writes only the changed pages. So part A's result rests on how the combine copies, which part B tests.
 
