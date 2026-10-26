@@ -58,8 +58,9 @@ T12_V1_ARMS = ('pgdelta_direct_inplace_w1', 'pgdelta_direct_inplace_w16', 'pgdel
 # EXP-23's follow-up: v1's path asking for BBR on its data socket (pgdelta send --congestion-control bbr). Kept
 # apart from EXP-13's registered side arms, which analysis/exp13.py reads as exactly four.
 CC_V1_ARMS = ('pgdelta_direct_inplace_bbr',)
-# EXP-45: v1 with BBR and its pages compressed with zstd (--compress zstd).
-ZSTD_V1_ARMS = ('pgdelta_direct_inplace_bbr_z',)
+# EXP-45: v1 with BBR and its pages compressed with zstd (--compress zstd). EXP-56: the same with sub-page
+# deltas (--subpage).
+ZSTD_V1_ARMS = ('pgdelta_direct_inplace_bbr_z', 'pgdelta_direct_inplace_bbr_zs')
 # EXP-31: v1 verifying only what it wrote (--verify-scope written), without the second pass over B.
 VS_V1_ARMS = ('pgdelta_direct_inplace_vw',)
 TLS_METHODS = ('pgdelta_direct_inplace_tls',)
@@ -187,7 +188,9 @@ TIERS = {'full': 'omni_today', 'full_nosync': 'diagnostic', 'full_syncfs': 'rele
          # EXP-23's follow-up: v1 with BBR on its data socket.
          'pgdelta_direct_inplace_bbr': 'protocol',
          # EXP-45's: the same with zstd on the pages sent.
-         'pgdelta_direct_inplace_bbr_z': 'protocol'}
+         'pgdelta_direct_inplace_bbr_z': 'protocol',
+         # EXP-56's: and only the changed 512-byte blocks of each page.
+         'pgdelta_direct_inplace_bbr_zs': 'protocol'}
 # The engine each pgdelta method runs, named by its flags, so that no change of pgdelta's
 # defaults can change what a method measures (as compare_methods pins EXP-02's):
 # - pgdelta: EXP-06's choice, which is also the command line's default on these 8-vCPU
@@ -262,6 +265,7 @@ PGDELTA_ENGINES.update({
     'pgdelta_direct_inplace_bbr': {**_V1_ENGINE, 'congestion_control': 'bbr'},
     # EXP-45: and zstd on the pages it sends.
     'pgdelta_direct_inplace_bbr_z': {**_V1_ENGINE, 'congestion_control': 'bbr', 'compress': 'zstd'},
+    'pgdelta_direct_inplace_bbr_zs': {**_V1_ENGINE, 'congestion_control': 'bbr', 'compress': 'zstd', 'subpage': True},
     # EXP-31: v1's engine verifying only the pages it wrote.
     'pgdelta_direct_inplace_vw': {**_V1_ENGINE, 'verify_scope': 'written'},
 })
@@ -304,6 +308,8 @@ def pgdelta_args(engine: dict) -> dict:
         send += ('--congestion-control', engine['congestion_control'])
     if engine.get('compress'):
         send += ('--compress', engine['compress'])
+    if engine.get('subpage'):
+        send += ('--subpage',)
     return {'send': send, 'receive': receive}
 
 

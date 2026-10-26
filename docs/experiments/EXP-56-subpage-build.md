@@ -59,3 +59,27 @@ Rule 11 applies to 3: a ratio within 20% of 0.80 gets a second session on fresh 
 - **If 1–3 hold:** `--subpage` stays opt-in and its row goes in the README. Advice: use it with `--compress zstd` on slow DR links.
 - **If 1 fails:** the build is fixed or withdrawn before anything else.
 - **If 3 fails:** the code stays, opt-in, with the measured numbers. The analysis looks first at the extra hashing.
+
+## Stage 1 results (October 27, before stage 2)
+
+`experiments/bytes/exp56.py` over EXP-51's data: a warm-up and 3 repeats of the four arms, in place, `--jobs 4`. Data: `docs/experiments/data/exp56-local.csv`; raw `results/bytes/exp56/runs.jsonl`; analysis and figure `analysis/exp56.py`.
+
+![Bytes each way and pgdelta's total per arm, over loopback](../figures/exp56-local.svg)
+
+| Median of 3 | source → dest | dest → source | pgdelta's total | sender's block hashing | receiver's |
+|---|---|---|---|---|---|
+| v1 | 599.3 MB | 2.2 MB | 1.52 s | none | none |
+| v1 + zstd | 212.8 MB | 2.2 MB | 1.94 s | none | none |
+| v1 + sub-page | 115.5 MB | 19.5 MB | 2.58 s | 0.90 s | 0.42 s |
+| **v1 + zstd + sub-page** | **37.1 MB** | 19.5 MB | 2.99 s | 0.88 s | 0.43 s |
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **Gate: every run complete; every copy byte-identical to S** | **Held:** 13 of 13 copies identical in all 1,278 files; the control differed in 12 |
+| 2 | zstd + sub-page's bytes within 10% of EXP-54/55 | **Held:** page data 37.0 MB against 35.1 expected (1.05); block digests 17.24 MB against 17.16 (1.005) |
+
+**Over loopback, with no link to save, sub-page costs about 1.05 s.** That is mostly the sender hashing the pages it sends in blocks, 0.9 s on its main thread, and the receiver hashing B's, 0.42 s on its workers. On a DR link it has to save more than that.
+
+At 0.5 Gbit/s, zstd's 213 MB take about 3.4 s on the link, and zstd plus sub-page's 37 MB about 0.6 s. With tuned TCP buffers of up to 128 MiB the delta stream fits in the socket buffer, so the sender's hashing should mostly overlap the link. Stage 2 runs as registered: its gate (prediction 1) held.
+
+**The stage 2 arm:** `pgdelta_direct_inplace_bbr_zs` (EXP-52's v1 engine with BBR, `--compress zstd` and `--subpage`), added to the harness with its analysis, `analysis/exp56_vm.py`, before the run.

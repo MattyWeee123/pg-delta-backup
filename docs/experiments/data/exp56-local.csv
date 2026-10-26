@@ -1,0 +1,5 @@
+arm,runs,total_s,page_data_mb,source_to_dest_mb,dest_to_source_mb,block_digest_mb,sender_hash_s,receiver_hash_s,pages_partial
+plain,3,1.516,599.19,599.27,2.24,,,,
+zstd,3,1.939,212.68,212.76,2.24,,,,
+subpage,3,2.578,115.41,115.49,19.49,17.24,0.9,0.424,71199
+zstd_subpage,3,2.987,37.0,37.08,19.49,17.24,0.881,0.426,71199
