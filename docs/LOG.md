@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-26 (late morning): v1 on a busy Omni; CI green again
+
+- **EXP-42 (OMNI-1b):** does live mode's recovery repair Omni's own `_mintxid` fork?
+  - **Yes:** Omni logs that fork with PostgreSQL's generic WAL records, with full-page images (16,631 references and 56 images in 10 s of pgbench).
+  - 20 of 20 live refreshes of a busy Omni 17.10 gave correct copies: balances, every index, and every heap before and after `VACUUM (FREEZE)`. All 4 deliberately broken refreshes were caught.
+  - The VM was deleted after the fetch.
+- **CI (the "Experiment tests" workflow) had been red since October 25,** and I hadn't been checking it:
+  - the hash refusal test patched the wrong name, so it passed only where `blake3` is installed (my Mac), not on GitHub's runner;
+  - a `parcopy` test raced on which of two correct refusals fired first.
+
+  Both are fixed and the workflow is green (1,539 tests, 239 skipped there). From now on I check CI after code pushes. Whether to update CI or remove it is the owner's call.
+
 ## 2026-10-26 (morning): live mode's worker cap scales with the source; the first run on Omni; checksums don't change the bytes
 
 - **EXP-39 (T10b's larger source):** on a 16-vCPU busy primary (three VMs, 28 vCPUs, 10 runs in 6 minutes), v1 with BLAKE3 at 4 workers met O4 and refreshed in 2.01 s, 20% faster than at 2 (2.52 s) and 2.1× faster than `pg_basebackup` (4.15 s). All three predictions held, so by the registered rule live mode's default `--jobs` is now at most the source's CPUs ÷ 4, from 1 to 4 (`pgdelta/cli.py`, tested).

@@ -94,7 +94,7 @@ One table per ledger area. **Fails:** the tests of section 1 that the item fails
 | D41 | Verification by a separate re-read (with D41p, graded D); v1's second destination pass | B; D41p D | provisional | P | Hashing while writing and an O_DIRECT re-read kept as T13 arms | T13f |
 | D42 | G2 for v1, which emits no manifest today | B | provisional | P | A manifest emitted early in T8's build, checked with pg_verifybackup on a stopped source | T8 (G2) |
 | D59 | v1's read order | C | provisional | P | – (PostgreSQL's documented backup protocol) | T8's early-read negative control |
-| G5 | Every claim for Omni (SPEC §7: "PostgreSQL results alone are insufficient") | D for Omni | provisional | P | Results labelled "PostgreSQL 17.11, Debian VMs" | OMNI-1 (e); after T8, v1 on an Omni data directory. *Probed October 26 (EXP-40): v1 on Omni 17.10 data directories, stopped (byte-identical) and live (recovered), Omni starting each B with S's data; one refresh of each, in a container* |
+| G5 | Every claim for Omni (SPEC §7: "PostgreSQL results alone are insufficient") | D for Omni | provisional | P | Results labelled "PostgreSQL 17.11, Debian VMs" | OMNI-1 (e); after T8, v1 on an Omni data directory. *Probed October 26 (EXP-40): v1 on Omni 17.10 data directories, stopped (byte-identical) and live (recovered), Omni starting each B with S's data; one refresh of each, in a container. Live under load October 26 (EXP-42): `_mintxid` is WAL-logged with full-page images; 20 of 20 live refreshes correct, 4 of 4 controls caught* |
 
 ### Performance: the v0 engine and its settings
 

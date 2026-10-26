@@ -1,6 +1,6 @@
 # EXP-42: Is v1 safe on a busy AlloyDB Omni, given Omni's own relation fork?
 
-Status: **pre-registered October 26, 2026, before any run.** OMNI-1b, lean: EXP-40's open point. One VM, about 25 minutes with set-up. The owner accepted the Omni container's license terms for this research use on October 26.
+Status: **done October 26, 2026 (all four predictions held): Omni writes its `_mintxid` fork through the WAL, with full-page images, so live mode's recovery repairs it like any page; 20 of 20 live refreshes of a busy Omni 17.10 gave correct copies, and all 4 deliberately broken ones were caught.** Pre-registered before any run. OMNI-1b, lean: EXP-40's open point. One VM, about 25 minutes with set-up. The owner accepted the Omni container's license terms for this research use on October 26.
 
 ## Question
 
@@ -43,3 +43,61 @@ Live mode reads a running server's files while they change, and relies on recove
 
 - One VM, one load (pgbench, 4 clients), 24 trials; a container, not Omni on Kubernetes.
 - What `_mintxid` is for is undocumented. The checks catch wrong data, broken indexes and broken heap pages, and freezing is exercised once per trial. A stale hint that only matters much later (at wraparound, say) would not show.
+
+## Results
+
+Data: `docs/experiments/data/exp42-trials.csv`; raw `results/omni/exp42/` (steps, every trial's statistics and logs, and a sample of the WAL dump's `_mintxid` lines, `waldump-mintxid-sample.txt`); analysis `analysis/exp42.py`, committed before the data. One `n2-standard-4` VM, Omni 17.10's container.
+
+![Omni's WAL by fork, and the live refreshes](../figures/exp42-omni-live.svg)
+
+### Where the forks are
+
+258 `_mintxid` files (8.7 MB) in a cluster with pgbench at scale 20: 6 in `global/` and 37–46 in each database's directory, the templates included. Tables have one and indexes don't:
+
+| Relation | `_mintxid` fork |
+|---|---|
+| `pgbench_accounts` (about 260 MB) | 272 KiB, about one fork page per thousand table pages |
+| `pgbench_branches`, `pgbench_tellers` | 32 KiB each |
+| `pgbench_history` (empty after `pgbench -i`) | none |
+| the three primary-key indexes | none |
+
+### The mechanism
+
+Over 10 s of pgbench that began just after a checkpoint, Omni's own `pg_waldump` read 127,818 WAL records:
+
+| Fork | Block references | Full-page images |
+|---|---:|---:|
+| main | 108,191 | 17,826 |
+| **mintxid** | **16,631** | **56** |
+| vm (visibility map) | 150 | 7 |
+
+The `_mintxid` changes are PostgreSQL's *generic* WAL records (16,627 of them, plus 4 plain full-page images): the facility an extension uses to log pages of its own format. Generic records register their buffers the standard way, so the first change to each page after a checkpoint carries a full-page image, as here. On disk, 17 of the 259 `_mintxid` files changed (one was new).
+
+So live mode's argument holds for the fork. Recovery replays from the backup's checkpoint, rewrites every `_mintxid` page changed during the backup from its full-page image, and applies the later changes. A page pgdelta read while it was being written is replaced.
+
+### The trials
+
+| | Counted (20) | Controls (4, read before `pg_backup_start`) |
+|---|---|---|
+| pgdelta's exit | 0 in all | 4 in all, as the variant always fails |
+| B started in Omni | 20 | 2 (2 refused to start) |
+| pgbench's invariant (four equal sums) | 20 | 0 of the 2 that started |
+| `bt_index_check` (every btree index) | 20 clean | 1 failed |
+| `verify_heapam`, before and after `VACUUM (FREEZE)` | 20 clean, 0 corruptions | `VACUUM (FREEZE)` failed on both that started |
+| **Verdict** | **20 correct** | **4 caught** |
+
+The counted refreshes took 11.4–13.6 s (median 12.0), with 1 source worker on 4 vCPUs (EXP-39's default) and 7.4–9.0 s in backup mode. B0 stayed fixed while S ran on, so pgdelta sent 20,050 of 60,573 pages at trial 1 and 55,138 of 63,269 by trial 24, as the copy fell further behind.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | Recorded: which relations have a `_mintxid` fork | Tables (catalogs included), not indexes; 258 files |
+| 2 | **The workload changes `_mintxid` files, and the WAL carries the fork, with full-page images** | **Held:** 16,631 references, 56 full-page images, 17 files changed |
+| 3 | **Deciding: all 20 counted trials correct** | **Held** |
+| 4 | At least 3 of 4 controls caught | **Held:** 4 of 4 |
+
+## What follows
+
+- **Live mode's argument carries to Omni 17.10:** Omni logs its own fork like a page, so recovery repairs whatever live mode read mid-write. 20 trials alone bound the failure rate only below 35% at 99.9% confidence. The argument rests on the mechanism, with EXP-25's 1,000 trials on PostgreSQL behind it. G5 extends to live refreshes of a busy Omni.
+- **EXP-40's live-mode question closes.** Its other `_mintxid` question stays open: a stopped source's unlogged relation, whose `_mintxid` fork pgdelta would copy rather than leave out or reset. No unlogged table was in these runs.
+- **The checks bite on Omni:** the broken variant produced copies that wouldn't start, or had unequal balances, a broken index, and a `VACUUM (FREEZE)` that failed. Omni's own failures look like PostgreSQL's.
+- **Still open for Omni:** Omni on Kubernetes (OMNI-2), and what `_mintxid` is for (undocumented; the checks exercise freezing once per trial, not wraparound).
