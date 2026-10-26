@@ -608,14 +608,16 @@ class StubServerTestCase(unittest.TestCase):
                  ('pg_drop_replication_slot', 'drop slot'))
         return [next(name for key, name in names if key in sql) for sql in self.statements()]
 
-    def run_live(self, output=None, in_place=False, basis=None, **extra_env):
+    def run_live(self, output=None, in_place=False, basis=None, checkpoint=None, **extra_env):
         basis = basis or self.root / 'B'
         if not basis.exists():
             write_tree(basis, {'PG_VERSION': b'17\n', CONTROL_FILE: control_file(9)})
+        options = {'checkpoint': checkpoint} if checkpoint else {}
         with self.env(**extra_env):
             return transfer(self.datadir, basis, None if in_place else (output or self.root / 'O'),
                             source_kind='live', pg_controldata=self.stub, pg_conn='host=stub user=u password=pw',
-                            psql=self.psql, receiver_options={'in_place': in_place} if in_place else None)
+                            psql=self.psql, receiver_options={'in_place': in_place} if in_place else None,
+                            **options)
 
 
 class StubSessionTests(StubServerTestCase):
@@ -717,6 +719,24 @@ class StubSessionTests(StubServerTestCase):
         self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
         self.assert_holds_the_live_copy(self.root / 'O')
         settle(self)
+
+    def test_the_start_checkpoint_is_fast_by_default_and_spread_on_request(self):
+        # C-ckpt: pg_backup_start's fast argument follows --checkpoint, as pg_basebackup's -c; the copy is the same.
+        for checkpoint, fast in ((None, 'true'), ('spread', 'false')):
+            with self.subTest(checkpoint=checkpoint):
+                self.log.unlink(missing_ok=True)
+                output = self.root / f'O-{checkpoint}'
+                outcome = self.run_live(output=output, checkpoint=checkpoint)
+                self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+                self.assert_holds_the_live_copy(output)
+                start = next(sql for sql in self.statements() if 'pg_backup_start' in sql)
+                self.assertIn(f", {fast})::text", start)
+                self.assertEqual(outcome.sender['live']['checkpoint'], checkpoint or 'fast')
+                settle(self)
+
+    def test_an_unknown_checkpoint_mode_is_refused(self):
+        with self.assertRaises(InvalidInput):
+            live.LiveSource(self.datadir, 'host=stub', self.stub, psql=self.psql, checkpoint='immediate')
 
     def test_the_during_start_variant_reads_while_pg_backup_start_runs(self):
         self.config['start_delay'] = 1.0
@@ -871,6 +891,7 @@ class StubSessionTests(StubServerTestCase):
         for args, message in (((), '--source-kind live needs --pg-conn'),
                               (('--source-kind', 'datadir', '--pg-conn', 'x'), '--pg-conn and --psql are for'),
                               (('--source-kind', 'datadir', '--live-timeout', '5'), '--live-timeout is for'),
+                              (('--source-kind', 'datadir', '--checkpoint', 'spread'), '--checkpoint is for'),
                               (('--source-kind', 'live', '--pg-conn', 'x', '--live-timeout', '0'),
                                'must be a positive number of seconds')):
             kind = () if args else ('--source-kind', 'live')

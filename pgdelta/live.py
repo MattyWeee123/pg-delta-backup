@@ -104,6 +104,11 @@ READ_BEFORE_START_ENV = 'PGDELTA_TEST_READ_BEFORE_START'
 ORACLE_ENV = 'PGDELTA_TEST_ORACLE_DIR'
 TEST_VARIANTS = {'1': 'before_start', 'during': 'during_start'}  # the variable's values: the broken variants
 DEFAULT_TIMEOUT = 120.0  # seconds the receiver may make no progress while the slot is held (--live-timeout)
+# pg_backup_start's checkpoint (--checkpoint), as pg_basebackup's -c. Fast is the default for now: every slowdown
+# measured so far (EXP-28, -30, -39) took it on a small dirty set; a large one is untested (C-ckpt), and pg_basebackup
+# itself defaults to spread.
+CHECKPOINTS = ('fast', 'spread')
+DEFAULT_CHECKPOINT = 'fast'
 CONTROL_FILE = 'global/pg_control'
 BACKUP_LABEL = 'backup_label'
 WAL_DIRECTORY = 'pg_wal'
@@ -446,8 +451,12 @@ def read_live_identity(root, pg_controldata, attempts=IDENTITY_READS):
 class LiveSource:
     """A running cluster read in backup mode: the session, the slot, pg_backup_start and pg_backup_stop."""
 
-    def __init__(self, root, conninfo, pg_controldata, psql=None, variant=None, session_class=Session):
+    def __init__(self, root, conninfo, pg_controldata, psql=None, variant=None, session_class=Session,
+                 checkpoint=DEFAULT_CHECKPOINT):
         self.root = Path(root)
+        if checkpoint not in CHECKPOINTS:
+            raise InvalidInput(f'checkpoint must be one of {", ".join(CHECKPOINTS)}, not {checkpoint!r}')
+        self.checkpoint = checkpoint
         self.conninfo, self.pg_controldata = conninfo, pg_controldata
         self.psql = psql or default_psql(pg_controldata)
         # The broken test variant ("before_start", "during_start"; False: none), from the environment unless given.
@@ -537,15 +546,16 @@ class LiveSource:
         self.segment_size = check_segment_size(size)
 
     def start(self, meanwhile=None):
-        """pg_backup_start(label, fast := true): from its return on, the data directory may be read.
+        """pg_backup_start(label, fast): from its return on, the data directory may be read.
 
-        `meanwhile` is for the during-start test variant only: it runs once the
-        call is sent and before its answer is read, while its checkpoint runs.
-        That call asks for a spread checkpoint (fast := false): an immediate
-        one can finish before the data directory is even listed (EXP-25).
+        fast is true for checkpoint "fast" (the default) and false for "spread",
+        as pg_basebackup's -c. `meanwhile` is for the during-start test variant
+        only: it runs once the call is sent and before its answer is read, while
+        its checkpoint runs. That call always asks for a spread checkpoint: an
+        immediate one can finish before the data directory is even listed (EXP-25).
         """
         self.start_requested_utc = time.time()
-        fast = 'true' if meanwhile is None else 'false'
+        fast = 'true' if meanwhile is None and self.checkpoint == 'fast' else 'false'
         sql = f"SELECT json_build_object('lsn', pg_backup_start('{self.label}', {fast})::text)"
         if meanwhile is None:
             answer = self.session.value(sql)
@@ -701,6 +711,7 @@ class LiveSource:
             'slot': self.slot if self.slot_created else None,
             'slot_lsn': lsn(self.slot_lsn),
             'label': self.label,
+            'checkpoint': self.checkpoint,
             'timeline': self.timeline,
             'start_lsn': lsn(self.start_lsn),
             'checkpoint_lsn': lsn(self.checkpoint_lsn),

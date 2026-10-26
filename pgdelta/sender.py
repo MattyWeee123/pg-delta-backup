@@ -282,7 +282,7 @@ class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
-                 hash_algorithm=DEFAULT_ALGORITHM, compress=None):
+                 hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT):
         self.started = time.perf_counter()
         self.hash_algorithm = hash_algorithm
         # --compress zstd: offered in HELLO; the codec exists once the receiver accepted it (pgdelta.compress).
@@ -299,6 +299,7 @@ class _Sender:
         # after pg_backup_stop; the watch that gives up on a stalled receiver while the slot is held.
         self.pg_conn, self.psql = pg_conn, psql
         self.live_timeout = live.DEFAULT_TIMEOUT if live_timeout is None else live_timeout
+        self.checkpoint = checkpoint
         self.live = self.reader = self.watch = None
         self.appended = []
         # Whether the receiver refreshes B in place (from ACCEPT; null until it arrives).
@@ -562,7 +563,8 @@ class _Sender:
         and copied aside before pg_backup_start is called ("before_start"), or once it is sent and before
         its answer is read ("during_start").
         """
-        self.live = live.LiveSource(self.source, self.pg_conn, self.pg_controldata, psql=self.psql)
+        self.live = live.LiveSource(self.source, self.pg_conn, self.pg_controldata, psql=self.psql,
+                                    checkpoint=self.checkpoint)
         self.watch = StallWatch(self.channel, self.inbox, self.live_timeout, on_give_up=self._kill_session)
         self.live.timeout = self.watch.seconds
         sock = getattr(self.channel, 'sock', None)
@@ -903,7 +905,7 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
-               hash_algorithm=DEFAULT_ALGORITHM, compress=None):
+               hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -931,7 +933,8 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     without it, only unsent bytes do (pgdelta.waits). Only the statistics
     change. `compress` "zstd" offers zstd for the pages sent (pgdelta.compress);
     a receiver that can't use it accepts without, and the pages go plain.
+    `checkpoint` ("fast" or "spread") is pg_backup_start's for a live source.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
-                   pg_conn, psql, live_timeout, hash_algorithm, compress).run()
+                   pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint).run()

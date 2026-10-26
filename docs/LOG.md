@@ -8,6 +8,13 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (late afternoon): a checkpoint switch for live sources
+
+- **`--checkpoint fast|spread`** for `--source-kind live`, as `pg_basebackup -c`. The default stays `fast` (no behaviour change), and the statistics record the mode.
+  - **Why:** pgdelta asks `pg_backup_start` for a fast checkpoint, which writes every dirty buffer at once, while `pg_basebackup` defaults to spread. Every slowdown test so far had only 128 MB of shared buffers, so that burst on a large dirty set is untested (C-ckpt).
+  - **What the switch does:** it is that row's own interim step. Until the large-dirty-set slowdown block decides the default, an operator can choose `spread`.
+  - **Tests:** 2 new live tests (`true` by default, `false` with spread, the same copy either way; an unknown mode refused) and a CLI refusal without a live source. Full suite green.
+
 ## 2026-10-27 (afternoon): sub-page deltas multiply with zstd
 
 - **EXP-54 (local, pre-registered):** do sub-page deltas still pay now that zstd ships? Yes: 512-byte blocks plus zstd sent 43.7 MB against zstd alone's 210.3 MB (0.21), 13.6× fewer than whole pages, counting B's block digests. All three predictions held.

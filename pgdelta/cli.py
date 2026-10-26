@@ -249,6 +249,13 @@ def _source_kind_option(parser):
                              'reply that does not come), so that backup mode ends and the slot stops holding WAL '
                              'on the source; TCP keepalives on the connection follow it too (default: '
                              f'{live.DEFAULT_TIMEOUT:g})')
+    parser.add_argument('--checkpoint', choices=live.CHECKPOINTS, metavar='{fast,spread}',
+                        help='--source-kind live: the checkpoint pg_backup_start takes, as pg_basebackup\'s -c. '
+                             'fast starts reading at once but writes every dirty buffer in a burst; spread paces '
+                             'those writes over checkpoint_completion_target of checkpoint_timeout, gentler on a '
+                             'busy primary with a large dirty set, and slower to start. pg_basebackup defaults to '
+                             'spread; pgdelta\'s slowdown tests so far used fast on a small dirty set (default: '
+                             f'{live.DEFAULT_CHECKPOINT})')
 
 
 def _positive_seconds(text):
@@ -487,7 +494,8 @@ def _sender_kwargs(args, identity):
             'hash_backend': args.hash_backend, 'source_kind': args.source_kind,
             'pg_controldata': args.pg_controldata, 'pg_conn': args.pg_conn, 'psql': args.psql,
             'live_timeout': args.live_timeout, 'hash_algorithm': args.hash,
-            'compress': None if getattr(args, 'compress', 'off') == 'off' else args.compress}
+            'compress': None if getattr(args, 'compress', 'off') == 'off' else args.compress,
+            'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT}
 
 
 def _source_identity(args):
@@ -496,6 +504,8 @@ def _source_identity(args):
         raise InvalidInput('--pg-conn and --psql are for --source-kind live')
     if args.source_kind != 'live' and args.live_timeout is not None:
         raise InvalidInput('--live-timeout is for --source-kind live')
+    if args.source_kind != 'live' and args.checkpoint is not None:
+        raise InvalidInput('--checkpoint is for --source-kind live')
     if args.source_kind == 'datadir':
         if not args.pg_controldata:
             raise InvalidInput('--source-kind datadir needs --pg-controldata: it reads the cluster state '
