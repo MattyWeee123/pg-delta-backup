@@ -37,13 +37,14 @@ def medians(sweeps, pattern='uniform'):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument('--sweep', default=str(ROOT / 'results' / 'exp04' / 'exp47'))
+    ap.add_argument('--sweep', action='append', help='repeat for the K10 session: the cells use every run')
     ap.add_argument('--figdir')
     a = ap.parse_args(argv)
     if a.figdir:
         plotting.FIGURES = Path(a.figdir)
     plotting.style()
-    t, mb, n = medians([a.sweep])
+    sweeps = a.sweep or [str(ROOT / 'results' / 'exp04' / 'exp47')]
+    t, mb, n = medians(sweeps)
     rows = []
     for condition in ('2:60:tuned', '1:60:tuned'):
         row = {'condition': condition, **{f'{name}_s': round(t[(condition, m)], 2) if (condition, m) in t else None
@@ -62,7 +63,7 @@ def main(argv=None):
     print(f"4. {'HELD' if ok4 else 'FAILED'}: bytes {[round(r['v1_mb'] / r['v1_zstd_mb'], 2) for r in rows]}, "
           f"against pg_basebackup {[r['zstd_over_full'] for r in rows]}")
     effective, waits = [], []
-    for log in sorted(Path(a.sweep).glob('logs/*/source/*-stats.json.log')):
+    for log in sorted(log for sweep in sweeps for log in Path(sweep).glob('logs/*/source/*-stats.json.log')):
         text = log.read_text()
         stats = json.loads(text[text.find('{'):])
         effective.append((stats.get('congestion_control') or {}).get('effective'))

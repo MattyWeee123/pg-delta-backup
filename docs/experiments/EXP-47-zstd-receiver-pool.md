@@ -70,6 +70,14 @@ Data: `docs/experiments/data/exp47-cells.csv`; raw `results/exp04/exp47/`; analy
 - **Plain v1's time does depend on the link.** It fits 3.71 s + 4.4 s ÷ (Gbit/s): 5.91 s at 2, 8.11 at 1, and 12.5 projected at 0.5 against EXP-46's measured 13.1. It crosses zstd's 6.1 s floor at about **1.8 Gbit/s**. That is the break-even, interpolated within one session, not measured.
 - **No second session (K10), and why:** to meet the deciding bar at 2 Gbit/s, zstd would need at most 5.32 s. That is below the 6.11 s it took in the same session on half the link rate, so a replicate couldn't reach the bar unless the floor itself moves. This departs from K10 (a second session for a deciding cell near its line). It is recorded here for the owner to overrule.
 
+## Revision: the second session after all (October 26, K10)
+
+The owner's rule asks for a second session on a deciding cell within 20% of its bar. The argument above for skipping it stands, but it is a reason, not the rule. The second session runs:
+- only the deciding cell: uniform at `2:60:tuned`, the three methods, 2 repeats;
+- on fresh VMs, order seed 471; results in `results/exp04/exp47b`.
+
+The verdict on prediction 1 then uses both sessions' runs per method (`analysis/exp47.py --sweep results/exp04/exp47 --sweep results/exp04/exp47b`).
+
 ## What follows
 
 - **`--compress zstd` is recommended beside BBR for DR links below about 1.8 Gbit/s,** opt-in. Measured: 0.52 of v1 at 0.5 Gbit/s, 0.75 at 1, and even at 2. The help text and README now give these numbers rather than a judgment.
