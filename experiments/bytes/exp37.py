@@ -14,7 +14,7 @@ of S (base/ and global/), the bytes each strategy would send:
 - subpage: for the pages positional sends, the 64-byte blocks that differ from B's page at that offset (a lower
   bound on a sub-page delta, no encoding overhead);
 - subpage512: the same with 512-byte blocks, plus what an achievable scheme costs the other way: B's 16 block
-  digests (8 bytes each) for every page sent;
+  digests (8 bytes each) for every page sent that has a page of B at its offset (a new file's pages need none);
 - zstd: positional's pages compressed with zstd level 3 in 1 MiB frames, and its CPU time.
 
 Scenarios: uniform (UPDATE 1% of pgbench_accounts' rows, chosen at random), vacuum_full (the same, then VACUUM FULL
@@ -122,7 +122,7 @@ def measure(s_root, b_root):
         b_data[rel] = data
         b_pages.update(digest(p) for p in pages_of(data))
         b_chunks.update(digest(data[a:z]) for a, z in chunks(data))
-    total = positional = content = cdc = subpage = subpage512 = 0
+    total = positional = content = cdc = subpage = subpage512 = referenced = 0
     sent_pages = []
     for rel, path in s_files.items():
         data = path.read_bytes()
@@ -144,6 +144,7 @@ def measure(s_root, b_root):
                 a5 = np.frombuffer(page, dtype=np.uint8)[: len(page) // 512 * 512].reshape(-1, 512)
                 b5 = np.frombuffer(ref, dtype=np.uint8)[: len(page) // 512 * 512].reshape(-1, 512)
                 subpage512 += int((a5 != b5).any(axis=1).sum()) * 512 + len(page) % 512
+                referenced += 1  # B has a page here: only for these would the scheme ask B for block digests
             else:
                 subpage += len(page)
                 subpage512 += len(page)
@@ -156,7 +157,7 @@ def measure(s_root, b_root):
     compressed = sum(len(compressor.compress(blob[i:i + (1 << 20)])) for i in range(0, len(blob), 1 << 20))
     zstd_cpu = time.process_time() - started
     return {'s_relation_bytes': total, 'positional': positional, 'content_pages': content, 'cdc': cdc,
-            'subpage': subpage, 'subpage512': subpage512, 'subpage512_digest_bytes': len(sent_pages) * 16 * 8,
+            'subpage': subpage, 'subpage512': subpage512, 'subpage512_digest_bytes': referenced * 16 * 8,
             'zstd_of_positional': compressed, 'zstd_cpu_s': round(zstd_cpu, 3),
             'zstd_mib_per_cpu_s': round(len(blob) / 2**20 / zstd_cpu, 1) if zstd_cpu else None}
 
@@ -167,7 +168,7 @@ def make_template(pg, path, scale):
     pg.sql('CREATE DATABASE bench', db='postgres')
     run([str(pg.bin / 'pgbench'), '-i', '-q', '-s', str(scale), '-h', pg.sock, '-p', str(PORT), '-U', 'postgres',
          'bench'])
-    pg.sql("UPDATE pgbench_accounts SET filler = md5(aid::text) || md5((aid * 7919)::text) || substr(md5((aid * 31)::text), 1, 20)")
+    pg.sql("UPDATE pgbench_accounts SET filler = md5(aid::text) || md5((aid::bigint * 7919)::text) || substr(md5((aid::bigint * 31)::text), 1, 20)")
     pg.sql('CREATE INDEX accounts_abalance ON pgbench_accounts (abalance)')
     pg.sql('VACUUM FULL ANALYZE pgbench_accounts')
     pg.sql('CHECKPOINT')

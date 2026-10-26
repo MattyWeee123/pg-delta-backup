@@ -1,6 +1,6 @@
 # EXP-37: What do pgdelta's whole, positional 8 KiB pages leave on the table?
 
-Status: **pre-registered October 26, 2026, before the counted run** (a smoke at scale 2 informed the predictions, and says so). Ledger test T4, lean: its three open rows. Local (the Mac); no network, only bytes and CPU.
+Status: **done October 26, 2026 (scale 10, 30 s; all four predictions held): after a rewrite, neither cross-file page matching nor content-defined chunking found a single reusable byte, so positional pages lose nothing there. For scattered updates, 512-byte blocks would send 5.0× fewer bytes and zstd 2.8× fewer, at 520–550 MiB/s per core.** Pre-registered before the counted run (a smoke at scale 2 informed the predictions, and says so). Ledger test T4, lean: its three open rows. Local (the Mac); no network, only bytes and CPU.
 
 ## Questions (the ledger's open rows)
 
@@ -45,3 +45,33 @@ Status: **pre-registered October 26, 2026, before the counted run** (a smoke at 
 - **If 2 holds:** a sub-page delta (512-byte blocks, digests from B for the pages that differ) is the largest bandwidth lever left for DR, worth a design: about 3× fewer bytes for scattered changes. It costs a round of block digests per page, which matters at DR round trips.
 - **If 3 holds:** compression (`zstd` on the wire) is worth an option for links slower than its CPU rate.
 - These are bytes on one synthetic dataset. Real tables, TOAST and indexes, would change the ratios, and Omni's data may be compressed already.
+
+## Results (scale 10: 196 MB of relation files)
+
+Data: `docs/experiments/data/exp37-bytes.csv`; raw `results/bytes/exp37/results.json`; figure `analysis/exp37.py`.
+
+![The bytes each strategy would send, per scenario](../figures/exp37-bytes.svg)
+
+| Scenario | positional (pgdelta) | content pages | cdc | subpage (64 B) | **subpage512 + digests** | **zstd of positional** |
+|---|---:|---:|---:|---:|---:|---:|
+| UPDATE 1% at random | 84.7 MB | 84.7 | 122.3 | 6.1 | **15.6 + 1.3 = 16.9** | **29.9** (2.83×, 548 MiB/s per core) |
+| ... then VACUUM FULL | 163.9 | **163.9** | **164.3** | 163.8 | 163.8 + 0.003 | 60.3 (2.72×) |
+| ... then CLUSTER | 164.0 | **164.0** | **164.3** | 163.8 | 163.8 + 0.004 | 60.3 (2.72×) |
+
+*Corrected before the write-up:* the first run charged B's block digests for every page sent, new files' too, which no scheme would ask for. Rerun charging only pages with a page of B at their offset. The uniform result was unchanged, and the rewrites' digest bytes fell from 2.6 MB to a few kilobytes.
+
+| # | Prediction | Verdict |
+|---|---|---|
+| 1 | **D18: after a rewrite, content pages and CDC each recover under 5%** | **Held:** both recovered nothing (0.0%) |
+| 2 | **D17: for uniform updates, subpage512 + digests at most a third of positional** | **Held:** 16.9 MB against 84.7 (20%, 5.0× fewer) |
+| 3 | **D35: zstd at least 2× at over 200 MiB/s per core** | **Held:** 2.83× (2.72× after rewrites) at 517–548 MiB/s |
+| 4 | For uniform updates, CDC sends more than positional | **Held:** 122.3 against 84.7 MB |
+
+## What follows
+
+- **D18 closes:** positional matching stays. A rewritten table changes every tuple's header, so neither cross-file matching nor content-defined chunking finds old bytes. A rewrite is sent whole by any such tool.
+- **D17 and D35 open two bandwidth levers for DR's slow or billed links.** Neither is built:
+  - **a sub-page delta** (512-byte blocks: about 5× fewer bytes for scattered changes, at the cost of one more round of block digests from B per differing page, which matters at DR round trips);
+  - **zstd on the wire** (about 2.8× on this data, at about 0.5 GB/s per core, well above the 2 Gbit/s DR link).
+  Together they would act on different things, and their product isn't measured. They matter where bytes cost: links below about 1 Gbit/s, and billed egress.
+- **The usual limits:** one synthetic dataset (pgbench with hex filler), one change pattern. Real tables, TOAST and data that is already compressed would change the ratios.
