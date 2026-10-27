@@ -370,8 +370,10 @@ class ReaderTests(unittest.TestCase):
         tree = reader.hash(entry)
         self.assertEqual(len(checked), 1)
         self.assertEqual(tree.digest, self.digest_of(wal_segment(16)))
-        os.unlink(self.root / 'pg_wal/seg')
-        (self.root / 'pg_wal/seg').write_bytes(wal_segment(16))  # same bytes, another file
+        # Same bytes, another file: made beside it and renamed over it, so the old inode is still in use when the
+        # new one is allocated. After an unlink, Linux may give the new file the freed inode number (a CI flake).
+        (self.root / 'pg_wal/seg.new').write_bytes(wal_segment(16))
+        os.replace(self.root / 'pg_wal/seg.new', self.root / 'pg_wal/seg')
         with self.assertRaisesRegex(VerificationError, 'replaced'):
             reader.open(entry)
         (self.root / 'pg_wal/seg').write_bytes(wal_segment(16)[:-PAGE])
