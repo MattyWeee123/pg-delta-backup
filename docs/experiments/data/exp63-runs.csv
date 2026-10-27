@@ -1,0 +1,17 @@
+scenario,args,exit_code,mode,fast_used,proof,receiver_refused,files_chosen,files_whole,pages_sent,pages_total,restored,logical_match,reason
+S1,default,0,reuse,True,clean shutdown in recovery,,856,140,4118,10594,True,True,
+S1b,default,0,reuse,True,clean shutdown in recovery,,856,140,4185,10594,True,True,
+S2,default,0,reuse,False,clean shutdown,,0,0,5075,10596,True,True,"B reaches 0/9A1D940, past where the server's history leaves timeline 1 (0/8D10118)"
+S2b,default,0,reuse,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",0,0,5249,10596,True,True,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL"
+S2c,default,0,reuse,False,clean shutdown in recovery,,0,0,5227,10596,True,True,"B reaches 0/BB7D0F0, past where the server's history leaves timeline 1 (0/AD104F0)"
+S2d,default,0,reuse,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",0,0,5249,10596,True,True,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL"
+S3,default,0,reuse,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",0,0,7060,10791,True,True,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL"
+S4,default,0,reuse,True,backup_manifest,,856,140,2953,9067,True,True,
+S5,default,0,reuse,True,backup_manifest,,1115,837,15559,24425,True,True,
+S6,--reuse-any-basis,0,reuse,False,backup_manifest,,0,0,10478,10496,True,True,B's data checksum version (0) is not the server's (1)
+S6,default,2,,False,,,0,0,0,0,,,
+S7,default,0,reuse,True,backup_manifest,,849,138,2432,10465,True,True,
+S8,--reuse-any-basis,0,reuse,False,backup_manifest,,0,0,3758,10496,True,True,B's system identifier (7701466089368545265) is not the server's (7701466096448903186)
+S8,default,2,,False,,,0,0,0,0,,,
+S9,--reuse-any-basis,0,reuse,False,backup_manifest,,0,0,4947,10534,True,True,"B's system identifier (7701466128935913593) is not the server's (7701466135463184532); B's catalog version (202406281) is not the server's (202506291); B is PostgreSQL 17, the server 18"
+S9,default,2,,False,,,0,0,0,0,,,

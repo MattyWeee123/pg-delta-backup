@@ -1,6 +1,6 @@
 # EXP-63: Does pgdelta's own fast path, run live, refresh the tricky old copies correctly?
 
-Status: **pre-registered October 27, 2026, before any run.** Local only (the Mac, PostgreSQL 17.11 and 18.6).
+Status: **done October 27, 2026 (13 scenarios, 16 refreshes; the deciding prediction held, and 2 of 3 overall): every copy pgdelta published recovered to exactly the source's data, and the fast path ran exactly where guard v2 passed in EXP-62. Its own identity check refused another cluster, an upgraded one and a changed checksum setting, even under `--reuse-any-basis`. Prediction 3 failed in S5, where most pages belong to databases B lacks.** Local only (the Mac, PostgreSQL 17.11 and 18.6).
 
 ## Question
 
@@ -33,3 +33,39 @@ Script: `experiments/tricky_copies/fastpath_check.py`, which writes `fastpath_ch
 - **If 1 and 2 hold:** the implementation matches the tested guard on every tricky copy, and the timed test beyond memory (EXP-64) goes ahead.
 - **If 1 fails:** the fast path is withdrawn from the README's recommendations until the cause is fixed and this check passes again.
 - **If 2 fails without 1 failing:** the difference is explained, and the guard is fixed or the difference shown to be harmless, before EXP-64.
+
+## Results (October 27)
+
+The 13 scenarios were built with `--wal-summaries --keep` (all checks passed). Each was refreshed by `experiments/tricky_copies/fastpath_check.py`, with S1 run first as a smoke test. Data: `docs/experiments/data/exp63-runs.csv`; raw `results/exp63/` (not in git).
+
+| Scenario | Refresh | Fast path | Why not, where refused | Pages sent / total | Copy matches the source |
+|---|---|---|---|---:|---|
+| S1 lagging standby | default | **ran** (clean shutdown in recovery) | | 4,118 / 10,594 | yes |
+| S1b, no checkpoint replayed | default | **ran** | | 4,185 / 10,594 | yes |
+| S2 old primary after failover | default | refused (sender's guard) | B reaches past where the server's history leaves timeline 1 | 5,075 / 10,596 | yes (hashed) |
+| S2b, its redo before the split | default | refused (receiver) | B was not stopped cleanly | 5,249 / 10,596 | yes (hashed) |
+| S2c, a standby of the old primary | default | refused (sender's guard) | B reaches past the split | 5,227 / 10,596 | yes (hashed) |
+| S2d, its WAL past the split lost | default | refused (receiver) | B was not stopped cleanly | 5,249 / 10,596 | yes (hashed) |
+| S3 crash-consistent copy | default | refused (receiver) | B was not stopped cleanly | 7,060 / 10,791 | yes (hashed) |
+| S4 VACUUM truncation | default | **ran** (backup_manifest) | | 2,953 / 9,067 | yes |
+| S5 `FILE_COPY` databases | default | **ran** | | 15,559 / 24,425 | yes |
+| S6 `pg_checksums --enable` | default | identity gate refused the in-place refresh; B untouched | | – | – |
+| S6 | `--reuse-any-basis` | refused (sender's guard) | B's data checksum version (0) is not the server's (1) | 10,478 / 10,496 | yes (hashed) |
+| S7 hint bits, no checksums | default | **ran** | | 2,432 / 10,465 | yes |
+| S8 another cluster | default | identity gate refused; B untouched | | – | – |
+| S8 | `--reuse-any-basis` | refused (sender's guard) | B's system identifier is not the server's | 3,758 / 10,496 | yes (hashed) |
+| S9 `pg_upgrade` 17→18 | default | identity gate refused; B untouched | | – | – |
+| S9 | `--reuse-any-basis` | refused (sender's guard) | B's system identifier is not the server's | 4,947 / 10,534 | yes (hashed) |
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | Deciding: no wrong copy | **Held:** 13 copies published, all recovered and matched; 3 refusals left B as it was |
+| 2 | The fast path runs exactly in S1, S1b, S4, S5, S7 | **Held** |
+| 3 | Where it runs, at most half the pages sent | **Failed in S5 only** (0.64): 837 of its files, most of its pages, belong to the databases created with `FILE_COPY`, which B lacks. Any path sends those whole. The other four sent 0.23–0.40 |
+
+**What it shows:**
+- **The implementation makes the same calls as the guard tested offline,** on every tricky copy, and every copy it made is correct. Every refusal names its reason in the statistics:
+  - the sender's guard for divergence and identity;
+  - the receiver for an unproven end.
+- **The identity hole found while planning was real in principle,** and is closed. With `--reuse-any-basis`, S6, S8 and S9 reach the fast path's guard, and it refuses all three by its own identity check.
+- **It sends more pages live than EXP-61 counted offline:** 4,118 against EXP-61's 2,039 for S1. The live range runs on to the new backup's start, so it includes the full-page images logged when the harness read every table after taking S (hint bits, with checksums on). The fast path's saving is the pages it doesn't read, not the pages it sends; timing it beyond memory is EXP-64.
