@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (night): the owner's research loop (rule 12, K13)
+
+The owner, in their words, asked that this be remembered and applied recursively:
+
+> Have we been doing anything novel? Or are you just rehashing the same stuff over and over and over again? The goal of this project was to either win by isolating some set of constraints, which we have, right? You mentioned that we do beat these other approaches when it comes to certain approaches, but I want you to make sure: what is the industry standard for that situation, and do we have competitors? Are we truly better than those competitors? And in the case where we are currently not beating the competition, we should be trying new things based on novel research and discussion, like figuring out where the bottleneck is and realizing: Is this a system's problem or an algorithm problem? Meaning, given our current algorithm, is it even feasibly possible, given the best systems optimizations in the world, to beat this other algorithm? If so, maybe it's a system's problem. If not, then it could even be an algorithm problem. Maybe the issue is this hashing approach. Maybe it's a page labeling approach we should try. Maybe some other algorithm.
+
+> And even better, don't just look at novel research. Try to synthesize information and conduct our own research as well. Maybe two different ideas from two different papers, or the same ideas from a paper, can be reworked potentially better for our use case. Also, definitely try pulling directly from the paper as well if you find something promising.
+
+> All decisions should, at the end of the day, be evidence-driven. You should not simply guess that something is the bottleneck. You should perform experiments to justify it. All decisions must be justified, as in a scientific research setting. All your decisions should be reviewed as if they're being reviewed by a paper committee reviewing your findings.
+
+It is now rule 12 in DECISIONS.md (decision K13). The first pass of the loop started the same night: a competitor audit from primary sources, a paper survey for mechanisms to combine, and a measured ceiling for the hash path.
+
 ## 2026-10-27 (evening): EXP-58, what pgdelta's own TLS costs
 
 - **Why:** O6 requires the data stream encrypted. TLS was built earlier on October 27, but what it costs at DR rates was the goal's open half. The TLS session had held EXP-58 for the owner's yes; the standing autonomy rule covers experiments that serve the plan, so it was designed, pre-registered (d355f86) and run.
