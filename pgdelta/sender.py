@@ -571,7 +571,7 @@ class _Sender:
         if not isinstance(facts, dict):
             raise ProtocolError('ACCEPT summary must be an object')
         started = time.perf_counter()
-        source = self.live.summary_source()
+        source = dict(self.live.summary_source(), identity=self.identity)
         counts['summarizer_wait_seconds'] = source['summarizer_wait_seconds']
         counts['summarized_lsn'] = (None if source['summarized_lsn'] is None
                                     else fastpath.format_lsn(source['summarized_lsn']))

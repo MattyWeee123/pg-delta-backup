@@ -15,11 +15,13 @@ from pgdelta_cluster import CONTROLDATA, PG_BIN, SKIP_REASON, available
 from pgdelta_support import REPO_ROOT, python_command, subprocess_env
 
 L = fastpath.parse_lsn
-FACTS = {'timeline': 1, 'redo': '0/2000000', 'end': '0/4000000', 'proof': 'clean shutdown', 'major': 17}
+IDENTITY = {'system_identifier': '7', 'catalog_version': 202406281, 'data_checksum_version': 1}
+FACTS = {'timeline': 1, 'redo': '0/2000000', 'end': '0/4000000', 'proof': 'clean shutdown', 'major': 17, **IDENTITY}
 
 
 def source(**changes):
-    base = {'server_version': 170011, 'summarize_wal': True, 'timeline': 1, 'start_lsn': L('0/8000000'),
+    base = {'identity': IDENTITY, 'server_version': 170011, 'summarize_wal': True, 'timeline': 1,
+            'start_lsn': L('0/8000000'),
             'history': {}, 'summaries': [(1, L('0/1000000'), L('0/5000000')), (1, L('0/5000000'), L('0/8000000'))]}
     return {**base, **changes}
 
@@ -52,6 +54,13 @@ class Guard(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn('do not cover', reasons[0])
         self.assertFalse(fastpath.guard({**FACTS, 'major': 18}, source())[0])
+
+    def test_another_cluster_is_refused_whatever_the_reuse_policy(self):
+        # --reuse-any-basis lets another cluster through the identity gate; its LSNs mean nothing here.
+        for key, value in (('system_identifier', '8'), ('catalog_version', 1), ('data_checksum_version', 0)):
+            ok, reasons = fastpath.guard({**FACTS, key: value}, source())
+            self.assertFalse(ok, key)
+            self.assertIn(key.replace('_', ' '), reasons[0])
 
     def test_malformed_facts_are_a_protocol_error(self):
         with self.assertRaises(ProtocolError):

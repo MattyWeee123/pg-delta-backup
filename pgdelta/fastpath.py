@@ -4,7 +4,8 @@ either copy.
 
 It runs only where B's lineage is provable (guard v2, EXP-62); otherwise the session hashes both copies, as it
 does without the option:
-- B and S share a cluster, catalog and data checksum version (the identity gate, which reuse needs anyway);
+- B and S share a cluster, catalog and data checksum version, compared here whatever the reuse policy (with
+  --reuse-any-basis the identity gate lets another cluster through, and LSNs of two clusters are unrelated);
 - B carries no marker of an interrupted in-place refresh, which leaves B a mix of two states;
 - B's end is proven by how B was stopped: a clean shutdown's checkpoint (written after every record), a cleanly
   stopped standby's minimum recovery point (no page is written past it), or the latest end in a base backup's
@@ -48,6 +49,7 @@ FORK_SUFFIX = {0: '', 1: '_fsm', 2: '_vm', 3: '_init'}
 SUMMARIZED_FORKS = ('main', 'vm')  # the forks whose blocks the summaries list; every other fork goes whole
 END = 1 << 64
 SUMMARIZER_WAIT_SECONDS = 120
+IDENTITY_KEYS = ('system_identifier', 'catalog_version', 'data_checksum_version')
 _RELATION = re.compile(r'^((?:base/[1-9][0-9]*|global)/[1-9][0-9]*)(_[a-z]+)?(?:\.([1-9][0-9]*))?$')
 _WALDUMP_LSN = re.compile(r'lsn: ([0-9A-Fa-f]+/[0-9A-Fa-f]+)')
 _SEGMENT = re.compile(r'^([0-9A-F]{8})([0-9A-F]{8})([0-9A-F]{8})$')
@@ -112,7 +114,7 @@ def basis_facts(basis, pg_controldata, marker):
     last = last_wal_record(basis / 'pg_wal', waldump, timeline, identity.get('wal_segment_size') or 16 << 20)
     facts = {'timeline': timeline, 'redo': format_lsn(redo), 'end': format_lsn(max(end, last or 0, redo)),
              'proof': proof, 'last_wal_record': format_lsn(last) if last else None,
-             'major': _major(basis)}
+             'major': _major(basis), **{key: identity.get(key) for key in IDENTITY_KEYS}}
     return facts, None
 
 
@@ -187,9 +189,13 @@ def covered(summaries, timeline, lo, hi):
 def guard(facts, source):
     """(ok, reasons): whether the summaries may stand in for reading B (guard v2, EXP-62).
 
-    `facts` is ACCEPT's "summary" from the receiver; `source` holds the server's version, its summarize_wal
-    setting, its major version, the backup's start LSN and timeline, its timeline history and its summaries."""
+    `facts` is ACCEPT's "summary" from the receiver; `source` holds the server's identity (pg_controldata's), its
+    version, its summarize_wal setting, the backup's start LSN and timeline, its timeline history and summaries."""
     reasons = []
+    identity = source.get('identity') or {}
+    for key in IDENTITY_KEYS:
+        if facts.get(key) is None or identity.get(key) is None or str(facts[key]) != str(identity[key]):
+            reasons.append(f'B\'s {key.replace("_", " ")} ({facts.get(key)}) is not the server\'s ({identity.get(key)})')
     major, version = source['server_version'] // 10000, source['server_version']
     if version < SUMMARY_FIXED.get(major, 1 << 31):
         reasons.append(f'the server is version {version}; WAL summaries need 17.11, 18.6 or later')
