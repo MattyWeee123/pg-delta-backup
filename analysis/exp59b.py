@@ -73,7 +73,7 @@ def main(argv=None):
 
 def figure(rows):
     plotting.style()
-    fig, ax = plt.subplots(figsize=(8.4, 4.2))
+    fig, ax = plt.subplots(figsize=(8.4, 4.9))
     colors = {PGDELTA: COLORS['blue'], SYNC: COLORS['orange'], ASYNC: COLORS['red'], FULL: COLORS['grey']}
     for i, r in enumerate(rows):
         for j, m in enumerate(METHODS):
@@ -89,7 +89,7 @@ def figure(rows):
     ax.set_xticks([i * 5 + 1.5 for i in range(len(rows))],
                   ['0.5 Gbit/s' if r['speed'] == '0.5g' else 'unthrottled' for r in rows])
     ax.set_ylabel('seconds to a usable copy (median)')
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=8, loc='upper center', bbox_to_anchor=(0.5, -0.1), ncol=3)
     ax.set_title("Scattered changes after a day's churn: pgBackRest's WAL fetched one segment a call or asynchronously",
                  fontsize=10)
     print(plotting.save(fig, 'exp59b-async'))

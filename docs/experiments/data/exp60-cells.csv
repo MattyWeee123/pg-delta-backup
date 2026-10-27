@@ -1,3 +1,3 @@
 gbit,blake2b_hash_basis_s,blake2b_hash_source_s,blake2b_runs,blake2b_verify_s,blake2b_wall_s,blake3_hash_basis_s,blake3_hash_source_s,blake3_runs,blake3_verify_s,blake3_wall_s,ratio,saving_s
-0.5,1.561,1.603,2,0.703,13.361,0.957,0.96,2,0.365,13.011,0.974,0.35
-5.0,1.489,1.607,2,0.755,4.653,0.853,0.961,2,0.388,4.12,0.885,0.533
+0.5,1.589,1.615,4,0.765,13.333,0.924,0.964,4,0.396,12.921,0.969,0.412
+5.0,1.55,1.624,4,0.794,4.724,0.881,0.961,4,0.434,4.12,0.872,0.604

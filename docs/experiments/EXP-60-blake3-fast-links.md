@@ -1,6 +1,6 @@
 # EXP-60: How much of v1's fixed cost on fast links is the hash, and does BLAKE3 lower it?
 
-Status: **first session done October 27, 2026 (8 runs, all passing, all four predictions held): at 5 Gbit/s v1 with BLAKE3 took 0.885 of v1 with BLAKE2b's time (4.12 s against 4.65), each hashing phase about 0.58 of BLAKE2b's. 0.885 is within 0.05 of the 0.90 bar, so rule 11's second session is pre-registered below and runs next.** Lean: the default pair, about 30 minutes, run on the same VMs after EXP-59.
+Status: **done October 27, 2026, firm (two sessions, 16 runs, all passing; all four predictions held in both): at 5 Gbit/s v1 with BLAKE3 took 0.885 of v1 with BLAKE2b's time in the first session and 0.847 in the second, 0.872 over both (4.12 s against 4.72). Each hashing phase took about 0.57–0.59 of BLAKE2b's. Every DR number measured on VMs before this used BLAKE2b, so on fast links they understate v1 by about 13%.** Lean: the default pair, about 30 minutes, run on the same VMs after EXP-59.
 
 ## Why this experiment
 
@@ -120,3 +120,22 @@ The same command on a fresh pair, after EXP-59b's runs (`--order-seed 601`, resu
 - **If the second session gives more than 0.90:** prediction 1 is recorded as not firm, and the pooled ratio is reported beside it.
 
 Predictions 2–4 are scored again on the second session.
+
+## Results: the second session (October 27)
+
+A fresh pair in us-central1-a, after EXP-59b's runs. `blake3` 1.0.11 was on both ends, and all 8 runs passed with their arm's hash. Data: `docs/experiments/data/exp60-cells.csv` (both sessions pooled); raw `results/exp04/exp60b/` (not in git). The figure above now shows both sessions pooled.
+
+| At 5 Gbit/s, 60 ms | First session | Second session | Both (4 runs per arm) |
+|---|---:|---:|---:|
+| BLAKE2b | 4.65 s | 4.81 s | 4.72 s |
+| BLAKE3 | 4.12 s | 4.08 s | 4.12 s |
+| **BLAKE3 ÷ BLAKE2b** | **0.885** | **0.847** | **0.872** |
+| hashing phases, BLAKE3 ÷ BLAKE2b | 0.60, 0.57 | 0.58, 0.55 | 0.59, 0.57 |
+| time saved at 0.5 Gbit/s / at 5 | 0.35 / 0.53 s | 0.41 / 0.74 s | 0.41 / 0.60 s |
+
+All four predictions held in the second session too. By the rule registered for it (the second session alone at most 0.90, and both pooled at most 0.90), **prediction 1 is firm.**
+
+**What changes:**
+- **On fast links, BLAKE3 makes v1 about 13% faster at 2.1 GB.** It took 0.60–0.62 of `pg_basebackup`'s time at 5 Gbit/s, against 0.68–0.73 with BLAKE2b (first and second session).
+- **pgdelta's README recommends the `blake3` package for production;** without it, `--hash auto` falls back to BLAKE2b. VM pipelines install it per experiment, as EXP-60's did. The VMs' startup script doesn't, so arms that don't pin `--hash` stay comparable with every earlier run; an arm meant to show the shipped speed pins `--hash blake3`.
+- **What stays:** every earlier DR number on VMs used BLAKE2b and is reported as measured, with this note beside it. Beyond memory nothing changes: there the disk read of B is the floor (EXP-48).

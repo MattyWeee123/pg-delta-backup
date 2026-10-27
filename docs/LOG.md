@@ -8,6 +8,25 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (evening): EXP-59 and -59b against pgBackRest from a day-old backup; EXP-60's BLAKE3, firm
+
+- **Sign-in:** the earlier "logged in" lines in the Terminal were old scrollback from before the hostname changed; gcloud's own logs showed no login after October 26. A new `gcloud auth login` tab fixed it, and a background watcher started the pipeline within a minute.
+- **EXP-59 (first pair, 36 runs, all passing; 3 of 3 predictions held):**
+  - timed to a usable copy from a backup a day's churn old, pgdelta took 0.024–0.084 of pgBackRest's time;
+  - pgBackRest's restore took 6–10 s, then 90–118 s of recovery fetching 166–205 WAL segments one per call;
+  - after the run: the analysis double-counted pgBackRest's recovery bytes (fixed: 1,689 MB, not 2,963). The trial-level row check failed after the runs, because it counts only the trial's own changes and the day's churn was also there; that skipped the B0 check. Aged trials now skip the row check, with a test.
+- **EXP-60 (same pair, 8 runs; 4 of 4 held):** BLAKE3 took 0.885 of BLAKE2b's time at 5 Gbit/s. The EXP-29-based estimate of each hashing phase held almost exactly. Within 0.05 of the bar, so rule 11's second session followed.
+- **Second pair:**
+  - **EXP-59b** (16 runs; 3 of 3 held) ran pgBackRest with asynchronous WAL fetching (`archive-async`, 4 processes; new variant `pgbackrest_zst_async`, destination-only). Recovery fell to 0.59–0.64 of the one-per-call time, still 67–78 s, and pgdelta took 0.053–0.122 of its time. The B0 check ran and passed.
+  - **EXP-60's second session** gave 0.847, 0.872 pooled: firm.
+- **Ledgers:**
+  - RESULTS has two new rows (against a repository; the hash on fast links);
+  - D01 and D15 are annotated, with no grade changed;
+  - the deck has a new slide after the DR slide, with EXP-59b's chart;
+  - pgdelta's README recommends the `blake3` package for production.
+
+  Both pairs were deleted, with no VM or disk left.
+
 ## 2026-10-27 (late night): EXP-62, the fast path's guard blind spot, and guard v2
 
 - **Why:** EXP-61's write-up named one way its guard could be fooled. It found an old copy's end partly from the WAL the copy still holds, so an old primary that lost its WAL past a failover split could pass. A safety argument for the owner's decision shouldn't rest on an untested hole.

@@ -1,6 +1,6 @@
 # EXP-59: Does pgBackRest still compete when its newest backup is a day old?
 
-Status: **done October 27, 2026 (one session, 36 runs, all passing; all three predictions held): from a backup a day's churn old, pgBackRest reached a usable copy in 99–125 s, pgdelta in 2.4–10.6 s, 0.024–0.084 of pgBackRest's time. Nearly all of pgBackRest's time was its recovery, which fetched 166–205 WAL segments one per call. Whether asynchronous fetching changes the verdict is EXP-59b, pre-registered below.** Ledger test T11b, lean: one VM pair, about an hour. The owner asked for it on October 27.
+Status: **done October 27, 2026 (one session, 36 runs, all passing; all three predictions held): from a backup a day's churn old, pgBackRest reached a usable copy in 99–125 s, pgdelta in 2.4–10.6 s, 0.024–0.084 of pgBackRest's time. Nearly all of pgBackRest's time was its recovery, which fetched 166–205 WAL segments one per call. EXP-59b then ran pgBackRest with asynchronous fetching (its guide's setting for high WAL volume). That cut its recovery to 0.59–0.64 of the one-per-call time, but pgdelta still took only 0.053–0.122 of its time to a usable copy. All three of EXP-59b's predictions held too.** Ledger test T11b, lean: one VM pair, about an hour. The owner asked for it on October 27.
 
 ## Question
 
@@ -130,3 +130,34 @@ The source's `archive-push` is unchanged. Scattered changes only (EXP-59's close
 - **If 1 holds:** EXP-59's verdict stands against pgBackRest's recommended recovery setting, and the margin is quoted from the asynchronous arm.
 - **If 1 fails:** EXP-59 is restated as holding only against one-segment-per-call recovery, with the asynchronous numbers beside it.
 - **If 2 fails:** recovery is bound by replaying the WAL, not by fetching it, and EXP-59's margin isn't an artefact of the configuration.
+
+## Results: EXP-59b (October 27)
+
+A fresh default pair in us-central1-a, 14:33–15:01 EDT. All 16 runs passed:
+- every pgBackRest copy, both variants, recovered and matched the source's per-table digest;
+- the row check was skipped for the aged trial, as now designed, and the B0 check ran: B0 was unchanged.
+
+Data: `docs/experiments/data/exp59b-cells.csv`; raw `results/exp04/exp59b/` (not in git).
+
+![pgBackRest's WAL fetched one segment a call or asynchronously, against pgdelta](../figures/exp59b-async.svg)
+
+| Link | pgdelta | pgBackRest, one segment a call | pgBackRest, asynchronous | `pg_basebackup` | pgdelta ÷ asynchronous |
+|---|---:|---:|---:|---:|---:|
+| 0.5 Gbit/s | **10.7 s** | 10.0 + 120.8 = 130.8 s | 10.0 + 77.7 = **87.8 s** | 37.0 s | **0.122** |
+| unthrottled | **3.9 s** | 7.2 + 113.5 = 120.8 s | 7.2 + 67.4 = **74.5 s** | 4.3 s | **0.053** |
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | Deciding: pgdelta at most 0.8 of asynchronous pgBackRest's time to a usable copy, at both speeds | **Held:** 0.122 and 0.053 |
+| 2 | Asynchronous archive-get's recovery at most 0.7 of the one-per-call variant's | **Held:** 0.643 and 0.593 |
+| 3 | Every run passes | **Held:** 16 of 16, with the B0 check |
+
+**What it shows:**
+- **EXP-59's verdict isn't an artefact of the configuration.** Fetching WAL asynchronously with 4 processes took about 43–46 s off pgBackRest's recovery. That is a real gain, and the setting is worth recommending to anyone using pgBackRest this way. Its copy still needed 67–78 s of recovery, against pgdelta's 0.2 s start, because both variants had the same ~196 segments of a day's churn to replay.
+- **The asynchronous variant moved more bytes:** 1.75 GB of WAL against 1.27 GB, for about the same number of segments restored. It prefetches ahead into its queue.
+- **The one-per-call arm reproduced EXP-59 across sessions:** recovery took 113–121 s here against 106–116 s there, and the restore 7–10 s.
+
+**The verdict, both sessions together:**
+- with a backup a day's churn (5% of rows) old, pgdelta reached a usable copy in 2–12% of pgBackRest's time, whichever way pgBackRest fetched WAL;
+- pgBackRest moved 3.5–4.5× pgdelta's bytes for scattered changes, and about 42× for local ones;
+- this holds for this churn on 2.1 GB. A busier day only adds WAL to replay; a backup taken just before would shrink the replay (EXP-08's case).
