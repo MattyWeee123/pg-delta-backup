@@ -89,4 +89,6 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 5. **The selector (idea 4):** small, after EXP-64 gives the fast path's measured constants.
 6. **Idea 3 only if** a VM split of the fixed cost shows that per-page work, not reading, dominates.
 
-EXP-64 (the fast path beyond memory) is running now, and its result places the fast path's real constants on the chart above.
+**Update, the same night: EXP-64's result.** The fast path refreshed 18 GB of local changes in 1.98 s (0.022 of a full copy), on the label bound. Scattered changes took 164.8 s, about 70 s above the bound. The runs' own timers put those 70 s in the sender's one-at-a-time reads of the source, which didn't overlap the receiver's writes: a systems problem, measured. The ranking above gains a new first item:
+
+0. **The fast path's source read pipeline** (parallel or read-ahead reads of the chosen pages, overlapped with sending), pre-registered as EXP-64b on the uniform cell. Its bound is about 112 s (0.62 of hashing). Beating a full copy there also needs idea 2.

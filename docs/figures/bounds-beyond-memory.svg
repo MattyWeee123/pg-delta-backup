@@ -665,6 +665,24 @@ z
     </g>
    </g>
    <g id="line2d_34">
+    <defs>
+     <path id="m30261ebbe5" d="M -0 5.656854 
+L 5.656854 0 
+L 0 -5.656854 
+L -5.656854 -0 
+z
+" style="stroke: #0072b2; stroke-linejoin: miter"/>
+    </defs>
+    <g clip-path="url(#p186690819d)">
+     <use xlink:href="#m30261ebbe5" x="53.986626" y="267.423843" style="fill: #0072b2; stroke: #0072b2; stroke-linejoin: miter"/>
+    </g>
+   </g>
+   <g id="line2d_35">
+    <g clip-path="url(#p186690819d)">
+     <use xlink:href="#m30261ebbe5" x="282.002985" y="111.798373" style="fill: #0072b2; stroke: #0072b2; stroke-linejoin: miter"/>
+    </g>
+   </g>
+   <g id="line2d_36">
     <path d="M 276.584534 269.320781 
 L 276.584534 20.798437 
 " clip-path="url(#p186690819d)" style="fill: none; stroke-dasharray: 0.8,1.32; stroke-dashoffset: 0; stroke: #0072b2; stroke-width: 0.8"/>
@@ -686,38 +704,44 @@ L 539.980877 269.320781
     <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="288.002985" y="88.869917" transform="rotate(-0 288.002985 88.869917)">EXP-48 uniform</text>
    </g>
    <g id="text_18">
+    <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="61.986626" y="257.423843" transform="rotate(-0 61.986626 257.423843)">EXP-64 fast, hot: 2 s</text>
+   </g>
+   <g id="text_19">
+    <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="290.002985" y="125.798373" transform="rotate(-0 290.002985 125.798373)">EXP-64 fast, uniform: 165 s</text>
+   </g>
+   <g id="text_20">
     <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; fill: #0072b2" transform="translate(280.678185 245.380766)">labels lose to a full copy</text>
     <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; fill: #0072b2" transform="translate(280.678185 254.982954)">past 28% of pages changed</text>
    </g>
-   <g id="text_19">
+   <g id="text_21">
     <text style="font-size: 10px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="294.361786" y="14.798437" transform="rotate(-0 294.361786 14.798437)">Beyond memory on a balanced persistent disk: what each algorithm must at least pay</text>
    </g>
    <g id="legend_1">
-    <g id="line2d_35">
+    <g id="line2d_37">
      <path d="M 55.942695 31.277187 
 L 63.942695 31.277187 
 L 71.942695 31.277187 
 " style="fill: none; stroke: #e69f00; stroke-width: 2; stroke-linecap: square"/>
     </g>
-    <g id="text_20">
+    <g id="text_22">
      <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="78.342695" y="34.077187" transform="rotate(-0 78.342695 34.077187)">full copy (sequential writes)</text>
     </g>
-    <g id="line2d_36">
+    <g id="line2d_38">
      <path d="M 55.942695 43.277812 
 L 63.942695 43.277812 
 L 71.942695 43.277812 
 " style="fill: none; stroke: #888888; stroke-width: 2; stroke-linecap: square"/>
     </g>
-    <g id="text_21">
+    <g id="text_23">
      <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="78.342695" y="46.077812" transform="rotate(-0 78.342695 46.077812)">hashing: read all of B, then write the changes</text>
     </g>
-    <g id="line2d_37">
+    <g id="line2d_39">
      <path d="M 55.942695 55.278437 
 L 63.942695 55.278437 
 L 71.942695 55.278437 
 " style="fill: none; stroke: #0072b2; stroke-width: 2; stroke-linecap: square"/>
     </g>
-    <g id="text_22">
+    <g id="text_24">
      <text style="font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="78.342695" y="58.078437" transform="rotate(-0 78.342695 58.078437)">page labels: write the changes only (fast path)</text>
     </g>
    </g>

@@ -1,6 +1,6 @@
 # EXP-64: Beyond memory, how much faster is the fast path than hashing, and than a full copy?
 
-Status: **pre-registered October 27, 2026, before any run.** One VM pair (the `ha` set), about 2 hours with the data load. The owner asked for the fast path to be built and timed beyond memory (K11).
+Status: **done October 27, 2026 (one session, 12 runs, all passing; 4 of 5 predictions held, the deciding one among them). Beyond memory, for local changes the fast path refreshed 18 GB in 1.98 s, against 87.8 s by hashing and 90.7 s by a full copy (0.022–0.023). For scattered changes it took 164.8 s, 0.915 of hashing and 1.81 times a full copy. Its own timers place the gap in the sender's one-at-a-time reads of the source (about 99 s), which didn't overlap the receiver's writes (about 107 s): a systems problem.** One VM pair (the `ha` set), about 2 hours with the data load. The owner asked for the fast path to be built and timed beyond memory (K11).
 
 ## Question
 
@@ -61,3 +61,57 @@ The uniform comparison with the full copy is reported, not predicted. **Rule 11:
   The Omni operator's practice (EXP-44: it deletes the old disk) is unchanged, so the HA case on Omni still needs that disk kept.
 - **If 1 fails:** the fast path's own costs (the summaries, the guard, B's facts, the backup's start and stop) are read from its statistics, and the model is restated.
 - **If 3 fails:** the uniform case is bound by something besides the read; the write term is re-measured.
+
+## Results (October 27)
+
+The `ha` set in us-west1-a and -b (the revision above), 21:59–23:01 UTC, then deleted. PostgreSQL 17.11 (`server_version_num` 170011), a 17,787 MB database, `summarize_wal` on before B0. Every run exited 0. Every fast run used the fast path, its guard passing on B0's `backup_manifest`, and every fast copy recovered with `pgbench_accounts` equal to the source's. Data: `docs/experiments/data/exp64-cells.csv`; raw `results/exp04/exp64/` (not in git).
+
+![The fast path beyond memory against hashing and a full copy](../figures/exp64-beyond-memory.svg)
+
+| 18 GB on 8 GB VMs | Hashing (v1 live) | Fast path | `pg_basebackup` | Fast ÷ hashing | Fast ÷ full |
+|---|---:|---:|---:|---:|---:|
+| Local changes (hot 1%): time | 87.8 s | **1.98 s** | 90.7 s | **0.023** | **0.022** |
+| pages sent | 13,880 | 14,712 | all | | |
+| Scattered changes (uniform 1%): time | 180.1 s | 164.8 s | 91.2 s | 0.915 | 1.81 |
+| pages sent | 618,417 | 619,251 | all | | |
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | Deciding: hot, fast at most 0.35 of hashing | **Held, 0.023** |
+| 2 | Hot, fast at most 0.35 of a full copy | **Held, 0.022** |
+| 3 | Uniform, fast at most 0.75 of hashing | **Failed, 0.915** |
+| 4 | Every fast run used the fast path; every fast copy correct; every run exited 0 | **Held** |
+| 5 | Control: hashing within 20% of EXP-48's v1 | **Held:** 87.8 against 87.5 s, and 180.1 against 184.6 s |
+
+On the lower-bound chart (`analysis/bounds.py`), the local point sits on the bound for page labels, and the scattered point about 70 s above it:
+
+![The bounds beyond memory, with EXP-64's measurements](../figures/bounds-beyond-memory.svg)
+
+## Why the scattered case missed (from the runs' own timers)
+
+| Uniform, median of 2 | Fast path | Hashing |
+|---|---:|---:|
+| Sender reading the source and hashing (`hash_source`) | 157.1 s, of which 57.8 s blocked sending | 86.7 s (the whole of S, sequential, on 4 workers) |
+| Receiver hashing B (`hash_basis`) | none | 102.9 s |
+| Receiver writing the pages (`rebuild`) and syncing them (`fsync`) | 57.6 s and 49.4 s | 117.5 s and 113.7 s (overlapping) |
+| Receiver waiting for data (`recv_wait`) | **105.2 s** | 61.1 s |
+| Guard (summaries, 1,466,330 block rows) | 4.7 s | none |
+
+- **The fast path did save B's read:** about 103 s of hashing B is gone.
+- **It replaced that with about 99 s of reading 616,000 scattered pages of the source.** These were read one at a time in the single sending thread, with no read-ahead or parallel reads, while the receiver sat idle for 105 s.
+- **The receiver's own writing and syncing took about 107 s** (about 5,800 pages a second).
+
+So the two sides' I/O ran mostly one after the other: about 99 s of reading plus about 58 s blocked on sending. Overlapped, the bound is about max(99, 107) + 5 ≈ 112 s, or 0.62 of hashing. **This is a systems problem:**
+- **read parallelism and pipelining on the source** (parallel or read-ahead reads of the chosen pages);
+- **the scattered write rate on B,** which the gap-filling writes of research loop 1 (idea 2) would attack.
+
+With both, the fast path could reach a full copy's time on scattered changes. Even overlapped, it stays about 1.2 times a full copy here, near the 28% crossover the bounds predict.
+
+**What this shows:**
+- **Beyond memory, for local changes, the fast path ends the "at best a tie" verdict:** about 45 times faster than both hashing and a full copy, with the copy proven correct.
+- **For scattered changes that touch about 28% of the pages, it is still slower than a full copy,** and the cause is measured, not guessed. **Conditions:** `summarize_wal` on before the old copy was taken, an old copy whose end is provable (here a base backup with its manifest), and PostgreSQL 17.11.
+
+**Next** (research loop 1, re-ranked):
+- **The source-side read pipeline,** pre-registered as EXP-64b, re-running the uniform cell;
+- **an `fio` sweep for the gap-filling idea;**
+- **the competitor head-to-heads still unmeasured:** `pg_rewind`, and catch-up from a WAL archive.

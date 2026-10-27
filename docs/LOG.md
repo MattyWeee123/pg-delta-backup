@@ -8,6 +8,22 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (night): the fast path built (K11), checked live (EXP-63) and timed beyond memory (EXP-64); research loop 1
+
+- **Built:** `--fast-path summaries` (pgdelta/fastpath.py), opt-in, behind guard v2. Unit tests and two real-server refreshes pass. Planning EXP-63 found that `--reuse-any-basis` could let another cluster reach the fast path; it now checks identity itself.
+- **EXP-63 (local, 13 tricky copies):** every published copy matched the source. The fast path ran exactly where guard v2 passed, and refused the rest.
+- **EXP-64 (the `ha` set in us-west1, after us-central1 and us-east1 had no capacity):**
+  - local changes: 1.98 s, against 87.8 s by hashing and 90.7 s by a full copy;
+  - scattered changes: 164.8 s, 1.8× a full copy, the gap traced by the runs' timers to unoverlapped source reads.
+
+  The first pipeline's poll took "workload done" for the end; a corrected watcher fetched the results and deleted the VMs.
+- **Research loop 1** (docs/research/2026-10-27-research-loop-1.md):
+  - a competitor audit from primary sources;
+  - the hash path's measured ceiling (about 85% of ideal), so hashing's HA tie is an algorithm limit;
+  - lower bounds beyond memory;
+  - mechanisms from papers, read critically.
+- **Next, by evidence:** EXP-64b (the source read pipeline), an `fio` sweep for gap-filled writes, and the unmeasured head-to-heads against `pg_rewind` and archive catch-up.
+
 ## 2026-10-27 (night): the owner's research loop (rule 12, K13)
 
 The owner, in their words, asked that this be remembered and applied recursively:

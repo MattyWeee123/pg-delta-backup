@@ -82,8 +82,8 @@ def main(argv=None):
         for pattern, seconds in exp64_points(a.exp64).items():
             share = EXP48[pattern]['pages'] / N * 100
             ax.plot(share, seconds, 'D', color=COLORS['blue'], ms=8)
-            ax.annotate(f'EXP-64 fast, {pattern}', (share, seconds), textcoords='offset points', xytext=(6, -12),
-                        fontsize=8)
+            ax.annotate(f'EXP-64 fast, {pattern}: {seconds:.0f} s', (share, seconds), textcoords='offset points',
+                        xytext=(8, 10 if pattern == 'hot' else -14), fontsize=8)
     ax.axvline(crossover * 100, color=COLORS['blue'], lw=0.8, ls=':')
     ax.text(crossover * 100 + 0.5, 15, f'labels lose to a full copy\npast {crossover:.0%} of pages changed',
             fontsize=8, color=COLORS['blue'])
