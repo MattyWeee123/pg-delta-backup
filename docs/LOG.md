@@ -8,6 +8,22 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (late night): TLS built (O6)
+
+- **Why:** the goals scorecard showed TLS, the owner's own requirement since October 23 (O6), as the one unmet goal pgdelta could close itself. pgdelta sent its pages and the session's hash key in clear, and EXP-13's TLS measurement never ran.
+- **What was built:** `--tls-cert`, `--tls-key` and `--tls-ca` on `send` and `receive`, opt-in, all three on both ends.
+  - The connection runs inside mutual TLS 1.3, and each end accepts only a peer whose certificate the given private CA signed.
+  - The statistics record the version, cipher, peer and handshake time.
+  - A session without the options is unchanged on the wire.
+- **Tests:** 8 new, with a throwaway CA made by `openssl`:
+  - a session over TLS builds the same copy;
+  - a relay sees S's marker bytes and file names without TLS and neither with it;
+  - a peer from another CA is refused in both directions, as is a sender without TLS, with no output published;
+  - the CLI refuses a partial set of options, and TLS with `--stdio`.
+
+  The full suite (1,566 tests) passes.
+- **Not yet measured:** what TLS costs at DR rates. EXP-58 is proposed (one VM pair, about 45 minutes) and waits for the owner.
+
 ## 2026-10-27 (night): the start checkpoint on a large dirty set
 
 - **EXP-57 (one VM, pre-registered):** with about 4.9 GB of dirty buffers on a balanced persistent disk and a TPC-B load at 0.6 of capacity:

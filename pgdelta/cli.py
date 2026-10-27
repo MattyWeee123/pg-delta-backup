@@ -268,6 +268,29 @@ def _source_kind_option(parser):
                              f'{live.DEFAULT_CHECKPOINT})')
 
 
+def _tls_options(parser, peer):
+    # O6: TCP inside mutual TLS 1.3 (pgdelta.transport). All three together, on both ends, or none.
+    parser.add_argument('--tls-cert', type=Path, metavar='FILE',
+                        help=f'run the TCP connection inside TLS 1.3, presenting this certificate (PEM); with '
+                             f'--tls-key and --tls-ca, on both ends. Without them the stream, and the session\'s '
+                             f'hash key, cross the network in clear')
+    parser.add_argument('--tls-key', type=Path, metavar='FILE', help="--tls-cert's private key (PEM)")
+    parser.add_argument('--tls-ca', type=Path, metavar='FILE',
+                        help=f'the CA (PEM) that must have signed {peer}\'s certificate; anything else is refused')
+
+
+def _tls(args, server):
+    """The TLS context --tls-cert, --tls-key and --tls-ca ask for, or None without them."""
+    given = (args.tls_cert, args.tls_key, args.tls_ca)
+    if not any(given):
+        return None
+    if not all(given):
+        raise InvalidInput('--tls-cert, --tls-key and --tls-ca go together')
+    if getattr(args, 'stdio', False):
+        raise InvalidInput('--tls-* is for --listen: --stdio is already the transport the caller set up')
+    return transport.tls_context(args.tls_cert, args.tls_key, args.tls_ca, server=server)
+
+
 def _positive_seconds(text):
     try:
         value = float(text)
@@ -364,6 +387,7 @@ def build_parser():
     _jobs_option(receive, 'B and verify O')
     _rebuild_options(receive)
     _prefetch_options(receive)
+    _tls_options(receive, 'the sender')
     # Set by `local`: S is on this host too, so O must also stay outside it.
     receive.add_argument('--local-source', type=Path, help=argparse.SUPPRESS)
     receive.set_defaults(func=cmd_receive)
@@ -372,6 +396,7 @@ def build_parser():
     send.add_argument('--source', required=True, type=Path, help='new backup S (read-only)')
     send.add_argument('--connect', required=True, metavar='HOST:PORT')
     _sender_options(send)
+    _tls_options(send, 'the receiver')
     # Experiment switch (EXP-13): the threshold of the busy and idle parts of the sender's waits.
     send.add_argument('--busy-inflight-bytes', type=_byte_count, metavar='BYTES',
                       help='statistics only: while the sender waits for the receiver, a moment counts as busy '
@@ -437,6 +462,7 @@ def cmd_receive(args):
 
 def _receive(args):
     launched = getattr(args, 'launched', None)
+    tls = _tls(args, server=True)
     if args.stdio:
         channel = transport.stdio_channel()
         prefetched = prefetch.not_run(args.prefetch_basis, 'stdio: the sender is connected from the start')
@@ -453,15 +479,15 @@ def _receive(args):
         setup = receiver.prepare_receiver(args.basis, args.output, pg_controldata=_basis_controldata(args),
                                           reuse_any_basis=args.reuse_any_basis,
                                           local_source=args.local_source, in_place=args.in_place)
-        if not transport.is_loopback(host):
+        if tls is None and not transport.is_loopback(host):
             log('warning: the TCP transport is neither authenticated nor encrypted; '
-                'use it only on a trusted network')
+                'use --tls-cert, --tls-key and --tls-ca, or a trusted network')
         listener = transport.listen(host, port)
         listening = time.perf_counter()
 
         def wait():
             log(f'listening on {_format_address(listener.getsockname())}')
-            return transport.accept_channel(listener)
+            return transport.accept_channel(listener, tls=tls)
 
         if args.prefetch_basis == 'on':
             # B is read into the page cache while the sender is awaited; stopped when it connects.
@@ -472,8 +498,11 @@ def _receive(args):
             channel, prefetched = wait(), prefetch.not_run('off', 'switched off (--prefetch-basis off)')
         log(prefetch.describe(prefetched))
         try:
-            return receiver.run_receiver(channel, setup=setup, prefetch=prefetched, launched=launched,
-                                         listening=listening, **_receiver_engine(args))
+            stats = receiver.run_receiver(channel, setup=setup, prefetch=prefetched, launched=launched,
+                                          listening=listening, **_receiver_engine(args))
+            if channel.tls is not None:
+                stats['tls'] = channel.tls
+            return stats
         finally:
             channel.close()
 
@@ -576,12 +605,15 @@ def cmd_send(args):
 
     def run():
         identity = _source_identity(args)
-        channel = transport.connect_channel(host, port, congestion_control=args.congestion_control)
+        channel = transport.connect_channel(host, port, congestion_control=args.congestion_control,
+                                            tls=_tls(args, server=False))
         try:
             stats = sender.run_sender(channel, args.source, busy_inflight_bytes=args.busy_inflight_bytes,
                                       **_sender_kwargs(args, identity))
             if channel.congestion_control is not None:
                 stats['congestion_control'] = channel.congestion_control
+            if channel.tls is not None:
+                stats['tls'] = channel.tls
             return stats
         finally:
             channel.close()

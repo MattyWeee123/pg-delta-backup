@@ -3,6 +3,10 @@
 The session code only sees a protocol.Channel, so an SSH transport can be
 added later by running `python -m pgdelta receive --stdio` through ssh and
 wrapping the ssh process's pipes exactly as spawn_local_receiver does.
+
+TCP may run inside mutual TLS 1.3 (O6; --tls-cert, --tls-key, --tls-ca on send and receive): each end presents a
+certificate the other end's CA signed, so only an authorized sender can write into B, and the pages and the
+session's hash key (in HELLO) never cross the network in clear.
 """
 from __future__ import annotations
 
@@ -10,6 +14,7 @@ import ipaddress
 import os
 from pathlib import Path
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -102,7 +107,37 @@ def is_loopback(host):
         return False
 
 
-def socket_channel(sock):
+def tls_context(cert, key, ca, *, server):
+    """Mutual TLS 1.3 (O6): this end presents `cert` with `key` and requires the peer's certificate signed by `ca`.
+    A private CA names the parties, so the client checks the certificate, not the host name."""
+    try:
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER if server else ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_3
+        if not server:
+            context.check_hostname = False
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.load_cert_chain(cert, key)
+        context.load_verify_locations(cafile=ca)
+    except (OSError, ssl.SSLError, ValueError) as exc:
+        raise InvalidInput(f'cannot load the TLS certificate, key or CA: {exc}') from exc
+    return context
+
+
+def _secure(sock, tls, server_side):
+    """`sock` wrapped in TLS after the handshake, and what was negotiated; (sock, None) without `tls`."""
+    if tls is None:
+        return sock, None
+    try:
+        secure = tls.wrap_socket(sock, server_side=server_side)
+    except (OSError, ssl.SSLError) as exc:
+        sock.close()
+        raise TransferError(f'TLS handshake failed: {exc}') from exc
+    peer = dict(item for part in (secure.getpeercert() or {}).get('subject', ()) for item in part)
+    return secure, {'version': secure.version(), 'cipher': secure.cipher()[0], 'peer': peer.get('commonName')}
+
+
+def socket_channel(sock, tls=None):
+    """A Channel over a connected TCP socket; `tls`, what _secure negotiated on it, is kept as channel.tls."""
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     reader, writer = sock.makefile('rb'), sock.makefile('wb')
 
@@ -129,7 +164,9 @@ def socket_channel(sock):
                 pass
 
     # abort(): a shut-down socket fails a send or receive blocked on it at once, on Linux and macOS alike.
-    return Channel(reader, writer, closer=close, sock=sock, aborter=lambda: sock.shutdown(socket.SHUT_RDWR))
+    channel = Channel(reader, writer, closer=close, sock=sock, aborter=lambda: sock.shutdown(socket.SHUT_RDWR))
+    channel.tls = tls
+    return channel
 
 
 def keep_alive(sock, seconds):
@@ -173,14 +210,16 @@ def listen(host, port):
     return listener
 
 
-def accept_channel(listener):
+def accept_channel(listener, tls=None):
+    """The one connection the receiver takes, inside TLS when `tls` (a tls_context with server=True) is given."""
     try:
         sock, _ = listener.accept()
     except OSError as exc:
         raise TransferError(f'accept failed: {exc}') from exc
     finally:
         listener.close()
-    return socket_channel(sock)
+    sock, negotiated = _secure(sock, tls, server_side=True)
+    return socket_channel(sock, negotiated)
 
 
 def set_congestion_control(sock, name):
@@ -205,9 +244,11 @@ def set_congestion_control(sock, name):
     return out
 
 
-def connect_channel(host, port, timeout=30.0, congestion_control=None):
+def connect_channel(host, port, timeout=30.0, congestion_control=None, tls=None):
     """Connect to a receiver; the channel's connect_seconds is the connect's own time (EXP-13's connect_s), and
-    with congestion_control its congestion_control reports what the socket got (set_congestion_control)."""
+    with congestion_control its congestion_control reports what the socket got (set_congestion_control). With
+    `tls` (a tls_context with server=False) the connection is wrapped in TLS, its handshake timed apart as
+    channel.tls['handshake_seconds']."""
     started = time.perf_counter()
     chosen = None
     try:
@@ -222,8 +263,12 @@ def connect_channel(host, port, timeout=30.0, congestion_control=None):
     except OSError as exc:
         raise TransferError(f'cannot connect to {host}:{port}: {exc}') from exc
     connected = time.perf_counter() - started
+    shaken = time.perf_counter()
+    sock, negotiated = _secure(sock, tls, server_side=False)
+    if negotiated is not None:
+        negotiated['handshake_seconds'] = round(time.perf_counter() - shaken, 6)
     sock.settimeout(None)
-    channel = socket_channel(sock)
+    channel = socket_channel(sock, negotiated)
     channel.connect_seconds = connected
     channel.congestion_control = chosen
     return channel
