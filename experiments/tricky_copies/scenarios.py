@@ -15,6 +15,7 @@ from __future__ import annotations
 from functools import partial
 
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -515,6 +516,28 @@ def build_s2(ctx, crash=False):
     return promote_and_write(ctx, r)
 
 
+WAL_SEGMENT = re.compile(r'^([0-9A-F]{8})([0-9A-F]{8})([0-9A-F]{8})$')
+WAL_SEGMENT_BYTES = 16 * 1024 * 1024  # initdb's default
+
+
+def build_s2d(ctx):
+    """S2d (EXP-62): S2b, then B loses its WAL from the segment holding the split on, as if deleted or never
+    copied. Its pages keep the diverged writes; nothing left in B shows it went past the split."""
+    source = build_s2(ctx, crash=True)
+    split = lsnscan.parse_lsn(ctx.facts['split_lsn'])
+    first = split // WAL_SEGMENT_BYTES
+    removed = []
+    for path in sorted((ctx.old_copy / 'pg_wal').iterdir()):
+        match = WAL_SEGMENT.match(path.name)
+        if match and (int(match.group(2), 16) << 32 | int(match.group(3), 16) << 24) // WAL_SEGMENT_BYTES >= first:
+            path.unlink()
+            removed.append(path.name)
+    ctx.step(f"delete B's WAL from the split's segment on: {len(removed)} segments")
+    ctx.facts['wal_removed'] = removed
+    ctx.check('s2d_wal_removed', bool(removed), segments=removed)
+    return source
+
+
 def build_s2c(ctx):
     """S2c: B is a hot standby Q of the old primary P. Q replays P's diverging writes,
     writes them to disk without a restartpoint and stops cleanly. P never checkpoints after
@@ -955,6 +978,12 @@ SCENARIOS = [
              'n/a', 'correct; unchanged user-table pages may be reused', build_s9, check_s9),
 ]
 BY_ID = {s.id: s for s in SCENARIOS}
+# Built only when named: EXP-62's, beside EXP-03's list so its runs and T11's stay as they were.
+EXTRA_SCENARIOS = [
+    Scenario('S2d', 'ex-primary-wal-lost', 'Ex-primary after a failover, its WAL past the split lost',
+             "data directory of the old primary as S2b's, with its WAL segments from the split's on deleted",
+             'wrong', 'correct; diverged pages detected and re-sent', build_s2d, None),
+]
 
 
 # --------------------------------------------------------------------------

@@ -44,7 +44,8 @@ def make_bins(args):
 def select_scenarios(names):
     if not names or [n.lower() for n in names] == ['all']:
         return list(scenarios.SCENARIOS)
-    by_key = {spec.id.upper(): spec for spec in scenarios.SCENARIOS}  # S1b, S2b, S2c: any case
+    # S1b, S2b, S2c: any case. EXP-62's S2d is built only when named.
+    by_key = {spec.id.upper(): spec for spec in (*scenarios.SCENARIOS, *scenarios.EXTRA_SCENARIOS)}
     chosen = []
     for name in names:
         key = name.upper().split('-')[0]

@@ -102,6 +102,27 @@ def guard(old_info, source_info, b_tli, b_redo, b_end, path, summaries, s_start)
     return not reasons, reasons
 
 
+def proven_end(old_info, old_copy):
+    """(B's end, None) where how B was stopped proves it, else (None, why not) (EXP-62's guard v2).
+
+    A clean shutdown's checkpoint is written after every record; a standby stopped cleanly writes no page past
+    its minimum recovery point; a base backup's manifest records the end of its WAL. A data directory that
+    crashed or was copied while running proves nothing without all of its WAL."""
+    state = old_info.get('cluster_state')
+    if old_info.get('backup_label'):
+        manifest = Path(old_copy) / 'backup_manifest'
+        if not manifest.is_file():
+            return None, 'B is a base backup without a backup_manifest'
+        ends = [parse_lsn(r['End-LSN']) for r in json.loads(manifest.read_text()).get('WAL-Ranges', [])]
+        return (max(ends), None) if ends else (None, "B's backup_manifest lists no WAL range")
+    if state == 'shut down':
+        return lsn_or_zero(old_info['checkpoint_location']), None
+    if state == 'shut down in recovery':
+        return max(lsn_or_zero(old_info['checkpoint_location']),
+                   lsn_or_zero(old_info.get('min_recovery_location'))), None
+    return None, f"B was not stopped cleanly ({state}), so its end can't be proven without all of its WAL"
+
+
 def ranges(path, lo, hi):
     """The stretches of [lo, hi) on each timeline of S's history."""
     return [(tli, max(begin, lo), min(switch, hi)) for tli, begin, switch in path if max(begin, lo) < min(switch, hi)]
@@ -202,14 +223,26 @@ def score_scenario(scenario_dir, old_info, source_info, threshold, waldump):
                 last_record or 0, b_redo)
     ok, reasons = guard(old_info, source_info, b_tli, b_redo, b_end, path, dump['summaries'], s_start)
     naive = score(source, old, selected(dump['summaries'], path, b_redo, s_start))
-    if ok:
-        guarded = {**naive, 'path': 'summaries'}
-    else:  # every page hashed: what differs is sent, nothing is left wrong, and both copies are read in full
-        guarded = {'path': 'hash', 'pages_sent': naive['hash_path_pages_sent'], 'wrong': 0, 'real_wrong': 0,
-                   'pages_read': naive['hash_path_pages_read'], 'read_fraction': 1.0}
+    # EXP-62's guard v2: B's end proven by how B was stopped; its WAL's last record still counts where further.
+    end_v2, why_not = proven_end(old_info, old)
+    if end_v2 is None:
+        ok_v2, reasons_v2 = False, [why_not]
+    else:
+        ok_v2, reasons_v2 = guard(old_info, source_info, b_tli, b_redo, max(end_v2, last_record or 0, b_redo), path,
+                                  dump['summaries'], s_start)
+
+    def guarded_by(passed):
+        if passed:
+            return {**naive, 'path': 'summaries'}
+        # every page hashed: what differs is sent, nothing is left wrong, and both copies are read in full
+        return {'path': 'hash', 'pages_sent': naive['hash_path_pages_sent'], 'wrong': 0, 'real_wrong': 0,
+                'pages_read': naive['hash_path_pages_read'], 'read_fraction': 1.0}
     return {'s_start': dump['s_start'], 's_timeline': s_tli, 'dump_error': dump.get('error'),
             'server_version': dump.get('server_version'), 'summaries': len(dump['summaries']),
             'history': [(tli, format_lsn(a), None if b == END else format_lsn(b)) for tli, a, b in path],
             'b': {'timeline': b_tli, 'redo': format_lsn(b_redo), 'end': format_lsn(b_end),
                   'last_wal_record': format_lsn(last_record) if last_record else None},
-            'guard': {'ok': ok, 'reasons': reasons}, 'naive': naive, 'guarded': guarded}
+            'guard': {'ok': ok, 'reasons': reasons}, 'naive': naive, 'guarded': guarded_by(ok),
+            'guard_v2': {'ok': ok_v2, 'reasons': reasons_v2,
+                         'proven_end': format_lsn(end_v2) if end_v2 is not None else None},
+            'guarded_v2': guarded_by(ok_v2)}

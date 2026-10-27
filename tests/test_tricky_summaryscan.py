@@ -55,6 +55,38 @@ class Guard(unittest.TestCase):
         self.assertIn('do not cover', reasons[0])
 
 
+class ProvenEnd(unittest.TestCase):
+    """EXP-62's guard v2: B's end comes from how it was stopped, never from the WAL it happens to hold."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.old = Path(self.temp.name)
+
+    def end(self, **info):
+        return summaryscan.proven_end({'checkpoint_location': '0/3000000', 'min_recovery_location': '0/0',
+                                       'backup_label': None, **info}, self.old)
+
+    def test_clean_stops_prove_their_end(self):
+        self.assertEqual(self.end(cluster_state='shut down'), (parse_lsn('0/3000000'), None))
+        self.assertEqual(self.end(cluster_state='shut down in recovery', min_recovery_location='0/4000000'),
+                         (parse_lsn('0/4000000'), None))
+
+    def test_a_crashed_data_directory_proves_nothing(self):
+        end, why = self.end(cluster_state='in production')
+        self.assertIsNone(end)
+        self.assertIn('not stopped cleanly', why)
+
+    def test_a_base_backup_needs_its_manifest(self):
+        end, why = self.end(cluster_state='in production', backup_label={'START WAL LOCATION': '0/2000028'})
+        self.assertIsNone(end)
+        self.assertIn('without a backup_manifest', why)
+        (self.old / 'backup_manifest').write_text(
+            '{"WAL-Ranges": [{"Timeline": 1, "Start-LSN": "0/2000028", "End-LSN": "0/2000138"}]}')
+        self.assertEqual(self.end(cluster_state='in production', backup_label={'x': 'y'}),
+                         (parse_lsn('0/2000138'), None))
+
+
 class Score(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
