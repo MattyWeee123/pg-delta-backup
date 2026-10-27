@@ -3432,6 +3432,13 @@ class Orchestrator:
             argv += ['--hex-filler']
         return argv
 
+    def aging_args(self, trial: dict, fraction: float, seed: int) -> list[str]:
+        """cluster_args for EXP-59's aging workload: uniform, `fraction` of the rows, its own `seed`."""
+        argv = self.cluster_args(trial)
+        for flag, value in (('--pattern', 'uniform'), ('--fraction', repr(fraction)), ('--seed', str(seed))):
+            argv[argv.index(flag) + 1] = value
+        return argv
+
     def take_b0(self, trial: dict) -> None:
         self.remove_dest(self.b0)
         log(f'{self.trial_id}: B0 over the unthrottled link')
@@ -3499,11 +3506,21 @@ class Orchestrator:
                 # the source) and stanzas, before B0, so B0 is taken from the archiving cluster.
                 log(f'{self.trial_id}: pgBackRest set-up ({", ".join(self.pgbackrest_methods)})')
                 self.pgbackrest = trial['pgbackrest'] = self.setup_pgbackrest()
+            aged_by = getattr(args, 'pgbackrest_aged_by', None)
+            if self.pgbackrest is not None and aged_by:
+                # EXP-59: the repository's newest backup comes first, then a day's churn, then B0, so the
+                # backup is older than the old copy (a daily backup); the restore rolls B back and replays it.
+                self.pgbackrest['backups'] = self.pgbackrest_backups()
+                aging_seed = args.seed + 59
+                log(f'{self.trial_id}: aging workload, uniform {aged_by:g} (seed {aging_seed})')
+                trial['aging'] = {'pattern': 'uniform', 'fraction': aged_by, 'seed': aging_seed,
+                                  'result': self.source.script(SOURCE_CLUSTER, 'workload',
+                                                               *self.aging_args(trial, aged_by, aging_seed))}
             self.take_b0(trial)
             log(f'{self.trial_id}: workload {pattern} k={trial["rows_changed"]}')
             trial['workload'] = self.source.script(SOURCE_CLUSTER, 'workload',
                                                    *self.cluster_args(trial))
-            if self.pgbackrest is not None:
+            if self.pgbackrest is not None and not aged_by:
                 # The repository is counted as already paid: one full backup per variant, untimed.
                 self.pgbackrest['backups'] = self.pgbackrest_backups()
             save_json(self.out / 'trials' / f'{self.trial_id}.json', trial)
@@ -5884,6 +5901,13 @@ def parse_args(argv=None):
     parser.add_argument('--events-rows', type=int)
     parser.add_argument('--hex-filler', action='store_true',
                         help="EXP-45: pgbench_accounts' filler as hex text, not blanks (realistic compression)")
+    parser.add_argument('--pgbackrest-aged-by', type=float, metavar='FRACTION',
+                        help='EXP-59 (T11b): take the pgBackRest backups before B0, then update this fraction of '
+                             "pgbench_accounts' rows at random (an aging workload, its own seed) before B0: the "
+                             "repository's newest backup is older than the old copy, as a daily backup is. "
+                             "Without it the backups follow the trial's workload (EXP-08). The workload's "
+                             'row-level check then counts the aging rows too; the copies are checked against '
+                             "the source's own digest")
     parser.add_argument('--batch-size', type=int, default=100)
     parser.add_argument('--speeds', default=DEFAULT_SPEEDS,
                         help='comma list of Gbit/s values and/or "unthrottled"')
