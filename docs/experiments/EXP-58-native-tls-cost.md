@@ -1,6 +1,6 @@
 # EXP-58: What does pgdelta's own TLS cost at DR rates?
 
-Status: **pre-registered October 27, 2026, before any run.** Lean: one default pair, about 40 minutes. Owner decision O6 requires the data stream encrypted. Native TLS was built on October 27 (063831e), and its cost was the open half of O6's goal.
+Status: **done October 27, 2026 (one session, 12 runs, all passing; all four predictions held): inside its own TLS 1.3, pgdelta took 1.033 of its in-clear time at 2 Gbit/s and 1.148 at 5 Gbit/s, and sent 0.3–0.6% more bytes. The handshake took 67 ms, about one round trip. Neither ratio is within 0.05 of its bar, so one session stands.** Lean: one default pair, about 40 minutes. Owner decision O6 requires the data stream encrypted. Native TLS was built on October 27 (063831e), and its cost was the open half of O6's goal.
 
 ## Question
 
@@ -37,3 +37,34 @@ The sender's handshake time and both VMs' CPU are reported, not predicted. **Rul
 - **If 1 holds:** O6's goal is met at DR rates. The scorecard's TLS row moves to "Met", and the README says TLS costs at most 10% at 2 Gbit/s, with the measured figure.
 - **If 1 fails:** the write-up attributes the cost from the CPU counters and the phase timers: encryption on the sender's thread, decryption on the receiver's, or the handshake. O6 then stays "Partly met", with the cost stated.
 - **If 2 fails but 1 holds:** TLS is cheap at DR rates and costs something on fast links. Both are stated.
+
+## Results (October 27)
+
+The default pair in us-central1-a, 15:30–15:37 EDT, then deleted. `blake3` 1.0.11 was on both ends, and every pgdelta run hashed with BLAKE3. All 12 runs passed. Every TLS run negotiated TLS 1.3 with `TLS_AES_256_GCM_SHA384` and the session's server certificate, and no clear run negotiated TLS. Data: `docs/experiments/data/exp58-cells.csv`; raw `results/exp04/exp58/` (not in git).
+
+![pgdelta in clear and inside its own TLS 1.3](../figures/exp58-tls.svg)
+
+| 60 ms | In clear | Inside TLS | TLS ÷ clear | `pg_basebackup` (in clear) |
+|---|---:|---:|---:|---:|
+| **2 Gbit/s:** time | 5.23 s | 5.40 s | **1.033** | 11.38 s |
+| bytes, source to destination | 609.9 MB | 611.7 MB | 1.003 | 2,108.9 MB |
+| CPU, source / destination | 4.56 / 6.28 s | 5.25 / 6.85 s | +0.69 / +0.57 s | |
+| **5 Gbit/s:** time | 4.04 s | 4.64 s | **1.148** | 6.52 s |
+| bytes | 609.9 MB | 613.3 MB | 1.006 | 2,108.9 MB |
+| CPU, source / destination | 4.82 / 6.27 s | 5.41 / 6.91 s | +0.59 / +0.65 s | |
+| handshake (sender) | | 0.067–0.068 s | | |
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | Deciding: at most 1.10 of clear's time at 2 Gbit/s | **Held, 1.033** |
+| 2 | At most 1.20 at 5 Gbit/s | **Held, 1.148** |
+| 3 | At most 2% more bytes on the wire | **Held:** 0.3% and 0.6% |
+| 4 | Every run passes, TLS 1.3 with the session's server on every TLS run, none in clear | **Held:** 12 of 12 |
+
+**What it shows:**
+- **At DR rates, encryption costs about 3%.** About 0.17 s of a 5.2 s refresh, with 0.6–0.7 CPU-seconds on each end for 610 MB, and under 1% more bytes.
+- **On a fast link the cost shows more, about 15%.** The same per-byte work falls on the sending and receiving threads, and there is less link time to hide it behind.
+- **pgdelta inside TLS still beats `pg_basebackup` in clear:** 0.47 of its time at 2 Gbit/s and 0.71 at 5 Gbit/s. `pg_basebackup` over TLS (libpq's `sslmode`) would pay for its own encryption on 3.5 times the bytes.
+- **So O6's goal is met:** the data stream, the file names and the hash key cross only inside mutual TLS 1.3 when the options are given, at about 3% of a DR refresh's time.
+
+**What this does not show:** one session, at 2.1 GB and one pattern, scattered changes, the most bytes. Local changes send under 40 MB, so TLS's per-byte cost there is smaller still. TLS stays opt-in: making it the default would need a certificate set-up story for Omni, which is the owner's call.

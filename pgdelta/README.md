@@ -51,7 +51,7 @@ With them, the connection runs inside mutual TLS 1.3. Each end presents its own 
 - **It protects** the changed pages and the session's hash key, which travels in the sender's HELLO, from anyone on the path. It also keeps any party without a certificate from writing into B.
 - **The CA is meant to be private**, made for pgdelta's hosts. The client checks the receiver's certificate against it, not against a host name.
 - **The statistics record** the version, cipher and the peer certificate's common name (`tls`), and on the sender the handshake's time.
-- **What it costs** at DR rates is not yet measured (O6, the owner's requirement).
+- **What it costs:** at 2 Gbit/s and 60 ms, 1.033 of the in-clear time for a 2.1 GB refresh, and 1.148 at 5 Gbit/s, with 0.3–0.6% more bytes and a 67 ms handshake ([EXP-58](../docs/experiments/EXP-58-native-tls-cost.md)).
 
 Making a CA and the two certificates with `openssl`:
 

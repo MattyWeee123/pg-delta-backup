@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (evening): EXP-58, what pgdelta's own TLS costs
+
+- **Why:** O6 requires the data stream encrypted. TLS was built earlier on October 27, but what it costs at DR rates was the goal's open half. The TLS session had held EXP-58 for the owner's yes; the standing autonomy rule covers experiments that serve the plan, so it was designed, pre-registered (d355f86) and run.
+- **What ran:** one default pair. v1 with BBR and BLAKE3 in clear, against the same inside pgdelta's mutual TLS 1.3, using the session's certificates from the harness's TLS material. Scattered 1% changes at 2 and 5 Gbit/s and 60 ms, 2 repeats, with `pg_basebackup` for context. New harness arm `pgdelta_direct_inplace_bbr_b3_tls`; each run now records the TLS session it negotiated.
+- **Outcome (12 runs, all 4 predictions held):**
+  - time: 1.033 of clear at 2 Gbit/s, 1.148 at 5 Gbit/s;
+  - bytes: 0.3–0.6% more;
+  - CPU: about 0.6–0.7 s more on each end;
+  - every TLS run used TLS 1.3 with AES-256-GCM, with a 67 ms handshake.
+  
+  O6 is met; the scorecard's TLS row is marked met. The pair was deleted.
+
 ## 2026-10-27 (evening): EXP-59 and -59b against pgBackRest from a day-old backup; EXP-60's BLAKE3, firm
 
 - **Sign-in:** the earlier "logged in" lines in the Terminal were old scrollback from before the hostname changed; gcloud's own logs showed no login after October 26. A new `gcloud auth login` tab fixed it, and a background watcher started the pipeline within a minute.

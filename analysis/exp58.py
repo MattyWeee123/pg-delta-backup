@@ -107,11 +107,9 @@ def figure(cells):
                    label={'clear': LABELS[CLEAR], 'tls': LABELS[TLS], 'full': LABELS[FULL]}[name] if i == 0 else None)
             ax.annotate(f'{value:.2f}', (i * 4 + j, value), textcoords='offset points', xytext=(0, 3), ha='center',
                         fontsize=8.5)
-        if c.get('time_ratio'):
-            ax.text(i * 4 + 0.5, -0.09, f"TLS ÷ clear {c['time_ratio']:.3f}", transform=ax.get_xaxis_transform(),
-                    ha='center', fontsize=8.5)
-    ax.set_xticks([i * 4 + 1 for i in range(len(cells))], [f"{c['gbit']:g} Gbit/s, 60 ms" for c in cells])
-    ax.tick_params(axis='x', pad=16)
+    ax.set_xticks([i * 4 + 1 for i in range(len(cells))],
+                  [f"{c['gbit']:g} Gbit/s, 60 ms" + (f"\nTLS ÷ clear {c['time_ratio']:.3f}" if c.get('time_ratio') else '')
+                   for c in cells])
     ax.set_ylabel('seconds to refresh 2.1 GB (median)')
     ax.legend(fontsize=8.5)
     ax.set_title("pgdelta in clear and inside its own TLS 1.3, scattered changes (1%)", fontsize=10)
