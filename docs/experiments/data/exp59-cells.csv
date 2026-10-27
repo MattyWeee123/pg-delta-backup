@@ -1,0 +1,7 @@
+pattern,speed,full_mb,full_run_s,full_runs,full_start_s,full_usable_s,pgbackrest_zst_mb,pgbackrest_zst_run_s,pgbackrest_zst_runs,pgbackrest_zst_start_s,pgbackrest_zst_usable_s,pgdelta_direct_inplace_mb,pgdelta_direct_inplace_run_s,pgdelta_direct_inplace_runs,pgdelta_direct_inplace_start_s,pgdelta_direct_inplace_usable_s,pgdelta_over_pgbackrest
+uniform,0.5g,2117.1,36.69,2,0.28,36.97,1688.3,9.86,2,115.56,125.43,484.0,10.37,2,0.18,10.55,0.084
+uniform,2g,2117.0,10.34,2,0.28,10.62,1689.2,6.2,2,107.13,113.32,484.0,4.32,2,0.17,4.5,0.04
+uniform,unthrottled,2119.3,3.79,2,0.28,4.06,1689.1,6.25,2,106.16,112.4,484.2,3.24,2,0.17,3.4,0.03
+hot,0.5g,2116.8,36.24,2,0.29,36.53,1495.7,9.9,2,102.9,112.8,35.6,2.72,2,0.17,2.89,0.026
+hot,2g,2117.2,10.35,2,0.28,10.63,1496.7,6.31,2,92.4,98.7,35.6,2.3,2,0.17,2.47,0.025
+hot,unthrottled,2119.0,3.66,2,0.28,3.94,1496.7,6.23,2,92.8,99.04,35.6,2.24,2,0.17,2.41,0.024

@@ -1,6 +1,6 @@
 # EXP-60: How much of v1's fixed cost on fast links is the hash, and does BLAKE3 lower it?
 
-Status: **pre-registered October 27, 2026, before any run.** Lean: the default pair, about 30 minutes, run on the same VMs after EXP-59.
+Status: **first session done October 27, 2026 (8 runs, all passing, all four predictions held): at 5 Gbit/s v1 with BLAKE3 took 0.885 of v1 with BLAKE2b's time (4.12 s against 4.65), each hashing phase about 0.58 of BLAKE2b's. 0.885 is within 0.05 of the 0.90 bar, so rule 11's second session is pre-registered below and runs next.** Lean: the default pair, about 30 minutes, run on the same VMs after EXP-59.
 
 ## Why this experiment
 
@@ -85,3 +85,38 @@ The default `n2-standard-8` pair, as EXP-53 (BBR on v1's data socket, tuned TCP 
 ## Cost
 
 About 30 minutes on the pair EXP-59 creates: 3 methods × 2 conditions × 2 repeats, plus the blake3 install. The pair is torn down after both experiments.
+
+## Results: the first session (October 27)
+
+The pair EXP-59 created (us-central1-a), after EXP-59's runs. `blake3` 1.0.11 was installed and imported on both ends, and every run passed with the hash its arm pins: BLAKE2b on every `_b2` run, BLAKE3 on every `_b3` run. Data: `docs/experiments/data/exp60-cells.csv`; raw `results/exp04/exp60/` (not in git).
+
+![v1 with BLAKE2b against BLAKE3](../figures/exp60-blake3.svg)
+
+| | BLAKE2b | BLAKE3 | BLAKE3 ÷ BLAKE2b | `pg_basebackup` |
+|---|---:|---:|---:|---:|
+| **5 Gbit/s, 60 ms:** time | 4.65 s | **4.12 s** | **0.885** | 6.83 s |
+| hash S (source) | 1.61 s | 0.96 s | 0.60 | |
+| hash B (destination) | 1.49 s | 0.85 s | 0.57 | |
+| verify | 0.76 s | 0.39 s | 0.51 | |
+| **0.5 Gbit/s, 60 ms:** time | 13.36 s | 13.01 s | 0.974 | 37.24 s |
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | Deciding: BLAKE3 at most 0.90 of BLAKE2b's time at 5 Gbit/s | **Held, 0.885**: within 0.05 of the bar, so a second session (rule 11) |
+| 2 | Each hashing phase at most 0.6 of BLAKE2b's at 5 Gbit/s | **Held:** 0.598 and 0.573 |
+| 3 | The saving at 0.5 Gbit/s within 0.4 s of the saving at 5 | **Held:** 0.35 s against 0.53 s |
+| 4 | Every run passes with its arm's hash | **Held:** 8 of 8 |
+
+**What it shows (one session, provisional until the second):**
+- **The background's estimate held almost exactly.** EXP-29's cost per page put the BLAKE2b function at 0.88 s of each hashing phase. That predicts about 0.9 s per phase with BLAKE3, and the phases measured 0.96 and 0.85 s. What remains of each, about 0.7 s, is reading the copy and the per-page work outside the hash function.
+- **The saving is real but partly hidden.** The two hashing phases each lost about 0.6 s, and verification lost 0.37 s, but the run as a whole lost 0.53 s, because the two ends hash at the same time and some of the work overlaps the transfer.
+- **At 0.5 Gbit/s the saving is about the same in seconds (0.35 s)** but a small share (0.974), since the link dominates there.
+- **So the fast-link numbers on VMs understated v1 by about 12% at 5 Gbit/s:** v1 took 0.60 of `pg_basebackup`'s time with BLAKE3, against 0.68 with BLAKE2b.
+
+## The second session (rule 11), pre-registered October 27 before it runs
+
+The same command on a fresh pair, after EXP-59b's runs (`--order-seed 601`, results in `results/exp04/exp60b`).
+- **It is firm if the second session alone gives at most 0.90 at 5 Gbit/s, and both sessions' runs pooled do too** (`analysis/exp60.py --sweep results/exp04/exp60 --sweep results/exp04/exp60b`).
+- **If the second session gives more than 0.90:** prediction 1 is recorded as not firm, and the pooled ratio is reported beside it.
+
+Predictions 2–4 are scored again on the second session.

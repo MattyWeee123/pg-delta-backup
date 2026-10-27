@@ -5,7 +5,7 @@
 
 Per pattern and speed, each method's medians of: its run's time (total_s), its copy's start (output_start_s: for
 pgBackRest the recovery through archive-get), their sum (time to a usable copy) and its bytes (source to dest, with
-the recovery's WAL). Scores 1 (deciding: pgdelta's usable time at most 0.8 of pgbackrest_zst's in every cell),
+the recovery's WAL, which wire_s2d_bytes already holds). Scores 1 (deciding: pgdelta's usable time at most 0.8 of pgbackrest_zst's in every cell),
 2 (pgBackRest moves more bytes in every cell) and 3 (every run passes). Writes docs/experiments/data/exp59-cells.csv
 and the figure exp59-old-backup.
 """
@@ -47,8 +47,9 @@ def cells(sweep):
                 run = statistics.median(num(r['total_s']) for r in mine)
                 start = statistics.median(num(r['output_start_s']) or 0.0 for r in mine)
                 usable = statistics.median(num(r['total_s']) + (num(r['output_start_s']) or 0.0) for r in mine)
-                mb = statistics.median(((num(r['wire_s2d_bytes']) or 0) + (num(r['recovery_wire_s2d_bytes']) or 0))
-                                       / 1e6 for r in mine)
+                # wire_s2d_bytes already holds pgBackRest's recovery WAL (measure.with_recovery_bytes); adding
+                # recovery_wire_s2d_bytes again double-counted it (corrected after the run, October 27)
+                mb = statistics.median((num(r['wire_s2d_bytes']) or 0) / 1e6 for r in mine)
                 row.update({f'{m}_run_s': round(run, 2), f'{m}_start_s': round(start, 2),
                             f'{m}_usable_s': round(usable, 2), f'{m}_mb': round(mb, 1), f'{m}_runs': len(mine)})
             if f'{PGDELTA}_usable_s' in row and f'{PGBR}_usable_s' in row:

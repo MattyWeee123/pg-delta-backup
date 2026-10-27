@@ -86,7 +86,8 @@ NUMERIC = ('fraction', 'target_gbit', 'measured_s2d_gbit', 'measured_d2s_gbit', 
 DELTA_METHODS = ('incremental', 'pgdelta', 'pgdelta_1thread', 'rsync_8k', 'rsync_default',
                  'pgdelta_gapfill_seq', 'pgdelta_seq', 'pgdelta_fsync_wb', 'pgdelta_fsync_worker',
                  'pgdelta_inplace', 'incremental_cfr', 'pgdelta_direct', 'pgdelta_direct_inplace',
-                 'pgdelta_direct_inplace_j8', 'pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
+                 'pgdelta_direct_inplace_j8', 'pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block',
+                 'pgbackrest_zst_async')
 # The median phase table: timed phases (and parts) in the order they run, then pgdelta's own
 # timers for its write phase, which lie inside its transfer, then T2's tools' own timers inside
 # their one phase (pg_basebackup's --verbose lines, pg_probackup's lines and its timed sync -f,

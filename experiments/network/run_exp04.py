@@ -51,7 +51,7 @@ Optional methods for T3, T8a and T11 (named in --methods; see the README):
                    (untimed); one timed phase: receiver_start (dest), then at once pgdelta send
                    --source-kind datadir on the stopped data directory (transfer);
                    the source is restarted afterwards, untimed, whatever happened
-    pgbackrest_zst, pgbackrest_none, pgbackrest_block
+    pgbackrest_zst, pgbackrest_none, pgbackrest_block, pgbackrest_zst_async (EXP-59b: dest's archive-get async)
                    T11: pgbackrest restore --delta of B, a copy of B0 made before the
                    cache drop, from a repository on the source over SSH (restore); the
                    repositories, archiving and one full backup each are set up per
@@ -3442,6 +3442,17 @@ class Orchestrator:
             argv[argv.index(flag) + 1] = value
         return argv
 
+    def trial_verify(self, trial: dict) -> dict:
+        """The source's row-level ground-truth check after the trial's runs, or why it was skipped.
+
+        An aged trial's source also holds the aging workload's rows (EXP-59), so the check, which expects the trial's
+        k rows alone, can't match it: EXP-59's first session raised there after its runs and so skipped the B0 check
+        that follows. Each output is still compared with the source's own per-table digest."""
+        if trial.get('aging'):
+            return {'skipped': "aged trial: the aging workload changed rows beyond the trial's k",
+                    'aging_k': (trial['aging'].get('result') or {}).get('k')}
+        return self.source.script(SOURCE_CLUSTER, 'verify', *self.cluster_args(trial))
+
     def take_b0(self, trial: dict) -> None:
         self.remove_dest(self.b0)
         log(f'{self.trial_id}: B0 over the unthrottled link')
@@ -3597,7 +3608,7 @@ class Orchestrator:
             logical_check = self.finish_logical_checks(trial)
             if logical_check is not None:
                 trial['logical_check'] = logical_check
-            trial['verify'] = self.source.script(SOURCE_CLUSTER, 'verify', *self.cluster_args(trial))
+            trial['verify'] = self.trial_verify(trial)
             final = measure.tree_digest(self.b0)
             same, differences = measure.compare_digests(self.b0_digest, final)
             trial['b0_unchanged'] = same

@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import types
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -1936,7 +1937,7 @@ PGBACKREST_RESTORE_LOG = """\
 
 class NewMethodFlags(unittest.TestCase):
     def test_the_new_methods_are_optional(self):
-        self.assertEqual(len(NEW_METHODS), 10)
+        self.assertEqual(len(NEW_METHODS), 11)  # EXP-59b added pgbackrest_zst_async
         for method in NEW_METHODS:
             self.assertNotIn(method, measure.METHODS)
             self.assertIn(method, measure.OPTIONAL_METHODS)
@@ -1957,6 +1958,17 @@ class NewMethodFlags(unittest.TestCase):
                           *measure.V1PROXY_METHODS, *measure.T12_V1_ARMS, *measure.CC_V1_ARMS,
                           *measure.VS_V1_ARMS, *measure.ZSTD_V1_ARMS, *measure.HASH_V1_ARMS,
                           *measure.PGBACKREST_METHODS})
+
+    def test_an_aged_trial_skips_the_row_level_check(self):
+        # EXP-59: the aging rows are on top of the trial's k, so the check can't match; it is skipped and said so.
+        calls = []
+        fake = types.SimpleNamespace(source=types.SimpleNamespace(script=lambda *a: calls.append(a) or {'ok': 1}),
+                                     cluster_args=lambda trial: ['--x'])
+        aged = run_exp04.Orchestrator.trial_verify(fake, {'aging': {'result': {'k': 350000}}})
+        self.assertEqual((aged['aging_k'], calls), (350000, []))
+        self.assertIn('skipped', aged)
+        self.assertEqual(run_exp04.Orchestrator.trial_verify(fake, {}), {'ok': 1})
+        self.assertEqual(len(calls), 1)
 
     def test_the_hash_arms_pin_their_hash(self):
         # EXP-60: the sender asks for its arm's hash; the receiver takes it from HELLO, so it has no flag.
@@ -3226,6 +3238,18 @@ class PgBackRestConfig(unittest.TestCase):
         wrapper = measure.pgbackrest_ssh_wrapper('/data/exp04/pgbackrest/ssh_config')
         self.assertTrue(wrapper.startswith('#!/bin/sh\n'))
         self.assertTrue(wrapper.endswith('exec ssh -F /data/exp04/pgbackrest/ssh_config "$@"\n'))
+
+    def test_the_async_variant_changes_only_dests_archive_get(self):
+        # EXP-59b: the source's stanza is pgbackrest_zst's; only dest's gets archive-async and its processes.
+        self.assertEqual(measure.PGBACKREST_VARIANTS['pgbackrest_zst_async'], measure.PGBACKREST_VARIANTS['pgbackrest_zst'])
+        self.assertEqual(measure.pgbackrest_dest_options('pgbackrest_zst_async'), {'archive-async': 'y', 'process-max': '4'})
+        self.assertEqual(measure.pgbackrest_dest_options('pgbackrest_zst'), {})
+        source = self.parse(measure.pgbackrest_source_config(self.work, ['pgbackrest_zst_async'], pg_path='p',
+                                                             socket_path='s', port=5432, user='u'))
+        self.assertNotIn('archive-async', dict(source['pgbackrest_zst_async']))
+        dest = self.parse(measure.pgbackrest_dest_config(self.work, ['pgbackrest_zst_async'], source_ip='10.0.0.1',
+                                                         ssh_user='bench'))
+        self.assertEqual(dest['pgbackrest_zst_async']['archive-async'], 'y')
 
     def test_pgbackrest_none_is_uncompressed_on_the_network_too(self):
         # With compress-type=none and a remote repository, pgBackRest compresses what it sends

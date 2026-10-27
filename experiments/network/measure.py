@@ -76,7 +76,7 @@ PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_d
                           *V1PROXY_METHODS, *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS,
                           *HASH_V1_ARMS)
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
-PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
+PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block', 'pgbackrest_zst_async')
 # T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On
 # dest's XFS that clones B0's unchanged blocks (EXP-10); on ext4 it copies in the kernel.
 INCREMENTAL_METHODS = ('incremental', 'incremental_cfr')
@@ -1278,11 +1278,17 @@ PGBACKREST_VARIANTS = {
     'pgbackrest_zst': {'compress-type': 'zst'},
     'pgbackrest_none': {'compress-type': 'none', 'compress-level-network': '0'},
     'pgbackrest_block': {'compress-type': 'zst', 'repo1-bundle': 'y', 'repo1-block': 'y'},
+    # EXP-59b: pgbackrest_zst's repository, with dest's archive-get asynchronous (PGBACKREST_DEST_ONLY).
+    'pgbackrest_zst_async': {'compress-type': 'zst'},
 }
 # The variant options that act on dest, where the restore and the recovery's archive-get run and
 # reach the repository over SSH: they go in dest's stanza sections too.
 PGBACKREST_DEST_OPTIONS = ('compress-level-network',)
 PGBACKREST_PROCESS_MAX = 4
+# Options only dest's stanza takes, never the source's (where they would change its archive-push). EXP-59b:
+# recovery's archive-get prefetches WAL with 4 processes into the spool queue, as pgBackRest's guide advises for
+# high WAL volume; EXP-08's and EXP-59's variants fetch one segment per call.
+PGBACKREST_DEST_ONLY = {'pgbackrest_zst_async': {'archive-async': 'y', 'process-max': str(PGBACKREST_PROCESS_MAX)}}
 PGBACKREST_LOG_LEVELS = {'log-level-console': 'info', 'log-level-file': 'detail'}
 
 
@@ -1340,7 +1346,8 @@ def pgbackrest_dest_config(work, stanzas, *, source_ip, ssh_user) -> str:
 
 def pgbackrest_dest_options(stanza: str) -> dict:
     """The variant's options that dest's own pgBackRest commands use (PGBACKREST_DEST_OPTIONS)."""
-    return {key: value for key, value in PGBACKREST_VARIANTS[stanza].items() if key in PGBACKREST_DEST_OPTIONS}
+    return {**{key: value for key, value in PGBACKREST_VARIANTS[stanza].items() if key in PGBACKREST_DEST_OPTIONS},
+            **PGBACKREST_DEST_ONLY.get(stanza, {})}
 
 
 def pgbackrest_ssh_config(source_ip: str, user: str, key: str) -> str:
