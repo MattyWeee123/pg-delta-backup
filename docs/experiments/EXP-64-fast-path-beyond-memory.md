@@ -29,6 +29,15 @@ EXP-48's set-up, run by a lab script (`experiments/network/lab_exp64.sh`) becaus
 
 **The analysis,** committed before the data: `analysis/exp64.py`, figure `exp64-beyond-memory`. Medians of 2.
 
+## Revision before any registered run (October 27, rule 8)
+
+**The region changes to us-west1 (zones a and b).** No `n2d-highcpu-8` capacity was found in us-central1 (a, b, c and f) or us-east1 (b, c and d); GCP answered `ZONE_RESOURCE_POOL_EXHAUSTED`, and nothing was created there.
+- **Unchanged:** the machine type, the 150 GiB balanced persistent disks, the database, the arms and every prediction.
+- **Why that's sound:** a balanced disk's limits are set by its size, not its region. The session records its own disk test, which EXP-48's model needs.
+- **If prediction 5 (the control against EXP-48) fails,** the region is one more candidate cause.
+
+**The smoke** (scale 20, 300 MB, one run per arm) ran every arm end to end. Every fast copy matched the source. In memory at that size the fast path took 1.15 s against hashing's 4.1 s for hot changes, but 5.4 s against 4.3 s for uniform ones. That decides nothing here.
+
 ## Predictions
 
 1. **Deciding: hot changes, the fast path takes at most 0.35 of the hashing path's time.** The model: the hashing path pays about 86 s reading B; the fast path writes the roughly 14,000 changed pages (EXP-48: 13,935) in about 2 s, plus fixed costs of a few seconds.
