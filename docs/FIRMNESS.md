@@ -88,7 +88,7 @@ One table per ledger area. **Fails:** the tests of section 1 that the item fails
 | ID | Steers | Grade | Verdict | Fails | Kept open now | Firmed by |
 |---|---|---|---|---|---|---|
 | D09 | The oracle for v0 staged and for v1 on a stopped source | A | **firm** | – | – (scoped; T8 replaces it for v1 live, which has no S) | – |
-| D11 | Closes LSN or timestamp skipping as an authority for reuse | A | **firm** | – | – (scoped to v0 staged and v1 on a stopped source; T8 reruns EXP-03 live) | – |
+| D11 | Closes LSN or timestamp skipping as an authority for reuse | A | **firm** | – | – (scoped to v0 staged and v1 on a stopped source; T8 reruns EXP-03 live). *October 27: WAL summaries, a different label, were tested as an authority (EXP-61, -62, local). Unguarded they failed like LSNs. Behind a lineage guard that takes the old copy's end only from a clean stop or a backup manifest (guard v2), they left no real wrong page in 13 scenarios. D11 is unchanged; a guarded summary path would be a new owner decision, not a reopening of LSN skipping* | – |
 | D14 | The hash; key secrecy | A | provisional | P | Strength recorded as an owner-accepted argument (a 2^-128 event can't be measured). Secrecy rides on O6: today the key crosses in HELLO in clear | T8's native TLS with a packet capture |
 | D39 | Publication; the in-place startup block (G1) | B | provisional | P | T13's crash arm ranked as a correctness gate | T13c; the suite on Debian with no Linux-only skips |
 | D41 | Verification by a separate re-read (with D41p, graded D); v1's second destination pass | B; D41p D | provisional | P | Hashing while writing and an O_DIRECT re-read kept as T13 arms | T13f |
@@ -103,12 +103,12 @@ One table per ledger area. **Fails:** the tests of section 1 that the item fails
 | D10p | Closes the staged capture as the performance path | X | **firm** | – | – (staged mode stays as the correctness scaffold, D10) | – |
 | D40p | Closes the main-loop fsync; v1's build changes DEFAULT_FSYNC | X | **firm** | – | – (which replacement is D86) | – |
 | D48 | Worker processes (spawn), not threads | A | provisional | P, R | The thread backend stays, hidden (D49) | T5 (threads, sub-interpreters, the free-threaded build; the Python version recorded) |
-| D15 | BLAKE2b; source CPU per worker; hashing B | D | provisional | P | The hash behind an interface that allows BLAKE3 | T5 |
+| D15 | BLAKE2b; source CPU per worker; hashing B | D | provisional | P | The hash behind an interface that allows BLAKE3. *October 27: every DR run on VMs, and EXP-48's, used BLAKE2b, since the VMs lacked the blake3 package; EXP-60 (pre-registered) measures BLAKE3 on fast links* | T5; EXP-60 |
 | D20 | Every page hashed; the reason threads lost (D48) | D | provisional | P | Node-level hashing kept as a T5 arm | T5 |
 | D07 | Standard library only (kept by D56): no native hash, no compiled core | C | provisional | P, J | T5's BLAKE3 arm uses the native package; shipping it is K5 | T5; K5 |
 | D50 | Four workers on each end; every v1 arm since EXP-09; the T5 and T13 cut | C | provisional (lifted) | P, F, L | 4 and 8 jobs, and the source capped with dest at 8, kept as co-equal arms; per-end settings | T10b (a dest-only arm; the larger-source block); T12r's side readings |
 | D13 | No cached tree of B, so dest always hashes B | D | provisional | P, J | The route needs a key design first: a cached keyed tree conflicts with D14's fresh key per run (pgdelta/prefetch.py) | K11, then a prototype (v1 in place with and without hashing B, 5 repeats, two sessions) |
-| D12 | No LSN or WAL-summary hints, even for ordering | D | provisional | P | A switch candidate on T8's list | An ordering arm in T8 (changed files first, from summarize_wal) |
+| D12 | No LSN or WAL-summary hints, even for ordering | D | provisional | P | A switch candidate on T8's list. *October 27: EXP-61 and -62 measured summaries as more than a hint: with guard v2, 0 real wrong pages in 13 scenarios and 2–35% of hashing's page reads where it ran (counted, not timed)* | An ordering arm in T8 (changed files first, from summarize_wal); a timed, guarded skip arm beyond memory if the owner wants the fast path |
 | D17 | Closes units larger than 8 KiB | A | **firm** | – | – | – |
 | D17-sub | No units smaller than a page | D | provisional | P | T4 queued | T4 |
 | D18 | Page i against page i of the same file; closes any-offset matching within a file | A | **firm** | – | – | – |
