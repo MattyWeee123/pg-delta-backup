@@ -1,0 +1,3 @@
+rates,runs,pages,jobs,hash_source_s,hash_basis_s,rebuild_s,fsync_s,verify_s,total_s,wall_s,blake2b_function_s,blake3_function_s
+2 Gbit/s,4,259035.0,4.0,1.699,1.417,0.781,0.432,0.758,5.161,5.678,0.881,0.185
+3 to 5 Gbit/s,10,259035.0,4.0,1.47,1.306,0.702,0.422,0.688,4.061,4.57,0.881,0.185

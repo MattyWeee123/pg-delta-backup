@@ -1955,7 +1955,17 @@ class NewMethodFlags(unittest.TestCase):
         self.assertEqual(set(measure.BASIS_COPY_METHODS),
                          {'pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
                           *measure.V1PROXY_METHODS, *measure.T12_V1_ARMS, *measure.CC_V1_ARMS,
-                          *measure.VS_V1_ARMS, *measure.ZSTD_V1_ARMS, *measure.PGBACKREST_METHODS})
+                          *measure.VS_V1_ARMS, *measure.ZSTD_V1_ARMS, *measure.HASH_V1_ARMS,
+                          *measure.PGBACKREST_METHODS})
+
+    def test_the_hash_arms_pin_their_hash(self):
+        # EXP-60: the sender asks for its arm's hash; the receiver takes it from HELLO, so it has no flag.
+        for method, name in (('pgdelta_direct_inplace_bbr_b2', 'blake2b'), ('pgdelta_direct_inplace_bbr_b3', 'blake3')):
+            args = measure.PGDELTA_ARGS[method]
+            self.assertEqual(args['send'][-2:], ('--hash', name))
+            self.assertNotIn('--hash', args['receive'])
+            self.assertIn(method, measure.T12_METHODS)  # they run under --conditions
+        self.assertNotIn('--hash', measure.PGDELTA_ARGS['pgdelta_direct_inplace_bbr']['send'])
 
     def test_each_new_pgdelta_method_pins_its_flags(self):
         def receive(*middle, fsync='main', in_place=False):

@@ -2773,7 +2773,10 @@ class Orchestrator:
                     'window_ok': (None if engine.get('window') is None or find_window(reported) is None
                                   else find_window(reported) == engine['window']),
                     'high_churn_ok': (reported.get('high_churn_node_fraction') == engine['high_churn']
-                                      if engine.get('high_churn') is not None else None)}
+                                      if engine.get('high_churn') is not None else None),
+                    # EXP-60: the keyed digest both ends used, and whether it is the one the method pins.
+                    'hash': reported.get('hash'),
+                    'hash_ok': reported.get('hash') == engine['hash'] if engine.get('hash') else None}
         if method in measure.RSYNC_METHODS and transfer:
             sender = next(c for c in transfer['commands'] if c['host'] == 'source')
             stats = rsync_transfer_stats(sender.get('log_tail', ''))

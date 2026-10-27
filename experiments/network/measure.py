@@ -61,6 +61,10 @@ CC_V1_ARMS = ('pgdelta_direct_inplace_bbr',)
 # EXP-45: v1 with BBR and its pages compressed with zstd (--compress zstd). EXP-56: the same with sub-page
 # deltas (--subpage).
 ZSTD_V1_ARMS = ('pgdelta_direct_inplace_bbr_z', 'pgdelta_direct_inplace_bbr_zs')
+# EXP-60: v1 with BBR, its keyed hash pinned (--hash): BLAKE2b, which every DR arm before EXP-60 ran because the
+# VMs lacked the blake3 package (auto falls back to it), and BLAKE3. Pinned, so installing the package can't
+# change what either arm measures.
+HASH_V1_ARMS = ('pgdelta_direct_inplace_bbr_b2', 'pgdelta_direct_inplace_bbr_b3')
 # EXP-31: v1 verifying only what it wrote (--verify-scope written), without the second pass over B.
 VS_V1_ARMS = ('pgdelta_direct_inplace_vw',)
 TLS_METHODS = ('pgdelta_direct_inplace_tls',)
@@ -69,7 +73,8 @@ TLS_METHODS = ('pgdelta_direct_inplace_tls',)
 # every dispatch too (they read the snapshot, method_paths' source_data, and never stop the source).
 # T12's side arms are v1's path too.
 PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
-                          *V1PROXY_METHODS, *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS)
+                          *V1PROXY_METHODS, *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS,
+                          *HASH_V1_ARMS)
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
 PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block')
 # T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On
@@ -113,7 +118,7 @@ PARCOPY_METHODS = tuple(PARCOPY_VARIANTS)
 T2_METHODS = ('full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS, 'parcopy8', 'parcopy4',
               'pgdelta_direct_inplace_j8')
 # The arms EXP-13 (T12) adds; its runs need --conditions (the emulated WAN) and CRC32C manifests.
-T12_METHODS = (*T12_V1_ARMS, *CC_V1_ARMS, *ZSTD_V1_ARMS, 'parcopy16')
+T12_METHODS = (*T12_V1_ARMS, *CC_V1_ARMS, *ZSTD_V1_ARMS, *HASH_V1_ARMS, 'parcopy16')
 # T10a (EXP-12), the source's slowdown under a fixed-rate load (run_exp04 --load). none: an empty timed
 # phase of --none-window-s, the null's own windows; capture: the staged capture alone, a local
 # pg_basebackup of S on the source; bracket: pg_backup_start and pg_backup_stop in one session.
@@ -138,7 +143,7 @@ RSYNC_METHODS = ('rsync_8k', 'rsync_default')
 STAGED_METHODS = PGDELTA_STAGED_METHODS + RSYNC_METHODS
 # pgdelta refreshing B itself (--in-place) rather than writing a new copy O.
 IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', *V1PROXY_METHODS,
-                    *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS)
+                    *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS, *HASH_V1_ARMS)
 # Methods that patch B, a copy of B0 made before the cache drop and not timed: in a real
 # refresh B already exists. The copy keeps B0 itself unchanged for the next method.
 BASIS_COPY_METHODS = IN_PLACE_METHODS + PGBACKREST_METHODS
@@ -190,7 +195,9 @@ TIERS = {'full': 'omni_today', 'full_nosync': 'diagnostic', 'full_syncfs': 'rele
          # EXP-45's: the same with zstd on the pages sent.
          'pgdelta_direct_inplace_bbr_z': 'protocol',
          # EXP-56's: and only the changed 512-byte blocks of each page.
-         'pgdelta_direct_inplace_bbr_zs': 'protocol'}
+         'pgdelta_direct_inplace_bbr_zs': 'protocol',
+         # EXP-60's: v1 with BBR, its hash pinned to BLAKE2b or BLAKE3.
+         'pgdelta_direct_inplace_bbr_b2': 'protocol', 'pgdelta_direct_inplace_bbr_b3': 'protocol'}
 # The engine each pgdelta method runs, named by its flags, so that no change of pgdelta's
 # defaults can change what a method measures (as compare_methods pins EXP-02's):
 # - pgdelta: EXP-06's choice, which is also the command line's default on these 8-vCPU
@@ -266,6 +273,9 @@ PGDELTA_ENGINES.update({
     # EXP-45: and zstd on the pages it sends.
     'pgdelta_direct_inplace_bbr_z': {**_V1_ENGINE, 'congestion_control': 'bbr', 'compress': 'zstd'},
     'pgdelta_direct_inplace_bbr_zs': {**_V1_ENGINE, 'congestion_control': 'bbr', 'compress': 'zstd', 'subpage': True},
+    # EXP-60: v1 with BBR, its keyed hash pinned.
+    'pgdelta_direct_inplace_bbr_b2': {**_V1_ENGINE, 'congestion_control': 'bbr', 'hash': 'blake2b'},
+    'pgdelta_direct_inplace_bbr_b3': {**_V1_ENGINE, 'congestion_control': 'bbr', 'hash': 'blake3'},
     # EXP-31: v1's engine verifying only the pages it wrote.
     'pgdelta_direct_inplace_vw': {**_V1_ENGINE, 'verify_scope': 'written'},
 })
@@ -310,6 +320,8 @@ def pgdelta_args(engine: dict) -> dict:
         send += ('--compress', engine['compress'])
     if engine.get('subpage'):
         send += ('--subpage',)
+    if engine.get('hash'):
+        send += ('--hash', engine['hash'])
     return {'send': send, 'receive': receive}
 
 

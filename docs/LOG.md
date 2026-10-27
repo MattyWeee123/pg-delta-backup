@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (late night): what pgdelta's fast-link floor is made of; EXP-60 pre-registered
+
+- **Why:** the owner pointed out two answers that contradicted each other. One called pgdelta's roughly 4 s floor on fast links "hashing both copies"; a later one said hashing isn't what limits pgdelta, reading is. Neither had been measured as stated.
+- **What the existing runs show** (`analysis/exp60.py --background-only`, from EXP-52's and EXP-53's own timers, 10 runs at 3 to 5 Gbit/s, 2.1 GB):
+  - reading and hashing S took 1.47 s on the source, and B 1.31 s on the destination, at the same time;
+  - writing the changed pages took 0.70 s, fsync 0.42 s and verification 0.69 s;
+  - pgdelta's own total was 4.06 s.
+- **Every one of those runs hashed with BLAKE2b,** as did EXP-48's. Their statistics logs say so. The VMs never installed the optional `blake3` package, so `--hash auto` fell back. From EXP-29's per-page cost, BLAKE2b is about 0.88 s of each hashing phase (inferred); BLAKE3 would be about 0.19 s.
+- **So each answer was right in one regime:** at 2.1 GB on a fast link the hash function is likely the largest single part of the floor; beyond memory the disk read of B is (EXP-48).
+- **EXP-60 (pre-registered):** v1 with BLAKE2b against BLAKE3 at 0.5 and 5 Gbit/s, on the pair EXP-59 creates, after EXP-59's runs. New harness arms `pgdelta_direct_inplace_bbr_b2` and `_b3` pin their hash, and each run now records the hash it used. It waits, with EXP-59, for the owner's `gcloud auth login`.
+- **The scorecard's TLS row** was already current (the TLS session had updated it).
+
 ## 2026-10-27 (late night): TLS built (O6)
 
 - **Why:** the goals scorecard showed TLS, the owner's own requirement since October 23 (O6), as the one unmet goal pgdelta could close itself. pgdelta sent its pages and the session's hash key in clear, and EXP-13's TLS measurement never ran.
