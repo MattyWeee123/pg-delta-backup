@@ -8,6 +8,16 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (late night): EXP-61, a WAL-summary fast path on the tricky old copies
+
+- **Why:** the owner asked whether pages could carry a label, so the refresh knows what changed without reading both copies. PostgreSQL 17's WAL summaries are such a label. Reading B is what holds pgdelta to "at best a tie" in HA beyond memory, so a safe label-driven path is the one route past it. gcloud stayed signed out, and this needs no VM.
+- **What ran (pre-registered in 027e2fa before any run):**
+  - EXP-03's scenario builder, with the source running `summarize_wal = on`;
+  - a dump of every summary before the servers stop;
+  - a scorer that compares every page of S with B and counts what the summary path would leave wrong, with and without a lineage guard: same cluster, version and checksums, B's own end of WAL on S's timeline history, and summaries covering the gap. 12 scenarios, about a minute in all.
+- **Outcome:** with the guard, 0 real wrong pages in all 12, and 2–35% of hashing's reads in the 6 it let through. Without it, 1,276–8,046 real wrong pages in each of the other 6. Predictions 1–3 held. Prediction 4 failed in S4, which sent 1.72× the differing pages, all of them free-space-map pages sent whole: a safe over-send.
+- **What it doesn't settle:** time (counted pages only), larger and more varied copies, and an old copy whose own WAL was lost, which the guard can't see past. Building the path is the owner's call.
+
 ## 2026-10-27 (late night): what pgdelta's fast-link floor is made of; EXP-60 pre-registered
 
 - **Why:** the owner pointed out two answers that contradicted each other. One called pgdelta's roughly 4 s floor on fast links "hashing both copies"; a later one said hashing isn't what limits pgdelta, reading is. Neither had been measured as stated.

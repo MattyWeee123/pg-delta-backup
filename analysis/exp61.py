@@ -89,23 +89,20 @@ def figure(table):
     ys = range(len(table))[::-1]
     labels = [r['scenario'] for r in table]
     for y, r in zip(ys, table):
-        left.barh(y + 0.2, max(r['naive_real_wrong'], 0), 0.4, color=COLORS['red'],
-                  label='without the guard' if y == ys[0] else None)
-        left.barh(y - 0.2, r['guarded_real_wrong'], 0.4, color=COLORS['blue'],
-                  label='with the guard' if y == ys[0] else None)
-        left.text(max(r['naive_real_wrong'], 0.8) * 1.15, y + 0.2, f"{r['naive_real_wrong']:,}", va='center', fontsize=8)
-        left.text(max(r['guarded_real_wrong'], 0.8) * 1.15, y - 0.2, f"{r['guarded_real_wrong']:,}", va='center',
-                  fontsize=8)
+        left.barh(y, r['naive_real_wrong'], 0.6, color=COLORS['red'])
+        left.text(r['naive_real_wrong'] * 1.15 + 0.15, y, f"{r['naive_real_wrong']:,}", va='center', fontsize=8)
         color = COLORS['blue'] if r['guard_ok'] else COLORS['grey']
         right.barh(y, r['guarded_read_fraction'], 0.6, color=color)
         right.text(r['guarded_read_fraction'] + 0.02, y,
                    f"{r['guarded_read_fraction']:.0%}" + ('' if r['guard_ok'] else '  (refused: hash path)'),
                    va='center', fontsize=8)
     left.set_xscale('symlog', linthresh=1)
+    left.set_xlim(0, 3e4)
     left.set_yticks(list(ys), labels)
     left.set_xlabel('real wrong pages left in the copy (symlog)')
-    left.legend(fontsize=8.5, loc='lower right')
-    left.set_title('Wrong pages', fontsize=10)
+    guarded = sum(r['guarded_real_wrong'] for r in table)
+    left.set_title(f'Without the guard: real wrong pages\n(with it: {guarded} in all {len(table)} scenarios)',
+                   fontsize=10)
     right.set_xlim(0, 1.45)
     right.set_xlabel("pages read, as a share of hashing both copies")
     right.set_title('Reading (guarded path)', fontsize=10)

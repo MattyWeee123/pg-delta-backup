@@ -1,0 +1,13 @@
+scenario,title,built_ok,dump_error,summaries,guard_ok,guard_reasons,pages_source,pages_basis,pages_changed,pages_absent_in_basis,naive_sent,naive_wrong,naive_real_wrong,naive_wrong_by_category,guarded_path,guarded_real_wrong,guarded_wrong,guarded_read_fraction,naive_read_fraction,naive_sent_over_needed
+S1,"Lagging standby, same timeline",True,,9,True,,8525,8489,1734,0,2039,53,0,"{""hint_bits_only"": 53}",summaries,0,53,0.1198,0.1198,1.1759
+S1b,"Lagging standby, same timeline, no checkpoint replayed",True,,8,True,,8525,8489,1749,0,2106,0,0,{},summaries,0,0,0.1238,0.1238,1.2041
+S2,Ex-primary that kept writing after a failover,True,,4,False,"B's WAL reaches 0/9A1D900, past where S's history leaves timeline 1 (0/8D100D8)",8525,8502,3010,0,2073,1295,1276,"{""content"": 1276, ""hint_bits_only"": 19}",hash,0,0,1.0,0.1217,0.6887
+S2b,Ex-primary that flushed diverged pages after a failover without a checkpoint,True,,4,False,"B's WAL reaches 0/9B7F118, past where S's history leaves timeline 1 (0/8D12540)",8525,8504,3183,0,2074,1463,1444,"{""content"": 1443, ""hint_bits_only"": 19, ""vm"": 1}",hash,0,0,1.0,0.1218,0.6516
+S2c,"Standby that followed the ex-primary past a failover, stopped cleanly",True,,5,False,"B's WAL reaches 0/BB7D0D8, past where S's history leaves timeline 1 (0/AD104D8)",8525,8504,3162,0,2074,1444,1444,"{""content"": 1443, ""vm"": 1}",hash,0,0,1.0,0.1218,0.6559
+S3,Crash-consistent copy,True,,9,True,,8692,8633,4965,0,5324,0,0,{},summaries,0,0,0.3073,0.3073,1.0723
+S4,VACUUM truncated a table between copies,True,,8,True,,6998,8427,508,0,874,0,0,{},summaries,0,0,0.0567,0.0567,1.7205
+S5,Databases created with STRATEGY FILE_COPY,True,,13,True,,22350,15917,3,12990,13473,0,0,{},summaries,0,0,0.3521,0.3521,1.0369
+S6,pg_checksums --enable between copies,True,,9,False,data checksum version differs,8427,8427,8427,0,381,8046,8046,"{""checksum_only"": 7925, ""vm"": 121}",hash,0,0,1.0,0.0226,0.0452
+S7,"Hint bits set by reads, no checksums",True,,10,True,,8396,8396,3770,0,363,3770,0,"{""hint_bits_only"": 3770}",summaries,0,3770,0.0216,0.0216,0.0963
+S8,A different cluster with the same data,True,,7,False,"system identifier differs; B's WAL reaches 0/7000120, past where S's history leaves timeline 1 (S start 0/7000028)",8427,8427,1708,0,369,1666,1666,"{""content"": 6, ""lsn_only"": 1644, ""vm"": 16}",hash,0,0,1.0,0.0219,0.216
+S9,pg_upgrade --link from 17 to 18,True,,3,False,system identifier differs; major version differs; summaries do not cover timeline 1 0/7000028..0/11000028,8465,8427,2846,39,477,2423,2423,"{""content"": 1673, ""lsn_only"": 640, ""vm"": 110}",hash,0,0,1.0,0.0282,0.1653
