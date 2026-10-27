@@ -25,11 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from experiments.tricky_copies import lsnscan
+from experiments.tricky_copies import lsnscan, summaryscan
 from experiments.tricky_copies.classify import classify_wrong_skips
 from experiments.tricky_copies.logical import compute_logical_state
-from experiments.tricky_copies.pgcluster import (REDO_KEY, Cluster, PgBin, clean_env, free_port,
-                                                 parse_backup_label, pg_major_of, run,
+from experiments.tricky_copies.pgcluster import (REDO_KEY, START_WAL_KEY, Cluster, PgBin, clean_env, free_port,
+                                                 parse_backup_label, parse_lsn_text, pg_major_of, run,
                                                  select_threshold, short_tempdir, tree_size)
 
 BASE_CONF = {'autovacuum': 'off', 'checkpoint_timeout': '30min'}
@@ -1041,15 +1041,56 @@ def write_json(path, document):
     Path(path).write_text(json.dumps(document, indent=2, sort_keys=False) + '\n')
 
 
+# EXP-61: the source's WAL summaries.
+WAL_SUMMARIES_CONF = {'summarize_wal': 'on'}
+
+
+def dump_wal_summaries(cluster, source_backup, timeout=120):
+    """Every WAL summary the source's summarizer wrote, once it has passed S's start, with S's timeline history.
+
+    PostgreSQL 17 ends a summary at each checkpoint's redo record, so once the summarizer has passed S's START
+    WAL LOCATION the summaries up to it are complete. Each summary keeps its blocks and its limit blocks (a
+    fork's truncation or creation) by "tablespace/database/relfilenode/fork"."""
+    start = parse_lsn_text(parse_backup_label((Path(source_backup) / 'backup_label').read_text())[START_WAL_KEY])
+    result = {'s_start': start, 'server_version': cluster.scalar('SHOW server_version'), 'error': None}
+    try:
+        cluster.wait_for(f"SELECT summarized_lsn >= '{start}'::pg_lsn FROM pg_get_wal_summarizer_state()",
+                         timeout=timeout)
+    except TimeoutError as exc:
+        result['error'] = str(exc)
+    result['summarizer'] = cluster.query('SELECT summarized_tli, summarized_lsn FROM pg_get_wal_summarizer_state()')[0]
+    summaries = []
+    for tli, begin, end in cluster.query('SELECT tli, start_lsn, end_lsn FROM pg_available_wal_summaries() '
+                                         'ORDER BY tli, start_lsn'):
+        blocks, limits = {}, {}
+        for ts, db, rel, fork, block, is_limit in cluster.query(
+                'SELECT reltablespace, reldatabase, relfilenode, relforknumber, relblocknumber, is_limit_block '
+                f"FROM pg_wal_summary_contents({tli}, '{begin}', '{end}')"):
+            key = f'{ts}/{db}/{rel}/{fork}'
+            if is_limit == 't':
+                limits[key] = min(int(block), limits.get(key, int(block)))
+            else:
+                blocks.setdefault(key, []).append(int(block))
+        summaries.append({'tli': int(tli), 'start': begin, 'end': end, 'blocks': blocks, 'limits': limits})
+    result['summaries'] = summaries
+    result['history'] = {p.name: p.read_text() for p in sorted((Path(cluster.datadir) / 'pg_wal').glob('*.history'))}
+    return result
+
+
 def build_scenario(spec, out_root, *, rows=DEFAULT_ROWS, bins, default_bin, keep=False,
-                   force=False, verbose=True, source_conf=None, old_copy_conf=None):
+                   force=False, verbose=True, source_conf=None, old_copy_conf=None, wal_summaries=False):
     """Build one scenario under out_root/<id>-<slug>/ and return its metadata.
 
     ``source_conf`` adds server settings to the cluster that becomes the source, from its
     creation on; ``old_copy_conf`` to the one whose data directory becomes B (S1, S1b, S2,
     S2b and S2c, where that is a cluster of its own). EXP-03 uses neither; T11 gives the
     source wal_keep_size. scenario.json records both, and with which role's settings
-    the source and B's cluster ran."""
+    the source and B's cluster ran.
+
+    ``wal_summaries`` (EXP-61) runs the source with summarize_wal on, dumps its summaries before the servers
+    stop, and scores the summary path on the scenario (summaryscan.json)."""
+    if wal_summaries:
+        source_conf = {**(source_conf or {}), **WAL_SUMMARIES_CONF}
     scenario_dir = prepare_scenario_dir(Path(out_root) / spec.dirname, force)
     ctx = BuildContext(scenario_dir, rows, bins, default_bin, keep=keep, verbose=verbose,
                        source_conf=source_conf, old_copy_conf=old_copy_conf)
@@ -1072,6 +1113,9 @@ def build_scenario(spec, out_root, *, rows=DEFAULT_ROWS, bins, default_bin, keep
         ctx.step('record the logical state of the source')
         state = compute_logical_state(source.query)
         write_json(scenario_dir / 'expected_state.json', state)
+        if wal_summaries:
+            ctx.step("wait for the WAL summarizer to pass S's start, then dump the summaries")
+            write_json(scenario_dir / 'wal_summaries.json', dump_wal_summaries(source, ctx.source_backup))
         xid_after = xid_horizon(source)
         result['quiesce'] = {'xid_horizon_before_s': xid_before,
                              'xid_horizon_after_state': xid_after,
@@ -1102,6 +1146,13 @@ def build_scenario(spec, out_root, *, rows=DEFAULT_ROWS, bins, default_bin, keep
                                                      if n}
         ctx.check('classification_matches_lsnscan',
                   why['wrongly_skipped'] == totals['pages_wrongly_skipped'])
+        if wal_summaries:
+            ctx.step('summary-path analysis (EXP-61)')
+            scored = summaryscan.score_scenario(scenario_dir, old_info, source_info, threshold,
+                                                bins[old_info['pg_version']].tool('pg_waldump'))
+            write_json(scenario_dir / 'summaryscan.json', scored)
+            ctx.step(f"guard {'passes' if scored['guard']['ok'] else 'refuses'}; naive path leaves "
+                     f"{scored['naive']['wrong']} pages wrong ({scored['naive']['real_wrong']} real)")
         result['built_ok'] = all(check['ok'] for check in ctx.checks.values())
     except Exception as exc:  # noqa: BLE001 - recorded in scenario.json
         result['error'] = f'{type(exc).__name__}: {exc}'

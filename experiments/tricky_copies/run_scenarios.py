@@ -70,7 +70,8 @@ def do_build(args, bins, default):
         print(f'== build {spec.id} ({spec.title})', flush=True)
         meta = scenarios.build_scenario(spec, out, rows=args.rows, bins=bins,
                                         default_bin=default, keep=args.keep, force=args.force,
-                                        verbose=not args.quiet)
+                                        verbose=not args.quiet,
+                                        wal_summaries=getattr(args, 'wal_summaries', False))
         status = 'built' if meta['built_ok'] else 'NOT BUILT'
         detail = meta.get('error') or ', '.join(meta.get('failed_checks', [])) or ''
         print(f'== {spec.id}: {status} in {meta["build_seconds"]}s {detail}', flush=True)
@@ -154,6 +155,9 @@ def build_parser():
                        help='keep the working clusters (stopped) under <scenario>/pgdwork-*')
     build.add_argument('--force', action='store_true',
                        help='overwrite a non-empty output directory without scenario.json')
+    build.add_argument('--wal-summaries', action='store_true',
+                       help='EXP-61: run the source with summarize_wal on and score the WAL-summary path '
+                            '(summaryscan.json in each scenario)')
 
     ev = argparse.ArgumentParser(add_help=False)
     ev.add_argument('--python', default=sys.executable, help='interpreter that runs the tool')
