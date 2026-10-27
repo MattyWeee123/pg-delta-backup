@@ -8,6 +8,16 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (late night): EXP-62, the fast path's guard blind spot, and guard v2
+
+- **Why:** EXP-61's write-up named one way its guard could be fooled. It found an old copy's end partly from the WAL the copy still holds, so an old primary that lost its WAL past a failover split could pass. A safety argument for the owner's decision shouldn't rest on an untested hole.
+- **What ran (pre-registered in 3ba32b5 before any run):**
+  - a new scenario S2d: S2b's crashed old primary, with its WAL segments from the split's on deleted;
+  - a guard v2 that takes B's end only from how B was stopped: a clean shutdown's checkpoint, a cleanly stopped standby's minimum recovery point, or a base backup's manifest. It refuses anything else.
+  - EXP-61's 12 scenarios plus S2d, rebuilt. EXP-61's numbers reproduced.
+- **Outcome (all 3 predictions held):** v1 let S2d through, with 1,444 real wrong pages (1,443 stale rows). v2 refused it and left no real wrong page in any of the 13. Its cost: the crash-consistent copy S3 is hashed instead of using the summaries.
+- **Still the owner's decision** whether to build the fast path at all.
+
 ## 2026-10-27 (late night): EXP-61, a WAL-summary fast path on the tricky old copies
 
 - **Why:** the owner asked whether pages could carry a label, so the refresh knows what changed without reading both copies. PostgreSQL 17's WAL summaries are such a label. Reading B is what holds pgdelta to "at best a tie" in HA beyond memory, so a safe label-driven path is the one route past it. gcloud stayed signed out, and this needs no VM.

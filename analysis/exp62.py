@@ -77,25 +77,33 @@ def main(argv=None):
 
 
 def figure(table):
-    """One row per scenario: real wrong pages left without a guard, with v1 and with v2; refusals marked."""
+    """A grid: one row per scenario, one column per guard. Red: real wrong pages left; blue: the summaries ran
+    and left none; grey: refused, so every page is hashed as pgdelta does now."""
     plotting.style()
-    fig, ax = plt.subplots(figsize=(8.6, 5.2))
-    ys = list(range(len(table)))[::-1]
-    arms = (('naive_real_wrong', None, 'no guard', COLORS['red']), ('v1_real_wrong', 'v1_ok', 'guard v1 (EXP-61)',
-            COLORS['orange']), ('v2_real_wrong', 'v2_ok', 'guard v2', COLORS['blue']))
-    for j, (key, ok, label, color) in enumerate(arms):
-        for y, r in zip(ys, table):
-            offset = 0.27 * (1 - j)
-            ax.barh(y + offset, r[key], 0.25, color=color, label=label if y == ys[0] else None)
-            text = f'{r[key]:,}' + ('' if ok is None or r[ok] else ' (refused: hashed)')
-            ax.text(r[key] * 1.15 + 0.15, y + offset, text, va='center', fontsize=7)
-    ax.set_xscale('symlog', linthresh=1)
-    ax.set_xlim(0, 2e5)
-    ax.set_yticks(ys, [r['scenario'] for r in table])
-    ax.set_xlabel('real wrong pages left in the copy (symlog)')
-    ax.legend(fontsize=8.5, loc='lower right')
-    ax.set_title("A WAL-summary fast path: no guard, EXP-61's guard and guard v2 (S2d: the old primary's WAL lost)",
-                 fontsize=10)
+    fig, ax = plt.subplots(figsize=(7.4, 6.0))
+    columns = (('no guard', 'naive_real_wrong', None), ("guard v1\n(EXP-61)", 'v1_real_wrong', 'v1_ok'),
+               ('guard v2', 'v2_real_wrong', 'v2_ok'))
+    for x, (_, key, ok) in enumerate(columns):
+        for y, r in enumerate(table):
+            refused = ok is not None and not r[ok]
+            wrong = r[key]
+            color = COLORS['grey'] if refused else COLORS['red'] if wrong else COLORS['blue']
+            ax.add_patch(plt.Rectangle((x + 0.04, y + 0.06), 0.92, 0.88, color=color, alpha=0.25 if refused else 0.8))
+            text = 'refused:\nhashed' if refused else (f'{wrong:,} wrong' if wrong else 'summaries,\n0 wrong')
+            ax.text(x + 0.5, y + 0.5, text, ha='center', va='center', fontsize=7.5,
+                    color='black' if refused else 'white', fontweight='bold' if wrong and not refused else None)
+    ax.set_xlim(0, len(columns))
+    ax.set_ylim(len(table), 0)
+    ax.set_xticks([x + 0.5 for x in range(len(columns))], [c[0] for c in columns])
+    ax.xaxis.tick_top()
+    ax.set_yticks([y + 0.5 for y in range(len(table))], [f"{r['scenario']}  ({r['b_state']})" for r in table],
+                  fontsize=8.5)
+    ax.grid(False)
+    for side in ('left', 'bottom', 'top', 'right'):
+        ax.spines[side].set_visible(False)
+    ax.tick_params(length=0)
+    ax.set_title('Real wrong pages a WAL-summary fast path leaves (S2d: the old primary lost its WAL past the split)',
+                 fontsize=9.5, pad=34)
     print(plotting.save(fig, 'exp62-guards'))
 
 

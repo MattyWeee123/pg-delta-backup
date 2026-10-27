@@ -1,0 +1,14 @@
+scenario,built_ok,dump_error,b_state,naive_real_wrong,naive_wrong_by_category,v1_ok,v1_real_wrong,v1_reasons,v2_ok,v2_real_wrong,v2_reasons,v2_read_fraction
+S1,True,,shut down in recovery,0,"{""hint_bits_only"": 53}",True,0,,True,0,,0.1198
+S1b,True,,shut down in recovery,0,{},True,0,,True,0,,0.1238
+S2,True,,shut down,1276,"{""content"": 1276, ""hint_bits_only"": 19}",False,0,"B's WAL reaches 0/9A1D928, past where S's history leaves timeline 1 (0/8D10100)",False,0,"B's WAL reaches 0/9A1D928, past where S's history leaves timeline 1 (0/8D10100)",1.0
+S2b,True,,in production,1444,"{""content"": 1443, ""hint_bits_only"": 19, ""vm"": 1}",False,0,"B's WAL reaches 0/9B7F148, past where S's history leaves timeline 1 (0/8D12570)",False,0,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",1.0
+S2c,True,,shut down in recovery,1444,"{""content"": 1443, ""vm"": 1}",False,0,"B's WAL reaches 0/BB7D090, past where S's history leaves timeline 1 (0/AD10490)",False,0,"B's WAL reaches 0/BB7D090, past where S's history leaves timeline 1 (0/AD10490)",1.0
+S2d,True,,in production,1444,"{""content"": 1443, ""hint_bits_only"": 19, ""vm"": 1}",True,1444,,False,0,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",1.0
+S3,True,,in production,0,{},True,0,,False,0,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",1.0
+S4,True,,in production,0,{},True,0,,True,0,,0.0567
+S5,True,,in production,0,{},True,0,,True,0,,0.3521
+S6,True,,in production,8046,"{""checksum_only"": 7925, ""vm"": 121}",False,0,data checksum version differs,False,0,data checksum version differs,1.0
+S7,True,,in production,0,"{""hint_bits_only"": 3770}",True,0,,True,0,,0.0216
+S8,True,,in production,1666,"{""content"": 3, ""lsn_only"": 1647, ""vm"": 16}",False,0,"system identifier differs; B's WAL reaches 0/7000120, past where S's history leaves timeline 1 (S start 0/7000028)",False,0,"system identifier differs; B's WAL reaches 0/7000120, past where S's history leaves timeline 1 (S start 0/7000028)",1.0
+S9,True,,in production,2423,"{""content"": 1673, ""lsn_only"": 640, ""vm"": 110}",False,0,system identifier differs; major version differs; summaries do not cover timeline 1 0/7000028..0/11000028,False,0,system identifier differs; major version differs; summaries do not cover timeline 1 0/7000028..0/11000028,1.0

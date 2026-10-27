@@ -122,7 +122,7 @@ All 12 scenarios built, every check passed, and the summarizer reached S's start
 
 - **Time.** Pages were counted, not timed. EXP-48's disk model (beyond memory, time ≈ |B| ÷ read rate + pages written ÷ write rate) implies the fast path removes the |B| term. For a standby with local changes, the HA verdict "at best a tie" could become a large win. That is inferred, not measured.
 - **Scale and variety.** Each scenario is about 8,500 pages, built once. The tricky cases are the ones EXP-03 found; others (a deleted `pg_wal` on B, unlogged tables, tablespaces, a summarizer restarted mid-range) weren't built.
-- **The guard's blind spot.** It reads B's own WAL to find how far B went. An old primary whose `pg_wal` past the split was lost or removed would look like a clean ancestor and pass. `pg_rewind` has the same dependency. Any build of this path would need B's WAL to be complete from its redo point, or must refuse.
+- **The guard's blind spot.** It reads B's own WAL to find how far B went. An old primary whose `pg_wal` past the split was lost or removed would look like a clean ancestor and pass. `pg_rewind` has the same dependency. Any build of this path would need B's WAL to be complete from its redo point, or must refuse. *[EXP-62](EXP-62-guard-blind-spot.md) confirmed the blind spot: 1,444 real wrong pages on such a copy. A stricter guard v2, which takes B's end only from a clean stop or a base backup's manifest, refused it and left none in 13 scenarios.*
 - **Omni as shipped:** `summarize_wal` is off (EXP-40). Summaries exist only from when it is turned on, and are kept 10 days by default. A server before 17.11 or 18.6 would also need refusing, for the visibility-map summaries bug fixed in August 2026.
 
 ## Decision for the owner
