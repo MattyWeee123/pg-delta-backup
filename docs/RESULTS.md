@@ -46,7 +46,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | Question | Answer |
 |---|---|
 | Reuse after `VACUUM FULL` / `CLUSTER`? | **None, by any strategy:** cross-file page matching and content-defined chunking found nothing (EXP-37). Positional pages lose nothing |
-| Fewer bytes on slow links? | 512-byte blocks would send **5× fewer bytes** for scattered changes (EXP-37, not built). **zstd is built** (`--compress zstd`, opt-in): 2.8× fewer bytes. Compressed and decompressed on pools beside the transfer, **scattered changes took 0.52 of v1's time at 0.5 Gbit/s** (6.8 s against 13.1; `pg_basebackup` 36.9), **0.75 at 1 Gbit/s**, and were even at 2 (EXP-45, -46, -47). For DR links below about 1.8 Gbit/s |
+| Fewer bytes on slow links? | **zstd is built** (`--compress zstd`, opt-in): 2.8× fewer bytes. Scattered changes took 0.52 of v1's time at 0.5 Gbit/s (6.8 s against 13.1; `pg_basebackup` 36.9), 0.75 at 1 Gbit/s and, with batched pool tasks, 0.86 at 2. **Break-even about 4 Gbit/s** (EXP-45 to -47, -52, -53). **Sub-page deltas are built but off** (`--subpage`): 3.5× fewer bytes again, but slower as built, since their block hashing outweighed the link time saved (EXP-54 to -56) |
 
 ![Bytes by strategy](figures/exp37-bytes.svg)
 
@@ -58,7 +58,9 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | `--verify-scope` | `written` in place, `all` for a new copy | EXP-31, -32, -33, -35 |
 | `--jobs` with `--source-kind live` | at most CPUs ÷ 4, from 1 to 4 | EXP-28, -30, -39 |
 | `--congestion-control` | the host's default; `bbr` opt-in | EXP-24 (speed), EXP-26 (fairness) |
-| `--compress` | `off`; `zstd` opt-in for DR links below about 1.8 Gbit/s | EXP-37, -45, -46, -47 |
+| `--compress` | `off`; `zstd` opt-in for DR links below about 4 Gbit/s, chiefly 2 and slower | EXP-37, -45 to -47, -52, -53 |
+| `--subpage` | off (slower as built) | EXP-54 to -56 |
+| `--checkpoint` (live) | `fast`; `spread` opt-in | EXP-57 |
 
 ## Still open
 
