@@ -173,6 +173,15 @@ def _compress_option(parser):
                              'measurement (EXP-54, EXP-55), but as built it was slower than zstd alone at 0.5 and '
                              '1 Gbit/s on 8-vCPU VMs, its block hashing costing more than the link time saved '
                              '(EXP-56). Leave it off')
+    parser.add_argument('--fast-path', choices=('summaries',), default=None,
+                        help='with --source-kind live and an in-place refresh: send only the blocks the server\'s '
+                             'WAL summaries (summarize_wal = on, PostgreSQL 17.11, 18.6 or later) list since B\'s '
+                             'redo point, reading no other page of either copy, where B\'s lineage is provable: '
+                             'B stopped cleanly or a base backup with its manifest, on the server\'s timeline '
+                             'history, no interrupted refresh, the summaries covering the gap (guard v2, EXP-61, '
+                             'EXP-62). Otherwise the session hashes both copies as without it. Pages left unsent '
+                             'are not verified; the pages written are. The session\'s role needs EXECUTE on '
+                             'pg_get_wal_summarizer_state, pg_available_wal_summaries and pg_wal_summary_contents')
 
 
 def _hash_option(parser):
@@ -535,7 +544,7 @@ def _sender_kwargs(args, identity):
             'live_timeout': args.live_timeout, 'hash_algorithm': args.hash,
             'compress': None if getattr(args, 'compress', 'off') == 'off' else args.compress,
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
-            'subpage': getattr(args, 'subpage', False)}
+            'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None)}
 
 
 def _source_identity(args):

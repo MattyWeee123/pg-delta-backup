@@ -220,6 +220,15 @@ Two more, answered October 25 by taking the recommendations as they stood "for n
 
 Still open: K11 (D13's key design), and the sponsor's answers for K7 and K8.
 
+## Decisions of October 27, 2026 (evening)
+
+| # | Question | The owner's answer | What follows |
+|---|---|---|---|
+| K11 | Build the guarded WAL-summary fast path, and time it beyond memory? | **Build and time it.** | `--fast-path summaries` (opt-in, live source, in place), behind guard v2 (EXP-62). DESIGN.md's "never skip pages" now has this one opt-in exception. A pre-registered timed test beyond memory follows (EXP-63). |
+| K12 | The deck's placeholders (team names, course, date, contact) | **Leave them for now.** | The bracketed placeholders stay. |
+
+The O4 question (which number governs when the worst second and the work lost disagree on a large dirty set, EXP-57) was explained to the owner on October 27 and awaits an answer; fast stays the default meanwhile, by EXP-57's registered rule.
+
 ## What T3, T8a and T11 settled (October 24, 2026)
 
 Three experiments ran on two new `n2-standard-8` VMs in `us-central1-a`: 552 timed runs and 48 correctness runs, all verified. Each write-up was rechecked independently against the raw data, EXP-10's XFS arm and write-back rerun in a second recheck, and the corrections are in them.

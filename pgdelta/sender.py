@@ -28,7 +28,7 @@ import os
 import threading
 import time
 
-from pgdelta import __version__, datadir, live, matching, protocol, subpage, transport, waits
+from pgdelta import __version__, datadir, fastpath, live, matching, protocol, subpage, transport, waits
 from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
@@ -288,8 +288,15 @@ class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
-                 hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False):
+                 hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
+                 fast_path=None):
         self.started = time.perf_counter()
+        # --fast-path summaries (pgdelta.fastpath): offered in HELLO; `fast` is the summaries' block plan once the
+        # guard let it run, and the listed files then go by fast_path's rules, B unread.
+        self.fast_path, self.fast = fast_path, None
+        self.fast_counts = {'used': False, 'reasons': [], 'summaries': 0, 'summary_rows': 0, 'relations': 0,
+                            'files_chosen': 0, 'files_whole': 0, 'pages_chosen': 0, 'guard_seconds': 0.0,
+                            'summarizer_wait_seconds': None, 'summarized_lsn': None}
         self.hash_algorithm = hash_algorithm
         # --compress zstd: offered in HELLO; the codec exists once the receiver accepted it (pgdelta.compress).
         self.compress, self.codec = compress, None
@@ -425,6 +432,7 @@ class _Sender:
         return self.block
 
     def _run(self):
+        fastpath.check_mode(self.fast_path, self.source_kind, self.subpage)
         if self.source_kind not in datadir.SOURCE_KINDS:
             raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
                                f'not {self.source_kind!r}')
@@ -486,6 +494,8 @@ class _Sender:
             hello['compress_offer'] = [self.compress]
         if self.subpage:
             hello['subpage_offer'] = SUB_BLOCK
+        if self.fast_path:
+            hello['summary_offer'] = True
         self._send_json(protocol.HELLO, hello)
         accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
         if offered is not None:
@@ -519,7 +529,14 @@ class _Sender:
         self.mode = 'reuse' if self.reuse else 'full'
         self.max_run = max(1, RUN_BYTES // self.block)
         self.max_request = protocol.max_nodes_per_request(self.node_blocks)
-        self._send_files(inventory.files, 0)
+        if 'summary' in accept or 'summary_refused' in accept:
+            if not self.fast_path:
+                raise ProtocolError('ACCEPT summary without a summary_offer')
+            self._decide_fast_path(accept)
+        if self.fast is not None:
+            self._send_fast(inventory.files)
+        else:
+            self._send_files(inventory.files, 0)
         if self.live is not None:
             # Every listed file has been sent: end backup mode, then send the WAL it needs and its backup_label.
             self._end_live(len(inventory.files))
@@ -541,6 +558,107 @@ class _Sender:
         receiver = final.get('receiver')
         self.receiver_stats = receiver if isinstance(receiver, dict) else None
         return self.stats('complete', 0, None)
+
+    def _decide_fast_path(self, accept):
+        """--fast-path summaries: the guard (pgdelta.fastpath.guard) on what the receiver proved of B and on the
+        server's summaries, then SUMMARY_DECISION. A receiver that proved nothing ("summary_refused") waits for no
+        decision, and the session hashes both copies."""
+        counts, facts = self.fast_counts, accept.get('summary')
+        if facts is None:
+            refused = accept.get('summary_refused')
+            counts['reasons'] = [refused if isinstance(refused, str) else 'the receiver declined the fast path']
+            return
+        if not isinstance(facts, dict):
+            raise ProtocolError('ACCEPT summary must be an object')
+        started = time.perf_counter()
+        source = self.live.summary_source()
+        counts['summarizer_wait_seconds'] = source['summarizer_wait_seconds']
+        counts['summarized_lsn'] = (None if source['summarized_lsn'] is None
+                                    else fastpath.format_lsn(source['summarized_lsn']))
+        ok, reasons = fastpath.guard(facts, source)
+        if ok:
+            spans = fastpath.ranges(fastpath.history_path(source['history'], source['timeline']),
+                                    fastpath.parse_lsn(facts['redo']), source['start_lsn'])
+            rows = []
+            for tli, start, end in source['summaries']:
+                if any(tli == t and start < hi and end > lo for t, lo, hi in spans):
+                    rows += self.live.summary_rows(tli, start, end)
+                    counts['summaries'] += 1
+            self.fast = fastpath.block_plan(rows)
+            counts['summary_rows'], counts['relations'] = len(rows), len(self.fast)
+        counts['used'], counts['reasons'] = ok, reasons
+        counts['guard_seconds'] = time.perf_counter() - started
+        self._send_json(protocol.SUMMARY_DECISION, {'use': ok, 'reasons': reasons})
+
+    def _send_fast(self, entries):
+        """--fast-path summaries: each listed file in order. Where the summaries chose its pages, only those go, read
+        now, then FILE_DONE_WRITTEN with the digest of what was sent; any other file goes whole by the usual path."""
+        blocks_per_segment = (self.identity or {}).get('blocks_per_segment') or (1 << 30) // self.block
+        counts = self.fast_counts
+        for index, entry in enumerate(entries):
+            self.inbox.check()
+            basis_size = self.basis_sizes.get(index) if self.reuse else None
+            unlogged = self.selection is not None and self.selection.source_path(entry.path) != entry.path
+            pages, whole = fastpath.pages_to_send(entry.path, entry.size, basis_size, self.fast, self.block,
+                                                  blocks_per_segment, whole=unlogged)
+            if whole:
+                counts['files_whole'] += 1
+                self._finish(self._whole_job(index, entry))
+                continue
+            counts['files_chosen'] += 1
+            counts['pages_chosen'] += len(pages)
+            sent, leaves = 0, []
+            started = time.perf_counter()
+            try:
+                handle = self.reader.open(entry)
+            except OSError as exc:
+                raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
+            try:
+                for first, count in matching.runs(pages, self.max_run):
+                    offset = first * self.block
+                    length = min(count * self.block, entry.size - offset)
+                    try:
+                        data = handle.read(offset, length)
+                    except OSError as exc:
+                        raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
+                    view = memoryview(data)
+                    leaves += [(page, self.hasher.leaf(view[(page - first) * self.block:(page - first + 1) * self.block]))
+                               for page in range(first, first + count)]
+                    self.inbox.check()
+                    self._send_run(index, first, data)
+                    sent += length
+                self._drain_runs()
+            finally:
+                handle.close()
+            self.hash_source += time.perf_counter() - started
+            digest = fastpath.written_digest(self.hasher, entry.size, leaves)
+            self._send(protocol.FILE_DONE_WRITTEN, protocol.encode_file_done(index, entry.size, digest))
+            self.files_digest.add(entry.path, entry.size, digest)
+            total = -(-entry.size // self.block)
+            self.files['total'] += 1
+            if basis_size != entry.size:
+                self.files['size_mismatch'] += 1
+            self.files['unchanged' if not pages and basis_size == entry.size else 'changed'] += 1
+            self.pages['total'] += total
+            self.pages['sent'] += len(pages)
+            self.pages['reused'] += total - len(pages)
+            self.pages['sent_bytes'] += sent
+
+    def _whole_job(self, index, entry):
+        """A listed file sent whole in fast mode: hashed as read (pg_control pinned), every page sent, its digest
+        that of the whole file; B's copy of it is never read."""
+        started = time.perf_counter()
+        try:
+            tree = self.reader.hash(entry)
+        except OSError as exc:
+            raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
+        self.hash_source += time.perf_counter() - started
+        if tree.size != entry.size:
+            raise VerificationError(f'source file {entry.path} changed size during the run ({entry.size} -> '
+                                    f'{tree.size} bytes)')
+        job = _Job(index, entry.path, tree, None, entry=entry)
+        job.plan.whole = list(range(tree.node_count))
+        return job
 
     def _start_hashing(self, key):
         """The session's hasher and hash pool, and a live source's reader, for self.hash_algorithm."""
@@ -956,6 +1074,10 @@ class _Sender:
             **({'subpage': {'requested': True, 'used': self.subpage_used,
                             **{k: round(v, 6) if isinstance(v, float) else v for k, v in self.subpage_counts.items()}}}
                if self.subpage else {}),
+            # --fast-path: whether the guard let it run and why not, and what the summaries chose; absent without it.
+            **({'fast_path': {'requested': self.fast_path,
+                              **{k: round(v, 6) if isinstance(v, float) else v for k, v in self.fast_counts.items()}}}
+               if self.fast_path else {}),
         }
 
 
@@ -963,7 +1085,8 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
-               hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False):
+               hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
+               fast_path=None):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -994,7 +1117,10 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     `checkpoint` ("fast" or "spread") is pg_backup_start's for a live source.
     `subpage` offers sub-page deltas (pgdelta.subpage): with them accepted, each page sent carries only its
     512-byte blocks that differ from B's.
+    `fast_path` "summaries" (pgdelta.fastpath, a live source only) offers to send only the blocks the server's WAL
+    summaries list since B's redo point, without reading B; the receiver proves B's lineage, the guard here
+    decides, and otherwise the session is as without it.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
-                   pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage).run()
+                   pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, fast_path).run()

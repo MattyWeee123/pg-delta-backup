@@ -77,7 +77,7 @@ import tempfile
 import threading
 import time
 
-from pgdelta import __version__, flush, inplace, placement, protocol, subpage
+from pgdelta import __version__, fastpath, flush, inplace, placement, protocol, subpage
 from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
@@ -115,7 +115,7 @@ HELLO_KEYS = frozenset(('protocol_version', 'block', 'node_blocks', 'key', 'sour
 # Only a live source's HELLO has it (pgdelta.live): files follow in one APPEND before COMPLETE.
 # hash: the digest algorithm, absent for BLAKE2b (EXP-29); hash_offer: what a sender with --hash auto can use,
 # preferred first, of which this receiver picks the first it can use and names it in ACCEPT.
-HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer', 'compress_offer', 'subpage_offer'))
+HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer', 'compress_offer', 'subpage_offer', 'summary_offer'))
 _CREATE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0)
                  | getattr(os, 'O_NOFOLLOW', 0))
 _KERNEL_COPY = sys.platform.startswith('linux') and hasattr(os, 'copy_file_range')
@@ -244,6 +244,8 @@ class ReceiverSetup:
     in_place: bool = False
     marker: object = None
     lock: object = None
+    # B's pg_controldata, for the fast path's lineage facts (pgdelta.fastpath.basis_facts).
+    pg_controldata: object = None
 
     def release(self):
         """Let go of B (in place); the receiver does so when its run ends. Safe to repeat."""
@@ -325,7 +327,7 @@ def _prepare_in_place(basis, identity, pg_controldata, reuse_any_basis, local_so
         lock.release()
         raise
     return ReceiverSetup(basis, basis, inventory, identity, reuse_any_basis, protected, in_place=True,
-                         marker=marker, lock=lock)
+                         marker=marker, lock=lock, pg_controldata=pg_controldata)
 
 
 @dataclass
@@ -451,6 +453,12 @@ class _Receiver:
         self.subpage_offer, self.subpage = None, False
         self.subpage_counts = {'pages_partial': 0, 'pages_whole': 0, 'pages_same': 0, 'blocks_received': 0,
                                'block_digest_bytes': 0, 'hash_seconds': 0.0}
+        # --fast-path summaries (pgdelta.fastpath): the HELLO's offer; B's lineage facts or why there are none; while
+        # the sender's SUMMARY_DECISION is awaited, B is not read; once it said so, B is never read (fast_mode), and
+        # each file the summaries chose is checked by the pages written (FILE_DONE_WRITTEN).
+        self.summary_offer, self.summary_facts, self.summary_refused = False, None, None
+        self.summary_pending = self.fast_mode = False
+        self.fast_counts = {'files_written_checked': 0, 'pages_reread': 0, 'reasons': []}
         # EXP-13's protocol timers, on the time.perf_counter() clock: publish_s counts from `launched` (the
         # receive command's start) and hello_wait_s from `listening` (its listener's), each else from here.
         started = time.perf_counter()
@@ -680,6 +688,19 @@ class _Receiver:
                         and (self.in_place or self.rebuild == 'copy-patch'))
         if self.subpage:
             accept['subpage'] = SUB_BLOCK
+        if self.summary_offer:
+            # B's lineage is read now: in place, its pg_control is renamed once B is blocked, after ACCEPT.
+            if not (self.in_place and self.reuse):
+                self.summary_refused = ('the fast path refreshes B in place only (--in-place), and B must pass the '
+                                        'identity check')
+            else:
+                self.summary_facts, self.summary_refused = fastpath.basis_facts(
+                    self.setup.basis, self.setup.pg_controldata, self.setup.marker)
+            if self.summary_facts is not None:
+                accept['summary'] = self.summary_facts
+                self.summary_pending = True  # B is read only if the sender's guard says no
+            else:
+                accept['summary_refused'] = self.summary_refused
         self.channel.send_json(protocol.ACCEPT, accept)
         self._start_pool()
         self._start_fsync()
@@ -687,12 +708,11 @@ class _Receiver:
             self._begin_in_place()
         else:
             self._create_staging()
-        if self.reuse and self.basis_files:
-            self.basis_thread = threading.Thread(target=self._hash_basis, name='pgdelta-basis',
-                                                 daemon=True)
-            self.basis_thread.start()
+        if not self.summary_pending:
+            self._start_basis_thread()
         handlers = {protocol.LEAF_REQUEST: self._leaf_request, protocol.PAGE_DATA: self._page_data,
-                    protocol.FILE_DONE: self._file_done}
+                    protocol.FILE_DONE: self._file_done, protocol.SUMMARY_DECISION: self._summary_decision,
+                    protocol.FILE_DONE_WRITTEN: self._file_done_written}
         if self.subpage:
             handlers[protocol.PAGE_DELTA] = self._page_delta
         if getattr(self, 'codec', None) is not None:
@@ -712,12 +732,30 @@ class _Receiver:
                                                                        protocol.LEAF_REQUEST):
                 # Plain pages, a file's end, an append and the end: every queued run is written first.
                 self._drain_decompressed()
+            if self.summary_pending and code != protocol.SUMMARY_DECISION:
+                raise ProtocolError(f'{protocol.name(code)} arrived before SUMMARY_DECISION')
             if code == protocol.COMPLETE:
                 return self._complete(payload)
             if code not in handlers:
                 raise ProtocolError(f'unexpected {protocol.name(code)} from the sender')
             handlers[code](payload)
             self._raise_background_errors()
+
+    def _start_basis_thread(self):
+        if self.reuse and self.basis_files:
+            self.basis_thread = threading.Thread(target=self._hash_basis, name='pgdelta-basis',
+                                                 daemon=True)
+            self.basis_thread.start()
+
+    def _summary_decision(self, payload):
+        """The sender's guard: the fast path runs, and B is never read; or it does not, and B is hashed as usual."""
+        if not self.summary_pending:
+            raise ProtocolError('SUMMARY_DECISION without B\'s lineage facts in ACCEPT, or a second one')
+        use, reasons = fastpath.check_decision(protocol.decode_json(payload, 'SUMMARY_DECISION'))
+        self.summary_pending, self.fast_mode = False, use
+        self.fast_counts['reasons'] = reasons
+        if not use:
+            self._start_basis_thread()
 
     def _read_hello(self):
         code, payload = self._recv()
@@ -764,6 +802,10 @@ class _Receiver:
         # Accepted only where this end can decompress; otherwise the sender sends plain PAGE_DATA.
         self.codec = compression.Codec() if offer and compression.usable(offer[0]) else None
         self.compress_offer = offer
+        summary_offer = hello.get('summary_offer', False)
+        if type(summary_offer) is not bool:
+            raise ProtocolError('HELLO summary_offer must be true or false')
+        self.summary_offer = summary_offer
         sub_offer = hello.get('subpage_offer')
         if sub_offer is not None and type(sub_offer) is not int:
             raise ProtocolError('HELLO subpage_offer must be an integer')
@@ -952,7 +994,7 @@ class _Receiver:
         leaf requests in stream order, so B's file is never written before it
         was hashed. This guard keeps a misbehaving sender from breaking that.
         """
-        if self.reuse and index in self.basis_files and index >= self.basis_hashed:
+        if self.reuse and index in self.basis_files and index >= self.basis_hashed and not self.fast_mode:
             raise ProtocolError(f'data for {entry.path} arrived before the basis digests of it were sent; '
                                 f'in place, a file of B is written only after it was hashed')
         try:
@@ -1264,6 +1306,54 @@ class _Receiver:
             self.verify_seconds += elapsed
             self.verify_wait_seconds += elapsed
             self._accept_file(entry, size, digest)
+
+    def _file_done_written(self, payload):
+        """--fast-path summaries: a file of which only the pages the summaries chose were sent, in place. The pages
+        left are B's, unread; the pages written are re-read and their digest compared with that of what was sent
+        (pgdelta.fastpath.written_digest)."""
+        if not self.fast_mode:
+            raise ProtocolError('FILE_DONE_WRITTEN outside the fast path')
+        index, size, digest = protocol.decode_file_done(payload)
+        if index >= len(self.files):
+            raise ProtocolError(f'FILE_DONE_WRITTEN for unknown file {index}')
+        output, entry = self._open(index), self.files[index]
+        if size != entry.size:
+            raise ProtocolError(f'FILE_DONE_WRITTEN size for {entry.path} differs from the inventory')
+        started = time.perf_counter()
+        basis_size = self.basis_files.get(index)
+        gaps = output.gaps()
+        self._check_gaps(entry, gaps, basis_size)
+        for start, stop in gaps:
+            self.counts.pages_copied += stop - start
+            self.counts.bytes_copied += min(stop * self.block, size) - start * self.block
+        if os.fstat(output.fd).st_size > size:
+            os.ftruncate(output.fd, size)
+        if os.fstat(output.fd).st_size != size:
+            raise ProtocolError(f'{entry.path} was rebuilt with the wrong length')
+        leaves, block = [], self.block
+        verified = time.perf_counter()
+        for first, count in output.runs:
+            for page in range(first, first + count):
+                data = pread_exact(output.fd, min(block, size - page * block), page * block)
+                leaves.append((page, self.hasher.leaf(data)))
+        self.fast_counts['pages_reread'] += len(leaves)
+        if fastpath.written_digest(self.hasher, size, leaves) != digest:
+            raise VerificationError(f'{entry.path}: the pages written do not match what the source sent')
+        self.verify_seconds += time.perf_counter() - verified
+        synced = time.perf_counter()
+        if self.syncer is not None:
+            fd, self.current = output.fd, None
+            self.fsync_wait_seconds += self.syncer.submit(fd, entry.path)
+        else:
+            os.fsync(output.fd)
+            self.fsync_seconds += time.perf_counter() - synced
+            os.close(output.fd)
+            self.current = None
+        self.rebuild_seconds += time.perf_counter() - started
+        os.chmod(self._output_path(entry.path), entry.mode)
+        self.counts.files_verified += 1
+        self.fast_counts['files_written_checked'] += 1
+        self._accept_file(entry, size, digest)
 
     def _append(self, payload):
         """A live source's APPEND: the files that follow the listed ones (its WAL and backup_label).
@@ -1689,6 +1779,10 @@ class _Receiver:
             stats['subpage'] = {'offered': self.subpage_offer, 'accepted': self.subpage,
                                 **{key: round(value, 6) if isinstance(value, float) else value
                                    for key, value in self.subpage_counts.items()}}
+        if self.summary_offer:
+            # Only when offered, so a session without --fast-path keeps its COMPLETE frame's bytes.
+            stats['fast_path'] = {'offered': True, 'facts': self.summary_facts, 'refused': self.summary_refused,
+                                  'used': self.fast_mode, **self.fast_counts}
         if self.misplaced_write is not None:
             stats['test_misplaced_write'] = self.misplaced_write
         return stats

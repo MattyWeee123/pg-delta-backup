@@ -568,6 +568,50 @@ class LiveSource:
         self.started_utc, self.started = time.time(), time.perf_counter()
         self.start_lsn = parse_lsn(answer['lsn'])
 
+    def summary_source(self, wait_seconds=120.0, poll=0.25):
+        """--fast-path summaries (pgdelta.fastpath): what the guard needs from the server, once backup mode began.
+
+        The server's version and summarize_wal setting, the backup's timeline (its start checkpoint's), the
+        timeline history files in pg_wal, and every WAL summary it lists. When it summarizes WAL, its summarizer
+        is waited for (up to `wait_seconds`) until it has passed the backup's start, so that the summaries up to
+        it are complete: PostgreSQL ends a summary at each checkpoint's redo record. The functions are the
+        server's own (pg_get_wal_summarizer_state, pg_available_wal_summaries); the session's role needs EXECUTE
+        on them, which PostgreSQL grants to superusers only by default."""
+        state = self.session.value(
+            "SELECT json_build_object('summarize_wal', current_setting('summarize_wal') = 'on', "
+            "'timeline', (SELECT timeline_id FROM pg_control_checkpoint()))")
+        summarized, waited, deadline = None, 0.0, time.perf_counter() + wait_seconds
+        started = time.perf_counter()
+        while state['summarize_wal']:
+            answer = self.session.value(
+                "SELECT json_build_object('lsn', (SELECT summarized_lsn::text FROM pg_get_wal_summarizer_state()))")
+            summarized = parse_lsn(answer['lsn'] or '0/0')
+            if summarized >= self.start_lsn or time.perf_counter() >= deadline:
+                break
+            time.sleep(poll)
+        waited = time.perf_counter() - started
+        summaries = self.session.value(
+            "SELECT coalesce(json_agg(json_build_array(tli, start_lsn::text, end_lsn::text) "
+            "ORDER BY tli, start_lsn), '[]'::json) FROM pg_available_wal_summaries()")
+        history = {}
+        for path in sorted((self.root / 'pg_wal').glob('*.history')):
+            try:
+                history[path.name] = path.read_text(errors='replace')
+            except OSError:
+                pass
+        return {'server_version': self.server['version'], 'summarize_wal': bool(state['summarize_wal']),
+                'timeline': int(state['timeline']), 'start_lsn': self.start_lsn,
+                'summarized_lsn': summarized, 'summarizer_wait_seconds': round(waited, 3), 'history': history,
+                'summaries': [(int(tli), parse_lsn(start), parse_lsn(end)) for tli, start, end in summaries]}
+
+    def summary_rows(self, timeline, start, end):
+        """One WAL summary's contents: (tablespace, database, relfilenode, fork, block, is_limit) rows."""
+        rows = self.session.value(
+            f"SELECT coalesce(json_agg(json_build_array(reltablespace, reldatabase, relfilenode, relforknumber, "
+            f"relblocknumber, is_limit_block)), '[]'::json) FROM pg_wal_summary_contents({int(timeline)}, "
+            f"'{format_lsn(start)}', '{format_lsn(end)}')")
+        return [tuple(row) for row in rows]
+
     def select(self):
         """What is sent from the data directory (pgdelta.datadir.select_live)."""
         return datadir.select_live(self.root, self.identity)

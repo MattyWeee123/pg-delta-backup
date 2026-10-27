@@ -33,6 +33,13 @@ PAGE_DATA_ZSTD = 11
 BLOCK_DIGESTS = 12
 PAGE_DELTA = 13
 PAGE_DELTA_ZSTD = 14
+# --fast-path summaries (pgdelta.fastpath): once ACCEPT carried B's lineage ("summary"), the sender's guard decides
+# and says so before anything else: {"use": true|false, "reasons": [...]}. Sent only after a HELLO's summary_offer
+# was accepted, so no other session's bytes change.
+SUMMARY_DECISION = 15
+# Then each file of which only the pages the summaries chose are sent ends with FILE_DONE_WRITTEN: FILE_DONE's
+# fields, its digest that of the pages written (pgdelta.fastpath.written_digest), not of the whole file.
+FILE_DONE_WRITTEN = 16
 MESSAGES = {
     HELLO: ('HELLO', 'control'),
     ACCEPT: ('ACCEPT', 'control'),
@@ -48,6 +55,8 @@ MESSAGES = {
     BLOCK_DIGESTS: ('BLOCK_DIGESTS', 'leaf_digests'),
     PAGE_DELTA: ('PAGE_DELTA', 'page_data'),
     PAGE_DELTA_ZSTD: ('PAGE_DELTA_ZSTD', 'page_data'),
+    SUMMARY_DECISION: ('SUMMARY_DECISION', 'control'),
+    FILE_DONE_WRITTEN: ('FILE_DONE_WRITTEN', 'control'),
 }
 CATEGORIES = ('control', 'node_digests', 'leaf_digests', 'page_data')
 

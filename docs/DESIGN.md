@@ -121,5 +121,5 @@ Because of (1) and (2), correctness never depends on where reused bytes came fro
 
 - **Read the live data directory directly**, inside PostgreSQL's backup start/stop window, instead of staging S. That's v1, which removes the extra full read and the scratch space on the source.
 - **Hand off to native incremental or `pg_rewind`** when their prerequisites hold.
-- **Use LSNs or WAL summaries** to send likely-changed pages sooner. They'll never be used to skip pages.
+- **Use LSNs or WAL summaries** to send likely-changed pages sooner. Page LSNs are never used to skip pages. *October 27: WAL summaries may skip pages, opt-in only (`--fast-path summaries`), behind guard v2: the owner chose to build it after EXP-61 and EXP-62 found it left no real wrong page on 13 tricky copies. Without the option, and wherever the guard refuses, every page is hashed as before.*
 - **Handle tablespaces outside the data directory** (refused with a clear error).
