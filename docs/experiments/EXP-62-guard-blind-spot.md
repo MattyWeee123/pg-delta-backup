@@ -48,7 +48,7 @@ The last WAL record in B's `pg_wal` still counts when it lies further (more caut
 
 ## Results
 
-All 13 scenarios built with every check passing, and no summary dump failed. EXP-61's 12 rebuilt with the same counts: the same verdicts, the same wrong pages and the same read fractions. In S2d, 2 of B's WAL segments were deleted, from the one holding the split on. Data: `docs/experiments/data/exp62-guards.csv`; raw `results/exp62/` (not in git).
+All 13 scenarios built with every check passing, and no summary dump failed. EXP-61's 12 rebuilt with the same verdicts and wrong-page counts, and with the same pages sent in 11 of them. S3, the crash copy, sent 5,306 pages against EXP-61's 5,324 (read fraction 0.307 both times), since where the crash lands varies between builds. In S2d, 7 of B's WAL segments were deleted, from the one holding the split (`…08`) through `…0E`. Data: `docs/experiments/data/exp62-guards.csv`; raw `results/exp62/` (not in git).
 
 ![Real wrong pages left: no guard, EXP-61's guard and guard v2](../figures/exp62-guards.svg)
 
