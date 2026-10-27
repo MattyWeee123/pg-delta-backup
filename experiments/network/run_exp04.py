@@ -2030,7 +2030,16 @@ class Orchestrator:
         listen = (f'127.0.0.1:{PGDELTA_PORT}' if method in measure.TLS_METHODS else f'{self.dest_ip}:{PGDELTA_PORT}')
         return [sys.executable, '-m', 'pgdelta', 'receive', *target,
                 '--listen', listen,
-                '--pg-controldata', self.bin / 'pg_controldata', *measure.PGDELTA_ARGS[method]['receive']]
+                '--pg-controldata', self.bin / 'pg_controldata', *measure.PGDELTA_ARGS[method]['receive'],
+                *self.native_tls_args(method, 'server')]
+
+    def native_tls_args(self, method, role: str) -> list:
+        """EXP-58: pgdelta's own TLS flags for a method whose engine asks for it: dest's receiver presents the
+        session's server certificate, the source's sender its client certificate, both trusting only its CA."""
+        if not measure.PGDELTA_ENGINES[method].get('native_tls'):
+            return []
+        return ['--tls-cert', f'{self.tls_dir}/{role}.crt', '--tls-key', f'{self.tls_dir}/{role}.key',
+                '--tls-ca', f'{self.tls_dir}/ca.crt']
 
     def pgdelta_send_argv(self, method, paths) -> list:
         # pgdelta_direct* reads a stopped data directory (--source-kind datadir, among the engine's
@@ -2047,7 +2056,8 @@ class Orchestrator:
                 '--connect', connect,
                 '--pg-controldata', self.bin / 'pg_controldata', '--stats-json', paths['stats'],
                 *measure.PGDELTA_ARGS[method]['send'],
-                *(['--busy-inflight-bytes', str(busy)] if busy is not None else [])]
+                *(['--busy-inflight-bytes', str(busy)] if busy is not None else []),
+                *self.native_tls_args(method, 'client')]
 
     def receive_argv(self, method, paths) -> list:
         """The receiver a method launches on dest: parcopy's for parcopy*, pgdelta's otherwise."""
@@ -2776,6 +2786,8 @@ class Orchestrator:
                                       if engine.get('high_churn') is not None else None),
                     # EXP-60: the keyed digest both ends used, and whether it is the one the method pins.
                     'hash': reported.get('hash'),
+                    # EXP-58: pgdelta's own TLS as the sender negotiated it (version, cipher, peer, handshake), if any.
+                    'tls': reported.get('tls'),
                     'hash_ok': reported.get('hash') == engine['hash'] if engine.get('hash') else None}
         if method in measure.RSYNC_METHODS and transfer:
             sender = next(c for c in transfer['commands'] if c['host'] == 'source')
@@ -5580,8 +5592,8 @@ class Orchestrator:
         result['busy_inflight_flag'] = self.busy_flag
         if not self.busy_flag:
             log("pgdelta send has no --busy-inflight-bytes on both VMs: its waits' busy parts count unsent bytes only")
-        tls = (any(method in measure.TLS_METHODS for method in self.methods) or self.t12_plan['stunnel_link_test']
-               or args.tls_refusal_check)
+        tls = (any(method in measure.TLS_METHODS or method in measure.NATIVE_TLS_V1_ARMS for method in self.methods)
+               or self.t12_plan['stunnel_link_test'] or args.tls_refusal_check)
         if tls:
             missing = [f'{vm}: {tool}' for vm, env in environment.items() for tool in ('stunnel', 'openssl')
                        if not env.get(tool)]

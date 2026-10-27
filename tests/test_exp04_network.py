@@ -1957,7 +1957,7 @@ class NewMethodFlags(unittest.TestCase):
                          {'pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
                           *measure.V1PROXY_METHODS, *measure.T12_V1_ARMS, *measure.CC_V1_ARMS,
                           *measure.VS_V1_ARMS, *measure.ZSTD_V1_ARMS, *measure.HASH_V1_ARMS,
-                          *measure.PGBACKREST_METHODS})
+                          *measure.NATIVE_TLS_V1_ARMS, *measure.PGBACKREST_METHODS})
 
     def test_an_aged_trial_skips_the_row_level_check(self):
         # EXP-59: the aging rows are on top of the trial's k, so the check can't match; it is skipped and said so.
@@ -1969,6 +1969,19 @@ class NewMethodFlags(unittest.TestCase):
         self.assertIn('skipped', aged)
         self.assertEqual(run_exp04.Orchestrator.trial_verify(fake, {}), {'ok': 1})
         self.assertEqual(len(calls), 1)
+
+    def test_the_native_tls_arm_passes_the_sessions_certificates(self):
+        # EXP-58: the receiver presents the session's server certificate, the sender its client one, both trusting
+        # only the session's CA; otherwise the arm is _b3's.
+        fake = types.SimpleNamespace(tls_dir='/data/exp04/tls')
+        self.assertEqual(run_exp04.Orchestrator.native_tls_args(fake, 'pgdelta_direct_inplace_bbr_b3_tls', 'server'),
+                         ['--tls-cert', '/data/exp04/tls/server.crt', '--tls-key', '/data/exp04/tls/server.key',
+                          '--tls-ca', '/data/exp04/tls/ca.crt'])
+        self.assertEqual(run_exp04.Orchestrator.native_tls_args(fake, 'pgdelta_direct_inplace_bbr_b3', 'client'), [])
+        self.assertEqual(measure.PGDELTA_ARGS['pgdelta_direct_inplace_bbr_b3_tls'],
+                         measure.PGDELTA_ARGS['pgdelta_direct_inplace_bbr_b3'])
+        self.assertIn('pgdelta_direct_inplace_bbr_b3_tls', measure.T12_METHODS)
+        self.assertNotIn('pgdelta_direct_inplace_bbr_b3_tls', measure.TLS_METHODS)  # no stunnel
 
     def test_the_hash_arms_pin_their_hash(self):
         # EXP-60: the sender asks for its arm's hash; the receiver takes it from HELLO, so it has no flag.
