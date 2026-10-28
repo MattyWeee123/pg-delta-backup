@@ -544,7 +544,8 @@ def check_basis_wal(value):
     return value
 
 
-def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False):
+def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False,
+               selector=None):
     if type(read_ahead) is not int or read_ahead < 0:
         raise InvalidInput(f'read-ahead must be a whole number of threads, not {read_ahead!r}')
     if type(fill_gaps) is not int or fill_gaps < 0:
@@ -558,6 +559,8 @@ def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gap
             raise InvalidInput('--plan-out writes the fast path\'s plan, so it needs --fast-path')
         if diverged_basis:
             raise InvalidInput('--diverged-basis extends the fast path to an old primary, so it needs --fast-path')
+        if selector is not None:
+            raise InvalidInput('--selector chooses the fast path\'s fill or a full copy, so it needs --fast-path')
         return
     if mode not in MODES:
         raise InvalidInput(f'--fast-path must be one of {", ".join(MODES)}, not {mode!r}')

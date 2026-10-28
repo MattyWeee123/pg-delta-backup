@@ -4,6 +4,22 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (14:35 UTC): the selector built into the sender (`--selector`, off by default)
+
+- **Why:** EXP-74's predictions 1–3 held, and its registration said that if they did, the selector goes into the sender behind an option, off by default.
+- **What it does:** after the guard, it predicts the fast path's time at fills of 0, 1, 2 and 4 pages and a full copy's, then takes the fastest. That is either the fill, or every listed file sent whole with B unread.
+  - **The model:** EXP-74's, in `pgdelta/selector.py`.
+  - **Disk limits:** from `--selector-read-ops`, `--selector-write-ops` and `--selector-mb-per-second` (defaults: EXP-74's pair).
+  - **Statistics:** `fast_path.selector` gives each option's prediction, the choice and the choice's own time.
+- **Counting each fill cheaply:** each file's plan is reduced to its runs of consecutive pages and the gaps between them, so every fill's pages and requests come from one pass.
+  - It matches `fastpath.fill_gaps` and the sender's runs exactly on random plans.
+  - Its predictions match the analysis model's within 0.03 s.
+  - It took 0.14 s on the Mac for 1.2 M scattered pages.
+- **Tested on a real server:**
+  - with the default limits it picks a fill, and the copy recovers to the source;
+  - on disks set to read 1 page a second it predicts a full copy faster, sends every file whole, and that copy recovers too.
+- **Not yet timed.** Its full copy is pgdelta's own (every file whole), not the `pg_basebackup` EXP-74 timed. A later session times both.
+
 ## 2026-10-28 (14:30 UTC): EXP-74 done, the model and selector held; the guard's grouped reading confirmed on the VMs
 
 - **The selector (deciding, held):** in both new cells (4% and 12% of rows changed) it picked fill 0 from the unfilled plan and the guard's time. Fill 0 was the fastest arm measured in both.

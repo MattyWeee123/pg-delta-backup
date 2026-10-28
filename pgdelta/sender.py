@@ -23,13 +23,13 @@ import base64
 import json
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import os
 import threading
 import time
 
-from pgdelta import __version__, datadir, fastpath, live, matching, protocol, subpage, transport, waits
+from pgdelta import __version__, datadir, fastpath, live, matching, protocol, selector, subpage, transport, waits
 from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
@@ -358,7 +358,7 @@ class _Sender:
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                  hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-                 fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False):
+                 fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False, selector=None):
         self.started = time.perf_counter()
         # --read-ahead (EXP-64b): the fast path's chosen pages read on this many threads ahead of sending (0: one run
         # at a time in the sending thread, as in EXP-64); and what the reading did.
@@ -369,6 +369,8 @@ class _Sender:
         self.fill_gaps, self.pages_filled = fill_gaps, 0
         # --diverged-basis (idea 1): offered in HELLO; for an old primary past the fork, what B's WAL added.
         self.diverged_basis, self.diverged_counts = diverged_basis, None
+        # --selector (EXP-74): the disks' limits (pgdelta.selector.Disks) it predicts with; what it chose.
+        self.selector, self.selector_counts = selector, None
         # --fast-path summaries (pgdelta.fastpath): offered in HELLO; `fast` is the summaries' block plan once the
         # guard let it run, and the listed files then go by fast_path's rules, B unread.
         self.fast_path, self.fast = fast_path, None
@@ -511,7 +513,7 @@ class _Sender:
 
     def _run(self):
         fastpath.check_mode(self.fast_path, self.source_kind, self.subpage, self.read_ahead, self.plan_out,
-                            self.fill_gaps, self.diverged_basis)
+                            self.fill_gaps, self.diverged_basis, self.selector)
         if self.source_kind not in datadir.SOURCE_KINDS:
             raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
                                f'not {self.source_kind!r}')
@@ -704,11 +706,15 @@ class _Sender:
             unlogged = self.selection is not None and self.selection.source_path(entry.path) != entry.path
             pages, whole = fastpath.pages_to_send(entry.path, entry.size, basis_size, self.fast, self.block,
                                                   blocks_per_segment, whole=unlogged)
-            if self.fill_gaps and not whole:
-                filled = fastpath.fill_gaps(pages, self.fill_gaps)
-                self.pages_filled += len(filled) - len(pages)
-                pages = filled
             plans.append((index, entry, basis_size, pages, whole))
+        if self.selector is not None and self._select(plans) is None:
+            plans = [(index, entry, basis_size, [], True) for index, entry, basis_size, _, _ in plans]
+        if self.fill_gaps:
+            for i, (index, entry, basis_size, pages, whole) in enumerate(plans):
+                if not whole:
+                    filled = fastpath.fill_gaps(pages, self.fill_gaps)
+                    self.pages_filled += len(filled) - len(pages)
+                    plans[i] = (index, entry, basis_size, filled, whole)
         if self.plan_out is not None:
             _write_plan(self.plan_out, self.block, plans, self.max_run)
         if self.read_ahead:
@@ -722,6 +728,22 @@ class _Sender:
         finally:
             if self.ahead is not None:
                 self.ahead.close()
+
+    def _select(self, plans):
+        """--selector (pgdelta.selector, EXP-74): each fill's and a full copy's time, predicted from the unfilled plan,
+        the guard's time and the disks' limits. The fastest sets the fill; a full copy (None) sends every listed file
+        whole, B unread. Returns the fill, or None."""
+        started = time.perf_counter()
+        options, fill = selector.choose([pages for *_, pages, whole in plans if not whole],
+                                        sum(entry.size for _, entry, _, _, whole in plans if whole),
+                                        sum(entry.size for _, entry, *_ in plans), self.fast_counts['guard_seconds'],
+                                        self.block, self.max_run, self.selector)
+        self.fill_gaps = fill or 0
+        self.selector_counts = {'choice': selector.FULL if fill is None else f'fill{fill}',
+                                'predicted_seconds': {name: round(s, 2) for name, s in options.items()},
+                                'seconds': round(time.perf_counter() - started, 6),
+                                'disks': asdict(self.selector)}
+        return fill
 
     def _send_fast_file(self, index, entry, basis_size, pages, whole):
         """One listed file in fast mode (_send_fast): whole by the usual path, or its chosen pages and FILE_DONE_WRITTEN."""
@@ -1215,7 +1237,9 @@ class _Sender:
                               **({'fill_gaps': {'gap_pages': self.fill_gaps, 'pages_filled': self.pages_filled}}
                                  if self.fill_gaps else {}),
                               # --diverged-basis: offered; for a B past the fork, what its own WAL added.
-                              **({'diverged_basis': self.diverged_counts or {}} if self.diverged_basis else {})}}
+                              **({'diverged_basis': self.diverged_counts or {}} if self.diverged_basis else {}),
+                              # --selector: what it predicted and chose, where the fast path ran; absent without it.
+                              **({'selector': self.selector_counts} if self.selector is not None else {})}}
                if self.fast_path else {}),
         }
 
@@ -1237,7 +1261,7 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-               fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False):
+               fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False, selector=None):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -1276,8 +1300,10 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     chosen pages are sent too (fastpath.fill_gaps), so fewer, larger reads and writes carry them.
     `diverged_basis` extends the fast path to a B that kept writing after the server's timeline left its own (an old
     primary after a failover): the blocks B's own WAL names since the checkpoint before the fork are sent too.
+    `selector`, a pgdelta.selector.Disks, has the fast path choose its fill, or a full copy, once the guard has run:
+    the fastest by EXP-74's model of the plan on those disks (the fill given is then replaced).
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
                    pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, fast_path,
-                   read_ahead, plan_out, fill_gaps, diverged_basis).run()
+                   read_ahead, plan_out, fill_gaps, diverged_basis, selector).run()

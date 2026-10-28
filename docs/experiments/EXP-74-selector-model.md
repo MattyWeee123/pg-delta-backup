@@ -137,6 +137,12 @@ Fill 4 would not have been its pick in either cell.
 ## What followed
 
 As registered for 1–3 holding:
-- **The selector is built into the sender,** behind an option and off by default. After the guard it chooses the fill, or a full copy instead of the fast path. Its disk constants come from options, and the defaults are this pair's. A later session times it on its own.
+- **The selector is built into the sender,** behind an option and off by default: `--selector` (`pgdelta/selector.py`).
+  - **What it does:** after the guard, it predicts each fill's time (0, 1, 2 and 4 pages) and a full copy's, and takes the fastest: that fill, or every listed file sent whole with B unread.
+  - **Its disk constants** come from `--selector-read-ops`, `--selector-write-ops` and `--selector-mb-per-second`; the defaults are this pair's.
+  - **How it counts:** each file's runs of consecutive pages and the gaps between them, so each fill's requests come from one pass over the pages. Its predictions match `analysis/fastpath_model.py`'s within 0.03 s on random plans (`tests/test_pgdelta_selector.py`).
+  - **Its cost:** 0.14 s on a laptop for 1.2 M scattered pages, recorded per session as `fast_path.selector.seconds`.
+  - **Tested on a real server:** it picks a fill and the copy recovers to the source, and on disks set to read 1 page a second it sends every file whole and the copy recovers too.
+  - **Not yet timed:** a later session times it on its own. pgdelta's own full copy, every file sent whole, is not the `pg_basebackup` timed here.
 - **EXP-73b's projection is confirmed on the VMs** (4 held): the grouped reading took 0.406 of the old reading's time, against EXP-73b's 0.456 and 0.472 on the Mac.
 - **The break-even** against a full copy lies beyond what this database's changes reach (53% of listed pages). Placing it needs a cell where the changed relations are most of the database, which is a design for a later session.

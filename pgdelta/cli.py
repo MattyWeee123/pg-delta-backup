@@ -11,7 +11,8 @@ import tempfile
 import time
 import traceback
 
-from pgdelta import datadir, fastpath, flush, inplace, live, placement, prefetch, receiver, sender, transport
+from pgdelta import (datadir, fastpath, flush, inplace, live, placement, prefetch, receiver, selector, sender,
+                     transport)
 from pgdelta.errors import EXIT_TRANSFER_FAILURE, InvalidInput, PgDeltaError, TransferError
 from pgdelta.hashing import ALGORITHMS, DEFAULT_ALGORITHM, NODE_BLOCKS
 from pgdelta.identity import read_identity
@@ -167,6 +168,17 @@ def _non_negative_int(text):
     return value
 
 
+
+def _positive_float(text):
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'expected a number, got {text!r}') from None
+    if not 0 < value < float('inf'):
+        raise argparse.ArgumentTypeError('must be a positive number')
+    return value
+
+
 def _compress_option(parser):
     parser.add_argument('--compress', choices=('off', 'zstd'), default='off',
                         help='compress the pages sent with zstd (level 3), where the receiver can decompress; '
@@ -210,6 +222,22 @@ def _compress_option(parser):
                              'and these go with the summaries\' blocks since that checkpoint. B must have been '
                              'stopped cleanly, keep that WAL, and have data checksums or wal_log_hints (idea 1, '
                              'EXP-69, EXP-69b, EXP-71) (default: on with --fast-path)')
+    parser.add_argument('--selector', action='store_true',
+                        help='with --fast-path, where the guard lets it run: predict its time from its plan at each '
+                             'fill (0, 1, 2 and 4 pages) and a full copy\'s, from the disks\' limits below, and take '
+                             'the fastest: that fill, or every listed file sent whole with B unread. Replaces '
+                             '--fill-gaps. In EXP-74 the model put every fast arm within 2.6%% of its time and picked '
+                             'the fastest arm measured in both cells; as built here it is not yet timed '
+                             '(off by default)')
+    parser.add_argument('--selector-read-ops', type=_positive_float, default=selector.Disks.read_ops, metavar='N',
+                        help='with --selector: the source disk\'s reads per second at its cap '
+                             '(default: %(default)g, EXP-74\'s 150 GiB balanced persistent disk)')
+    parser.add_argument('--selector-write-ops', type=_positive_float, default=selector.Disks.write_ops, metavar='N',
+                        help='with --selector: the destination disk\'s writes per second at its cap '
+                             '(default: %(default)g)')
+    parser.add_argument('--selector-mb-per-second', type=_positive_float,
+                        default=selector.Disks.bytes_per_second / 1e6, metavar='MB',
+                        help='with --selector: either disk\'s megabytes per second (default: %(default)g)')
     parser.add_argument('--plan-out', type=Path, default=None, metavar='PATH',
                         help='with --fast-path, where the guard lets it run: write its plan to PATH as JSON, each '
                              'listed file with its size, whether it goes whole, and its chosen pages as [first, '
@@ -579,7 +607,7 @@ def _sender_kwargs(args, identity):
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
             'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
             'read_ahead': _read_ahead(args), 'plan_out': getattr(args, 'plan_out', None),
-            'fill_gaps': _fill_gaps(args), 'diverged_basis': _diverged_basis(args)}
+            'fill_gaps': _fill_gaps(args), 'diverged_basis': _diverged_basis(args), 'selector': _selector(args)}
 
 
 def _read_ahead(args):
@@ -596,6 +624,15 @@ def _fill_gaps(args):
     if pages is None:
         return fastpath.DEFAULT_FILL_GAPS if getattr(args, 'fast_path', None) else 0
     return pages
+
+
+def _selector(args):
+    """--selector's disks (pgdelta.selector.Disks), or None without it. It replaces --fill-gaps, so not both."""
+    if not getattr(args, 'selector', False):
+        return None
+    if getattr(args, 'fill_gaps', None) is not None:
+        raise InvalidInput('--selector chooses the fill itself, so it does not take --fill-gaps')
+    return selector.Disks(args.selector_read_ops, args.selector_write_ops, args.selector_mb_per_second * 1e6)
 
 
 def _diverged_basis(args):
