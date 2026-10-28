@@ -1,6 +1,12 @@
 # EXP-69b: With its guard fixed, does idea 1's copy come out right on every failover it accepts, and is the checksum condition necessary?
 
-Status: **pre-registered October 28, 2026, before any run.** Local, counted, not timed; minutes.
+Status: **done October 28, 2026 (one local session, 8 builds plus a WAL-cut copy; as registered 4 of 5 predictions held).**
+- **The deciding one failed by one page:** in S2h, EXP-03's classifier counted 1 real wrong page.
+- **A post-hoc check traced it to a gap in that classifier:** a tuple's command ID, which PostgreSQL's own consistency mask ignores.
+- **Wherever its fixed guard passed** (4 builds), idea 1's copy started and its rows equalled S's, with no hint S contradicts left unsent.
+- **The hazard is real:** without data checksums or `wal_log_hints` (S2i), the same send set left 345 pages of hints that name a transaction S never committed, and the copy showed 20,000 rows S doesn't have. The guard refused S2i.
+
+Pre-registered October 28, before any run (commit e2e92a4). Local, counted, not timed; minutes.
 
 It follows from EXP-69's part A. As registered there, the deciding prediction failed. Post-hoc checks traced the three failures to the guard and the checks, not to idea 1's send set:
 - **the guard's end check:** it compared the start of B's last WAL record with a standby's end pointer, and so refused a valid S2c;
@@ -88,3 +94,79 @@ All five predictions are exact counts or bars, so rule 11 doesn't apply.
 - **If 1–3 hold:** idea 1's send set and guard are correct on these failovers, the hint hazard included, and the checksum condition is shown to be needed. Its prototype in pgdelta is registered next, timed against `pg_rewind` on EXP-67's cells. That prototype's predictions use EXP-69's part B sizes.
 - **If 1 fails:** the wrong pages or rows are traced before anything is built.
 - **If 3 fails:** S2i didn't make the hazard real. The condition stays, as `pg_rewind`'s own, but the claim that it is needed is withdrawn.
+
+## Results (October 28)
+
+Local, PostgreSQL 17.11 on macOS. Every build passed the harness's own checks:
+- **S2h and S2i:** the transaction committed on B (20,000 rows there) and absent on S.
+- **S2i:** checksums 0 and `wal_log_hints` off.
+
+The whole run took 76 s. Data: `docs/experiments/data/exp69b-builds.csv` and `exp69b-posthoc.json`; raw `results/exp69b/` (not in git).
+
+![Idea 1's copy, built and started, on each failover: what it sends, and whether its rows match S's](../figures/exp69b-union.svg)
+
+| Build | Guard | Pages that differ | Idea 1 sends | Copy's rows | Real wrong left (EXP-03's classifier) | Contradicted hints left | `pg_rewind` (dry run) |
+|---|---|---:|---:|---|---:|---:|---|
+| S2, B's WAL kept | **passed** | 3,010 | 3,349 | **match** | 0 | 0 | 1,681 blocks; 13 more named, all past S's end of file |
+| S2c, B's WAL kept | **passed** | 3,162 | 3,518 | **match** | 0 | 0 | 1,848 blocks; 15 more, all past S's end |
+| S2c, as EXP-61 built it | **passed** | 3,162 | 3,518 | **match** | 0 | 0 | the same |
+| S2h (with checksums) | **passed** | 2,046 | 2,398 | **match** | 1 | 0 | 345 blocks, the same set |
+| S2b (B crashed, WAL intact) | refused: not stopped cleanly | 3,183 | 3,518 | match | 0 | 0 | refused: "must be shut down cleanly" |
+| S2d (B crashed, WAL lost) | refused: not stopped cleanly | 3,183 | 2,107 | **differ** | 1,443 | 0 | refused |
+| S2i (no checksums, no `wal_log_hints`) | refused: neither | 2,045 | 2,050 | **differ:** hazard has 20,000 rows, S has 0 | 2 | **345 pages (20,000 tuples)** | refused: needs checksums or `wal_log_hints` |
+| S2, as EXP-61 built it | refused: no checkpoint before the fork in B's WAL | | | | | | failed: B's WAL missing |
+| S2, B's WAL cut after the fork's segment | refused: B's WAL ends before B's end | | | | | | |
+
+| # | Prediction | Outcome, as registered |
+|---|---|---|
+| 1 | Deciding: wherever the guard passes, the copy's rows equal S's, with no real wrong page and no contradicted hint; it passes kept S2, kept S2c, default S2c and S2h | **Failed by one page:** all 4 passed, all 4 copies' rows matched, 0 contradicted hints; but EXP-03's classifier counted 1 real wrong page in S2h |
+| 2 | The guard refuses kept S2b and S2d, default S2, S2i and the cut copy, each for its reason | **Held** |
+| 3 | The hazard is real in S2i: a contradicted hint left, and the copy's rows differ | **Held:** 345 pages, 20,000 tuples; the copy shows all 20,000 rows |
+| 4 | `pg_rewind` takes no block `pg_waldump` doesn't name; the rest lie past one side's end of file | **Held** in all 4 |
+| 5 | Idea 1 sends at most 1.5 times the pages that differ | **Held:** 1.113, 1.113, 1.113, 1.172 |
+
+## Post-hoc check (written after the data; no verdict changes)
+
+**The one page is `pg_depend` block 12, in S2h.** Its two versions have the same page LSN, from before the common checkpoint.
+
+**They differ only in three tuples' command ID (`t_cid`).** Transaction 788 (S2h's `CREATE TABLE hazard`, committed on both sides) inserted these tuples:
+- B, the old primary that ran it, keeps their command IDs, 2, 2 and 4;
+- S, the promoted standby, has 0, because replay writes the first command ID.
+
+**PostgreSQL's own `heap_mask` masks this field for that reason:** "During replay, we set Command Id to FirstCommandId. Hence, mask it." That is [`heapam.c`](https://github.com/postgres/postgres/blob/REL_17_STABLE/src/backend/access/heap/heapam.c), PostgreSQL 17. A command ID means nothing once its transaction has ended.
+
+**EXP-03's classifier masks hint bits as `heap_mask` does, but not `t_cid`.** `analysis/exp69b_posthoc.py` re-judges the unsent pages under PostgreSQL's own mask (`t_cid`, a speculative tuple's `ctid`, padding). Under it, no page still differs in any build the guard passed:
+- S2, S2c (both builds): 0 of 0;
+- S2h: 0 of 1.
+
+**Why this showed up only in S2h:** it is the only build whose DDL ran on the old primary after the standby was cloned, so the standby got that DDL's tuples by replay.
+
+**The classifier gap is a finding of its own.** It can only add "content" pages, never hide one, so it can only have over-counted real wrong pages in earlier experiments. None of their verdicts rests on such an over-count:
+- the guarded paths' 0s stand;
+- the unguarded paths' counts were far above zero for other reasons.
+
+Fixing it in the shared classifier is left for a separate, recorded change.
+
+## What it means (with a committee's reading)
+
+- **Idea 1's send set is correct on every failover its guard accepts here.** Four builds were accepted: a primary stopped cleanly, a standby that followed it past the fork (two ways), and a primary whose hint bits name a transaction S never committed. In each, the copy built from B plus the sent pages started, and its rows equal S's. Its pages equal S's under PostgreSQL's own consistency mask.
+- **Each of the guard's conditions refused a case that would otherwise have been wrong:**
+  - **S2i, no checksums:** without the checksum condition, the copy shows 20,000 rows of a transaction that S never committed. So the condition is not merely inherited from `pg_rewind`, but necessary.
+  - **S2d, WAL lost:** without the end proof and the WAL check, it has 1,443 real wrong pages.
+  - **S2b, crashed with its WAL intact:** refused, though its copy would have been right. That is the price of requiring a clean stop. `pg_rewind --dry-run` refuses it too; `pg_rewind` proper would first run crash recovery.
+- **Size:** idea 1 sent 1.11–1.17 times the pages that differ. By the same dry runs, `pg_rewind` would copy 87–114 MB, 84–101 MB of it whole WAL segments, and then replay S's WAL. Idea 1's sends here are 19–29 MB of pages.
+- **The control:** on B's side, idea 1 and `pg_rewind` agree block for block, except blocks past S's end of file, which both drop. That ties the B-side half of idea 1 to the standard tool's own reading of the same WAL.
+
+**Limitations:**
+- **Scale and timing:** small local clusters, about 3,000 pages that differ, counted, not timed. Part B of EXP-69 measures EXP-67's real cells; a timed prototype is still to come.
+- **Coverage:** one major version, one platform, and these failover shapes. Not covered:
+  - a B that was itself promoted before (several timelines on B's side);
+  - tablespaces;
+  - unlogged relations;
+  - relations created and dropped after the fork.
+- **The row check** compares user tables (EXP-03's logical state), not catalogs. The catalog pages were checked page by page above.
+
+## What follows (applied)
+
+- **Idea 1's correctness case is made for these failovers.** Its prototype in pgdelta is next, registered before any run, and timed against `pg_rewind` on EXP-67's cells. Its predictions wait on EXP-69's part B, which sizes both sides' block sets at 18 GB and explains `pg_rewind`'s extra copy.
+- **The classifier gap** (`t_cid`, and the padding PostgreSQL masks) is recorded here. Fixing `classify.mask_heap` is a separate change, with a note of which earlier counts it would move.

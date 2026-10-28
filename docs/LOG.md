@@ -8,6 +8,19 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-28 (evening): EXP-69b done, idea 1's copy is right wherever its fixed guard passes
+
+- **As registered, 4 of 5 predictions held.** Over 8 builds and a WAL-cut copy:
+  - the fixed guard passed kept S2, kept S2c, default S2c and S2h, and refused the other five for their reasons;
+  - every passed copy started with rows equal to S's, and left 0 contradicted hints;
+  - idea 1 sent 1.11–1.17 times the pages that differ.
+- **The deciding prediction failed by one page.** EXP-03's classifier counted 1 real wrong page in S2h: `pg_depend` block 12.
+  - **Post hoc:** three tuples there differ only in their command ID. The old primary kept 2, 2 and 4; the promoted standby has 0, as replay writes it.
+  - **PostgreSQL's own `heap_mask`** masks that field ("During replay, we set Command Id to FirstCommandId. Hence, mask it."); EXP-03's classifier doesn't. Under PostgreSQL's mask, no unsent page differs in any passed build.
+  - **The gap can only over-count,** so no earlier verdict rests on it.
+- **The checksum condition is necessary:** in S2i (no checksums, no `wal_log_hints`), the union left 345 pages of hints naming a transaction S never committed. Its copy showed 20,000 rows S doesn't have. The guard refused it.
+- **Next:** EXP-69 part B on EXP-68's VMs once they're free, then idea 1's prototype in pgdelta, registered and timed against `pg_rewind`.
+
 ## 2026-10-28 (late afternoon): EXP-69b pre-registered
 
 - **What it re-tests:** EXP-69 part A's verdicts, with the end check fixed (`pg_waldump --end`) and a hint check that reads each transaction's fate from S's own `pg_xact`. It adds two things:

@@ -1,0 +1,9 @@
+variant,scenario,guard_ok,reasons,pages_changed,union_sent,real_wrong,wrong,wrong_by_category,dangerous_pages,dangerous_tuples,copy_restored,copy_rows_match,copy_differences,b_blocks,s_blocks,rewind_exit,rewind_blocks,only_pg_rewind,only_waldump,only_waldump_by_place,cut_guard_ok,cut_reasons
+default,S2,False,no checkpoint before the fork in B's own WAL,,,,,{},,,,,[],,,1,0,,,{},,
+default,S2c,True,,3162,3518,0,0,{},0,0,True,True,[],1871,1705,0,1848,0,15,"{""beyond S's end of file"": 15}",,
+kept,S2,True,,3010,3349,0,19,"{""hint_bits_only"": 19}",0,0,True,True,[],1698,1704,0,1681,0,13,"{""beyond S's end of file"": 13}",False,"B's WAL from the common checkpoint's redo ends at 0/8FFCA60, before B's end 0/9A1D900"
+kept,S2b,False,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",3183,3518,0,19,"{""hint_bits_only"": 19}",0,0,True,True,[],1871,1705,1,0,,,{},,
+kept,S2c,True,,3162,3518,0,0,{},0,0,True,True,[],1871,1705,0,1848,0,15,"{""beyond S's end of file"": 15}",,
+kept,S2d,False,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",3183,2107,1443,1443,"{""vm"": 1, ""content"": 1442}",0,0,True,False,"[""postgres.public.accounts: 199072 rows, expected 200000"", ""postgres.public.tags: 19833 rows, expected 20000""]",0,1738,1,0,,,{},,
+kept,S2h,True,,2046,2398,1,5,"{""hint_bits_only"": 4, ""content"": 1}",0,0,True,True,[],345,2026,0,345,0,0,{},,
+kept,S2i,False,B has neither data checksums nor wal_log_hints on,2045,2050,2,352,"{""hint_bits_only"": 350, ""content"": 2}",345,20000,True,False,"[""postgres.public.hazard: 20000 rows, expected 0""]",0,1678,1,0,,,{},,

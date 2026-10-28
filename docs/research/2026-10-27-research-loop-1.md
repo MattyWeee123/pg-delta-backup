@@ -106,3 +106,12 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
   - **Its inferred time for hot10:** about 5 s. The send set is the 33,975 pages pgdelta's hashing found changed, at EXP-65's rate, plus reading B's WAL since the fork.
   - **What it rests on:** `pg_rewind` copied 4,077 MB beyond S's WAL for uniform, unexplained.
   - **So a local scale model comes first:** it measures the blocks B's WAL names (`pg_waldump`) against `pg_rewind`'s own file map (`--debug`), and whether S's summaries cover the fork when S was a standby before its promotion.
+
+**Update, October 28: EXP-69 part A and EXP-69b (idea 1, counted on local failovers).**
+- **Correctness:** wherever its guard passed (4 builds), idea 1's copy, built from the old primary plus S's pages for both sides' block sets, started with rows equal to S's. It sent 1.11–1.17 times the pages that differ.
+- **The guard:** each condition refused a case that would otherwise have been wrong. A lost WAL left 1,443 wrong pages; no checksums left 20,000 visible rows of a transaction S never committed.
+- **Along the way, three errors of mine were found and recorded, none in the send set:**
+  - an end check that compared a record's start with an end pointer;
+  - a hint check that couldn't tell common history from B's own;
+  - a page classifier that doesn't mask command IDs as PostgreSQL does.
+- **Next:** EXP-69 part B (EXP-67's cells with diagnostics, after EXP-68), then idea 1's prototype, timed against `pg_rewind`.

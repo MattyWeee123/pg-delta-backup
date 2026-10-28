@@ -1,0 +1,22 @@
+{
+  "default/S2c": {
+    "content_by_exp03": 0,
+    "still_differ_by_postgres_mask": 0,
+    "examples": []
+  },
+  "kept/S2": {
+    "content_by_exp03": 0,
+    "still_differ_by_postgres_mask": 0,
+    "examples": []
+  },
+  "kept/S2c": {
+    "content_by_exp03": 0,
+    "still_differ_by_postgres_mask": 0,
+    "examples": []
+  },
+  "kept/S2h": {
+    "content_by_exp03": 1,
+    "still_differ_by_postgres_mask": 0,
+    "examples": []
+  }
+}

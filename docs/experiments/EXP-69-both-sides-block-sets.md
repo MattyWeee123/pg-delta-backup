@@ -165,7 +165,7 @@ Data: `docs/experiments/data/exp69-scenarios.csv` and `exp69-posthoc.json`; raw 
 - **The send set itself held everywhere B's WAL was complete,** in 4 builds: 0 real wrong pages. That covers a primary stopped cleanly, a standby that followed it, and a crashed primary with its WAL intact.
 - **The guard's refusals are necessary.** Where B's WAL was lost (S2d), the same union left 1,443 real wrong pages. The guard refused it.
 - **Idea 1 sent 1.11 times the pages that differ** (kept S2), against `pg_rewind`'s 97 MB. Most of that 97 MB was 84 MB of whole WAL segments.
-- **None of this is confirmatory until it is re-run.** The guard's end check needs fixing, and the hint check needs to test a transaction's fate on S. Both changes, and a scenario that makes the hint danger real (B without checksums or `wal_log_hints`, a transaction open at the fork and committed on B), go in a new registration (EXP-69b) before any run.
+- **None of this is confirmatory until it is re-run** (done: [EXP-69b](EXP-69b-idea-1-fixed-guard.md), 4 of 5 held as registered; its copies matched S's rows wherever the fixed guard passed). The guard's end check needs fixing, and the hint check needs to test a transaction's fate on S. Both changes, and a scenario that makes the hint danger real (B without checksums or `wal_log_hints`, a transaction open at the fork and committed on B), go in a new registration (EXP-69b) before any run.
 
 ## Amendment to part B, made before it ran (October 28, after part A)
 
