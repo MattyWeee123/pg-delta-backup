@@ -153,4 +153,10 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 - **The guard on the VMs:** 1.91 s against EXP-70's 4.70 s on the same summary rows (0.406; the projection was about 0.46). That is 1.1–1.3 µs per row, against 3.2. The scattered cell took 43.8 s, against EXP-70's 46.6.
 - **The model** (the plan's requests and bytes against each disk's limits, constants from earlier sessions) predicted all 7 fast arms within 2.6%, in cells it hadn't seen, and both full copies within 0.1%.
 - **The selector** picked fill 0 at 4% and 12% of rows changed, where the plans are bound by bytes. That was the fastest arm in both cells; in EXP-70's scattered cell, bound by requests, fill 2 is. So idea 4 is confirmed for choosing the fill. It is now built into the sender as `--selector`, off by default and not yet timed.
-- **Not reached:** a cell where a full copy wins. This database's untouched 8.4 GB caps the fast path at about half of the pages. The model puts the break-even at about 85% of the listed bytes for byte-bound plans (not measured).
+- **Not reached (in EXP-74):** a cell where a full copy wins. This database's untouched 8.4 GB caps the fast path at about half of the pages. The model puts the break-even at about 85% of the listed bytes for byte-bound plans (not measured).
+
+**Update, October 28: the selector timed, and the break-even placed (EXP-75).**
+- **In the sender** (`--selector`, opt-in), the selector took 1.008 of fill 2's time in EXP-70's cell, bound by requests, and 1.001 of fill 0's with 96% of the pages changed. It chose those fills in every run, and the choice took at most 0.15 s.
+- **A full copy is a recommendation, not an option:** pgdelta's own full copy is its pipeline with every page chosen, which can't beat fill 0. The selector predicts `pg_basebackup`'s time and says when it is faster.
+- **It was right on both sides:** with nearly every page changed, `pg_basebackup` took 0.893 of the fast path's time. Interpolating with EXP-74, the break-even is near 85% of the pages changed (the model: 86%).
+- **Where the fast path loses there:** not the disks (both arms kept them busy for the same 95 s). It is the guard (5.3 s for 4.6 M summary rows) and about 7 s more beyond the busier disk's time. Those fixed costs are the next target.

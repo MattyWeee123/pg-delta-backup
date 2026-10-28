@@ -169,6 +169,7 @@ def figure(by, name):
                   [f"{p}\n({(by.get((p, FIXED[p][0])) or {}).get('page_fraction') or 0:.0%} of pages changed)"
                    for p in FIXED])
     ax.set_ylabel('seconds (median of 2)')
+    ax.set_ylim(0, max(c['seconds'] or 0 for c in by.values()) * 1.25)  # room for the labels under the title
     ax.legend(fontsize=8, loc='upper left')
     ax.set_title('EXP-75: --selector against the fixed fills and pg_basebackup', fontsize=10)
     options = ('fill0', 'fill1', 'fill2', 'fill4', 'full')
@@ -178,12 +179,13 @@ def figure(by, name):
         values = [c.get(f'predicted_{o}_s') for o in options]
         pick = (c.get('choices') or '').split()[:1]
         xs = [k + (i - 0.5) * width for k in range(len(options))]
-        bx.bar(xs, [v or 0 for v in values], width * 0.9, label=pattern,
-               color=COLORS['blue'] if i == 0 else COLORS['orange'],
+        bx.bar(xs, [v or 0 for v in values], width * 0.9, color=COLORS['blue'] if i == 0 else COLORS['orange'],
                edgecolor=['black' if [o] == pick else 'none' for o in options])
+        bx.bar([0], [0], 0, color=COLORS['blue'] if i == 0 else COLORS['orange'], label=pattern)  # a plain legend key
     bx.set_xticks(range(len(options)), ['fill 0', 'fill 1', 'fill 2', 'fill 4', 'full copy'])
     bx.set_ylabel('predicted seconds (outlined: its choice;\nfull copy: pg_basebackup, reported only)')
-    bx.legend(fontsize=8)
+    bx.set_ylim(0, bx.get_ylim()[1] * 1.2)  # the legend above the bars
+    bx.legend(fontsize=8, loc='upper left', ncol=2)
     bx.set_title("the selector's predictions", fontsize=10)
     print(plotting.save(fig, name))
 

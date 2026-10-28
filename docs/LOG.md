@@ -4,6 +4,16 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (16:18 UTC): EXP-75 done, the selector held, and pg_basebackup's win placed near 85% of pages
+
+- **Every prediction held.**
+  - **Deciding:** `--selector` took 1.008 of fill 2's time in EXP-70's uniform cell (bound by requests) and 1.001 of fill 0's in `scatterall12` (96% of the pages). It chose those same fills in every run, and the choice took at most 0.15 s.
+  - **Its flag:** it said `pg_basebackup` was faster in both `scatterall12` runs and in neither uniform run. It was right: 100.94 s against 112.99 s (0.893, bar 0.95).
+  - **The model:** within 1.5% for fill 2 and 6% for fill 0 (over-predicting at nearly every page), and within 0.2% for `pg_basebackup`. Every copy was correct (10 of 10 runs; the changed `events` rows counted).
+- **The break-even:** interpolating with EXP-74's scatter12 (0.64 at 53% of pages), the fast path stops beating `pg_basebackup` near 85% of the pages changed; the model gives 86%. New figure `fastpath-breakeven` (`analysis/breakeven_fastpath.py`, from the write-ups' medians), in EXP-75 and RESULTS.
+- **Where the fast path loses at 96%:** both arms kept the disks busy for the same 95 s. The 12 s gap is the guard (5.3 s for 4.6 M summary rows) and about 7 s more beyond the busier disk's time: fixed costs, the next target.
+- **Post-hoc (no verdict changes):** the overhead beyond the guard and the busier disk was 12.6 s at 20 GB, against the fit's 20.0 s, so it grows less than linearly with the bytes.
+
 ## 2026-10-28 (14:59 UTC): EXP-75 pre-registered (the selector timed); a full copy becomes a recommendation
 
 - **Why EXP-75:** EXP-74 registered timing the selector in a later session, and its cells never reached a full copy's win.

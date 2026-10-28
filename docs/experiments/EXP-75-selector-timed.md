@@ -1,6 +1,6 @@
 # EXP-75: Does `--selector`, built into the sender, take the fastest fill, and does it say rightly where `pg_basebackup` is faster?
 
-Status: **pre-registered October 28, 2026, before any run.** One `ha` VM pair, about 1.5 hours with the data load. It times the selector EXP-74 registered for building ("a later session times it on its own").
+Status: **done October 28, 2026: every prediction held.** The selector took 1.008 of fill 2's time in the cell bound by requests and 1.001 of fill 0's where nearly every page changed, choosing that fill in every run. It flagged `pg_basebackup` as faster exactly where it was: 0.893 of the fast path's time at 96% of the pages changed, the first measured cell past the break-even. Pre-registered the same day, before any run; one `ha` VM pair. It times the selector EXP-74 registered for building ("a later session times it on its own").
 
 ## Question
 
@@ -77,3 +77,60 @@ EXP-74 couldn't show three things:
   - **The fast path's overhead per MB** (where `pg_basebackup` wins) becomes the next target: what it is (the time with neither disk busy, the per-page hashing and framing), and whether it can be overlapped.
 - **If 3 fails because `pg_basebackup` doesn't win in `scatterall12`:** the model's overhead per MB (fitted on EXP-70 at 39% of the pages) overstates it at nearly every page. It is refitted, and the break-even is placed again.
 - **If 1 fails in `uniform` with fill 1 or 2 chosen:** the choice's own cost or the fills' spread decides it, and the timers say which.
+
+## Results
+
+The `ha` set in us-west1-b and -c, EXP-70's and EXP-74's zones (us-west1-a was out of balanced disks again). The smoke at scale 20 passed:
+- 5 runs, every fast copy matched, and every fast run used the fast path;
+- the selector chose fill 2 in `uniform` and fill 0 in `scatterall12`, and flagged nothing at 600 MB;
+- its choice took 3–6 ms.
+
+The registered runs took 15:33–16:14 UTC, and the VMs were then deleted. The database was 17,787 MB at the start. `scatterall12`'s workload changed 7,203,738 rows in each table in 267 s. Data: `docs/experiments/data/exp75-cells.csv`; raw `results/exp04/exp75/` (not in git).
+
+![EXP-75: --selector against the fixed fills and pg_basebackup, and its predictions](../figures/exp75-selector.svg)
+
+*How to read it:* left, each cell's arms (median of 2), with the model's prediction as a black line on each bar and the selector's choice under its time; right, the selector's predictions for every option in each cell (outlined: its choice; the full copy is `pg_basebackup`'s, reported only).
+
+| Cell | Arm | Measured (s) | The runs (s) | Model (s) | Share of listed pages sent |
+|---|---|---|---|---|---|
+| uniform | fill 2 | 43.36 | 43.24, 43.47 | 42.73 | 39% (28% unfilled) |
+| uniform | **`--selector`** (fill 2 both runs) | **43.70** | 43.48, 43.92 | 42.77 | 39% |
+| scatterall12 | fill 0 | 112.99 | 112.88, 113.11 | 120.15 | 96% |
+| scatterall12 | `pg_basebackup` | 100.94 | 100.93, 100.96 | 100.75 | 100% |
+| scatterall12 | **`--selector`** (fill 0 both runs) | **113.14** | 112.94, 113.34 | 120.17 | 96% |
+
+**The selector's predictions:**
+- **uniform:** fill 0 69.62, fill 1 43.11, **fill 2 42.77**, fill 4 50.72 s; `pg_basebackup` 90.76 s (not faster);
+- **scatterall12:** **fill 0 120.17**, fills 1, 2 and 4 120.20 s; `pg_basebackup` **100.75 s (faster)**.
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | **Deciding:** in each cell, the selector at most 1.05 of the fixed fill's time | **Held:** 1.008 (uniform), 1.001 (scatterall12) |
+| 2 | Its choice in every run: fill 1 or 2 in uniform; fill 0, 1 or 2 in scatterall12 | **Held:** fill 2, fill 2; fill 0, fill 0 |
+| 3 | `pg_basebackup` predicted faster in every scatterall12 run and in no uniform run, and in scatterall12 at most 0.95 of the fixed fill's time | **Held:** flagged in 2 of 2 and 0 of 2; **0.893** |
+| 4 | The fixed fills within 15% of the model, `pg_basebackup` within 5% | **Held:** 1.015 and 0.940; 1.002 |
+| 5 | The choice's own time at most 1.0 s in every run | **Held:** 0.15 s (uniform), 0.07 s (scatterall12) |
+| 6 | Every run exits 0; every fast run used the fast path and passed the copy's check (the changed `events` counted in scatterall12) | **Held:** 10 of 10; 8 of 8 matched |
+
+**Rule 11:** the selector chose the fixed arm's fill in every run of both cells, and both ratios are below 1.05, so no second session.
+
+**Reported, not predicted:**
+- **What changed:** in `scatterall12` the unfilled plan held 96% of the listed pages (2,435,622 pages of 19,961 MB); in `uniform`, 28%.
+- **Where the fast path's extra time goes in scatterall12.** Both disks were busy for the same time in both arms (fill 0: source 95.07 s, destination 93.44 s; `pg_basebackup`: 94.50 and 95.36 s), so the 12.05 s gap is not disk time:
+  - **the guard:** 5.28 s, reading 4,598,230 summary rows (1.15 µs per row, as in EXP-74);
+  - **time beyond the busier disk's busy time:** 12.6 s for the fast path besides its guard, against 5.6 s for `pg_basebackup`, so about 7 s more.
+- **The model at nearly every page** over-predicted the fast path by 6% (120.15 against 112.99 s). Its overhead beyond the guard and the busier disk was 12.6 s, against the 20.0 s the fit gives (0.6 s plus 0.97 ms per MB). So the overhead grows less than linearly with the bytes, which EXP-70's two-cell fit couldn't show.
+  - **It decided nothing here:** the flag was right with a 19.4 s predicted margin against 12.05 s measured.
+- **The break-even, between cells:** the fast path took 0.64 of `pg_basebackup`'s time at 53% of the pages (EXP-74's scatter12) and 1.12 at 96% (here).
+  - **Linear interpolation** puts the crossing at 85% of the listed pages; the model gives 86% for plans bound by bytes. That is an interpolation between one cell each side, from two sessions, not a measurement at the crossing.
+
+![Where pg_basebackup starts to win, from EXP-70, EXP-74 and EXP-75](../figures/fastpath-breakeven.svg)
+
+*How to read it:* each point is a cell's fastest fast-path arm over the same session's `pg_basebackup`, against the share of listed pages its unfilled plan changed; the dashed line is the model for plans bound by bytes; EXP-70's uniform cell sits above it because it is bound by requests.
+
+## What followed
+
+As registered for 1–3 holding:
+- **`--selector`** takes the fastest fill in both regimes, and says rightly where `pg_basebackup` is faster. It stays off by default: its constants are this pair's.
+  - **To make it the default,** the next step is measuring the disks' limits at the start of a session instead of taking them from options.
+- **The fast path's overhead where `pg_basebackup` wins is the next target.** At 96% of the pages, 5.3 s of the 12.05 s gap is the guard reading 4.6 M summary rows. About 7 s more is time beyond the busier disk's. Both are costs of the fast path that a full copy doesn't pay. Cutting them would move the break-even past 85%.

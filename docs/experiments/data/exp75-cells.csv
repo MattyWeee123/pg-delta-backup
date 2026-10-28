@@ -1,0 +1,6 @@
+pattern,arm,runs,seconds,guard_s,pages_sent,source_reads,dest_writes,source_io_s,dest_io_s,source_s,predicted_s,predicted_requests,listed_mb,page_fraction,measured_over_predicted,choices,choice_s_max,predicted_fill0_s,predicted_fill1_s,predicted_fill2_s,predicted_fill4_s,predicted_full_s
+uniform,fast8wf2,2,43.36,1.88,859405.0,87991.0,89798.0,34.61,34.39,36.09,42.73,89249,17863.6,0.393,1.015,,,,,,,
+uniform,fast8ws,2,43.7,1.9,859405.0,88111.5,89859.5,34.55,34.44,35.96,,,,,,fill2 fill2,0.153518,69.62,43.11,42.77,50.72,90.76
+scatterall12,fast8w,2,112.99,5.28,2435622.0,77562.5,79705.0,95.07,93.44,100.42,120.15,127845,19961.4,0.959,0.94,,,,,,,
+scatterall12,full,2,100.94,,,153941.0,78014.0,94.5,95.36,,100.75,,,,1.002,,,,,,,
+scatterall12,fast8ws,2,113.14,5.31,2435622.0,77627.0,80521.5,95.15,94.02,100.52,,,,,,fill0 fill0,0.073845,120.17,120.2,120.2,120.2,100.75
