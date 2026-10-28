@@ -4,6 +4,16 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (19:27 UTC): EXP-77 done: its deciding prediction failed, but the stall is gone
+
+- **Deciding (failed):** with both arms reading each written run in one call, the check on the verifier saved only 0.44 s over the main loop in scatterall12 (bar 3.0 s).
+- **Held:** uniform no slower (0.13 s faster); the source disk's idle stretches while sending 0.51–0.76 s (EXP-76: 3.8–4.8 s); every page still re-read (3.0–3.2 µs a page, 7.0–7.5 s per run, off the critical path); 10 of 10 runs correct.
+- **Most of the gain was the batching, in both arms.** Against EXP-76 in the same cell and set-up, the main-loop arm fell from 113.20 to 108.92 s, and the verifier's to 108.48 s. Unchanged arms agree within 0.3% between sessions.
+  - The design didn't compare the old page-by-page loop with the new code in one session, so the measured effect is between sessions. That is recorded post-hoc, with no verdict changed.
+- **Against `pg_basebackup` at 96% of the pages:** 1.071 (EXP-75: 1.119). Of the 7.2 s left, the guard is 5.3 s and the plan 0.9 s.
+- **The break-even figure** marks EXP-77's point apart: the cells below 96% weren't re-measured with the fix.
+- **The check stays on the verifier,** as built. **Next: the guard.**
+
 ## 2026-10-28 (18:05 UTC): EXP-76 done (failed); the stall it found fixed; EXP-77 pre-registered
 
 - **EXP-76's deciding prediction failed.**

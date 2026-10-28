@@ -20,6 +20,9 @@ CELLS = [
     ('EXP-74 scatter12\n(fill 0)', 0.527, 61.32, 95.29),
     ('EXP-75 scatterall12\n(fill 0)', 0.959, 112.99, 100.94),
 ]
+# Measured after EXP-77's change to the receiver (the written pages re-read a run at a time, on the verifier): shown
+# apart, since the cells below 96% were not re-measured with it.
+AFTER = [('EXP-77 scatterall12\n(fill 0, after the fix)', 0.959, 108.48, 101.25)]
 LISTED_MB, GUARD_S = 19000, 3.0
 
 
@@ -42,6 +45,10 @@ def main():
     for (name, share, fast, full), y in zip(CELLS, ys):
         below = name.startswith('EXP-74 scatter4')  # beside scatter12's: its label goes under the point
         ax.annotate(f'{name}\n{y:.2f}', (share, y), textcoords='offset points', xytext=(0, -40 if below else 9),
+                    ha='center', fontsize=8)
+    for name, share, fast, full in AFTER:
+        ax.plot(share, fast / full, 'o', mfc='none', mec=COLORS['blue'], ms=8, label='after EXP-77 (receiver fixed)')
+        ax.annotate(f'{name}\n{fast / full:.2f}', (share, fast / full), textcoords='offset points', xytext=(0, -42),
                     ha='center', fontsize=8)
     # The measured crossing, interpolated between the two cells either side of it.
     (x0, y0), (x1, y1) = (xs[2], ys[2]), (xs[3], ys[3])

@@ -160,3 +160,8 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 - **A full copy is a recommendation, not an option:** pgdelta's own full copy is its pipeline with every page chosen, which can't beat fill 0. The selector predicts `pg_basebackup`'s time and says when it is faster.
 - **It was right on both sides:** with nearly every page changed, `pg_basebackup` took 0.893 of the fast path's time. Interpolating with EXP-74, the break-even is near 85% of the pages changed (the model: 86%).
 - **Where the fast path loses there:** not the disks (both arms kept them busy for the same 95 s). It is the guard (5.3 s for 4.6 M summary rows) and about 7 s more beyond the busier disk's time. Those fixed costs are the next target.
+
+**Update, October 28: the fast path's fixed costs located on a timeline (EXP-76, EXP-77).**
+- **The tail is the last flush,** and `pg_basebackup` pays it too. Early write-back on the sync worker moved it into the transfer, which lost where bytes bind (EXP-76: 3.75 s slower), so it stays opt-in.
+- **A stall at every 1 GiB file's end** was the receiver re-reading each written page one at a time in its main loop. Reading each run in one call, on the verifier, removed it. At 96% of the pages the fast path fell from 113.2 to 108.5 s, 1.07 of `pg_basebackup`'s time (EXP-77; its deciding comparison, the check's place alone, saved only 0.44 s).
+- **What is left there,** 7.2 s, is mostly the guard (5.3 s for 4.6 M summary rows) and the plan (0.9 s). The guard is the next target.

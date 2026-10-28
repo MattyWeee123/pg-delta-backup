@@ -1,0 +1,6 @@
+pattern,arm,runs,seconds,source_io_s,dest_io_s,reread_s,sending_s,source_idle_s,verify
+uniform,fast8wf2q,2,42.77,35.38,33.97,1.35,35.62,0.0,sequential
+uniform,fast8wf2,2,42.64,35.34,33.79,1.48,35.79,0.0,pipelined
+scatterall12,fast8wq,2,108.92,96.25,93.77,6.97,98.88,1.66,sequential
+scatterall12,fast8w,2,108.48,96.67,93.87,7.45,97.83,0.64,pipelined
+scatterall12,full,2,101.25,94.11,95.44,,,,
