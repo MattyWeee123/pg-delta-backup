@@ -9,6 +9,14 @@ Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registrat
 
 
 
+## 2026-10-28 (10:30 UTC): EXP-72 pre-registered (TLS's cost on the fixed transport); the console checked
+
+- **EXP-72** repeats EXP-58's design on the fixed TLS transport, with seed 720. EXP-58's figures were measured on the transport that broke OpenSSL's threading rule, so the docs call them "likely an upper bound", which is only inferred. EXP-72 measures instead.
+  - **Deciding:** at 2 Gbit/s, TLS takes at most 1.10 of clear's time (EXP-58's bar).
+  - **Expected, reported and not scored:** both ratios at or below EXP-58's, and less CPU added on the receiver.
+  - **Design fix before registering:** a bar set at EXP-58's own 5 Gbit/s ratio (1.15) would make an unchanged cost a coin flip, so EXP-58's bars stand. The comparison with EXP-58 is reported beside them.
+- **The owner's Cloud console** opens to CMU's web login in the built-in browser. Signing in is the owner's to do. The project itself is reachable through `gcloud`, which every VM experiment uses.
+
 ## 2026-10-28 (09:50 UTC): a Ctrl-C while the hashing workers start no longer breaks the pool
 
 - **Found from CI:** the TLS fix's run (f29ceaa) failed in `test_ctrl_c_to_the_whole_process_group_mid_run`. A worker was still importing `hashlib` when the test's SIGINT reached the process group, and printed a `KeyboardInterrupt` traceback. The pool doesn't wait for its workers before work starts, and a worker ignored SIGINT only once its initializer ran, after its imports.
