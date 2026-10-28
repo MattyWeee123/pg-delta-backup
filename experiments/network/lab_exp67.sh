@@ -1,0 +1,147 @@
+#!/bin/bash
+# EXP-67, run on dest of the ha set (docs/experiments/EXP-67-rewind-old-primary.md): an old primary after a failover
+# (B), brought current from the new primary (S) three ways, from a fresh copy of it each time, both VMs' caches
+# dropped:
+#   rewind  the standard: pg_rewind from S, then B started as S's standby until it has replayed to S's LSN;
+#   fast    pgdelta live, in place, --fast-path summaries requested (its guard should refuse a diverged B, so the
+#           session hashes both copies), then the copy started until it accepts connections;
+#   full    one pg_basebackup -X stream into a new directory, then started the same way.
+# Each lag forks afresh. On the source VM a standby Q of the current primary P catches up and stops cleanly; P then
+# writes 10,000 rows Q never sees and stops cleanly; P's data directory goes to dest as B0, and Q, promoted onto a new
+# timeline, takes P's place as S. S then runs the lag: "hot10" (the same 1% hot rows updated 10 times) or "uniform"
+# (1% of rows once). Each copy's pgbench_accounts must equal S's (B's own 10,000 rows undone).
+#     setsid nohup bash experiments/network/lab_exp67.sh SOURCE_IP [REPEATS] [SEED] \
+#         > /data/exp04-results/exp67-lab.log 2>&1 < /dev/null &
+# SCALE (default 600, about 18 GB) and OUT change the size and the results directory (the smoke: SCALE=20).
+set -u
+SRC=$1
+REPEATS=${2:-2}
+SEED=${3:-670}
+SCALE=${SCALE:-600}
+DEST=$(hostname -I | awk '{print $1}')
+cd ~/pgd
+R=${OUT:-/data/exp04-results/exp67}
+W=/data/exp67
+rm -rf "$R" "$W"; mkdir -p "$R" "$W"
+KEY=$HOME/.ssh/exp04_ed25519
+SSRC=(ssh -n -i "$KEY" -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$SRC")
+export PATH="$PATH:/usr/sbin:/sbin"
+PGBIN=/usr/lib/postgresql/17/bin
+ROOT=$W/src
+B0=$W/B0 B=$W/B FULL=$W/full
+CONN="host=$ROOT/s port=5432 user=study dbname=postgres"
+on_src() { "${SSRC[@]}" "export PATH=\$PATH:/usr/sbin:/sbin; cd ~/pgd; $1"; }
+psrc() { on_src "$PGBIN/psql -h $ROOT/s -p 5432 -U study -d postgres -qAtX -v ON_ERROR_STOP=1 -c \"$1\""; }
+pq() { on_src "$PGBIN/psql -h $W/qs -p 5434 -U study -d postgres -qAtX -c \"$1\"" 2>/dev/null; }
+pcopy() { $PGBIN/psql -h /tmp -p 5433 -U study -d postgres -qAtX -c "$1" 2>/dev/null; }
+drop() { sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null; on_src "sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null"; }
+start_copy() {  # $1: data directory; started on 5433 without archiving or summaries; returns when it accepts connections
+  $PGBIN/pg_ctl -D "$1" -l "$2" -w -t 3600 \
+    -o "-p 5433 -k /tmp -c listen_addresses='' -c archive_mode=off -c summarize_wal=off" start > /dev/null 2>&1
+}
+stop_copy() { $PGBIN/pg_ctl -D "$1" -m fast -w stop > /dev/null 2>&1; }
+STATE="SELECT count(*) || ':' || sum(abalance) FROM pgbench_accounts"
+CLUSTER_ARGS="--root $ROOT --bin-dir $PGBIN --log-dir $W/logs"
+WORKLOAD_ARGS="$CLUSTER_ARGS --scale $SCALE --fraction 0.01 --seed 20261022 --hot-percent 1.0 --batch-size 100"
+
+fork() {  # $1: the lag's name. Leaves B0 (the old primary) on dest and S (Q promoted) running as the source.
+  on_src "rm -rf $W/q $W/qs && mkdir -p $W/qs && $PGBIN/pg_basebackup -h $ROOT/s -p 5432 -U study -D $W/q \
+    -X stream -c fast -R > $W/q-basebackup.log 2>&1 && $PGBIN/pg_ctl -D $W/q -l $W/q.log -w -t 600 \
+    -o \"-p 5434 -k $W/qs -c listen_addresses='' -c archive_mode=off\" start > /dev/null" \
+    || { echo "the standby Q failed"; return 1; }
+  local target; target=$(psrc "SELECT pg_current_wal_lsn()")
+  for x in $(seq 600); do [ "$(pq "SELECT pg_last_wal_replay_lsn() >= '$target'")" = t ] && break; sleep 1; done
+  on_src "$PGBIN/pg_ctl -D $W/q -m fast -w stop > /dev/null" || { echo "Q did not stop"; return 1; }
+  # The fork: P writes what Q never sees, then stops cleanly (a fenced old primary).
+  psrc "UPDATE pgbench_accounts SET abalance = abalance - 7 WHERE aid % 6000 = 3" > /dev/null \
+    || { echo "the diverging update failed"; return 1; }
+  on_src "python3 experiments/network/source_cluster.py stop-clean --root $ROOT --bin-dir $PGBIN > $W/stop-$1.json" \
+    || { echo "P did not stop cleanly"; return 1; }
+  rm -rf "$B0"; mkdir -p "$B0"
+  on_src "tar -C $ROOT/data -cf - ." | tar -C "$B0" -xf - || { echo "copying P to dest failed"; return 1; }
+  # Q takes P's place, promoted onto a new timeline; its primary_conninfo (P's socket) goes first.
+  on_src "rm -rf $ROOT/data && mv $W/q $ROOT/data && sed -i '/primary_conninfo/d' $ROOT/data/postgresql.auto.conf \
+    && python3 experiments/network/source_cluster.py start $CLUSTER_ARGS > $W/start-$1.json \
+    && $PGBIN/pg_ctl -D $ROOT/data -w -t 600 promote > /dev/null" || { echo "promoting Q failed"; return 1; }
+  for x in $(seq 120); do [ "$(psrc "SELECT pg_is_in_recovery()")" = f ] && break; sleep 1; done
+  psrc "CHECKPOINT" > /dev/null  # the new timeline in S's control file
+  echo "{\"lag\": \"$1\", \"promoted_lsn\": \"$(psrc "SELECT pg_current_wal_lsn()")\", \"timeline\": $(psrc "SELECT timeline_id FROM pg_control_checkpoint()"), \"b0_state\": \"$($PGBIN/pg_controldata "$B0" | awk -F': *' '/cluster state/ {print $2}')\", \"b0_timeline\": $($PGBIN/pg_controldata "$B0" | awk -F': *' '/Latest checkpoint.s TimeLineID/ {print $2}')}" > "$R/fork-$1.json"
+}
+
+echo "$(date -u +%T) set-up: scale $SCALE"
+on_src "mkdir -p $W && python3 experiments/network/source_cluster.py setup $WORKLOAD_ARGS --pattern hot \
+  --listen-ip $SRC --client-ip $DEST > $W/setup.json" || { echo "set-up failed"; exit 1; }
+# S keeps its WAL since the fork for pg_rewind and the rewound standby (a slot or an archive would do the same).
+psrc "ALTER SYSTEM SET wal_keep_size = '40GB'" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
+VERSION=$(psrc "SHOW server_version_num")
+echo "{\"server_version_num\": $VERSION, \"summarize_wal\": \"$(psrc "SHOW summarize_wal")\", \"data_checksums\": \"$(psrc "SHOW data_checksums")\", \"database_bytes\": $(psrc "SELECT pg_database_size('postgres')"), \"scale\": $SCALE}" > "$R/source.json"
+[ "$VERSION" -ge 170011 ] || { echo "the server is $VERSION: the fast path needs 17.11 or later; failed"; exit 1; }
+
+i=0
+for lag in hot10 uniform; do
+  echo "$(date -u +%T) $lag: the fork (a standby promoted; the old primary to dest)"
+  fork "$lag" || { echo "fork failed"; exit 1; }
+  echo "$(date -u +%T) $lag: $(cat "$R/fork-$lag.json")"
+  if [ "$lag" = hot10 ]; then passes=10; pattern=hot; else passes=1; pattern=uniform; fi
+  for p in $(seq "$passes"); do
+    on_src "python3 experiments/network/source_cluster.py workload $WORKLOAD_ARGS --pattern $pattern \
+      > $W/workload-$lag-$p.json" || { echo "workload failed"; exit 1; }
+  done
+  S_LSN=$(psrc "SELECT pg_current_wal_lsn()")
+  SOURCE_STATE=$(psrc "$STATE")
+  echo "{\"lag\": \"$lag\", \"source_lsn\": \"$S_LSN\", \"source_state\": \"$SOURCE_STATE\"}" > "$R/lag-$lag.json"
+  echo "$(date -u +%T) $lag: source at $S_LSN, state $SOURCE_STATE"
+  python3 - "$REPEATS" "$SEED" "$lag" > "$R/plan-$lag.txt" <<'EOF'
+import random, sys
+repeats, seed, lag = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+runs = [(arm, k) for arm in ('rewind', 'fast', 'full') for k in range(repeats)]
+random.Random(seed + (lag == 'uniform')).shuffle(runs)
+for arm, k in runs:
+    print(arm, k)
+EOF
+  while read -r arm k; do
+    d="$R/run-$(printf %02d "$i")"
+    mkdir -p "$d"
+    rm -rf "$B" "$FULL"
+    [ "$arm" != full ] && cp -a "$B0" "$B"
+    target=$B
+    drop
+    status=0 rstatus=null
+    t0=$(date +%s.%N)
+    case "$arm" in
+      rewind)
+        $PGBIN/pg_rewind --target-pgdata="$B" --source-server="host=$SRC port=5432 user=study dbname=postgres" \
+          --write-recovery-conf --progress > "$d/rewind.log" 2>&1 || status=$?
+        tr=$(date +%s.%N)
+        [ "$status" = 0 ] && { start_copy "$B" "$d/copy.log" || status=$?; }
+        for x in $(seq 9000); do [ "$(pcopy "SELECT pg_last_wal_replay_lsn() >= '$S_LSN'")" = t ] && break; sleep 0.2; done ;;
+      fast)
+        tr=null
+        python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
+          --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 > "$d/receive.log" 2>&1 &
+        rp=$!
+        for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
+        on_src "python3 -m pgdelta send --source $ROOT/data --source-kind live --pg-conn '$CONN' --connect $DEST:7000 \
+          --pg-controldata $PGBIN/pg_controldata --jobs 4 --hash blake3 --fast-path summaries \
+          --stats-json /tmp/exp67-send.json" > "$d/send.log" 2>&1 || status=$?
+        wait "$rp"; rstatus=$?
+        [ "$status" = 0 ] && { start_copy "$B" "$d/copy.log" || status=$?; }
+        on_src "cat /tmp/exp67-send.json" > "$d/send.json" ;;
+      full)
+        tr=null
+        target=$FULL
+        $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$FULL" -X stream -c fast > "$d/full.log" 2>&1 || status=$?
+        [ "$status" = 0 ] && { start_copy "$FULL" "$d/copy.log" || status=$?; } ;;
+    esac
+    t1=$(date +%s.%N)
+    COPY_STATE=$(pcopy "$STATE")
+    stop_copy "$target"
+    match=$([ "$COPY_STATE" = "$SOURCE_STATE" ] && echo true || echo false)
+    printf '{"run": %s, "lag": "%s", "arm": "%s", "repeat": %s, "t0": %s, "t_rewound": %s, "t1": %s, "status": %s, "receiver_status": %s, "source_state": "%s", "copy_state": "%s", "match": %s}\n' \
+      "$i" "$lag" "$arm" "$k" "$t0" "$tr" "$t1" "$status" "$rstatus" "$SOURCE_STATE" "$COPY_STATE" "$match" > "$d/meta.json"
+    echo "$(date -u +%T) run $i: $lag $arm repeat $k: $(python3 -c "print(round($t1 - $t0, 2))") s, exit $status, match $match"
+    i=$((i + 1))
+  done < "$R/plan-$lag.txt"
+done
+rm -rf "$B" "$FULL" "$B0"
+echo "$(date -u +%T) done"

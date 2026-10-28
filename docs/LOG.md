@@ -16,6 +16,10 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - **The mechanism:** replay pays per WAL record and, beyond memory, waits on data-file reads (31 MB/s of WAL against 89 MB/s); the fast path pays once per page.
 - **A label fixed after the data:** the figure had shown the archive's size. It now shows the WAL replay applied, from each copy's `redo starts at`. Scores unchanged.
 - **Next:** EXP-64b, then EXP-66, are running on a fresh pair (launched right after EXP-65's teardown, because of the region's N2D quota).
+- **EXP-67 pre-registered,** the last competitor research loop 1 lists as never timed: `pg_rewind` for an old primary after a failover.
+  - **The failover is real,** built at 18 GB beyond memory: a standby promoted onto a new timeline, and the old primary's own 10,000 rows past the fork.
+  - **Against `pg_rewind`:** pgdelta, whose guard must refuse and hash, and a re-clone.
+  - **What it decides:** whether idea 1 (the union of both sides' block sets) is worth building.
 
 ## 2026-10-27 (late night): overlapped source reads built; EXP-64b pre-registered
 
