@@ -1,0 +1,11 @@
+config,ops_per_s,mb_per_s,mean_latency_us
+randread-8k-qd1,2162.8,17.72,446.9
+randread-8k-qd32,4193.7,34.36,7615.9
+randread-8k-qd8,4198.1,34.39,1892.0
+randwrite-128k-qd32,1566.9,205.51,20388.6
+randwrite-16k-qd32,4197.2,68.78,7609.0
+randwrite-32k-qd32,4193.8,137.46,7615.8
+randwrite-64k-qd32,3134.8,205.51,10188.6
+randwrite-8k-qd32,4194.9,34.37,7612.5
+seqread-1m-qd8,195.8,205.51,40786.0
+seqwrite-1m-qd8,195.8,205.51,40700.4

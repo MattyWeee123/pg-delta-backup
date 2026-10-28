@@ -8,6 +8,21 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-28 (morning): EXP-64b and EXP-66 done; EXP-67 running
+
+- **EXP-64b, overlapped source reads:** the deciding prediction held, and controls replicated EXP-64 within 2.4%; all 10 runs were correct.
+  - **8 reader threads:** 102.8 s against 167.4 s without threads (0.614), 184.4 s for hashing (0.557) and 91.0 s for a full copy (1.13).
+  - **1 thread:** 148.7 s. Prediction 4 (overlap alone suffices) failed: parallel reads mattered.
+  - **Prediction 3 failed:** the receiver still waited 41 s for data. It syncs each file in its main loop and stops receiving meanwhile.
+- **EXP-66, how the disk counts I/O:** random 32 KiB writes ran at the same 4,194 a second as 8 KiB ones, so idea 2's premise holds. One 8 KiB read at a time completes 2,163 times a second.
+- **Two errors in the registrations' arithmetic, found in the data and written up openly, scores unchanged:**
+  - **The syncs were counted twice:** in fsync mode `main`, the receiver's rebuild timer includes the syncs. So EXP-64's "107 s of writing and syncing" was about 60 s, and EXP-64b's 112 s bound wasn't one.
+  - **The run count was modelled:** independent pages give 443,128 runs; the real set had 249,193.
+  - **EXP-66's control "held"** only because the two errors cancelled. Its registered branch for a failed control is followed instead: instrument the write path before prototyping idea 2.
+  - **Both figures** now label the registered numbers as such, and show the measured ones beside them.
+- **EXP-67** (`pg_rewind` for an old primary) launched on a fresh pair right after EXP-64b's teardown.
+- **Next: EXP-68,** pre-registered while EXP-67 runs: the receiver's syncs on a worker thread, 8 and 16 threads, the hot cell, disk counters, and the real page set.
+
 ## 2026-10-28 (early): EXP-65 done, the fast path against archive replay; EXP-64b and EXP-66 running
 
 - **EXP-65:** all 4 predictions held, on the `ha` set in us-west1; its VMs were deleted after the fetch.

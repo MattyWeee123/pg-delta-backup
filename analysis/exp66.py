@@ -29,6 +29,11 @@ PAGE = 8192
 SEGMENT_PAGES = (1 << 30) // PAGE
 UNIFORM_PAGES, TOTAL_PAGES = 619_856, 2_175_659  # EXP-48's uniform cell
 MEASURED_WRITE_S = 107.0  # EXP-64, fast path, uniform: rebuild 57.6 s + fsync 49.4 s
+# Found after the data: in fsync mode main the receiver's rebuild timer already includes each file's fsync, so the
+# registered 107 s counted the syncs twice; the receiver wrote and synced in 57.6 s (EXP-64) and 59.9 s (EXP-64b's
+# fast arm). And the real page set fell in 249,193 runs (EXP-64b's read-ahead count), not the model's 443,128.
+# Prediction 3 is scored as registered; the figure shows both numbers, and the write-up the correction.
+REBUILD_S, REAL_RUNS = 59.9, 249_193  # EXP-64b, fast arm, median; and its readers' count of runs
 SIZES_K = (8, 16, 32, 64, 128)
 GAPS = range(0, 9)
 
@@ -150,11 +155,16 @@ def figure(fio, rows):
     left.set_title('How the disk counts writes by size', fontsize=10)
     gaps = [r['gap_pages'] for r in rows]
     right.bar(gaps, [r['seconds'] for r in rows], 0.7, color=COLORS['blue'])
-    right.axhline(MEASURED_WRITE_S, color=COLORS['black'], lw=0.8, ls=':')
-    right.text(max(gaps), MEASURED_WRITE_S + 2, f'EXP-64 measured {MEASURED_WRITE_S:.0f} s', ha='right', fontsize=8)
+    right.axhline(MEASURED_WRITE_S, color=COLORS['black'], lw=0.8, ls=':',
+                  label=f'registered comparison, {MEASURED_WRITE_S:.0f} s (syncs counted twice)')
+    right.axhline(REBUILD_S, color=COLORS['red'], lw=0.9, ls='--',
+                  label=f'measured writing and syncing, {REBUILD_S:.0f} s (EXP-64b)')
+    right.set_ylim(0, MEASURED_WRITE_S * 1.35)
+    right.legend(fontsize=7.5, loc='upper right')
     right.set_xlabel('clean gaps filled, up to this many pages')
     right.set_ylabel('modelled seconds to write the uniform page set')
-    right.set_title('Gap-filled writes for EXP-64\'s scattered changes', fontsize=10)
+    right.set_title(f'Gap-filled writes, pages chosen independently\n({rows[0]["writes"]:,} writes unfilled; the real '
+                    f'set had {REAL_RUNS:,} runs)', fontsize=9.5)
     fig.suptitle('EXP-66: a 150 GiB balanced persistent disk, fio with direct I/O', fontsize=10.5)
     fig.tight_layout()
     print(plotting.save(fig, 'exp66-write-sizes'))

@@ -28,6 +28,9 @@ LABELS = {'hash': 'hashing both copies', 'fast': 'fast path, reads in the sendin
           'fast1': 'fast path, 1 reader thread', 'fast8': 'fast path, 8 reader threads', 'full': 'pg_basebackup'}
 EXP64 = {'fast': 164.8, 'hash': 180.1}
 BOUND = 112.0  # EXP-64's overlapped bound: max(about 99 s of reads, about 107 s of writes and syncs) + about 5 s
+# Found after the data: in fsync mode main the receiver's rebuild timer already includes each file's fsync, so
+# the 107 s counted the syncs twice (about 60 s in all). The figure labels the registered bound as such and
+# shows the receiver's writing and syncing (rebuild_s); the scores are unchanged.
 
 
 def runs(results):
@@ -121,23 +124,26 @@ def figure(cells):
         left.bar(i, value, 0.75, color=colors[arm])
         left.annotate(f'{value:.1f}', (i, value), textcoords='offset points', xytext=(0, 3), ha='center', fontsize=8.5)
     left.axhline(BOUND, color=COLORS['black'], lw=0.8, ls=':')
-    left.text(len(ARMS) - 0.5, BOUND + 3, f'overlapped bound, about {BOUND:.0f} s', ha='right', fontsize=8)
+    left.text(len(ARMS) - 0.5, BOUND + 3, f'registered bound, {BOUND:.0f} s (it counted the syncs twice)', ha='right',
+              fontsize=7.5, bbox={'facecolor': 'white', 'edgecolor': 'none', 'alpha': 0.85, 'pad': 1})
     left.set_xticks(range(len(ARMS)), ['hashing', 'fast,\nno threads', 'fast,\n1 thread', 'fast,\n8 threads',
                                        'pg_base-\nbackup'], fontsize=8.5)
     left.set_ylabel('seconds to refresh about 18 GB (median)')
     left.set_title('Scattered changes (uniform 1%, 28% of pages)', fontsize=10)
     fast_arms = [arm for arm in ('fast', 'fast1', 'fast8') if cells[arm]['seconds'] is not None]
-    parts = (('sender reading the source', COLORS['blue'], lambda c: (c['source_s'] or 0) - (c['blocked_s'] or 0)),
+    parts = (('sender reading (or waiting on its readers)', COLORS['blue'],
+              lambda c: (c['source_s'] or 0) - (c['blocked_s'] or 0)),
              ('sender blocked sending', COLORS['sky'], lambda c: c['blocked_s'] or 0),
-             ('receiver waiting for data', COLORS['grey'], lambda c: c['recv_wait_s'] or 0))
+             ('receiver waiting for data', COLORS['grey'], lambda c: c['recv_wait_s'] or 0),
+             ('receiver writing and syncing', COLORS['red'], lambda c: c['rebuild_s'] or 0))
     for j, (label, color, value) in enumerate(parts):
-        right.barh([k * 4 + j for k in range(len(fast_arms))], [value(cells[arm]) for arm in fast_arms], 0.8,
+        right.barh([k * 5 + j for k in range(len(fast_arms))], [value(cells[arm]) for arm in fast_arms], 0.8,
                    color=color, label=label)
-    right.set_yticks([k * 4 + 1 for k in range(len(fast_arms))],
+    right.set_yticks([k * 5 + 1.5 for k in range(len(fast_arms))],
                      [{'fast': 'no threads', 'fast1': '1 thread', 'fast8': '8 threads'}[arm] for arm in fast_arms])
     right.invert_yaxis()
-    right.set_xlabel('seconds (median); reading and receiving overlap when they add up to more than the total')
-    right.legend(fontsize=8, loc='lower right')
+    right.set_xlabel('seconds (median); the receiver\'s two bars add up to about its total')
+    right.legend(fontsize=7.5, loc='upper center', bbox_to_anchor=(0.45, -0.2), ncol=2, frameon=False)
     right.set_title('Where the fast path\'s time went', fontsize=10)
     fig.suptitle('EXP-64b: overlapping the source\'s scattered reads with sending (8 GB VMs, balanced disks)',
                  fontsize=10.5)

@@ -92,3 +92,9 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 **Update, the same night: EXP-64's result.** The fast path refreshed 18 GB of local changes in 1.98 s (0.022 of a full copy), on the label bound. Scattered changes took 164.8 s, about 70 s above the bound. The runs' own timers put those 70 s in the sender's one-at-a-time reads of the source, which didn't overlap the receiver's writes: a systems problem, measured. The ranking above gains a new first item:
 
 0. **The fast path's source read pipeline** (parallel or read-ahead reads of the chosen pages, overlapped with sending), pre-registered as EXP-64b on the uniform cell. Its bound is about 112 s (0.62 of hashing). Beating a full copy there also needs idea 2.
+
+**Update, October 28: EXP-64b and EXP-66.**
+- **Item 0 is done:** 8 reader threads took the scattered cell from 167.4 s to 102.8 s, 1.13 times a full copy. Parallel reads mattered (one read at a time takes 447 µs on this disk), and the receiver's in-loop syncs now bind.
+- **Item 2 is done:** the disk counts writes up to 32 KiB as one operation, so idea 2's premise holds.
+- **Item 4 waits on the real page set:** EXP-66's model held its control only by two cancelling errors. The 112 s bound above and the "about 92 s" write term in idea 2 both rest on the same double count of the receiver's syncs. The receiver wrote and synced in about 60 s.
+- **New item 0b, EXP-68:** the receiver's syncs on a worker thread, a thread-count sweep, the hot cell, disk counters, and the real page set for idea 2's model. If both sides' roughly 60 s overlap, the fast path could beat a full copy at 28% of pages without any new algorithm (**inferred**).
