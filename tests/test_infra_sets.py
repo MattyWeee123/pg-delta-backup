@@ -72,7 +72,9 @@ def labels(text, sep=','):
     return dict(item.split('=', 1) for item in text.split(sep) if item)
 
 
-if args[:2] == ['services', 'list']:
+if args[:2] == ['auth', 'print-access-token']:
+    sys.exit(0 if state.get('signed_in', True) else 1)
+elif args[:2] == ['services', 'list']:
     print('compute.googleapis.com')
 elif args[:3] == ['compute', 'instances', 'list']:
     for vm in state['instances']:
@@ -497,6 +499,16 @@ class FakeProject(unittest.TestCase):
                 self.assertIn(message, result.stderr)
                 self.assertEqual([c for c in self.box.calls() if c[:3] == ['compute', 'instances', 'create']], [])
                 self.assertEqual(self.box.load()['instances'], [existing])
+
+    def test_create_names_expired_credentials_and_makes_nothing(self):
+        # EXP-72's first try: gcloud's sign-in had expired, and create.sh called it a disabled API.
+        self.box.state['signed_in'] = False
+        self.box.save()
+        result = self.box.run('create.sh', PAIR='a')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("run 'gcloud auth login'", result.stderr)
+        self.assertNotIn('not enabled', result.stderr)
+        self.assertEqual(self.box.load()['instances'], [])
 
     def test_create_refuses_a_set_the_quota_cant_hold(self):
         # Three n2-standard-8 VMs of other sets use 24 of the 32 vCPUs; a pair needs 16.

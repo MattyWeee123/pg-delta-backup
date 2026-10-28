@@ -13,7 +13,12 @@ source ./vmset.sh
 pgd_check_create
 pgd_print_set
 
-# Read-only check: this script never enables APIs or changes project settings.
+# Read-only checks: this script never enables APIs or changes project settings, and never signs in. Expired
+# credentials fail every call below, so name them first (EXP-72's first try read them as a disabled API).
+if [ "$DRY_RUN" != 1 ] && ! "$GCLOUD" --project "$PROJECT" auth print-access-token > /dev/null 2>&1; then
+  echo "gcloud has no valid credentials (expired or never set): run 'gcloud auth login', then try again" >&2
+  exit 1
+fi
 if ! gc_read compute.googleapis.com services list --enabled --filter=config.name=compute.googleapis.com \
      --format='value(config.name)' | grep -q compute; then
   echo "Compute Engine API is not enabled in $PROJECT" >&2
