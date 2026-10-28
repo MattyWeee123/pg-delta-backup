@@ -115,7 +115,8 @@ HELLO_KEYS = frozenset(('protocol_version', 'block', 'node_blocks', 'key', 'sour
 # Only a live source's HELLO has it (pgdelta.live): files follow in one APPEND before COMPLETE.
 # hash: the digest algorithm, absent for BLAKE2b (EXP-29); hash_offer: what a sender with --hash auto can use,
 # preferred first, of which this receiver picks the first it can use and names it in ACCEPT.
-HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer', 'compress_offer', 'subpage_offer', 'summary_offer'))
+HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer', 'compress_offer', 'subpage_offer', 'summary_offer',
+                                 'diverged_offer'))
 _CREATE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0)
                  | getattr(os, 'O_NOFOLLOW', 0))
 _KERNEL_COPY = sys.platform.startswith('linux') and hasattr(os, 'copy_file_range')
@@ -459,6 +460,10 @@ class _Receiver:
         self.summary_offer, self.summary_facts, self.summary_refused = False, None, None
         self.summary_pending = self.fast_mode = False
         self.fast_counts = {'files_written_checked': 0, 'pages_reread': 0, 'reasons': []}
+        # --diverged-basis: the HELLO's offer; whether ACCEPT took it (B stopped cleanly, so its end is proven) with
+        # B's wal_log_hints, read then; and what this end found in B's WAL when FORK_POINT came (None until then).
+        self.diverged_offer = self.diverged = False
+        self.diverged_hints, self.diverged_counts = None, None
         # EXP-13's protocol timers, on the time.perf_counter() clock: publish_s counts from `launched` (the
         # receive command's start) and hello_wait_s from `listening` (its listener's), each else from here.
         started = time.perf_counter()
@@ -706,6 +711,10 @@ class _Receiver:
             if self.summary_facts is not None:
                 accept['summary'] = self.summary_facts
                 self.summary_pending = True  # B is read only if the sender's guard says no
+                if self.diverged_offer and self.summary_facts['proof'].startswith('clean shutdown'):
+                    # B's own WAL may stand in for its changes after a fork: read only if FORK_POINT comes.
+                    self.diverged_hints = fastpath.wal_log_hints(self.setup.basis, self.setup.pg_controldata)
+                    self.diverged = accept['diverged'] = True
             else:
                 accept['summary_refused'] = self.summary_refused
         self.channel.send_json(protocol.ACCEPT, accept)
@@ -739,6 +748,9 @@ class _Receiver:
                                                                        protocol.LEAF_REQUEST):
                 # Plain pages, a file's end, an append and the end: every queued run is written first.
                 self._drain_decompressed()
+            if code == protocol.FORK_POINT:
+                self._fork_point(payload)
+                continue
             if self.summary_pending and code != protocol.SUMMARY_DECISION:
                 raise ProtocolError(f'{protocol.name(code)} arrived before SUMMARY_DECISION')
             if code == protocol.COMPLETE:
@@ -753,6 +765,27 @@ class _Receiver:
             self.basis_thread = threading.Thread(target=self._hash_basis, name='pgdelta-basis',
                                                  daemon=True)
             self.basis_thread.start()
+
+    def _fork_point(self, payload):
+        """--diverged-basis: the server's history leaves B's timeline where B kept writing. Answer with the
+        checkpoint before the fork in B's own WAL and the blocks B's WAL names since (fastpath.basis_wal_blocks)."""
+        if not (self.diverged and self.summary_pending) or self.diverged_counts is not None:
+            raise ProtocolError('FORK_POINT without an accepted diverged_offer before SUMMARY_DECISION, or a second one')
+        timeline, fork = fastpath.check_fork_point(protocol.decode_json(payload, 'FORK_POINT'))
+        if timeline != self.summary_facts['timeline']:
+            raise ProtocolError(f'FORK_POINT names timeline {timeline}, B is on {self.summary_facts["timeline"]}')
+        reply, refused = fastpath.basis_wal_blocks(self.setup.basis, self.setup.pg_controldata, self.summary_facts,
+                                                   fork, (self.setup.identity or {}).get('wal_segment_size') or 16 << 20)
+        if reply is None:
+            reply = {'refused': refused}
+            self.diverged_counts = {'fork': fastpath.format_lsn(fork), 'refused': refused}
+        else:
+            reply['wal_log_hints'] = self.diverged_hints
+            self.diverged_counts = {'fork': fastpath.format_lsn(fork), 'checkpoint': reply['checkpoint'],
+                                    'redo': reply['redo'], 'records': reply['records'], 'seconds': reply['seconds'],
+                                    'relations': len(reply['blocks']),
+                                    'blocks': sum(n for runs in reply['blocks'].values() for _, n in runs)}
+        self.channel.send_json(protocol.BASIS_WAL, reply)
 
     def _summary_decision(self, payload):
         """The sender's guard: the fast path runs, and B is never read; or it does not, and B is hashed as usual."""
@@ -813,6 +846,10 @@ class _Receiver:
         if type(summary_offer) is not bool:
             raise ProtocolError('HELLO summary_offer must be true or false')
         self.summary_offer = summary_offer
+        diverged_offer = hello.get('diverged_offer', False)
+        if type(diverged_offer) is not bool or (diverged_offer and not summary_offer):
+            raise ProtocolError('HELLO diverged_offer must be true or false, and true only with summary_offer')
+        self.diverged_offer = diverged_offer
         sub_offer = hello.get('subpage_offer')
         if sub_offer is not None and type(sub_offer) is not int:
             raise ProtocolError('HELLO subpage_offer must be an integer')
@@ -1790,6 +1827,8 @@ class _Receiver:
             # Only when offered, so a session without --fast-path keeps its COMPLETE frame's bytes.
             stats['fast_path'] = {'offered': True, 'facts': self.summary_facts, 'refused': self.summary_refused,
                                   'used': self.fast_mode, 'fsync_auto': self.fsync_auto, **self.fast_counts}
+            if self.diverged_offer:  # only when offered, so other sessions' bytes are unchanged
+                stats['fast_path']['diverged_basis'] = {'accepted': self.diverged, **(self.diverged_counts or {})}
         if self.misplaced_write is not None:
             stats['test_misplaced_write'] = self.misplaced_write
         return stats

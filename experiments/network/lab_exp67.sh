@@ -5,7 +5,11 @@
 #   rewind  the standard: pg_rewind from S, then B started as S's standby until it has replayed to S's LSN;
 #   fast    pgdelta live, in place, --fast-path summaries requested (its guard should refuse a diverged B, so the
 #           session hashes both copies), then the copy started until it accepts connections;
-#   full    one pg_basebackup -X stream into a new directory, then started the same way.
+#   full    one pg_basebackup -X stream into a new directory, then started the same way;
+#   union   (EXP-71) pgdelta live, in place, --fast-path summaries --diverged-basis (idea 1: the blocks B's own WAL
+#           names since the checkpoint before the fork, plus the summaries' since), with 8 reader threads, gaps of up
+#           to 2 pages filled and the receiver's syncs on its worker, then started the same way. Its first run per
+#           lag is checked with pg_amcheck --heapallindexed after the timing.
 # Each lag forks afresh. On the source VM a standby Q of the current primary P catches up and stops cleanly; P then
 # writes 10,000 rows Q never sees and stops cleanly; P's data directory goes to dest as B0, and Q, promoted onto a new
 # timeline, takes P's place as S. S then runs the lag: "hot10" (the same 1% hot rows updated 10 times) or "uniform"
@@ -167,6 +171,18 @@ EOF
         wait "$rp"; rstatus=$?
         [ "$status" = 0 ] && { start_copy "$B" "$d/copy.log" || status=$?; }
         on_src "cat /tmp/exp67-send.json" > "$d/send.json" ;;
+      union)
+        tr=null
+        python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
+          --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 --fsync worker > "$d/receive.log" 2>&1 &
+        rp=$!
+        for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
+        on_src "python3 -m pgdelta send --source $ROOT/data --source-kind live --pg-conn '$CONN' --connect $DEST:7000 \
+          --pg-controldata $PGBIN/pg_controldata --jobs 4 --hash blake3 --fast-path summaries --diverged-basis \
+          --read-ahead 8 --fill-gaps 2 --stats-json /tmp/exp67-send.json" > "$d/send.log" 2>&1 || status=$?
+        wait "$rp"; rstatus=$?
+        [ "$status" = 0 ] && { start_copy "$B" "$d/copy.log" || status=$?; }
+        on_src "cat /tmp/exp67-send.json" > "$d/send.json" ;;
       full)
         tr=null
         target=$FULL
@@ -175,6 +191,10 @@ EOF
     esac
     t1=$(date +%s.%N)
     COPY_STATE=$(pcopy "$STATE")
+    if [ "$arm" = union ] && [ "$k" = 0 ]; then  # EXP-71: every page of the copy, after the timing
+      $PGBIN/pg_amcheck -h /tmp -p 5433 -U study --all --heapallindexed --install-missing > "$d/amcheck.log" 2>&1
+      echo $? > "$d/amcheck-status"
+    fi
     stop_copy "$target"
     match=$([ "$COPY_STATE" = "$SOURCE_STATE" ] && echo true || echo false)
     printf '{"run": %s, "lag": "%s", "arm": "%s", "repeat": %s, "t0": %s, "t_rewound": %s, "t1": %s, "status": %s, "receiver_status": %s, "source_state": "%s", "copy_state": "%s", "match": %s}\n' \

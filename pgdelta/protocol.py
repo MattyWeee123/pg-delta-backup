@@ -40,6 +40,12 @@ SUMMARY_DECISION = 15
 # Then each file of which only the pages the summaries chose are sent ends with FILE_DONE_WRITTEN: FILE_DONE's
 # fields, its digest that of the pages written (pgdelta.fastpath.written_digest), not of the whole file.
 FILE_DONE_WRITTEN = 16
+# --diverged-basis (pgdelta.fastpath): where the guard found B past the point where the server's history leaves B's
+# timeline (an old primary after a failover), the sender names that fork before deciding: {"timeline", "fork"}. The
+# receiver answers with the checkpoint before it in B's own WAL and the blocks B's WAL names since, or why not.
+# Sent only after the receiver accepted the HELLO's diverged_offer, so no other session's bytes change.
+FORK_POINT = 17
+BASIS_WAL = 18
 MESSAGES = {
     HELLO: ('HELLO', 'control'),
     ACCEPT: ('ACCEPT', 'control'),
@@ -57,6 +63,8 @@ MESSAGES = {
     PAGE_DELTA_ZSTD: ('PAGE_DELTA_ZSTD', 'page_data'),
     SUMMARY_DECISION: ('SUMMARY_DECISION', 'control'),
     FILE_DONE_WRITTEN: ('FILE_DONE_WRITTEN', 'control'),
+    FORK_POINT: ('FORK_POINT', 'control'),
+    BASIS_WAL: ('BASIS_WAL', 'control'),
 }
 CATEGORIES = ('control', 'node_digests', 'leaf_digests', 'page_data')
 

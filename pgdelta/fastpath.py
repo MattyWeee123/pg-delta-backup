@@ -25,6 +25,23 @@ What is sent, as PostgreSQL's own incremental backup chooses (basebackup_increme
 - whole: free-space-map, init and other forks, every non-relation file, every file B lacks, an unlogged
   relation's main fork, and the WAL and backup_label a live source appends.
 
+With --diverged-basis (idea 1, EXP-69 and EXP-69b), an old primary that kept writing after the server's timeline
+left its own (a failover) is refreshed the same way, with B's own WAL standing in for what B changed since the fork,
+as pg_rewind reads it:
+- the sender names the fork (FORK_POINT); the receiver finds C, the last checkpoint before it in B's own WAL, and
+  lists every block B's WAL names from C's redo point through B's proven end (BASIS_WAL);
+- the pages sent are those blocks plus the summaries' from C's redo point to the backup's start, each the server's
+  current copy, so the copy is the server's state with no WAL of the server's to replay;
+- it runs only where B's WAL reads without a gap from C's redo point through B's end (pg_waldump --end), B has data
+  checksums or wal_log_hints (else a hint bit B set after the fork, which no WAL names, could stay on a page the
+  server has as of before: EXP-69b found 20,000 rows the server never committed), C's redo point lies on B's
+  timeline, and the summaries cover C's redo point to the backup's start;
+- B's WAL from C's redo point has records only of PostgreSQL's built-in resource managers, none of them Database or
+  Tablespace ones: an extension's record may change a relation without naming its blocks (pg_rewind refuses one it
+  does not know), and a database or tablespace created by copying files names none of its blocks. Relation files
+  B created or truncated after the fork need nothing more: a file the server lacks is removed, and every block past
+  B's length is sent, as pg_rewind does.
+
 Pages left unsent are read on neither side, so they are not verified. Each file is checked by the pages written:
 the receiver re-reads them and compares their digest with that of what was sent. The copy is the source's at the
 backup's start except where pages differ only in bits PostgreSQL changes without WAL (hint bits); recovery from
@@ -37,6 +54,7 @@ import json
 import re
 import struct
 import subprocess
+import time
 from pathlib import Path
 
 from pgdelta.errors import InvalidInput, ProtocolError
@@ -62,6 +80,18 @@ _RELATION = re.compile(r'^((?:base/[1-9][0-9]*|global)/[1-9][0-9]*)(_[a-z]+)?(?:
 _WALDUMP_LSN = re.compile(r'lsn: ([0-9A-Fa-f]+/[0-9A-Fa-f]+)')
 _SEGMENT = re.compile(r'^([0-9A-F]{8})([0-9A-F]{8})([0-9A-F]{8})$')
 _PAGE_NUMBER = struct.Struct('>Q')
+_CHECKPOINT = re.compile(r'lsn: ([0-9A-Fa-f]+/[0-9A-Fa-f]+),.*desc: CHECKPOINT_(?:SHUTDOWN|ONLINE) redo '
+                         r'([0-9A-Fa-f]+/[0-9A-Fa-f]+)')
+_RMGR = re.compile(r'^rmgr: (\S+)')
+_BLKREF = re.compile(r'blkref #\d+: rel (\d+)/(\d+)/(\d+)(?: fork (\w+))? blk (\d+)')
+FORK_NUMBERS = {'main': 0, 'fsm': 1, 'vm': 2, 'init': 3}
+# pg_waldump's names of PostgreSQL 17's and 18's built-in resource managers whose records name every block they
+# change; with --diverged-basis any other record in B's WAL since the common checkpoint refuses the fast path.
+BLOCK_RMGRS = frozenset(('XLOG', 'Transaction', 'Storage', 'CLOG', 'MultiXact', 'RelMap', 'Standby', 'Heap2', 'Heap',
+                         'Btree', 'Hash', 'Gin', 'Gist', 'Sequence', 'SPGist', 'BRIN', 'CommitTs', 'ReplicationOrigin',
+                         'Generic', 'LogicalMessage'))
+# B's block list travels in one BASIS_WAL frame; a larger one refuses the fast path.
+MAX_BASIS_WAL_BYTES = 48 << 20
 
 
 def parse_lsn(text):
@@ -159,6 +189,110 @@ def last_wal_record(pg_wal, waldump, timeline, segment_size, timeout=300):
     return None
 
 
+def wal_log_hints(basis, pg_controldata):
+    """Whether B's pg_control records wal_log_hints as on (read before ACCEPT: in place, B's pg_control is renamed
+    once B is blocked)."""
+    _, text = read_controldata(Path(basis), pg_controldata)
+    return controldata_value(text, 'wal_log_hints setting') == 'on'
+
+
+def basis_wal_blocks(basis, pg_controldata, facts, fork, segment_size=16 << 20, timeout=3600):
+    """--diverged-basis: (BASIS_WAL's reply, None), or (None, why B's own WAL can't stand in for what B changed since
+    the fork). `facts` is what basis_facts proved of B; `fork` the LSN where the server's history leaves B's
+    timeline. The reply's wal_log_hints is the caller's to add (wal_log_hints)."""
+    started = time.perf_counter()
+    waldump = Path(pg_controldata).parent / 'pg_waldump'
+    pg_wal, timeline = Path(basis) / 'pg_wal', int(facts['timeline'])
+    first = oldest_segment_start(pg_wal, timeline, segment_size)
+    if first is None or first >= fork:
+        return None, f'B\'s pg_wal holds no WAL of timeline {timeline} before the fork at {format_lsn(fork)}'
+    found, refused = last_checkpoint_before(waldump, pg_wal, timeline, first, fork, segment_size, timeout)
+    if found is None:
+        return None, refused
+    checkpoint, redo = found
+    end = parse_lsn(facts['end'])
+    blocks, records, refused = {}, 0, None
+    try:
+        process = subprocess.Popen([str(waldump), '--path', str(pg_wal), '--timeline', str(timeline),
+                                    '--start', format_lsn(redo), '--end', format_lsn(end)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    except OSError as exc:
+        return None, f'pg_waldump could not be run on B\'s WAL: {exc}'
+    with process:
+        for line in process.stdout:
+            rmgr = _RMGR.match(line)
+            if not rmgr:
+                continue
+            records += 1
+            if rmgr.group(1) not in BLOCK_RMGRS and refused is None:
+                refused = (f'B\'s WAL since the checkpoint before the fork has a {rmgr.group(1)} record, which may '
+                           f'change files without naming their blocks')
+            for tablespace, database, relfilenode, fork_name, block in _BLKREF.findall(line):
+                path = relation_path(int(tablespace), int(database), int(relfilenode),
+                                     FORK_NUMBERS.get(fork_name or 'main', -1))
+                if path is not None:
+                    blocks.setdefault(path, set()).add(int(block))
+        stderr = process.stderr.read()
+        status = process.wait(timeout)
+    if status:
+        return None, (f'B\'s WAL does not read through from {format_lsn(redo)} (the redo point of the checkpoint '
+                      f'before the fork) to its end {format_lsn(end)}: {stderr.strip()[-300:]}')
+    if refused:
+        return None, refused
+    reply = {'checkpoint': format_lsn(checkpoint), 'redo': format_lsn(redo), 'records': records,
+             'blocks': {path: block_runs(sorted(chosen)) for path, chosen in sorted(blocks.items())},
+             'seconds': round(time.perf_counter() - started, 3)}
+    if len(json.dumps(reply)) > MAX_BASIS_WAL_BYTES:
+        return None, f'B\'s WAL since the checkpoint before the fork names too many blocks to list'
+    return reply, None
+
+
+def last_checkpoint_before(waldump, pg_wal, timeline, first, fork, segment_size, timeout=3600):
+    """((record LSN, redo LSN), None) of the last checkpoint record before `fork` in B's WAL, or (None, why not).
+    pg_rewind reads back from the fork record by record; pg_waldump reads forward only, so windows ending at the
+    fork are read with --rmgr XLOG, each twice as long as the last, until one holds a checkpoint or starts at B's
+    oldest segment: B may keep far more WAL than lies between the fork and the checkpoint before it."""
+    segments = 1
+    while True:
+        start = max(first, (fork // segment_size - segments + 1) * segment_size)
+        try:
+            result = subprocess.run([str(waldump), '--path', str(pg_wal), '--timeline', str(timeline), '--rmgr',
+                                     'XLOG', '--start', format_lsn(start), '--end', format_lsn(fork)],
+                                    capture_output=True, text=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return None, f'pg_waldump could not read B\'s WAL for its checkpoints: {exc}'
+        before = [(parse_lsn(at), parse_lsn(redo)) for at, redo in _CHECKPOINT.findall(result.stdout)
+                  if parse_lsn(at) < fork]
+        if before:
+            return before[-1], None
+        if start == first:
+            return None, (f'B\'s own WAL from {format_lsn(first)} holds no checkpoint before the fork at '
+                          f'{format_lsn(fork)}')
+        segments *= 2
+
+
+def oldest_segment_start(pg_wal, timeline, segment_size):
+    """The LSN where the oldest segment of `timeline` in `pg_wal` begins, or None."""
+    try:
+        names = [path.name for path in Path(pg_wal).iterdir()]
+    except OSError:
+        return None
+    starts = [((int(m.group(2), 16) << 32) + int(m.group(3), 16) * segment_size)
+              for m in map(_SEGMENT.match, names) if m and int(m.group(1), 16) == timeline]
+    return min(starts) if starts else None
+
+
+def block_runs(blocks):
+    """Sorted block numbers as [[first, count], ...]."""
+    runs = []
+    for block in blocks:
+        if runs and runs[-1][0] + runs[-1][1] == block:
+            runs[-1][1] += 1
+        else:
+            runs.append([block, 1])
+    return runs
+
+
 # --- the sender: the guard ---------------------------------------------------------------------------------------
 
 def history_path(history, timeline):
@@ -199,11 +333,9 @@ def covered(summaries, timeline, lo, hi):
     return point >= hi
 
 
-def guard(facts, source):
-    """(ok, reasons): whether the summaries may stand in for reading B (guard v2, EXP-62).
-
-    `facts` is ACCEPT's "summary" from the receiver; `source` holds the server's identity (pg_controldata's), its
-    version, its summarize_wal setting, the backup's start LSN and timeline, its timeline history and summaries."""
+def cluster_reasons(facts, source):
+    """The guard's reasons that don't depend on where B lies in the server's history: B's identity and major version
+    against the server's, and the server's summaries."""
     reasons = []
     identity = source.get('identity') or {}
     for key in IDENTITY_KEYS:
@@ -216,6 +348,30 @@ def guard(facts, source):
         reasons.append('the server does not summarize WAL (summarize_wal is off)')
     if facts.get('major') is not None and facts['major'] != major:
         reasons.append(f'B is PostgreSQL {facts["major"]}, the server {major}')
+    return reasons
+
+
+def diverged_fork(facts, source):
+    """The LSN where the server's history leaves B's timeline, where B kept writing past it (an old primary after
+    a failover) and nothing else refuses B; else None."""
+    if cluster_reasons(facts, source):
+        return None
+    try:
+        end, timeline = parse_lsn(facts['end']), int(facts['timeline'])
+    except (KeyError, ValueError, TypeError, AttributeError):
+        return None
+    segment = next((seg for seg in history_path(source['history'], source['timeline']) if seg[0] == timeline), None)
+    return segment[2] if segment is not None and end > segment[2] < END else None
+
+
+def guard(facts, source, common=None):
+    """(ok, reasons): whether the summaries may stand in for reading B (guard v2, EXP-62).
+
+    `facts` is ACCEPT's "summary" from the receiver; `source` holds the server's identity (pg_controldata's), its
+    version, its summarize_wal setting, the backup's start LSN and timeline, its timeline history and summaries.
+    `common`, for a B that diverged (--diverged-basis), is the receiver's BASIS_WAL: the summaries are then read
+    from the redo point of C, the checkpoint before the fork, and B's WAL stands in for B's own changes."""
+    reasons = cluster_reasons(facts, source)
     try:
         redo, end, b_tli = parse_lsn(facts['redo']), parse_lsn(facts['end']), int(facts['timeline'])
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
@@ -225,6 +381,18 @@ def guard(facts, source):
     segment = next((seg for seg in path if seg[0] == b_tli), None)
     if segment is None:
         reasons.append(f'B\'s timeline {b_tli} is not on the server\'s history')
+    elif common is not None:
+        _, begin, switch = segment
+        checkpoint, redo = parse_lsn(common['checkpoint']), parse_lsn(common['redo'])
+        if not redo <= checkpoint < switch:
+            reasons.append(f'B\'s checkpoint {format_lsn(checkpoint)} (redo {format_lsn(redo)}) is not before the '
+                           f'fork at {format_lsn(switch)}')
+        if redo < begin:
+            reasons.append(f'the redo point of B\'s checkpoint before the fork is before timeline {b_tli} began on '
+                           f'the server\'s history')
+        if str(facts.get('data_checksum_version')) == '0' and not common.get('wal_log_hints'):
+            reasons.append('B has neither data checksums nor wal_log_hints on, so a hint bit B set after the fork '
+                           'is in no WAL (EXP-69b)')
     else:
         _, begin, switch = segment
         if end > min(switch, start):
@@ -238,6 +406,16 @@ def guard(facts, source):
         if gaps:
             reasons.append('the WAL summaries do not cover ' + ', '.join(gaps))
     return not reasons, reasons
+
+
+def merge_basis_blocks(plan, blocks):
+    """block_plan's plan with B's own blocks (BASIS_WAL's "blocks", relation fork paths and runs) added."""
+    for path, runs in blocks.items():
+        chosen, limit = plan.get(path, (set(), None))
+        for first, count in runs:
+            chosen.update(range(first, first + count))
+        plan[path] = (chosen, limit)
+    return plan
 
 
 def relation_path(tablespace, database, relfilenode, fork):
@@ -316,7 +494,43 @@ def check_decision(decision):
     return decision['use'], reasons
 
 
-def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gaps=0):
+def check_fork_point(value):
+    """FORK_POINT's fields (--diverged-basis): B's timeline and where the server's history leaves it."""
+    if (not isinstance(value, dict) or set(value) != {'timeline', 'fork'} or type(value['timeline']) is not int
+            or not isinstance(value['fork'], str)):
+        raise ProtocolError(f'FORK_POINT must be {{"timeline": int, "fork": "X/Y"}}, not {value!r}')
+    try:
+        return value['timeline'], parse_lsn(value['fork'])
+    except ValueError:
+        raise ProtocolError(f'FORK_POINT fork {value["fork"]!r} is not an LSN') from None
+
+
+def check_basis_wal(value):
+    """BASIS_WAL's fields: {"refused": why} or B's checkpoint before the fork, its records and blocks since."""
+    if isinstance(value, dict) and set(value) == {'refused'} and isinstance(value['refused'], str):
+        return value
+    keys = {'checkpoint', 'redo', 'records', 'blocks', 'seconds', 'wal_log_hints'}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise ProtocolError(f'BASIS_WAL must have the fields {sorted(keys)} or only "refused"')
+    try:
+        parse_lsn(value['checkpoint']), parse_lsn(value['redo'])
+    except (ValueError, AttributeError):
+        raise ProtocolError('BASIS_WAL checkpoint and redo must be LSNs') from None
+    if type(value['wal_log_hints']) is not bool or type(value['records']) is not int:
+        raise ProtocolError('BASIS_WAL wal_log_hints must be true or false, and records a count')
+    blocks = value['blocks']
+    if not isinstance(blocks, dict):
+        raise ProtocolError('BASIS_WAL blocks must map relation forks to runs')
+    for path, runs in blocks.items():
+        match = _RELATION.match(path) if isinstance(path, str) else None
+        if match is None or match.group(3) is not None or not isinstance(runs, list) or not all(
+                isinstance(run, list) and len(run) == 2 and all(type(n) is int and n >= 0 for n in run) and run[1] > 0
+                for run in runs):
+            raise ProtocolError(f'BASIS_WAL names {path!r} or its runs wrongly')
+    return value
+
+
+def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False):
     if type(read_ahead) is not int or read_ahead < 0:
         raise InvalidInput(f'read-ahead must be a whole number of threads, not {read_ahead!r}')
     if type(fill_gaps) is not int or fill_gaps < 0:
@@ -328,6 +542,8 @@ def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gap
             raise InvalidInput('--fill-gaps fills gaps between the fast path\'s chosen pages, so it needs --fast-path')
         if plan_out is not None:
             raise InvalidInput('--plan-out writes the fast path\'s plan, so it needs --fast-path')
+        if diverged_basis:
+            raise InvalidInput('--diverged-basis extends the fast path to an old primary, so it needs --fast-path')
         return
     if mode not in MODES:
         raise InvalidInput(f'--fast-path must be one of {", ".join(MODES)}, not {mode!r}')

@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-29 (midday): idea 1 built into pgdelta (`--diverged-basis`); EXP-71 pre-registered
+
+- **`--diverged-basis`** (sender, with `--fast-path summaries`; offered in HELLO, so other sessions' bytes are unchanged). It is for an old primary that kept writing after the server's timeline left its own, which the guard refused until now.
+  - **The exchange:** the sender names the fork (`FORK_POINT`). The receiver finds the last checkpoint before it in B's own WAL and lists every block B's WAL names from its redo point through B's end (`BASIS_WAL`).
+  - **What is sent:** those blocks join the summaries' blocks since that checkpoint, each the server's current copy, so none of the server's WAL is replayed.
+  - **The guard refuses** a B that wasn't stopped cleanly, whose WAL doesn't read through without a gap, that has neither checksums nor `wal_log_hints`, or whose WAL holds a record of an extension's resource manager or a Database or Tablespace record.
+  - **Finding the checkpoint:** windows ending at the fork, each twice as long as the last, so the receiver doesn't read all the WAL B keeps (EXP-67's old primary keeps up to 40 GB).
+  - **Tests:** a real failover, a standby promoted while its primary kept writing, both sides changing rows and creating a table of the same name. The old primary took the fast path with 4,019 blocks from its WAL, and the copy matched the server and passed `pg_amcheck`. Without the option, and with its WAL removed, it was refused and hashed, and both copies matched too. Unit tests cover the guard, the window search and the messages.
+- **EXP-71 pre-registered:** idea 1 timed against `pg_rewind` and a re-clone on EXP-67's cells, with a new `union` arm in EXP-67's lab.
+  - **The deciding prediction:** hot10 takes at most 0.5 of `pg_rewind`'s time (the model gives about 0.2).
+  - **Uniform:** at most 0.75 of a re-clone's (about 0.57).
+
 ## 2026-10-29 (morning): EXP-70 done, `--fill-gaps 2` is the fast path's default
 
 - **EXP-70** (one session, 14 runs, all correct): all 6 predictions held.

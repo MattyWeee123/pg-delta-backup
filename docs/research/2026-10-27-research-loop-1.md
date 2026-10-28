@@ -133,3 +133,8 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 - **What binds now:** about 12 s of fixed costs per run (the guard's 4.7 s among them) plus the bytes sent at the disks' byte rate.
 - **The selector (idea 4)** should choose the fill from the link's and disks' rates, since where bytes cost more than operations, less filling is better.
 - **Next:** idea 1's prototype for the failover case, then the fast path's fixed costs.
+
+**Update, October 29: idea 1 built (`--diverged-basis`), EXP-71 pre-registered.**
+- **The build:** pgdelta's fast path now handles an old primary that kept writing after the fork, with B's own WAL standing in for B's changes since the last common checkpoint, as `pg_rewind` reads it. A real failover in the tests matched the server and passed `pg_amcheck`.
+- **EXP-71** times it against `pg_rewind` and a re-clone on EXP-67's cells.
+

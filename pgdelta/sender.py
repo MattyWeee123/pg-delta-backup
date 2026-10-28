@@ -68,6 +68,8 @@ class Inbox:
         self.accept = self.complete = self.error = None
         self.basis, self.leaves, self.blocks = {}, {}, {}
         self.subpage = False  # set once ACCEPT took the subpage_offer: BLOCK_DIGESTS may arrive
+        # --diverged-basis: set once FORK_POINT was sent, so one BASIS_WAL may arrive; then its reply.
+        self.basis_wal_expected, self.basis_wal = False, None
         self.closed = False
         # The sender's protocol timers (pgdelta.waits.WaitTimers); without them waits aren't timed.
         self.timers = timers
@@ -150,6 +152,8 @@ class Inbox:
             index, entries = protocol.decode_block_digests(payload)
             for node, blob in entries:
                 self.blocks[(index, node)] = blob
+        elif code == protocol.BASIS_WAL and self.basis_wal_expected and self.basis_wal is None:
+            self.basis_wal = fastpath.check_basis_wal(protocol.decode_json(payload, 'BASIS_WAL'))
         elif code == protocol.COMPLETE:
             self.complete = protocol.decode_json(payload, 'COMPLETE')
         else:
@@ -354,7 +358,7 @@ class _Sender:
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                  hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-                 fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0):
+                 fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False):
         self.started = time.perf_counter()
         # --read-ahead (EXP-64b): the fast path's chosen pages read on this many threads ahead of sending (0: one run
         # at a time in the sending thread, as in EXP-64); and what the reading did.
@@ -363,6 +367,8 @@ class _Sender:
         self.plan_out = plan_out
         # --fill-gaps (EXP-70): clean gaps of at most this many pages between chosen pages are sent too; how many.
         self.fill_gaps, self.pages_filled = fill_gaps, 0
+        # --diverged-basis (idea 1): offered in HELLO; for an old primary past the fork, what B's WAL added.
+        self.diverged_basis, self.diverged_counts = diverged_basis, None
         # --fast-path summaries (pgdelta.fastpath): offered in HELLO; `fast` is the summaries' block plan once the
         # guard let it run, and the listed files then go by fast_path's rules, B unread.
         self.fast_path, self.fast = fast_path, None
@@ -505,7 +511,7 @@ class _Sender:
 
     def _run(self):
         fastpath.check_mode(self.fast_path, self.source_kind, self.subpage, self.read_ahead, self.plan_out,
-                            self.fill_gaps)
+                            self.fill_gaps, self.diverged_basis)
         if self.source_kind not in datadir.SOURCE_KINDS:
             raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
                                f'not {self.source_kind!r}')
@@ -569,6 +575,8 @@ class _Sender:
             hello['subpage_offer'] = SUB_BLOCK
         if self.fast_path:
             hello['summary_offer'] = True
+            if self.diverged_basis:
+                hello['diverged_offer'] = True  # FORK_POINT may follow ACCEPT
         self._send_json(protocol.HELLO, hello)
         accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
         if offered is not None:
@@ -649,19 +657,41 @@ class _Sender:
         counts['summarized_lsn'] = (None if source['summarized_lsn'] is None
                                     else fastpath.format_lsn(source['summarized_lsn']))
         ok, reasons = fastpath.guard(facts, source)
+        common = None
+        fork = fastpath.diverged_fork(facts, source) if not ok and self.diverged_basis else None
+        if fork is not None and accept.get('diverged') is True:
+            common, ok, reasons = self._basis_wal(facts, source, fork)
         if ok:
+            redo = common['redo'] if common is not None else facts['redo']
             spans = fastpath.ranges(fastpath.history_path(source['history'], source['timeline']),
-                                    fastpath.parse_lsn(facts['redo']), source['start_lsn'])
+                                    fastpath.parse_lsn(redo), source['start_lsn'])
             rows = []
             for tli, start, end in source['summaries']:
                 if any(tli == t and start < hi and end > lo for t, lo, hi in spans):
                     rows += self.live.summary_rows(tli, start, end)
                     counts['summaries'] += 1
             self.fast = fastpath.block_plan(rows)
+            if common is not None:
+                fastpath.merge_basis_blocks(self.fast, common['blocks'])
             counts['summary_rows'], counts['relations'] = len(rows), len(self.fast)
         counts['used'], counts['reasons'] = ok, reasons
         counts['guard_seconds'] = time.perf_counter() - started
         self._send_json(protocol.SUMMARY_DECISION, {'use': ok, 'reasons': reasons})
+
+    def _basis_wal(self, facts, source, fork):
+        """--diverged-basis: FORK_POINT, the receiver's BASIS_WAL, and the guard on it: (reply, ok, reasons)."""
+        self.inbox.basis_wal_expected = True
+        self._send_json(protocol.FORK_POINT, {'timeline': int(facts['timeline']), 'fork': fastpath.format_lsn(fork)})
+        reply = self.inbox.wait(lambda: self.inbox.basis_wal, 'BASIS_WAL', 'accept')  # part of the handshake
+        counts = self.diverged_counts = {'fork': fastpath.format_lsn(fork)}
+        if 'refused' in reply:
+            counts['refused'] = reply['refused']
+            return None, False, [reply['refused']]
+        ok, reasons = fastpath.guard(facts, source, common=reply)
+        counts.update({key: reply[key] for key in ('checkpoint', 'redo', 'records', 'wal_log_hints')},
+                      relations=len(reply['blocks']), blocks=sum(n for runs in reply['blocks'].values() for _, n in runs),
+                      receiver_seconds=reply['seconds'])
+        return reply, ok, reasons
 
     def _send_fast(self, entries):
         """--fast-path summaries: each listed file in order. Where the summaries chose its pages, only those go, read
@@ -1184,7 +1214,9 @@ class _Sender:
                                              else round(self.ahead.wait_seconds, 6)},
                               # --fill-gaps: pages_chosen counts the pages filled too; absent without it.
                               **({'fill_gaps': {'gap_pages': self.fill_gaps, 'pages_filled': self.pages_filled}}
-                                 if self.fill_gaps else {})}}
+                                 if self.fill_gaps else {}),
+                              # --diverged-basis: offered; for a B past the fork, what its own WAL added.
+                              **({'diverged_basis': self.diverged_counts or {}} if self.diverged_basis else {})}}
                if self.fast_path else {}),
         }
 
@@ -1206,7 +1238,7 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-               fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0):
+               fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -1243,8 +1275,10 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     of the sending thread (0: one run at a time in it). `plan_out`, a path, receives the fast path's plan as JSON
     where it runs (_write_plan). `fill_gaps` pages: clean gaps of at most that many pages between the fast path's
     chosen pages are sent too (fastpath.fill_gaps), so fewer, larger reads and writes carry them.
+    `diverged_basis` extends the fast path to a B that kept writing after the server's timeline left its own (an old
+    primary after a failover): the blocks B's own WAL names since the checkpoint before the fork are sent too.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
                    pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, fast_path,
-                   read_ahead, plan_out, fill_gaps).run()
+                   read_ahead, plan_out, fill_gaps, diverged_basis).run()

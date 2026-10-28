@@ -1,10 +1,13 @@
 """The WAL-summary fast path (pgdelta.fastpath, --fast-path summaries): its guard and page choice, and refreshes of
-a real PostgreSQL 17 primary's old copy, one cleanly stopped (the fast path runs) and one crashed (it is refused)."""
+a real PostgreSQL 17 primary's old copy, one cleanly stopped (the fast path runs) and one crashed (it is refused);
+and an old primary after a failover, with and without --diverged-basis (idea 1)."""
 import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -81,6 +84,88 @@ class Guard(unittest.TestCase):
     def test_malformed_facts_are_a_protocol_error(self):
         with self.assertRaises(ProtocolError):
             fastpath.guard({'timeline': 1}, source())
+
+
+class Diverged(unittest.TestCase):
+    """--diverged-basis (idea 1): an old primary that kept writing on timeline 1 after the server left it at 0/3000000."""
+    HISTORY = {'00000002.history': '1\t0/3000000\tno recovery target specified\n'}
+    SUMMARIES = [(1, L('0/1000000'), L('0/3000000')), (2, L('0/3000028'), L('0/8000000'))]
+    COMMON = {'checkpoint': '0/2400000', 'redo': '0/2300000', 'records': 9, 'seconds': 0.1, 'wal_log_hints': False,
+              'blocks': {'base/5/16384': [[3, 2]], 'base/5/16384_vm': [[0, 1]]}}
+
+    def server(self, **changes):
+        return source(timeline=2, history=self.HISTORY, summaries=self.SUMMARIES, **changes)
+
+    def test_the_fork_is_found_only_for_a_copy_past_it(self):
+        self.assertEqual(fastpath.diverged_fork(FACTS, self.server()), L('0/3000000'))
+        self.assertIsNone(fastpath.diverged_fork({**FACTS, 'end': '0/2800000'}, self.server()))  # an ancestor
+        self.assertIsNone(fastpath.diverged_fork(FACTS, source()))  # the server is still on B's timeline
+        self.assertIsNone(fastpath.diverged_fork({**FACTS, 'timeline': 3}, self.server()))  # not on its history
+        self.assertIsNone(fastpath.diverged_fork({**FACTS, 'system_identifier': '8'}, self.server()))  # refused anyway
+        self.assertIsNone(fastpath.diverged_fork(FACTS, self.server(summarize_wal=False)))
+
+    def test_the_checkpoint_before_the_fork_lets_it_run_from_its_redo_point(self):
+        self.assertEqual(fastpath.guard(FACTS, self.server(), common=self.COMMON), (True, []))
+        # Summaries from 0/1000000 only: from 0/2300000 they still cover; from a redo point before them they don't.
+        ok, reasons = fastpath.guard(FACTS, self.server(), common={**self.COMMON, 'redo': '0/0800000'})
+        self.assertFalse(ok)
+        self.assertIn('do not cover', reasons[0])
+
+    def test_a_checkpoint_past_the_fork_or_no_hint_protection_is_refused(self):
+        ok, reasons = fastpath.guard(FACTS, self.server(), common={**self.COMMON, 'checkpoint': '0/3100000'})
+        self.assertFalse(ok)
+        self.assertIn('not before the fork', reasons[0])
+        unprotected = {**FACTS, 'data_checksum_version': 0}
+        server = self.server(identity={**IDENTITY, 'data_checksum_version': 0})
+        ok, reasons = fastpath.guard(unprotected, server, common=self.COMMON)
+        self.assertFalse(ok)
+        self.assertIn('wal_log_hints', reasons[0])
+        self.assertTrue(fastpath.guard(unprotected, server, common={**self.COMMON, 'wal_log_hints': True})[0])
+
+    def test_b_s_blocks_join_the_summaries_plan(self):
+        plan = fastpath.merge_basis_blocks(fastpath.block_plan([(1663, 5, 16384, 0, 9, False)]),
+                                           self.COMMON['blocks'])
+        self.assertEqual(plan, {'base/5/16384': ({3, 4, 9}, None), 'base/5/16384_vm': ({0}, None)})
+        self.assertEqual(fastpath.block_runs([1, 2, 3, 7, 9, 10]), [[1, 3], [7, 1], [9, 2]])
+
+    def test_the_checkpoint_before_the_fork_is_sought_back_from_it_in_doubling_windows(self):
+        """A stand-in pg_waldump: checkpoints at 0/1800000 (redo 0/1700000) and 0/5800000, the fork at 0/6400000."""
+        with tempfile.TemporaryDirectory() as temp:
+            fake, calls = Path(temp) / 'pg_waldump', Path(temp) / 'calls'
+            fake.write_text(f'''#!{sys.executable}
+import sys
+start = sys.argv[sys.argv.index('--start') + 1]
+open({str(calls)!r}, 'a').write(start + '\\n')
+high, low = start.split('/')
+for at, redo in (('0/1800000', '0/1700000'), ('0/5800000', '0/5700000'), ('0/6800000', '0/6700000')):
+    h, l = at.split('/')
+    if (int(h, 16) << 32 | int(l, 16)) >= (int(high, 16) << 32 | int(low, 16)):
+        print(f'rmgr: XLOG len (rec/tot): 148/148, tx: 0, lsn: {{at}}, prev 0/0, desc: CHECKPOINT_ONLINE redo {{redo}}; tli 1')
+''')
+            fake.chmod(0o755)
+            seg = 16 << 20
+            found = fastpath.last_checkpoint_before(fake, temp, 1, 0, L('0/6400000'), seg)
+            self.assertEqual(found, ((L('0/5800000'), L('0/5700000')), None))
+            self.assertEqual(calls.read_text().split(), ['0/6000000', '0/5000000'])  # 1 segment, then 2
+            calls.unlink()
+            found = fastpath.last_checkpoint_before(fake, temp, 1, L('0/2000000'), L('0/5000000'), seg)
+            self.assertIsNone(found[0])  # none from B's oldest segment on
+            self.assertIn('no checkpoint before the fork', found[1])
+            self.assertEqual(calls.read_text().split(), ['0/5000000', '0/4000000', '0/2000000'])
+
+    def test_messages_are_checked(self):
+        self.assertEqual(fastpath.check_fork_point({'timeline': 1, 'fork': '0/3000000'}), (1, L('0/3000000')))
+        self.assertEqual(fastpath.check_basis_wal({'refused': 'why'}), {'refused': 'why'})
+        self.assertEqual(fastpath.check_basis_wal(self.COMMON), self.COMMON)
+        for bad in ({'timeline': '1', 'fork': '0/1'}, {'timeline': 1, 'fork': 'x'}, {'timeline': 1}):
+            with self.assertRaises(ProtocolError):
+                fastpath.check_fork_point(bad)
+        for blocks in ({'base/5/16384.1': [[0, 1]]}, {'pg_wal/x': [[0, 1]]}, {'base/5/16384': [[0, 0]]},
+                       {'base/5/16384': [[-1, 1]]}):
+            with self.assertRaises(ProtocolError):
+                fastpath.check_basis_wal({**self.COMMON, 'blocks': blocks})
+        with self.assertRaises(InvalidInput):
+            fastpath.check_mode(None, 'live', False, diverged_basis=True)
 
 
 class Pages(unittest.TestCase):
@@ -338,6 +423,115 @@ class RealServer(unittest.TestCase):
         self.assertIn('not stopped cleanly', fast['reasons'][0])
         self.assertEqual(stats['receiver']['fsync_mode'], 'main')  # auto: no lineage facts, so the main loop
         self.assertGreater(stats['receiver']['bytes_written']['by_message_type']['BASIS_NODES']['frames'], 0)
+        self.check_copy(target)
+
+
+@unittest.skipUnless(available() and all((PG_BIN / tool).exists() for tool in ('pgbench', 'pg_waldump', 'pg_basebackup')),
+                     SKIP_REASON)
+class FailedOver(unittest.TestCase):
+    """--diverged-basis (idea 1): a primary P and its standby; the standby promoted (S, timeline 2) while P kept
+    writing on timeline 1, then P stopped cleanly. After the fork each side updated other rows and created its own
+    table of the same name (the promoted side's OIDs start past the range P had reserved, so their files differ)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temp.name)
+        cls.sockets = Path(tempfile.mkdtemp(prefix='pgo'))
+        cls.env = dict(os.environ, LC_ALL='C', LANG='C')
+        primary, cls.source = cls.root / 'P', cls.root / 'S'
+        cls.cmd([PG_BIN / 'initdb', '-D', primary, '-U', 't', '-A', 'trust', '--no-sync', '--data-checksums'])
+        with open(primary / 'postgresql.conf', 'a') as conf:
+            conf.write('summarize_wal = on\nwal_keep_size = 512MB\n')
+        cls.ctl(primary, 'start', 5434)
+        cls.cmd([PG_BIN / 'pgbench', '-i', '-q', '-s', 2, '-h', cls.sockets, '-p', 5434, '-U', 't', 'postgres'])
+        cls.cmd([PG_BIN / 'pg_basebackup', '-D', cls.source, '-h', cls.sockets, '-p', 5434, '-U', 't',
+                     '-X', 'stream', '-c', 'fast', '-R'])
+        cls.ctl(cls.source, 'start', 5432)
+        cls.sql('CHECKPOINT', 5434)
+        cls.sql('UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid % 97 = 0', 5434)  # common history
+        lsn = cls.sql('SELECT pg_current_wal_lsn()', 5434)
+        for _ in range(600):
+            if cls.sql(f"SELECT pg_last_wal_replay_lsn() >= '{lsn}'", 5432) == 't':
+                break
+            time.sleep(0.05)
+        cls.cmd([PG_BIN / 'pg_ctl', '-D', cls.source, '-w', 'promote'])
+        # P, now the old primary, keeps writing on timeline 1: updates, a new table, and reads that set hint bits.
+        cls.sql('UPDATE pgbench_accounts SET abalance = -7 WHERE aid % 53 = 0', 5434)
+        cls.sql('CREATE TABLE side AS SELECT g, repeat(md5(g::text), 3) AS v FROM generate_series(1, 6000) g', 5434)
+        cls.sql('SELECT count(*) FROM pgbench_accounts WHERE abalance = -7', 5434)
+        cls.ctl(primary, 'stop', 5434)
+        shutil.copytree(primary, cls.root / 'old')
+        # S writes its own changes and its own table after the fork.
+        cls.sql('UPDATE pgbench_accounts SET abalance = abalance + 3 WHERE aid % 41 = 0')
+        cls.sql('CREATE TABLE side AS SELECT g FROM generate_series(1, 700) g')
+        cls.sql('CHECKPOINT')
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.ctl(cls.source, 'stop', 5432, check=False, mode='immediate')
+        cls.ctl(cls.root / 'P', 'stop', 5434, check=False, mode='immediate')
+        shutil.rmtree(cls.sockets, True)
+        cls.temp.cleanup()
+
+    cmd, ctl, sql = (RealServer.__dict__[name] for name in ('cmd', 'ctl', 'sql'))
+
+    STATE = ("SELECT md5(string_agg(aid || ':' || abalance, ',' ORDER BY aid)) || '/' || "
+             "(SELECT count(*) || ':' || sum(g) FROM side) FROM pgbench_accounts")
+
+    def refresh(self, name, *extra, prepare=None):
+        target = self.root / name
+        shutil.copytree(self.root / 'old', target)
+        if prepare is not None:
+            prepare(target)
+        stats_path = self.root / f'{name}.json'
+        result = subprocess.run(python_command(
+            'local', '--source', self.source, '--source-kind', 'live', '--pg-controldata', CONTROLDATA,
+            '--pg-conn', f'host={self.sockets} port=5432 user=t dbname=postgres', '--basis', target, '--in-place',
+            '--fast-path', 'summaries', '--stats-json', stats_path, *extra), capture_output=True, text=True,
+            cwd=REPO_ROOT, env=subprocess_env(), timeout=300)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return target, json.loads(stats_path.read_text())
+
+    def check_copy(self, target):
+        self.ctl(target, 'start', 5433)
+        try:
+            self.assertEqual(self.sql(self.STATE, 5433), self.sql(self.STATE))
+            amcheck = self.cmd([PG_BIN / 'pg_amcheck', '-h', self.sockets, '-p', 5433, '-U', 't', '--all',
+                                    '--heapallindexed', '--install-missing'], check=False)
+            self.assertEqual(amcheck.returncode, 0, amcheck.stdout + amcheck.stderr)
+        finally:
+            self.ctl(target, 'stop', 5433, check=False)
+
+    def test_the_old_primary_takes_the_fast_path_with_its_own_wal(self):
+        target, stats = self.refresh('diverged', '--diverged-basis')
+        fast, received = stats['fast_path'], stats['receiver']['fast_path']
+        self.assertTrue(fast['used'], fast['reasons'])
+        diverged = fast['diverged_basis']
+        self.assertLess(L(diverged['checkpoint']), L(diverged['fork']))
+        self.assertGreater(diverged['blocks'], 0)
+        self.assertEqual(received['diverged_basis']['blocks'], diverged['blocks'])
+        self.assertLess(stats['pages']['sent'], stats['pages']['total'])
+        self.assertNotIn('BASIS_NODES', stats['receiver']['bytes_written']['by_message_type'])  # B never hashed
+        self.check_copy(target)
+
+    def test_without_the_option_the_old_primary_is_refused_and_hashed(self):
+        target, stats = self.refresh('refused')
+        self.assertFalse(stats['fast_path']['used'])
+        self.assertIn('past where', stats['fast_path']['reasons'][0])
+        self.assertNotIn('diverged_basis', stats['fast_path'])
+        self.check_copy(target)
+
+    def test_an_old_primary_without_the_wal_since_the_checkpoint_is_refused_and_hashed(self):
+        def drop_old_wal(target):
+            segments = sorted(p for p in (target / 'pg_wal').iterdir() if p.name.startswith('00000001'))
+            for path in segments[:-1]:  # only the segment holding the shutdown checkpoint stays
+                path.unlink()
+        target, stats = self.refresh('no-wal', '--diverged-basis', prepare=drop_old_wal)
+        fast = stats['fast_path']
+        self.assertFalse(fast['used'])
+        self.assertIn('refused', fast['diverged_basis'])
+        self.assertEqual(fast['reasons'], [fast['diverged_basis']['refused']])
         self.check_copy(target)
 
 
