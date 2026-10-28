@@ -4,10 +4,14 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (13:43 UTC): EXP-72 done, TLS costs about 2% on the fixed transport
 
-
-
-
+- **Sign-in:** `gcloud`'s stored credentials still failed to refresh at first, in the owner's terminal too. A sign-in at 12:54 UTC took, and both pipelines started at 12:55 (EXP-74's after a fix: its script wasn't executable).
+- **Capacity:** every us-central1 zone was out of `n2-standard-8` VMs with local SSDs. The pipeline retried every 15 minutes and got us-central1-a, the registered region, on its third try. EXP-74's ha set got us-west1-b and -c, EXP-70's zones.
+- **EXP-72 (every prediction held):** inside pgdelta's own TLS, a 2.1 GB refresh took 1.018 of its in-clear time at 2 Gbit/s and 60 ms (bar 1.10), and 1.024 at 5 Gbit/s (bar 1.20). EXP-58 measured 1.033 and 1.148 on the old transport.
+  - TLS added 0.3% to the wire bytes and a 69 ms handshake. All 12 runs passed, and the controls were within 2.3% of EXP-58's.
+  - **Reading:** most of EXP-58's cost at 5 Gbit/s was the old transport, not the encryption. The two speeds' costs are within run-to-run spread, so this says "at most a few per cent", not 1.8 against 2.4.
+  - **Applied as registered:** pgdelta's README and RESULTS give EXP-72's figures in place of EXP-58's "likely an upper bound", and EXP-58's note points to EXP-72. O6 stays met.
 
 ## 2026-10-28 (12:40 UTC): EXP-74 pre-registered, the selector's model (idea 4); VM work waits for gcloud
 
