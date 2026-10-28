@@ -4,6 +4,17 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (21:28 UTC): EXP-79 done (deciding held within rule 11's band); EXP-79b pre-registered
+
+- **The guard on the VMs, with EXP-78's unsorted reading:** 0.64–0.69 µs per summary row in every cell, against 1.15–1.30 µs. That is 0.531 (uniform), 0.541 (scatter12) and **0.567 (scatterall12, deciding; bar 0.60)** of its earlier times. uniform's refresh fell from 42.64 to 42.04 s.
+- **Predictions 3 and 4 failed, both by design.**
+  - **scatterall12 ran after scatter12,** which had updated the same rows, so its plan chose 84% of the pages, not 96%.
+  - **The source wrote 5.86 and 2.01 GB** during its first two runs (most likely autovacuum), against 0.03–0.14 GB per run in EXP-77. Those were the slow runs.
+  - **scatter12's baseline row count** came from a session with another history.
+  - The clean runs are reported only. scatter12 with the current code took 0.604 of `pg_basebackup` at 53% of the pages.
+- **EXP-79b, rule 11's second session:** uniform then scatterall12, as in EXP-75–77. `analysis/exp79.py` gained `--patterns` and `--below`, and EXP-79's scores are unchanged.
+- **Also:** the owner asked what tools the project uses. Kubernetes once (EXP-44, Omni's operator on a short-lived GKE cluster); Docker for the Omni probes (EXP-40 to EXP-43), the early benchmark harness and one CI job; otherwise plain Compute Engine VMs driven by `gcloud` and shell, `tc netem`, `pgbench`, and the incumbent backup tools.
+
 ## 2026-10-28 (20:11 UTC): EXP-79 pre-registered: the guard on the VMs, and the break-even with the current code
 
 - **Why:** EXP-78's change was measured locally only (0.460). On the VMs the guard reads 1.15–1.30 µs per summary row, against the Mac's 0.51.

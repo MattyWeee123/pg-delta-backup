@@ -1,0 +1,6 @@
+pattern,arm,runs,seconds,guard_s,summary_rows,share_chosen,guard_us_per_row
+uniform,fast8wf2,2,42.04,1.015,1470205,0.392,0.69
+scatter12,fast8w,2,58.02,1.575,2449082,0.533,0.643
+scatter12,full,2,96.01,,,,
+scatterall12,fast8w,2,129.99,3.009,4609832,0.843,0.653
+scatterall12,full,2,109.41,,,,

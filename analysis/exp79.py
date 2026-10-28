@@ -2,6 +2,8 @@
 pg_basebackup re-placed with the fast path as it now is (docs/experiments/EXP-79-guard-on-vms.md).
 
     .venv/bin/python analysis/exp79.py [--results results/exp04/exp79]
+    .venv/bin/python analysis/exp79.py --results results/exp04/exp79b --patterns uniform,scatterall12 \
+        --below results/exp04/exp79 --out docs/experiments/data/exp79b-cells.csv --figure exp79b-guard   (EXP-79b)
 
 Cells: per pattern and arm, the median of the runs (exp68.runs); each fast run's guard and summary rows from its
 statistics. Scores 1 (deciding: scatterall12's guard at most 0.60 of EXP-75 to EXP-77's 5.31 s), 2 (uniform's guard at
@@ -10,6 +12,9 @@ pg_basebackup within 1% of EXP-77's 101.25 s), 4 (the summary rows within 1% of 
 read the same) and 5 (every run exits 0; every fast run used the fast path and passed the copy's check). Reports
 the fast path over pg_basebackup in scatter12 and scatterall12 and their interpolated crossing. Writes
 docs/experiments/data/exp79-cells.csv and the figure exp79-guard.
+
+EXP-79b, rule 11's second session (docs/experiments/EXP-79b-guard-second-session.md): --patterns limits the cells
+scored to those run, and --below takes scatter12's two medians (the point below the crossing) from EXP-79's results.
 """
 from __future__ import annotations
 
@@ -51,9 +56,17 @@ def main(argv=None):
     ap.add_argument('--results', default=str(ROOT / 'results' / 'exp04' / 'exp79'))
     ap.add_argument('--out', default=str(ROOT / 'docs' / 'experiments' / 'data' / 'exp79-cells.csv'))
     ap.add_argument('--figure', default='exp79-guard')
+    ap.add_argument('--patterns', default=','.join(ARMS))
+    ap.add_argument('--below', help="another session's results to take scatter12's medians from (EXP-79b)")
     a = ap.parse_args(argv)
+    for pattern in [p for p in ARMS if p not in a.patterns.split(',')]:
+        del ARMS[pattern]
     results = Path(a.results)
     rows, guard = exp68.runs(results), guards(results)
+    if a.below:  # scatter12's runs from the other session, for the break-even only
+        below = Path(a.below)
+        rows += [dict(r, run=('below', r['run'])) for r in exp68.runs(below) if r['pattern'] == 'scatter12']
+        guard.update({('below', run): value for run, value in guards(below).items()})
     cells = []
     for pattern, arms in ARMS.items():
         for arm in arms:
@@ -71,6 +84,8 @@ def main(argv=None):
             print(cell)
     by = {(c['pattern'], c['arm']): c for c in cells}
     fast = {p: by.get((p, ARMS[p][0])) for p in ARMS}
+    fast.setdefault('scatter12', None)
+    fast.setdefault('scatterall12', None)
     ratio = {p: round(fast[p]['guard_s'] / BEFORE[p][0], 3) for p in ARMS if fast[p] and fast[p].get('guard_s')}
     one = ratio.get('scatterall12') is not None and ratio['scatterall12'] <= GUARD_BAR
     print(f"1 (deciding). {'HELD' if one else 'FAILED'}: scatterall12's guard {fast['scatterall12'] and fast['scatterall12'].get('guard_s')} s, "
@@ -81,7 +96,7 @@ def main(argv=None):
     print(f"2. {'HELD' if two else 'FAILED'}: uniform's guard {ratio.get('uniform')} of {BEFORE['uniform'][0]} s "
           f"(bar {GUARD_BAR}); scatter12's {ratio.get('scatter12')} (reported)")
     full = by.get(('scatterall12', 'full'))
-    three = (fast['scatterall12'] is not None and full is not None
+    three = (fast.get('scatterall12') is not None and full is not None
              and fast['scatterall12']['seconds'] <= EXP77_FAST_S - SAVING_S
              and abs(full['seconds'] / EXP77_FULL_S - 1) <= FULL_BAND)
     print(f"3. {'HELD' if three else 'FAILED'}: scatterall12's fast path {fast['scatterall12'] and fast['scatterall12']['seconds']} s "
@@ -95,8 +110,18 @@ def main(argv=None):
             and all(r['fast_used'] and r['match'] is True for r in fast_rows))
     print(f"5. {'HELD' if five else 'FAILED'}: statuses {sorted({r['status'] for r in rows})}; fast used and matched "
           f"{all(r['fast_used'] and r['match'] is True for r in fast_rows)} ({len(fast_rows)} runs)")
+    if a.below:
+        for arm in ('fast8w', 'full'):
+            mine = [r for r in rows if r['pattern'] == 'scatter12' and r['arm'] == arm]
+            cell = {'pattern': 'scatter12', 'arm': arm, 'runs': len(mine), 'seconds': exp68.median(mine, 'seconds'),
+                    'from': str(a.below)}
+            g = [guard[r['run']] for r in mine if r['run'] in guard]
+            if g:
+                cell['share_chosen'] = round(statistics.median(x[2] for x in g), 3)
+            by[('scatter12', arm)] = cell
+        fast['scatter12'] = by[('scatter12', 'fast8w')]
     points = [(fast[p]['share_chosen'], fast[p]['seconds'] / by[(p, 'full')]['seconds'])
-              for p in ('scatter12', 'scatterall12') if fast[p] and (p, 'full') in by]
+              for p in ('scatter12', 'scatterall12') if fast.get(p) and (p, 'full') in by]
     if len(points) == 2:
         (x0, y0), (x1, y1) = points
         cross = x0 + (1 - y0) * (x1 - x0) / (y1 - y0) if y1 != y0 else None
