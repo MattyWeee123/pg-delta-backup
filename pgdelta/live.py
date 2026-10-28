@@ -612,6 +612,24 @@ class LiveSource:
             f"'{format_lsn(start)}', '{format_lsn(end)}')")
         return [tuple(row) for row in rows]
 
+    def summary_blocks(self, summaries):
+        """The contents of `summaries` [(timeline, start, end)] in one query, grouped per relation fork on the server:
+        (how many summary rows they hold, [(tablespace, database, relfilenode, fork, its distinct blocks in order,
+        its lowest limit block or None)]). A block in several summaries comes once, so less crosses psql than one
+        row per summary row (summary_rows): EXP-73 and EXP-73b."""
+        if not summaries:
+            return 0, []
+        values = ', '.join(f"({int(timeline)}, '{format_lsn(start)}'::pg_lsn, '{format_lsn(end)}'::pg_lsn)"
+                           for timeline, start, end in summaries)
+        rows, groups = self.session.value(
+            "SELECT json_build_array(coalesce(sum(n), 0), coalesce(json_agg(json_build_array(ts, db, rel, fork, "
+            "blocks, lim)), '[]'::json)) FROM (SELECT c.reltablespace AS ts, c.reldatabase AS db, c.relfilenode AS rel, "
+            "c.relforknumber AS fork, array_agg(DISTINCT c.relblocknumber ORDER BY c.relblocknumber) FILTER (WHERE NOT "
+            "c.is_limit_block) AS blocks, min(c.relblocknumber) FILTER (WHERE c.is_limit_block) AS lim, count(*) AS n "
+            f"FROM (VALUES {values}) AS s(tli, start_lsn, end_lsn) CROSS JOIN LATERAL "
+            "pg_wal_summary_contents(s.tli, s.start_lsn, s.end_lsn) AS c GROUP BY 1, 2, 3, 4) AS g")
+        return int(rows), [tuple(group) for group in groups]
+
     def select(self):
         """What is sent from the data directory (pgdelta.datadir.select_live)."""
         return datadir.select_live(self.root, self.identity)

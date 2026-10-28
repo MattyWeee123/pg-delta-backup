@@ -176,6 +176,17 @@ class Pages(unittest.TestCase):
     def pages(self, path, size, basis_size, **kw):
         return fastpath.pages_to_send(path, size, basis_size, self.PLAN, 8192, 131072, **kw)
 
+    def test_the_grouped_plan_is_the_plan_of_every_row(self):
+        # Rows from two summaries (a block in both, a limit in each, one fork with only a limit) against the same
+        # rows grouped per relation fork on the server (live.summary_blocks; EXP-73b).
+        rows = [(1663, 5, 16384, 0, 3, False), (1663, 5, 16384, 0, 9, False), (1663, 5, 16384, 0, 3, False),
+                (1663, 5, 16390, 0, 7, True), (1663, 5, 16390, 0, 4, True), (1663, 5, 16390, 0, 2, False),
+                (1663, 5, 16391, 1, 0, True), (1664, 0, 1262, 0, 0, False), (1700, 5, 1, 0, 0, False)]
+        groups = [(1663, 5, 16384, 0, [3, 9], None), (1663, 5, 16390, 0, [2], 4), (1663, 5, 16391, 1, None, 0),
+                  (1664, 0, 1262, 0, [0], None), (1700, 5, 1, 0, [0], None)]
+        self.assertEqual(fastpath.grouped_plan(groups), fastpath.block_plan(rows))
+        self.assertEqual(fastpath.grouped_plan([]), {})
+
     def test_listed_blocks_go_by_segment(self):
         self.assertEqual(self.pages('base/5/16384', 10 * 8192, 10 * 8192), ([3], False))
         self.assertEqual(self.pages('base/5/16384.1', 10 * 8192, 10 * 8192), ([3], False))
@@ -366,6 +377,28 @@ class RealServer(unittest.TestCase):
             self.assertEqual(amcheck.returncode, 0, amcheck.stdout + amcheck.stderr)
         finally:
             self.ctl(target, 'stop', port=5433, check=False)
+
+    def test_one_grouped_query_gives_the_plan_of_every_summary_row(self):
+        # The sender's one query grouped per relation fork (EXP-73b) against today's reading, row by row, over every
+        # summary here: the scattered updates, the truncation's limit block, the new table.
+        from pgdelta import live
+        session = live.Session(f'host={self.sockets} port=5432 user=t dbname=postgres', psql=PG_BIN / 'psql')
+        try:
+            source = live.LiveSource.__new__(live.LiveSource)
+            source.session = session
+            summaries = [(int(t), fastpath.parse_lsn(a), fastpath.parse_lsn(b)) for t, a, b in (
+                line.split('|') for line in self.sql('SELECT tli, start_lsn, end_lsn FROM pg_available_wal_summaries()')
+                .splitlines())]
+            rows = [row for summary in summaries for row in source.summary_rows(*summary)]
+            count, groups = source.summary_blocks(summaries)
+        finally:
+            session.close()
+        self.assertGreater(len(summaries), 1)
+        self.assertEqual(count, len(rows))
+        plan = fastpath.grouped_plan(groups)
+        self.assertEqual(plan, fastpath.block_plan(rows))
+        self.assertTrue(any(limit is not None for _, limit in plan.values()))  # the truncation is in there
+        self.assertEqual(source.summary_blocks([]), (0, []))
 
     def test_a_cleanly_stopped_copy_takes_the_fast_path_and_recovers_to_the_source(self):
         target, stats = self.refresh('fast', 'stale')

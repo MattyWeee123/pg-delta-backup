@@ -9,6 +9,17 @@ Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registrat
 
 
 
+## 2026-10-28 (11:40 UTC): EXP-73 and EXP-73b, the guard's summary reading halved
+
+- **Where the guard's time goes (EXP-73, local scale models):** it is the reading of the WAL summaries, linear in their rows. It costs 0.9 µs per row on the Mac and about 3.2 µs on the VMs (EXP-70: 22,000 to 1.46 M rows). The cost is spread over the server's JSON (44%), psql and `json.loads` (25%), and Python's tuples and sets (31%).
+- **EXP-73's deciding prediction failed:** B (one query grouped per relation fork on the server) took 0.547 of today's time, against a bar of 0.4. Every plan was identical.
+  - **Post-hoc:** the scale models had 1.51 rows per distinct block, against the VMs' 2.4.
+- **EXP-73b** matched the duplication (20 checkpointed batches and the lab's state check: 2.40 rows per block).
+  - **Deciding, held in two sessions under rule 11:** 0.456 and 0.472 of today's time at scale 320, with all 9 plans identical.
+  - **EXP-73's post-hoc model failed out of sample** (0.530 against 0.344), because the server still reads and sorts every row.
+- **Applied as registered:** the sender reads the chosen summaries in one grouped query (`live.summary_blocks`, `fastpath.grouped_plan`). A unit test and a real-server test show it builds today's plan, and every fast-path test passes on it.
+  - **Projected for EXP-70's scattered cell:** about 4.7 → 2.2 s of guard, or 5% of the refresh. Not measured yet; the next VM session times it, with EXP-72.
+
 ## 2026-10-28 (10:30 UTC): EXP-72 pre-registered (TLS's cost on the fixed transport); the console checked
 
 - **EXP-72** repeats EXP-58's design on the fixed TLS transport, with seed 720. EXP-58's figures were measured on the transport that broke OpenSSL's threading rule, so the docs call them "likely an upper bound", which is only inferred. EXP-72 measures instead.

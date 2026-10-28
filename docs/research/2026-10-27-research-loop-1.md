@@ -144,3 +144,7 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 - **Applied as registered:** `--diverged-basis` is on with `--fast-path`.
 - **Next:** the fast path's fixed costs (the guard took 5.4 s of the scattered session's 46.8 s), then the selector (idea 4).
 
+**Update, October 28: the fast path's fixed costs, first step (EXP-73, EXP-73b).**
+- **The guard's time is the summary reading,** linear in rows (about 3.2 µs per row on the VMs). It is not a fixed cost: at the scattered cell it is 4.7 s because there are 1.46 M rows.
+- **Reading them in one query grouped per relation fork halves it** with the VMs' duplication: 0.456 and 0.472 locally, with identical plans. It is now the sender's reading. On the VMs that projects to about 2.5 s saved per scattered refresh, still to be measured.
+- **Next:** time it on the VMs (with EXP-72), then the rest of the about 12 s per run with neither disk busy (EXP-70's post-hoc check): the start, the listing and the final syncs.

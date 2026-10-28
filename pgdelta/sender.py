@@ -665,15 +665,14 @@ class _Sender:
             redo = common['redo'] if common is not None else facts['redo']
             spans = fastpath.ranges(fastpath.history_path(source['history'], source['timeline']),
                                     fastpath.parse_lsn(redo), source['start_lsn'])
-            rows = []
-            for tli, start, end in source['summaries']:
-                if any(tli == t and start < hi and end > lo for t, lo, hi in spans):
-                    rows += self.live.summary_rows(tli, start, end)
-                    counts['summaries'] += 1
-            self.fast = fastpath.block_plan(rows)
+            chosen = [(tli, start, end) for tli, start, end in source['summaries']
+                      if any(tli == t and start < hi and end > lo for t, lo, hi in spans)]
+            # One query, grouped per relation fork on the server (EXP-73b); the same plan as block_plan of every row.
+            rows, groups = self.live.summary_blocks(chosen)
+            self.fast = fastpath.grouped_plan(groups)
             if common is not None:
                 fastpath.merge_basis_blocks(self.fast, common['blocks'])
-            counts['summary_rows'], counts['relations'] = len(rows), len(self.fast)
+            counts['summaries'], counts['summary_rows'], counts['relations'] = len(chosen), rows, len(self.fast)
         counts['used'], counts['reasons'] = ok, reasons
         counts['guard_seconds'] = time.perf_counter() - started
         self._send_json(protocol.SUMMARY_DECISION, {'use': ok, 'reasons': reasons})

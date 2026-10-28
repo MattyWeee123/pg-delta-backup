@@ -450,6 +450,17 @@ def block_plan(rows):
     return plan
 
 
+def grouped_plan(groups):
+    """block_plan's plan from summary rows grouped per relation fork on the server (live.summary_blocks):
+    (tablespace, database, relfilenode, fork, its distinct blocks or None, its lowest limit block or None)."""
+    plan = {}
+    for tablespace, database, relfilenode, fork, blocks, limit in groups:
+        path = relation_path(int(tablespace), int(database), int(relfilenode), int(fork))
+        if path is not None:
+            plan[path] = ({int(b) for b in blocks or ()}, None if limit is None else int(limit))
+    return plan
+
+
 def pages_to_send(path, size, basis_size, plan, block, blocks_per_segment, whole=False):
     """The pages of the listed file `path` to send, in order, and whether the whole file goes."""
     pages = -(-size // block)
