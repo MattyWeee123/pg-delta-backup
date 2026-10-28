@@ -70,11 +70,11 @@ def main(argv=None):
         cell = {'lag': lag, 'wal_since_fork_mb': round((lsn(info['source_lsn']) - lsn(fork['promoted_lsn'])) / 1e6, 1)}
         for arm in ARMS:
             mine = [r for r in rows if r['lag'] == lag and r['arm'] == arm and r['status'] == 0]
-            cell[f'{arm}_s'] = round(statistics.median(r['seconds'] for r in mine), 2) if mine else None
+            cell[f'{arm}_s'] = round(statistics.median(r['seconds'] for r in mine), 3) if mine else None
             cell[f'{arm}_runs'] = len(mine)
         rewinds = [r for r in rows if r['lag'] == lag and r['arm'] == 'rewind' and r['rewind_s'] is not None]
         if rewinds:
-            cell['pg_rewind_s'] = round(statistics.median(r['rewind_s'] for r in rewinds), 2)
+            cell['pg_rewind_s'] = round(statistics.median(r['rewind_s'] for r in rewinds), 3)
             copied = [r['rewind_copied_bytes'] for r in rewinds if r['rewind_copied_bytes']]
             cell['pg_rewind_copied_mb'] = round(statistics.median(copied) / 1e6, 1) if copied else None
         sent = [r['pages_sent'] for r in rows if r['lag'] == lag and r['arm'] == 'fast' and r['pages_sent']]
@@ -124,8 +124,8 @@ def figure(cells):
                        lw=0.6, label='of which pg_rewind itself' if i == 0 else None)
             ax.annotate(f'{value:.1f}', (x, value), textcoords='offset points', xytext=(0, 3), ha='center',
                         fontsize=8.5)
-    ax.set_xticks([1, 5], [f"hot rows updated 10x\n({cells['hot10']['wal_since_fork_mb']:,.0f} MB of WAL on S)",
-                           f"1% of rows, scattered\n({cells['uniform']['wal_since_fork_mb']:,.0f} MB of WAL on S)"])
+    ax.set_xticks([1, 5], [f"hot rows updated 10x\n({cells['hot10']['wal_since_fork_mb']:,.0f} MB of WAL since the fork)",
+                           f"1% of rows, scattered\n({cells['uniform']['wal_since_fork_mb']:,.0f} MB of WAL since the fork)"])
     ax.set_ylabel('seconds to a current copy (median)')
     ax.legend(fontsize=8.5, loc='upper left')
     ax.set_title('An 18 GB old primary after a failover: pg_rewind, pgdelta, a re-clone (8 GB VMs)', fontsize=10)

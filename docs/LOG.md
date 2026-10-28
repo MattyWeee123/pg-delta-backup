@@ -8,6 +8,25 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-28 (late morning): EXP-67 done, `pg_rewind` against pgdelta; EXP-68 running
+
+- **EXP-67:** all 3 predictions held, all 12 copies correct, on the `ha` set in us-west1; its VMs were deleted after the fetch.
+  - **Hot rows updated 10 times on the new primary:** `pg_rewind` and its replay took 36.4 s. pgdelta took 90.2 s (0.404); its guard refused the diverged copy, naming the fork, so it hashed. A re-clone took 90.9 s.
+  - **1% of rows scattered:** `pg_rewind` took 459.0 s, 84% of it replay (8,001 MB at 20.7 MB/s). pgdelta took 177.9 s (0.387), and a re-clone 91.1 s, which beat both.
+- **Two things the registration didn't model:**
+  - `pg_rewind` copied 353 and 4,077 MB beyond S's WAL since the fork, unexplained, since its file list wasn't recorded.
+  - Replay ran faster than EXP-65's for hot10 and slower for uniform.
+
+  Bounds in the write-up show neither changes a verdict.
+- **Two presentation changes after the data, scores unchanged:**
+  - the figure's "MB of WAL on S" now reads "since the fork";
+  - medians are kept to 3 decimals, so a label isn't rounded twice (177.8515 s had shown as 177.8).
+- **What follows:**
+  - **Idea 1 is next for the failover case:** both sides' block sets, sent once, never replayed. Its inferred time for hot10 is about 5 s against `pg_rewind`'s 36.4 s.
+  - **First, a local scale model:** it measures the blocks the old primary's WAL names, against `pg_rewind`'s `--debug` file map. Whatever inflated `pg_rewind`'s copy would inflate idea 1's too.
+  - **The selector (idea 4)** gains `pg_rewind` as a third option.
+- **EXP-68** launched on a fresh pair right after EXP-67's teardown.
+
 ## 2026-10-28 (morning): EXP-64b and EXP-66 done; EXP-67 running
 
 - **EXP-64b, overlapped source reads:** the deciding prediction held, and controls replicated EXP-64 within 2.4%; all 10 runs were correct.

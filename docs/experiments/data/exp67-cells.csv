@@ -1,0 +1,3 @@
+lag,fast_over_full,fast_over_rewind,fast_pages_sent,fast_runs,fast_s,full_runs,full_s,pg_rewind_copied_mb,pg_rewind_s,rewind_over_fast,rewind_over_full,rewind_runs,rewind_s,wal_since_fork_mb
+hot10,0.992,2.476,33975.0,2,90.227,2,90.924,2089.8,24.448,0.404,0.401,2,36.443,1737.4
+uniform,1.952,0.387,623827.0,2,177.851,2,91.097,12077.6,72.816,2.581,5.039,2,458.995,8001.1
