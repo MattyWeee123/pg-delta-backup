@@ -287,12 +287,14 @@ def check_decision(decision):
     return decision['use'], reasons
 
 
-def check_mode(mode, source_kind, subpage, read_ahead=0):
+def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None):
     if type(read_ahead) is not int or read_ahead < 0:
         raise InvalidInput(f'read-ahead must be a whole number of threads, not {read_ahead!r}')
     if mode is None:
         if read_ahead:
             raise InvalidInput('--read-ahead reads the fast path\'s chosen pages, so it needs --fast-path')
+        if plan_out is not None:
+            raise InvalidInput('--plan-out writes the fast path\'s plan, so it needs --fast-path')
         return
     if mode not in MODES:
         raise InvalidInput(f'--fast-path must be one of {", ".join(MODES)}, not {mode!r}')

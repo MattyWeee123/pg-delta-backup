@@ -110,6 +110,9 @@ class Pages(unittest.TestCase):
                                        ('summaries', 'live', False, -1)):
             with self.assertRaises(InvalidInput):
                 fastpath.check_mode(mode, kind, sub, ahead)
+        fastpath.check_mode('summaries', 'live', False, 0, 'plan.json')
+        with self.assertRaises(InvalidInput):
+            fastpath.check_mode(None, 'live', False, 0, 'plan.json')
 
 
 class ReadAhead(unittest.TestCase):
@@ -246,6 +249,22 @@ class RealServer(unittest.TestCase):
         self.assertTrue(fast['used'], fast['reasons'])
         self.assertEqual(fast['read_ahead']['threads'], 4)
         self.assertGreater(fast['read_ahead']['reads'], 0)
+        self.check_copy(target)
+
+    def test_the_fsync_worker_with_a_written_plan_gives_the_same_copy(self):
+        """EXP-68's arm: 8 reader threads, the receiver's syncs on its worker thread, and the plan written."""
+        plan_path = self.root / 'fast-worker-plan.json'
+        target, stats = self.refresh('fast-worker', 'stale', '--read-ahead', '8', '--fsync', 'worker',
+                                     '--plan-out', plan_path)
+        fast = stats['fast_path']
+        self.assertTrue(fast['used'], fast['reasons'])
+        self.assertEqual(stats['receiver']['fsync_mode'], 'worker')
+        plan = json.loads(plan_path.read_text())
+        chosen = [f for f in plan['files'] if not f['whole']]
+        self.assertEqual(len(chosen), fast['files_chosen'])
+        self.assertEqual(len(plan['files']) - len(chosen), fast['files_whole'])
+        self.assertEqual(sum(n for f in chosen for _, n in f['runs']), fast['pages_chosen'])
+        self.assertEqual(sum(len(f['runs']) for f in chosen), fast['read_ahead']['reads'])
         self.check_copy(target)
 
     def test_a_crashed_copy_is_refused_and_refreshed_by_hashing(self):

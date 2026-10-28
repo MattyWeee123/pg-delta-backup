@@ -197,6 +197,10 @@ def _compress_option(parser):
                              '64 MiB ahead of the sending thread, so the source\'s scattered reads overlap the '
                              'sending and the receiver\'s writes; 0 reads one run at a time in the sending thread '
                              '(EXP-64b) (default: %(default)s)')
+    parser.add_argument('--plan-out', type=Path, default=None, metavar='PATH',
+                        help='with --fast-path, where the guard lets it run: write its plan to PATH as JSON, each '
+                             'listed file with its size, whether it goes whole, and its chosen pages as [first, '
+                             'count] runs. For modelling the fast path\'s I/O (EXP-68)')
 
 
 def _hash_option(parser):
@@ -560,7 +564,7 @@ def _sender_kwargs(args, identity):
             'compress': None if getattr(args, 'compress', 'off') == 'off' else args.compress,
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
             'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
-            'read_ahead': getattr(args, 'read_ahead', 0)}
+            'read_ahead': getattr(args, 'read_ahead', 0), 'plan_out': getattr(args, 'plan_out', None)}
 
 
 def _source_identity(args):

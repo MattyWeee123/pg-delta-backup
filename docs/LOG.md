@@ -21,7 +21,11 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - **EXP-66's control "held"** only because the two errors cancelled. Its registered branch for a failed control is followed instead: instrument the write path before prototyping idea 2.
   - **Both figures** now label the registered numbers as such, and show the measured ones beside them.
 - **EXP-67** (`pg_rewind` for an old primary) launched on a fresh pair right after EXP-64b's teardown.
-- **Next: EXP-68,** pre-registered while EXP-67 runs: the receiver's syncs on a worker thread, 8 and 16 threads, the hot cell, disk counters, and the real page set.
+- **EXP-68 pre-registered** while EXP-67 runs. It tests the receiver's syncs on its worker thread (`--fsync worker`, built for EXP-10 and never measured beyond memory).
+  - **The deciding prediction:** 8 threads with the worker take at most 0.85 of EXP-64b's 102.8 s. Prediction 2: they beat a full copy.
+  - **Also:** 16 threads, the hot cell, and `/proc/diskstats` on both VMs per run.
+  - **EXP-66's rule re-applied** on the real page set, dumped by the new `--plan-out`.
+  - **Checked before registering:** the analysis was dry-run on synthetic results; a real-server test covers the exact arm (8 threads, the worker, a written plan); and EXP-66's refactored model reproduces its outputs byte for byte.
 
 ## 2026-10-28 (early): EXP-65 done, the fast path against archive replay; EXP-64b and EXP-66 running
 

@@ -79,7 +79,8 @@ def filled(starts, lengths, gap):
     return np.array(merged_lengths)
 
 
-def model(fio, seed=660):
+def cost_of(fio):
+    """The cost model: a write of b bytes takes max(1 / ops(b), b / the sequential write rate) seconds."""
     ops = np.array([fio[f'randwrite-{k}k-qd32']['ops_per_s'] for k in SIZES_K])
     seq = fio['seqwrite-1m-qd8']['mb_per_s'] * 1e6
     sizes = np.array(SIZES_K) * 1024
@@ -87,18 +88,28 @@ def model(fio, seed=660):
     def cost(nbytes):
         per_op = 1 / np.interp(nbytes, sizes, ops)  # flat beyond 128 KiB; the bandwidth term takes over
         return np.maximum(per_op, nbytes / seq)
+    return cost
 
-    chosen = np.random.default_rng(seed).random(TOTAL_PAGES) < UNIFORM_PAGES / TOTAL_PAGES
-    starts, lengths = runs_of(chosen)
-    rows = []
+
+def fill_rows(cost, starts, lengths):
+    """The modelled write time of runs (start, length) with clean gaps of up to g pages filled, g in GAPS. Starts are
+    pages numbered so that each segment holds SEGMENT_PAGES of them, since a fill never crosses a segment (EXP-68
+    reuses this for the real page set)."""
+    rows, pages = [], int(lengths.sum())
     for g in GAPS:
         merged = filled(starts, lengths, g)
         nbytes = merged * PAGE
         rows.append({'gap_pages': g, 'writes': len(merged), 'pages_written': int(merged.sum()),
-                     'extra_pages': int(merged.sum() - chosen.sum()),
+                     'extra_pages': int(merged.sum() - pages),
                      'mean_write_kib': round(float(nbytes.mean()) / 1024, 1),
                      'seconds': round(float(cost(nbytes).sum()), 1)})
     return rows
+
+
+def model(fio, seed=660):
+    chosen = np.random.default_rng(seed).random(TOTAL_PAGES) < UNIFORM_PAGES / TOTAL_PAGES
+    starts, lengths = runs_of(chosen)
+    return fill_rows(cost_of(fio), starts, lengths)
 
 
 def main(argv=None):

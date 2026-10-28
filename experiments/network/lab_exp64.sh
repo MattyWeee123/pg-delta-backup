@@ -9,7 +9,12 @@
 #         > /data/exp04-results/exp64-lab.log 2>&1 < /dev/null &
 # SCALE (default 600, about 18 GB) and OUT change the size and the results directory (the smoke: SCALE=20).
 # PATTERNS (default "hot uniform") and ARMS (default "hash fast full") pick the cells; an arm "fastN" is the fast
-# path with --read-ahead N (EXP-64b: PATTERNS=uniform ARMS="hash fast fast1 fast8 full").
+# path with --read-ahead N (EXP-64b: PATTERNS=uniform ARMS="hash fast fast1 fast8 full"), and "fastNw" the same with
+# the receiver's --fsync worker. ARMS_<pattern> (e.g. ARMS_hot) overrides ARMS for that pattern. Each run records
+# /proc/diskstats for /data on both VMs just before t0 and just after t1 (diskstats.txt). PLAN=1 has every fast run
+# write its plan (--plan-out); each run's digest of it goes in meta.json, and the first plan per pattern is kept as
+# plan-runs-PATTERN.json.gz (EXP-68: PATTERNS="hot uniform" ARMS_hot="fast fast8w"
+# ARMS_uniform="fast8 fast16 fast8w fast16w full" PLAN=1).
 set -u
 SRC=$1
 REPEATS=${2:-2}
@@ -17,6 +22,7 @@ SEED=${3:-640}
 SCALE=${SCALE:-600}
 PATTERNS=${PATTERNS:-hot uniform}
 ARMS=${ARMS:-hash fast full}
+PLAN=${PLAN:-0}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
 R=${OUT:-/data/exp04-results/exp64}
@@ -33,6 +39,9 @@ CONN="host=$ROOT/s port=5432 user=study dbname=postgres"
 on_src() { "${SSRC[@]}" "export PATH=\$PATH:/usr/sbin:/sbin; cd ~/pgd; $1"; }
 psrc() { on_src "$PGBIN/psql -h $ROOT/s -p 5432 -U study -d postgres -qAtX -v ON_ERROR_STOP=1 -c \"$1\""; }
 drop() { sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null; on_src "sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null"; }
+# The /proc/diskstats line of the device behind /data, on dest and on the source.
+DISK='awk -v d="$(basename "$(findmnt -no SOURCE /data)")" '"'"'$3 == d'"'"' /proc/diskstats'
+disks() { echo "dest $(eval "$DISK")"; echo "source $(on_src "$DISK")"; }
 STATE="SELECT count(*) || ':' || sum(abalance) FROM pgbench_accounts"
 WORKLOAD_ARGS="--root $ROOT --bin-dir $PGBIN --log-dir $W/logs --scale $SCALE --fraction 0.01 --seed 20261022 --hot-percent 1.0 --batch-size 100"
 
@@ -69,7 +78,8 @@ for pattern in $PATTERNS; do
   on_src "cat $W/workload-$pattern.json" > "$R/workload-$pattern.json"
   SOURCE_STATE=$(psrc "$STATE")
   echo "$(date -u +%T) $pattern: workload done; source state $SOURCE_STATE"
-  python3 - "$REPEATS" "$SEED" "$pattern" $ARMS > "$R/plan-$pattern.txt" <<'EOF'
+  arms_var="ARMS_$pattern"; arms=${!arms_var:-$ARMS}
+  python3 - "$REPEATS" "$SEED" "$pattern" $arms > "$R/plan-$pattern.txt" <<'EOF'
 import random, sys
 repeats, seed, pattern, arms = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4:]
 runs = [(arm, k) for arm in arms for k in range(repeats)]
@@ -87,20 +97,24 @@ EOF
       copied=$(python3 -c "print(round($c1 - $c0, 2))")
     fi
     drop
-    rstatus=null status=
+    disks | sed 's/^/before /' > "$d/diskstats.txt"
+    rstatus=null status= plan=null
     if [ "$arm" = full ]; then
       t0=$(date +%s.%N)
       $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$FULL" -X stream -c fast > "$d/full.log" 2>&1
       status=$?
       t1=$(date +%s.%N)
     else
+      threads=${arm#fast}; threads=${threads%w}
       case "$arm" in
         fast) fast='--fast-path summaries' ;;
-        fast*) fast="--fast-path summaries --read-ahead ${arm#fast}" ;;
+        fast*) fast="--fast-path summaries --read-ahead $threads" ;;
         *) fast= ;;
       esac
+      fsync=; [ "${arm%w}" != "$arm" ] && fsync='--fsync worker'
+      [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
-        --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 > "$d/receive.log" 2>&1 &
+        --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 $fsync > "$d/receive.log" 2>&1 &
       rp=$!
       for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
       t0=$(date +%s.%N)
@@ -112,6 +126,11 @@ EOF
       t1=$(date +%s.%N)
       on_src "cat /tmp/exp64-send.json" > "$d/send.json"
     fi
+    disks | sed 's/^/after /' >> "$d/diskstats.txt"
+    if [ "$PLAN" = 1 ] && [ "${arm#fast}" != "$arm" ] && on_src "test -s /tmp/exp64-plan.json"; then
+      plan="\"$(on_src "sha256sum /tmp/exp64-plan.json" | cut -c1-16)\""
+      [ -s "$R/plan-runs-$pattern.json.gz" ] || on_src "gzip -c /tmp/exp64-plan.json" > "$R/plan-runs-$pattern.json.gz"
+    fi
     verify=null
     if [ "${arm#fast}" != "$arm" ] && [ "$status" = 0 ]; then
       # The refreshed copy recovers from its backup_label; its pgbench_accounts must equal the source's.
@@ -121,8 +140,8 @@ EOF
       $PGBIN/pg_ctl -D "$B" -m fast -w stop > /dev/null 2>&1
       verify="{\"source\": \"$SOURCE_STATE\", \"copy\": \"$COPY_STATE\", \"match\": $([ "$SOURCE_STATE" = "$COPY_STATE" ] && echo true || echo false)}"
     fi
-    printf '{"run": %s, "pattern": "%s", "arm": "%s", "repeat": %s, "t0": %s, "t1": %s, "status": %s, "receiver_status": %s, "copy_seconds": %s, "verify": %s}\n' \
-      "$i" "$pattern" "$arm" "$k" "$t0" "$t1" "$status" "$rstatus" "$copied" "$verify" > "$d/meta.json"
+    printf '{"run": %s, "pattern": "%s", "arm": "%s", "repeat": %s, "t0": %s, "t1": %s, "status": %s, "receiver_status": %s, "copy_seconds": %s, "verify": %s, "plan": %s}\n' \
+      "$i" "$pattern" "$arm" "$k" "$t0" "$t1" "$status" "$rstatus" "$copied" "$verify" "$plan" > "$d/meta.json"
     echo "$(date -u +%T) run $i: $pattern $arm repeat $k: $(python3 -c "print(round($t1 - $t0, 2))") s, exit $status" \
       "$([ "$verify" != null ] && python3 -c "import json,sys; print('match', json.loads(sys.argv[1])['match'])" "$verify")"
     i=$((i + 1))
