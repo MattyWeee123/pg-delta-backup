@@ -15,17 +15,20 @@ Its guard refuses unless:
   own condition: otherwise a hint bit B set after the fork, for a transaction whose fate differs on S, is in no WAL);
 - B's timeline is on S's history, and B's end is proven by how B was stopped (EXP-62's guard v2);
 - C, the last checkpoint record before S's history leaves B's timeline, is in B's own WAL, and B's WAL reads on
-  from C's redo to at least B's proven end;
+  from C's redo through B's proven end (`pg_waldump --end`; EXP-69b: a standby's end is the end of its last record,
+  which EXP-69's guard compared with the record's start);
 - S's summaries cover C's redo to S's start.
 
 Every page of S is then compared with B's page at the same place (summaryscan.score). A page that differs and isn't
 sent is left wrong. Hint bits are harmless on an ancestor, but not on a diverged B, so the pages left wrong are also
-searched for hint bits B set that S lacks.
+searched for hint bits B set that S lacks (EXP-69), and for those whose transaction has another fate in S's pg_xact
+(EXP-69b: only these are dangerous). EXP-69b also builds idea 1's copy (materialize) to start it and compare its rows.
 """
 from __future__ import annotations
 
 import json
 import re
+import shutil
 import struct
 import subprocess
 from pathlib import Path
@@ -54,6 +57,14 @@ def waldump(waldump_bin, pg_wal, tli, start, timeout=600):
     proc = subprocess.run([str(waldump_bin), '--path', str(pg_wal), '--timeline', str(tli),
                            '--start', format_lsn(start)], capture_output=True, text=True, timeout=timeout)
     return proc.stdout
+
+
+def reads_through(waldump_bin, pg_wal, tli, start, end, timeout=600):
+    """Whether B's WAL on `tli` reads without a gap from `start` through `end` (pg_waldump --end exits 0)."""
+    proc = subprocess.run([str(waldump_bin), '--path', str(pg_wal), '--timeline', str(tli), '--start',
+                           format_lsn(start), '--end', format_lsn(end), '--quiet'], capture_output=True, text=True,
+                          timeout=timeout)
+    return proc.returncode == 0
 
 
 def first_segment_start(pg_wal, tli):
@@ -154,7 +165,7 @@ def left_wrong_with_b_hints(source, old, chosen):
     return found, examples
 
 
-def guard(old_info, source_info, b_tli, b_end, path, summaries, s_start, c, wal_last):
+def guard(old_info, source_info, b_tli, b_end, path, summaries, s_start, c, wal_last, reaches=None):
     """(ok, reasons) for idea 1's send set (the module's docstring)."""
     reasons = []
     for field, name in (('system_identifier', 'system identifier'), ('pg_version', 'major version'),
@@ -169,7 +180,7 @@ def guard(old_info, source_info, b_tli, b_end, path, summaries, s_start, c, wal_
         reasons.append("B's end isn't proven by how it was stopped")
     if c is None:
         reasons.append("no checkpoint before the fork in B's own WAL")
-    elif b_end is not None and (wal_last is None or wal_last < b_end):
+    elif b_end is not None and (not reaches if reaches is not None else (wal_last is None or wal_last < b_end)):
         reasons.append(f"B's WAL from the common checkpoint's redo ends at "
                        f"{format_lsn(wal_last) if wal_last else 'nothing'}, before B's end {format_lsn(b_end)}")
     if c is not None:
@@ -181,9 +192,12 @@ def guard(old_info, source_info, b_tli, b_end, path, summaries, s_start, c, wal_
     return not reasons, reasons
 
 
-def score_scenario(scenario_dir, old_info, source_info, threshold, waldump_bin, old=None):
+def score_scenario(scenario_dir, old_info, source_info, threshold, waldump_bin, old=None, fixed_end=False,
+                   xact_dir=None):
     """Idea 1's guard, send set and wrong pages for a built scenario (scenarios.build_scenario with wal_summaries).
-    `old` replaces the scenario's old copy (EXP-69's copy with its WAL cut)."""
+    `old` replaces the scenario's old copy (EXP-69's copy with its WAL cut). EXP-69b: `fixed_end` checks B's WAL
+    through B's end with pg_waldump --end, and `xact_dir` (S's pg_xact, cleanly stopped) adds the hints whose
+    transaction has another fate on S."""
     scenario_dir = Path(scenario_dir)
     dump = json.loads((scenario_dir / 'wal_summaries.json').read_text())
     old, source = Path(old or scenario_dir / 'old_copy'), scenario_dir / 'source_backup'
@@ -202,7 +216,9 @@ def score_scenario(scenario_dir, old_info, source_info, threshold, waldump_bin, 
         if c is not None:
             b_blocks, records, wal_last = block_refs(text, start=c[1])
             from_record = block_refs(text, start=c[0])[0]
-    ok, reasons = guard(old_info, source_info, b_tli, b_end, path, dump['summaries'], s_start, c, wal_last)
+    reaches = (reads_through(waldump_bin, old / 'pg_wal', b_tli, c[1], b_end)
+               if fixed_end and c is not None and b_end is not None else None)
+    ok, reasons = guard(old_info, source_info, b_tli, b_end, path, dump['summaries'], s_start, c, wal_last, reaches)
     if why_not:
         reasons = [why_not] + [r for r in reasons if not r.startswith("B's end")]
     out = {'guard': {'ok': ok, 'reasons': reasons},
@@ -224,6 +240,9 @@ def score_scenario(scenario_dir, old_info, source_info, threshold, waldump_bin, 
         's_blocks': sum(len(b) for b, _ in chosen_s.values()),
         'union_blocks': sum(len(b) for b, _ in chosen.values()),
         'scored': scored, 'left_wrong_with_b_hints': hints, 'b_hint_examples': examples})
+    if xact_dir is not None:
+        out['dangerous_hints'] = dangerous_hints(source, old, chosen, xact_dir)
+    out['chosen'] = chosen  # for materialize; not serialized
     return out
 
 
@@ -269,3 +288,115 @@ def copy_kind(path):
     if kind in ('fsm', 'vm', 'init'):
         return 'fsm_vm_init'
     return 'other'
+
+
+# EXP-69b: the fate of each hinted transaction on S, and idea 1's copy built for real.
+XACT_SEGMENT_BYTES = 32 * BLOCK  # SLRU_PAGES_PER_SEGMENT pages of 4 transactions per byte
+XACT_STATUS = {0: 'in progress', 1: 'committed', 2: 'aborted', 3: 'subcommitted'}
+
+
+def xact_status(xact_dir, xid):
+    """A transaction's status in a cleanly stopped cluster's pg_xact, read from its files."""
+    segment, offset = divmod(xid // 4, XACT_SEGMENT_BYTES)
+    path = Path(xact_dir) / f'{segment:04X}'
+    if not path.is_file() or path.stat().st_size <= offset:
+        return 'in progress'
+    with path.open('rb') as f:
+        f.seek(offset)
+        return XACT_STATUS[(f.read(1)[0] >> (2 * (xid % 4))) & 3]
+
+
+def contradicts(hint_bit, xid, xact_dir):
+    """Whether a hint bit B set says something about `xid` that S's pg_xact denies."""
+    if xid in (0, 1, 2):  # invalid, bootstrap, frozen: no fate to differ
+        return False
+    status = xact_status(xact_dir, xid)
+    if hint_bit in (HEAP_XMIN_COMMITTED, HEAP_XMAX_COMMITTED):
+        return status != 'committed'
+    return status == 'committed'  # XMIN_INVALID or XMAX_INVALID on a transaction S committed
+
+
+def dangerous_hints(source, old, chosen, xact_dir):
+    """Heap tuples, on pages left unsent, where B carries a hint bit S lacks and S's pg_xact contradicts it:
+    {'tuples': n, 'pages': n, 'examples': [...]}. A frozen xmin (both xmin bits) is left alone."""
+    source, old, tuples, pages, examples = Path(source), Path(old), 0, set(), []
+    for path in sorted(p for p in source.rglob('*') if p.is_file() and not p.is_symlink()):
+        rel = path.relative_to(source).as_posix()
+        if relation_kind(rel) != 'main' or not (old / rel).is_file():
+            continue
+        base, segno = summaryscan.SEGMENT.match(rel).groups()
+        blocks, limit = chosen.get(base, (set(), None))
+        with path.open('rb') as new_file, (old / rel).open('rb') as old_file:
+            for i in range(-(-path.stat().st_size // BLOCK)):
+                new_page, old_page = new_file.read(BLOCK), old_file.read(BLOCK)
+                number = int(segno or 0) * summaryscan.SEGMENT_BLOCKS + i
+                if number in blocks or (limit is not None and number >= limit) or len(old_page) < len(new_page):
+                    continue
+                if new_page == old_page or page_kind(old_page) != 'heap':
+                    continue
+                new_items = {pos: (off, flags) for pos, off, flags, _ in line_pointers(new_page)}
+                for pos, off, flags, length in line_pointers(old_page):
+                    other = new_items.get(pos)
+                    if flags != LP_NORMAL or length < 23 or off + 22 > BLOCK:
+                        continue
+                    xmin, xmax = struct.unpack_from('<II', old_page, off)
+                    b_mask = struct.unpack_from('<H', old_page, off + 20)[0]
+                    s_mask = (struct.unpack_from('<H', new_page, other[0] + 20)[0]
+                              if other and other[1] == LP_NORMAL and other[0] + 22 <= BLOCK else 0)
+                    extra = b_mask & ~s_mask & HINTS
+                    if b_mask & (HEAP_XMIN_COMMITTED | HEAP_XMIN_INVALID) == HEAP_XMIN_COMMITTED | HEAP_XMIN_INVALID:
+                        extra &= ~(HEAP_XMIN_COMMITTED | HEAP_XMIN_INVALID)
+                    bad = [bit for bit in (HEAP_XMIN_COMMITTED, HEAP_XMIN_INVALID) if extra & bit
+                           and contradicts(bit, xmin, xact_dir)]
+                    bad += [bit for bit in (HEAP_XMAX_COMMITTED, HEAP_XMAX_INVALID) if extra & bit
+                            and contradicts(bit, xmax, xact_dir)]
+                    if bad:
+                        tuples += 1
+                        pages.add((rel, number))
+                        if len(examples) < 5:
+                            examples.append({'file': rel, 'block': number, 'xmin': xmin, 'xmax': xmax,
+                                             'bits': [hex(b) for b in bad],
+                                             'xmin_on_s': xact_status(xact_dir, xmin)})
+    return {'tuples': tuples, 'pages': len(pages), 'examples': examples}
+
+
+def materialize(source, old, chosen, target):
+    """Idea 1's copy: S's non-relation files (backup_label and the backup's WAL among them), S's relation files B
+    lacks, and every other relation file built from B's pages with S's page wherever the send set takes it, cut or
+    grown to S's length, as summaryscan.score counts it."""
+    source, old, target = Path(source), Path(old), Path(target)
+    for path in sorted(source.rglob('*')):
+        rel = path.relative_to(source).as_posix()
+        dest = target / rel
+        if path.is_dir():
+            dest.mkdir(parents=True, exist_ok=True)
+            continue
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        kind = relation_kind(rel)
+        if kind is None or kind in ('fsm', 'init') or not (old / rel).is_file():
+            shutil.copy2(path, dest)
+            continue
+        base, segno = summaryscan.SEGMENT.match(rel).groups()
+        blocks, limit = chosen.get(base, (set(), None))
+        with path.open('rb') as new_file, (old / rel).open('rb') as old_file, dest.open('wb') as out:
+            for i in range(-(-path.stat().st_size // BLOCK)):
+                new_page, old_page = new_file.read(BLOCK), old_file.read(BLOCK)
+                number = int(segno or 0) * summaryscan.SEGMENT_BLOCKS + i
+                sent = number in blocks or (limit is not None and number >= limit) or len(old_page) < len(new_page)
+                out.write(new_page if sent else old_page)
+    target.chmod(0o700)
+    return target
+
+
+def where_block(base, block, source, old):
+    """Where a block lies (EXP-69b's control): pg_rewind skips blocks past either side's end of file by design."""
+    segno, inseg = divmod(block, summaryscan.SEGMENT_BLOCKS)
+    name = base + (f'.{segno}' if segno else '')
+    sizes = [(Path(root) / name).stat().st_size if (Path(root) / name).is_file() else None for root in (source, old)]
+    if None in sizes:
+        return 'file missing on a side'
+    if (inseg + 1) * BLOCK > sizes[0]:
+        return "beyond S's end of file"
+    if (inseg + 1) * BLOCK > sizes[1]:
+        return "beyond B's end of file"
+    return 'inside both files'

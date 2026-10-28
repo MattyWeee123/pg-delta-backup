@@ -1,7 +1,9 @@
 """EXP-69's scorer for idea 1 (experiments/tricky_copies/unionscan.py) on hand-made inputs, shaped like
 pg_waldump's and pg_rewind's own output."""
 import struct
+import tempfile
 import unittest
+from pathlib import Path
 
 from experiments.tricky_copies import summaryscan, unionscan
 from experiments.tricky_copies.lsnscan import BLOCK, parse_lsn
@@ -137,6 +139,89 @@ class RewindDebug(unittest.TestCase):
         kinds = [unionscan.copy_kind(p) for p in ('base/5/16389.1', 'base/5/16384_vm', 'pg_wal/00000002000000000000000A',
                                                    'pg_wal/summaries/x.summary', 'global/pg_control')]
         self.assertEqual(kinds, ['relation_blocks', 'fsm_vm_init', 'wal_segments', 'wal_summaries', 'other'])
+
+
+
+def heap_page_with(tuples):
+    """A heap page with one tuple per (xmin, infomask)."""
+    page = bytearray(heap_page([mask for _, mask in tuples]))
+    for i, (xmin, _) in enumerate(tuples):
+        struct.pack_into('<I', page, BLOCK - 24 * (i + 1), xmin)
+    return bytes(page)
+
+
+def xact_file(root, statuses):
+    """pg_xact/0000 with {xid: status bits}."""
+    (root / 'pg_xact').mkdir(parents=True)
+    data = bytearray(unionscan.XACT_SEGMENT_BYTES)
+    for xid, bits in statuses.items():
+        data[xid // 4] |= bits << (2 * (xid % 4))
+    (root / 'pg_xact' / '0000').write_bytes(bytes(data))
+    return root / 'pg_xact'
+
+
+class FatesAndCopy(unittest.TestCase):
+    """EXP-69b: a hint is dangerous only if S's pg_xact denies it; idea 1's copy is B's pages plus the sent ones."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.xact = xact_file(self.root / 's', {791: 1, 900: 2})  # 791 committed, 900 aborted, 950 never ended
+
+    def test_status_and_contradiction(self):
+        self.assertEqual([unionscan.xact_status(self.xact, x) for x in (791, 900, 950)],
+                         ['committed', 'aborted', 'in progress'])
+        self.assertFalse(unionscan.contradicts(unionscan.HEAP_XMIN_COMMITTED, 791, self.xact))
+        self.assertTrue(unionscan.contradicts(unionscan.HEAP_XMIN_COMMITTED, 950, self.xact))
+        self.assertTrue(unionscan.contradicts(unionscan.HEAP_XMIN_INVALID, 791, self.xact))
+        self.assertFalse(unionscan.contradicts(unionscan.HEAP_XMIN_COMMITTED, 2, self.xact))
+
+    def layout(self, b_tuples, s_tuples):
+        for side, tuples in (('b', b_tuples), ('src', s_tuples)):
+            rel = self.root / side / 'base' / '5'
+            rel.mkdir(parents=True, exist_ok=True)
+            (rel / '16384').write_bytes(heap_page_with(tuples) + heap_page_with(tuples))
+        return self.root / 'src', self.root / 'b'
+
+    def test_only_a_contradicted_hint_on_an_unsent_page_is_dangerous(self):
+        committed = unionscan.HEAP_XMIN_COMMITTED
+        source, old = self.layout([(791, committed), (950, committed)], [(791, 0), (950, 0)])
+        found = unionscan.dangerous_hints(source, old, {}, self.xact)
+        self.assertEqual((found['tuples'], found['pages']), (2, 2))  # 950's hint, on both pages
+        self.assertEqual(found['examples'][0]['xmin'], 950)
+        sent = unionscan.dangerous_hints(source, old, {'base/5/16384': [{0, 1}, None]}, self.xact)
+        self.assertEqual(sent['tuples'], 0)
+
+    def test_materialize_takes_s_pages_only_where_sent_and_s_length(self):
+        source, old = self.root / 'src', self.root / 'b'
+        for root, pages in ((source, [b'S0', b'S1', b'S2']), (old, [b'B0', b'B1'])):
+            (root / 'base' / '5').mkdir(parents=True)
+            (root / 'base' / '5' / '16384').write_bytes(b''.join(x.ljust(BLOCK, b'.') for x in pages))
+            (root / 'PG_VERSION').write_text('17\n' if root == source else 'old\n')
+        target = unionscan.materialize(source, old, {'base/5/16384': [{1}, None]}, self.root / 'copy' / 'B')
+        data = (target / 'base' / '5' / '16384').read_bytes()
+        self.assertEqual([data[i * BLOCK:i * BLOCK + 2] for i in range(3)], [b'B0', b'S1', b'S2'])
+        self.assertEqual((target / 'PG_VERSION').read_text(), '17\n')
+
+    def test_where_block(self):
+        source, old = self.root / 'src', self.root / 'b'
+        for root, n in ((source, 2), (old, 3)):
+            (root / 'base' / '5').mkdir(parents=True)
+            (root / 'base' / '5' / '16384').write_bytes(bytes(BLOCK * n))
+        self.assertEqual(unionscan.where_block('base/5/16384', 1, source, old), 'inside both files')
+        self.assertEqual(unionscan.where_block('base/5/16384', 2, source, old), "beyond S's end of file")
+        self.assertEqual(unionscan.where_block('base/5/16999', 0, source, old), 'file missing on a side')
+
+
+class GuardWithFixedEnd(unittest.TestCase):
+    def test_reaching_the_end_is_what_counts_when_known(self):
+        path = [(1, 0, parse_lsn('0/5000000')), (2, parse_lsn('0/5000000'), summaryscan.END)]
+        summaries = Guard.summaries
+        c = Guard.c
+        args = (INFO, INFO, 1, parse_lsn('0/6000108'), path, summaries, parse_lsn('0/8000000'), c,
+                parse_lsn('0/60000E0'))
+        self.assertFalse(unionscan.guard(*args)[0])  # EXP-69's comparison: the last record's start is before the end
+        self.assertTrue(unionscan.guard(*args, reaches=True)[0])
+        self.assertFalse(unionscan.guard(*args, reaches=False)[0])
 
 
 if __name__ == '__main__':

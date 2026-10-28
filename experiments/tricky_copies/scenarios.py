@@ -538,6 +538,42 @@ def build_s2d(ctx):
     return source
 
 
+def build_s2h(ctx, checksums=True):
+    """S2h, or without ``checksums`` S2i (EXP-69b): the hint-bit hazard of a diverged old primary. A transaction on P
+    inserts rows into a table of its own and stays open; a checkpoint follows, then the standby R stops: the fork. P
+    then commits the transaction and reads the table, setting XMIN_COMMITTED on every row, and stops cleanly. S (R
+    promoted) never saw the commit, so for S the rows don't exist. The hints are in P's WAL only with data checksums
+    or wal_log_hints (S2h has checksums; S2i has neither)."""
+    p = ctx.new_primary('primary', checksums=checksums, conf={'wal_log_hints': 'off'}, role='old_copy')
+    r = ctx.new_standby('standby', p, role='source')
+    p.psql('CREATE TABLE hazard (id int, pad text);')
+    ctx.step('open a transaction on P that inserts 20,000 rows into hazard and stays open')
+    session = subprocess.Popen([str(p.pgbin.tool('psql')), '-X', '-q', '-v', 'ON_ERROR_STOP=1', '--no-password',
+                                *[str(a) for a in p.conn_args()]], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, env=clean_env())
+    session.stdin.write("BEGIN;\nINSERT INTO hazard SELECT g, repeat('x', 100) FROM generate_series(1, 20000) g;\n")
+    session.stdin.flush()
+    p.wait_for("SELECT count(*) = 1 FROM pg_stat_activity WHERE state = 'idle in transaction' "
+               "AND backend_xid IS NOT NULL")
+    ctx.facts['hazard_xid'] = p.scalar("SELECT backend_xid FROM pg_stat_activity WHERE state = 'idle in transaction'")
+    p.psql('CHECKPOINT;')
+    split = ctx.wait_replay(p, r)
+    ctx.step('stop R cleanly: this is the split point, with the transaction still open on P')
+    r.stop('fast')
+    ctx.facts['split_lsn'] = split
+    ctx.step('commit the transaction on P after the fork, then read hazard there (setting its hint bits)')
+    out, err = session.communicate('COMMIT;\n', timeout=300)
+    ctx.check('hazard_committed_on_p', session.returncode == 0, stderr=err[-500:])
+    ctx.check('hazard_rows_on_p', p.scalar('SELECT count(*) FROM hazard') == '20000')
+    ctx.facts['old_primary_end_lsn'] = p.scalar('SELECT pg_current_wal_lsn()')
+    ctx.step('stop P cleanly (-m fast)')
+    p.stop('fast')
+    ctx.adopt_datadir_as_old_copy(p)
+    source = promote_and_write(ctx, r)
+    ctx.check('hazard_absent_on_s', source.scalar('SELECT count(*) FROM hazard') == '0')
+    return source
+
+
 def build_s2c(ctx):
     """S2c: B is a hot standby Q of the old primary P. Q replays P's diverging writes,
     writes them to disk without a restartpoint and stops cleanly. P never checkpoints after
@@ -983,6 +1019,13 @@ EXTRA_SCENARIOS = [
     Scenario('S2d', 'ex-primary-wal-lost', 'Ex-primary after a failover, its WAL past the split lost',
              "data directory of the old primary as S2b's, with its WAL segments from the split's on deleted",
              'wrong', 'correct; diverged pages detected and re-sent', build_s2d, None),
+    # EXP-69b's: a transaction open at the fork, committed and read on the old primary only.
+    Scenario('S2h', 'hint-hazard-checksums', 'Ex-primary that committed and read a transaction open at the fork',
+             'data directory of the old primary, with data checksums, whose hint bits name a transaction S never '
+             'committed', 'wrong', 'correct; diverged pages detected and re-sent', build_s2h, None),
+    Scenario('S2i', 'hint-hazard-no-checksums', 'As S2h, without data checksums or wal_log_hints',
+             "data directory of the old primary as S2h's, its hint bits in no WAL", 'wrong',
+             'correct; diverged pages detected and re-sent', partial(build_s2h, checksums=False), None),
 ]
 
 

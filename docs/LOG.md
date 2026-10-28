@@ -8,6 +8,13 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-28 (late afternoon): EXP-69b pre-registered
+
+- **What it re-tests:** EXP-69 part A's verdicts, with the end check fixed (`pg_waldump --end`) and a hint check that reads each transaction's fate from S's own `pg_xact`. It adds two things:
+  - **an end-to-end check:** idea 1's copy is built from B plus the sent pages, started, and its rows compared with S's;
+  - **two new scenarios, S2h and S2i:** a transaction open at the fork, committed and read on the old primary only, with and without data checksums. They test whether the checksum condition is needed: without it, B's hint bits name a transaction S never committed, in no WAL.
+- **Checked before registering:** a build smoke of S2h and S2i (their build checks only), 15 unit tests, and the analysis dry-run on synthetic results.
+
 ## 2026-10-28 (afternoon): EXP-69 part A done; part B amended before its run
 
 - **Part A, as registered: 2 of 5 predictions held, the deciding one failed.**
