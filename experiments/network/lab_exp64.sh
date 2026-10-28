@@ -15,7 +15,10 @@
 # /proc/diskstats for /data on both VMs just before t0 and just after t1 (diskstats.txt). PLAN=1 has every fast run
 # write its plan (--plan-out); each run's digest of it goes in meta.json, and the first plan per pattern is kept as
 # plan-runs-PATTERN.json.gz, and per arm plan-runs-PATTERN-ARM.json.gz (EXP-68: PATTERNS="hot uniform" ARMS_hot="fast fast8w"
-# ARMS_uniform="fast8 fast16 fast8w fast16w full" PLAN=1).
+# ARMS_uniform="fast8 fast16 fast8w fast16w full" PLAN=1). A pattern "scatterN" (EXP-74) changes N% of
+# pgbench_accounts' rows, chosen by a hash of each row's key in one statement (the same rows whatever the table's
+# physical order), since the uniform workload's batches of 100
+# rows would take hours at such fractions: with about 27 rows a page, 1 - (1 - N/100)^27 of the heap's pages.
 set -u
 SRC=$1
 REPEATS=${2:-2}
@@ -74,9 +77,19 @@ for pattern in $PATTERNS; do
   rm -rf "$B0"
   $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$B0" -X stream -c fast > "$R/B0-$pattern.log" 2>&1 \
     || { echo "B0 failed"; exit 1; }
-  on_src "python3 experiments/network/source_cluster.py workload $WORKLOAD_ARGS --pattern $pattern \
-    > $W/workload-$pattern.json" || { echo "workload failed"; exit 1; }
-  on_src "cat $W/workload-$pattern.json" > "$R/workload-$pattern.json"
+  if [[ "$pattern" =~ ^scatter([0-9]+)$ ]]; then
+    frac=$(python3 -c "print(${BASH_REMATCH[1]} / 100)")
+    w0=$(date +%s.%N)
+    psrc "UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE abs(hashint4(aid + 74)) % 10000 < ${BASH_REMATCH[1]}00" \
+      > /dev/null || { echo "workload failed"; exit 1; }
+    w1=$(date +%s.%N)
+    echo "{\"pattern\": \"$pattern\", \"fraction\": $frac, \"seconds\": $(python3 -c "print(round($w1 - $w0, 1))")}" \
+      > "$R/workload-$pattern.json"
+  else
+    on_src "python3 experiments/network/source_cluster.py workload $WORKLOAD_ARGS --pattern $pattern \
+      > $W/workload-$pattern.json" || { echo "workload failed"; exit 1; }
+    on_src "cat $W/workload-$pattern.json" > "$R/workload-$pattern.json"
+  fi
   SOURCE_STATE=$(psrc "$STATE")
   echo "$(date -u +%T) $pattern: workload done; source state $SOURCE_STATE"
   arms_var="ARMS_$pattern"; arms=${!arms_var:-$ARMS}
@@ -84,7 +97,7 @@ for pattern in $PATTERNS; do
 import random, sys
 repeats, seed, pattern, arms = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4:]
 runs = [(arm, k) for arm in arms for k in range(repeats)]
-random.Random(seed + (pattern == 'uniform')).shuffle(runs)
+random.Random(seed + (pattern == 'uniform') + (int(pattern[7:]) if pattern.startswith('scatter') else 0)).shuffle(runs)
 for arm, k in runs:
     print(arm, k)
 EOF

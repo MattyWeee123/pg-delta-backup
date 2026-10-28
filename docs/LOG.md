@@ -9,6 +9,19 @@ Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registrat
 
 
 
+## 2026-10-28 (12:40 UTC): EXP-74 pre-registered, the selector's model (idea 4); VM work waits for gcloud
+
+- **The model** (`analysis/fastpath_model.py`) predicts the fast path's time from its plan, which the sender knows once the guard has run.
+  - **Each disk's time:** the plan's requests (runs split at 168 KiB) at its operation rate, or its bytes at 210 MB/s, whichever is larger. Every constant comes from an earlier session.
+  - **The rest:** the guard plus an overhead fitted on two EXP-70 cells (0.6 s and 0.97 ms per MB sent).
+  - **A full copy:** priced from the plan's listed bytes (EXP-70's plan listed 17,866 MB, and its full copy read 17,865).
+  - **In-sample on EXP-70:** every scattered arm within 2.5–6%, and the full copy within 0.3%. It picks fill 2, which was the fastest arm. It misses the hot cell by 47%, where fixed write overhead dominates.
+- **EXP-74** tests the model and the selector on cells they haven't seen.
+  - **The cells:** 4% and 12% of rows changed (about two-thirds and nearly all of the pages), with fills 0–2 and a full copy, plus EXP-70's uniform cell, which times EXP-73b's grouped reading on the VMs.
+  - **Deciding:** the selector's pick within 5% of the fastest arm in each cell.
+  - **The lab change:** a `scatterN` pattern updates N% of rows chosen by a hash of each key, in one statement. A first version chose them with a seeded `random()`, which a local check showed depends on the table's physical order. The hash picks the same rows either way.
+- **`gcloud` is still signed out,** so EXP-72 and EXP-74 wait. Both pipelines are ready, and together they fit the 32-vCPU quota.
+
 ## 2026-10-28 (11:40 UTC): EXP-73 and EXP-73b, the guard's summary reading halved
 
 - **Where the guard's time goes (EXP-73, local scale models):** it is the reading of the WAL summaries, linear in their rows. It costs 0.9 µs per row on the Mac and about 3.2 µs on the VMs (EXP-70: 22,000 to 1.46 M rows). The cost is spread over the server's JSON (44%), psql and `json.loads` (25%), and Python's tuples and sets (31%).
