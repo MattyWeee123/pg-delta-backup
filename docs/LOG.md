@@ -4,6 +4,15 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (23:42 UTC): a review of recursive self-improvement work, against this project's workflow
+
+- **The owner asked** whether RSI agents and papers offer a better workflow. The review is in [research/2026-10-28-rsi-review.md](research/2026-10-28-rsi-review.md).
+- **What exists:** "RSI Agent" is not one framework. The field has three families: agents that edit their own code (DGM, HGM, SICA, Google's RRSI), LLM evolutionary program search (AlphaEvolve, OpenEvolve, ShinkaEvolve), and automated science (AI Scientist, AI co-scientist).
+- **Their big loops need hundreds to thousands of evaluations,** about $7,000–22,000 a run. At about an hour of VMs per evaluation they don't fit, but their reported failure modes do apply.
+- **Our loop matches what they converge on,** with stricter evaluation than most.
+- **The gaps their lessons show:** no formal cascade or proxy-fidelity log; no idea archive with triggers to revisit; no held-out workloads; no automatic check of the scorer's integrity; noise not used as an explicit bar.
+- **Five changes are proposed** to the owner. One optional use of RSI tooling: an offline evolutionary search over saved plans, the model only ranking and the VMs deciding.
+
 ## 2026-10-28 (23:28 UTC): EXP-80 pre-registered: crashed standbys by their minimum recovery point; crash recovery first found unsound
 
 - **The owner approved crash recovery first.** Three pilots changed it before anything was registered:
