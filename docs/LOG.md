@@ -4,6 +4,15 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (20:11 UTC): EXP-79 pre-registered: the guard on the VMs, and the break-even with the current code
+
+- **Why:** EXP-78's change was measured locally only (0.460). On the VMs the guard reads 1.15–1.30 µs per summary row, against the Mac's 0.51.
+- **And:** the break-even (about 85%) was interpolated between points from older code in different sessions.
+- **EXP-79, one ha pair:**
+  - **cells:** uniform (the guard), scatter12 (53% of pages) and scatterall12 (96%), with `pg_basebackup` in the last two;
+  - **deciding:** scatterall12's guard at most 0.60 of its 5.31 s;
+  - **also:** uniform's guard at most 0.60, scatterall12's fast path at least 2 s below EXP-77's with `pg_basebackup` within 1%, and the same summary rows as before.
+
 ## 2026-10-28 (20:05 UTC): EXP-78 done (local): the guard's reading without the server's sort; project access checked
 
 - **Project access, read-only, through `gcloud`** (the owner's credentials):
