@@ -125,3 +125,11 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 - **`pg_rewind`'s copy is explained:** S's WAL since the fork, B's 20,000 blocks, and the forks it copies whole. The "4 GB extra" was WAL the lab's own state check wrote after the recorded LSN. EXP-67's uniform `pg_rewind` time would be about 313 s without it (**inferred**); its verdicts stand.
 - **Idea 1's block set at scale** is 0.94 and 0.997 of the pages hashing sends. Its inferred times: a few seconds for hot10 against `pg_rewind`'s 36 s; about 77 s for uniform, against `pg_rewind`'s 313–459 s and a re-clone's 91 s. That is the case for building it.
 - **Found:** the fast-path guard needlessly refuses a range that crosses a timeline switch landing on a segment boundary, over a page-header hole that holds no WAL record. To be fixed with a test.
+- **The guard fix is done** (a page-header hole is no gap), with a unit test.
+
+**Update, October 29: EXP-70 (idea 2, item 4).**
+- **Item 4 is done:** filling clean gaps of up to 2 pages refreshed the scattered cell in 46.6 s. That is 0.608 of no filling and **0.512 of a full copy**, better than the model's 0.69. `--fill-gaps 2` is the fast path's default.
+- **1 page gave nearly all of it** (47.4 s). Past it, both disks move bytes at a full copy's rate while busy, so each further page filled costs its transfer time. Filling 4 pages took 1.20 times as long as 2.
+- **What binds now:** about 12 s of fixed costs per run (the guard's 4.7 s among them) plus the bytes sent at the disks' byte rate.
+- **The selector (idea 4)** should choose the fill from the link's and disks' rates, since where bytes cost more than operations, less filling is better.
+- **Next:** idea 1's prototype for the failover case, then the fast path's fixed costs.

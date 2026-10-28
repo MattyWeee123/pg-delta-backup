@@ -8,6 +8,19 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-29 (morning): EXP-70 done, `--fill-gaps 2` is the fast path's default
+
+- **EXP-70** (one session, 14 runs, all correct): all 6 predictions held.
+  - **Deciding:** filling clean gaps of up to 2 pages took 0.608 of no filling (46.6 against 76.6 s); the model gave 0.69.
+  - **The scattered cell** (28% of pages) now refreshes in 0.512 of a full copy's 91.0 s.
+  - **Filling 1 page** gave 47.4 s, and filling 4 pages 55.8 s (1.197 of 2, as predicted).
+  - **Requests fell** to 0.346 of no filling on both disks, and each filled plan was exactly `fill_gaps` of the unfilled one.
+- **A post-hoc check** (`analysis/exp70_posthoc.py`, no verdict changes): past 1 page, both disks move bytes at a full copy's rate while busy, so fewer operations are paid for in bytes. The model overstated small writes' cost: the destination completed about 4,790 writes per busy second, against `fio`'s 4,195 for random 8 KiB writes.
+- **Applied as registered:** `--fill-gaps` defaults to 2 with `--fast-path` (CLI only; `fastpath.DEFAULT_FILL_GAPS`), with tests.
+  - The lab scripts keep their registered arms (`--fill-gaps 0` where no fill was registered).
+  - `lab_exp65.sh` and EXP-63's `fastpath_check.py`, missed when EXP-68 changed the defaults, now pass their registered settings explicitly.
+- **The pipeline paused once** on a transient `gcloud` SSL error at the smoke's records check. The VMs were kept as designed, the records were checked by hand, and the registered run resumed on the same pair. The VMs were then deleted.
+
 ## 2026-10-29 (early): EXP-69 part B done, `pg_rewind`'s 4 GB explained; EXP-70 running
 
 - **EXP-69 part B** (EXP-67's cells with diagnostics, 18 GB):

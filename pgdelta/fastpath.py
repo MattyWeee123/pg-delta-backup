@@ -47,6 +47,9 @@ MODES = (MODE,)
 # The CLI's --read-ahead with --fast-path: 8 reader threads reach the disk's operation rate, and 16 add nothing
 # (EXP-64b, EXP-68).
 DEFAULT_READ_AHEAD = 8
+# The CLI's --fill-gaps with --fast-path: filling clean gaps of up to 2 pages cut the scattered cell's refresh to
+# 0.61 of no filling, and 4 pages took 1.20 times as long as 2 (EXP-70).
+DEFAULT_FILL_GAPS = 2
 # The first releases whose WAL summaries register visibility-map changes (commit f581fa7, August 2026).
 SUMMARY_FIXED = {17: 170011, 18: 180006}
 DEFAULT_TABLESPACE, GLOBAL_TABLESPACE = 1663, 1664

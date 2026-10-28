@@ -144,6 +144,16 @@ class Pages(unittest.TestCase):
         self.assertEqual(fastpath.fill_gaps([], 3), [])
         self.assertEqual(fastpath.fill_gaps([5], 3), [5])
 
+    def test_the_cli_fills_two_pages_with_the_fast_path_and_none_without(self):
+        from argparse import Namespace
+
+        from pgdelta import cli
+        self.assertEqual(cli._fill_gaps(Namespace(fast_path='summaries', fill_gaps=None)), fastpath.DEFAULT_FILL_GAPS)
+        self.assertEqual(fastpath.DEFAULT_FILL_GAPS, 2)
+        self.assertEqual(cli._fill_gaps(Namespace(fast_path='summaries', fill_gaps=0)), 0)
+        self.assertEqual(cli._fill_gaps(Namespace(fast_path=None, fill_gaps=None)), 0)
+        self.assertEqual(cli._fill_gaps(Namespace()), 0)
+
 
 class ReadAhead(unittest.TestCase):
     """EXP-64b's reader threads: runs come back in sending order, at most the window ahead, handles closed."""
@@ -271,8 +281,10 @@ class RealServer(unittest.TestCase):
         self.assertEqual(received['files_written_checked'], fast['files_chosen'])
         self.assertLess(stats['pages']['sent'], stats['pages']['total'] / 2)
         self.assertNotIn('BASIS_NODES', stats['receiver']['bytes_written']['by_message_type'])  # B never hashed
-        # EXP-68's defaults with --fast-path: 8 reader threads, and the receiver's syncs on its worker thread.
+        # The defaults with --fast-path: 8 reader threads, the receiver's syncs on its worker thread (EXP-68), and
+        # clean gaps of up to 2 pages filled (EXP-70).
         self.assertEqual(fast['read_ahead']['threads'], 8)
+        self.assertEqual(fast['fill_gaps']['gap_pages'], 2)
         self.assertEqual(stats['receiver']['fsync_mode'], 'worker')
         self.assertTrue(received['fsync_auto'])
         self.check_copy(target)
@@ -289,9 +301,10 @@ class RealServer(unittest.TestCase):
         """EXP-68's arm: 8 reader threads, the receiver's syncs on its worker thread, and the plan written."""
         plan_path = self.root / 'fast-worker-plan.json'
         target, stats = self.refresh('fast-worker', 'stale', '--read-ahead', '8', '--fsync', 'worker',
-                                     '--plan-out', plan_path)
+                                     '--fill-gaps', '0', '--plan-out', plan_path)
         fast = stats['fast_path']
         self.assertTrue(fast['used'], fast['reasons'])
+        self.assertNotIn('fill_gaps', fast)
         self.assertEqual(stats['receiver']['fsync_mode'], 'worker')
         plan = json.loads(plan_path.read_text())
         chosen = [f for f in plan['files'] if not f['whole']]

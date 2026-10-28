@@ -40,7 +40,9 @@ def refresh(scenario, source, sockdir, port, source_bin, basis_bin, work, extra)
             '--pg-controldata', str(source_bin.tool('pg_controldata')),
             '--basis-pg-controldata', str(basis_bin.tool('pg_controldata')),
             '--pg-conn', f'host={sockdir} port={port} user={SUPERUSER} dbname=postgres',
-            '--basis', str(target), '--in-place', '--fast-path', 'summaries', '--stats-json', str(stats_path), *extra]
+            '--basis', str(target), '--in-place', '--fast-path', 'summaries', '--stats-json', str(stats_path),
+            # EXP-63's settings, pinned since EXP-68 and EXP-70 changed the fast path's defaults.
+            '--read-ahead', '0', '--fill-gaps', '0', '--fsync', 'main', *extra]
     result = subprocess.run(argv, capture_output=True, text=True, cwd=REPO, env=env, timeout=1800)
     stats = json.loads(stats_path.read_text()) if stats_path.exists() else None
     return target, result.returncode, stats, result.stderr[-1500:]

@@ -197,11 +197,12 @@ def _compress_option(parser):
                              '64 MiB ahead of the sending thread, so the source\'s scattered reads overlap the '
                              'sending and the receiver\'s writes; 0 reads one run at a time in the sending thread '
                              f'(EXP-64b, EXP-68) (default: {fastpath.DEFAULT_READ_AHEAD} with --fast-path)')
-    parser.add_argument('--fill-gaps', type=_non_negative_int, default=0, metavar='PAGES',
+    parser.add_argument('--fill-gaps', type=_non_negative_int, default=None, metavar='PAGES',
                         help='with --fast-path: also send each clean gap of at most PAGES pages between two chosen '
                              'pages, so the two runs are read and written as one. Scattered changes are bound by '
                              'the disks\' operation rates (EXP-68), and a balanced persistent disk counts a write of '
-                             'up to 32 KiB as one operation (EXP-66) (default: %(default)s)')
+                             'up to 32 KiB as one operation (EXP-66, EXP-70) '
+                             f'(default: {fastpath.DEFAULT_FILL_GAPS} with --fast-path)')
     parser.add_argument('--plan-out', type=Path, default=None, metavar='PATH',
                         help='with --fast-path, where the guard lets it run: write its plan to PATH as JSON, each '
                              'listed file with its size, whether it goes whole, and its chosen pages as [first, '
@@ -571,7 +572,7 @@ def _sender_kwargs(args, identity):
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
             'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
             'read_ahead': _read_ahead(args), 'plan_out': getattr(args, 'plan_out', None),
-            'fill_gaps': getattr(args, 'fill_gaps', 0)}
+            'fill_gaps': _fill_gaps(args)}
 
 
 def _read_ahead(args):
@@ -580,6 +581,14 @@ def _read_ahead(args):
     if threads is None:
         return fastpath.DEFAULT_READ_AHEAD if getattr(args, 'fast_path', None) else 0
     return threads
+
+
+def _fill_gaps(args):
+    """--fill-gaps as given, else fastpath.DEFAULT_FILL_GAPS with --fast-path and 0 without."""
+    pages = getattr(args, 'fill_gaps', None)
+    if pages is None:
+        return fastpath.DEFAULT_FILL_GAPS if getattr(args, 'fast_path', None) else 0
+    return pages
 
 
 def _source_identity(args):

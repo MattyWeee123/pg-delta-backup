@@ -108,11 +108,11 @@ EOF
     else
       # Every setting explicit, since EXP-68 made 8 reader threads and the sync worker the fast path's defaults:
       # "fast" reads one run at a time and syncs in the main loop, as in EXP-64; fastN reads on N threads; a "w"
-      # syncs on the worker; "fK" fills clean gaps of up to K pages (EXP-70's --fill-gaps).
+      # syncs on the worker; "fK" fills clean gaps of up to K pages (EXP-70's --fill-gaps), and no "fK" fills none,
+      # since EXP-70 made 2 pages the default.
       fast= fsync='--fsync main'
       if [[ "$arm" =~ ^fast([0-9]*)(w?)(f([0-9]+))?$ ]]; then
-        fast="--fast-path summaries --read-ahead ${BASH_REMATCH[1]:-0}"
-        [ -n "${BASH_REMATCH[4]}" ] && fast="$fast --fill-gaps ${BASH_REMATCH[4]}"
+        fast="--fast-path summaries --read-ahead ${BASH_REMATCH[1]:-0} --fill-gaps ${BASH_REMATCH[4]:-0}"
         [ -n "${BASH_REMATCH[2]}" ] && fsync='--fsync worker'
       fi
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"

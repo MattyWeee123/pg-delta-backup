@@ -1,0 +1,6 @@
+arm,seconds,source_busy_s,source_busy_share,source_requests_per_busy_s,source_mb_per_busy_s,source_kib_per_request,dest_busy_s,dest_busy_share,dest_requests_per_busy_s,dest_mb_per_busy_s,dest_kib_per_request,source_of_op_cap,source_of_full_bytes,dest_of_op_cap,dest_of_full_bytes
+fast8w,76.57,61.62,0.805,4130,82.5,19.5,53.33,0.696,4786,95.2,19.4,0.985,0.392,1.141,0.454
+fast8wf1,47.38,35.73,0.754,3883,167.6,42.2,29.22,0.617,4788,206.4,42.1,0.926,0.795,1.142,0.984
+fast8wf2,46.59,34.48,0.74,2557,213.4,81.5,34.42,0.739,2566,204.3,77.8,0.61,1.013,0.612,0.974
+fast8wf4,55.75,43.35,0.778,1225,210.6,167.9,39.88,0.715,1355,211.2,152.3,0.292,1.0,0.323,1.007
+full,91.02,84.78,0.931,1624,210.7,126.7,85.29,0.937,816,209.7,251.0,0.387,1.0,0.195,1.0
