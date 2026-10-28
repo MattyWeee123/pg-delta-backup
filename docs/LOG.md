@@ -4,6 +4,25 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (23:57 UTC): the five workflow changes adopted (K14, rules 13–17)
+
+- **The owner adopted all five changes** from the RSI review. Each now has a rule in DECISIONS.md and a file or script behind it.
+- **Rule 13, a cascade and a proxy-fidelity log** (`research/proxy-fidelity.csv`, `analysis/proxy_fidelity.py`, figure `proxy-fidelity`).
+  - Tests, then a local scale model, then the VMs.
+  - Over 9 pairs so far, the VM ratio lay within 0.875–1.185 of the local one. So a change goes to the VMs on local evidence only with a local ratio of 0.80 or less.
+- **Rule 14, an idea archive** (`research/idea-archive.md`): 30 ideas with status, evidence, conditions, and a trigger to revisit each.
+- **Rule 15, a held-out workload set** (`research/held-out-workloads.md`), sealed:
+  - H1: the clustered, tpcb, append and retention patterns, which no fast-path experiment has used;
+  - H2: scale 1,200;
+  - H3: a `pd-ssd` disk;
+  - H4: PostgreSQL 18.
+  - It runs at milestones only, and first before `--crashed-standby` or `--selector` becomes a default.
+- **Rule 16, scorer integrity** (`analysis/integrity.py`, `experiments/registrations.json`). EXP-80 is registered as of its commit ca04163; its 12 scoring and tested files are unchanged since.
+- **Rule 17, noise as a bar** (`research/noise-floor.csv`, `analysis/noise_floor.py`, figure `noise-floor`).
+  - **Within a session:** across 52 cells of 10 s or more, the 95th-percentile spread is 2.27% (median 0.31%); under 10 s it is 7.7%.
+  - **Between sessions:** `pg_basebackup` moved 0.28–0.31%.
+  - **Interference:** EXP-79's disturbed cell (29%) is the kind of outlier the rule now checks for before scoring.
+
 ## 2026-10-28 (23:42 UTC): a review of recursive self-improvement work, against this project's workflow
 
 - **The owner asked** whether RSI agents and papers offer a better workflow. The review is in [research/2026-10-28-rsi-review.md](research/2026-10-28-rsi-review.md).

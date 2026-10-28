@@ -59,7 +59,7 @@ The owner asked whether RSI agents and papers offer a framework, tooling or prac
 - **The rule:** the model only ranks, as Janus does. A real VM run decides, with held-out cells and correctness checks unchanged.
 - **This is optional.** It suits small policies with a numerical objective, not the design-level questions (lineage proofs, new label sources) that have driven the biggest gains.
 
-## Recommended changes (to adopt with the owner's agreement)
+## Recommended changes: adopted by the owner, all five (decision K14; rules 13–17 in DECISIONS.md)
 
 1. **A three-stage cascade as a rule,** with a proxy-fidelity log:
    - tests (seconds);

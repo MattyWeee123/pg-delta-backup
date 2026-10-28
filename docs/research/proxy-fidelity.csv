@@ -1,0 +1,14 @@
+mechanism,proxy,proxy_experiment,proxy_ratio,vm_experiment,vm_cell,vm_ratio,note
+guard: grouped summary reading (B over A),local scale model (scale 320),EXP-73b,0.456,EXP-74,uniform,0.406,the VM ratio is against EXP-70's guard on the same summary rows; EXP-73b's second session gave 0.472
+guard: grouped summary reading (B over A),local scale model (scale 320),EXP-73b (2nd),0.472,EXP-74,uniform,0.406,
+guard: unsorted reading (D over B),local scale model (scale 320),EXP-78,0.460,EXP-79,uniform,0.531,
+guard: unsorted reading (D over B),local scale model (scale 320),EXP-78,0.460,EXP-79,scatter12,0.541,
+guard: unsorted reading (D over B),local scale model (scale 320),EXP-78,0.460,EXP-79,scatterall12,0.567,
+guard: unsorted reading (D over B),local scale model (scale 320),EXP-78,0.460,EXP-79b,uniform,0.545,
+guard: unsorted reading (D over B),local scale model (scale 320),EXP-78,0.460,EXP-79b,scatterall12,0.550,
+written-page check on the verifier over the main loop,local scale model (scale 80),EXP-77 local prior,0.882,EXP-77,uniform,0.997,both arms read a run at a time; the local prior compared them on a 1.2 GB model (medians 2.10 and 2.38 s)
+written-page check on the verifier over the main loop,local scale model (scale 80),EXP-77 local prior,0.882,EXP-77,scatterall12,0.996,
+the fast path's time (model over measured),time model (analysis/fastpath_model.py),EXP-74,1.000,EXP-74,scatter4 and scatter12 (6 arms) and uniform,0.974-1.024,measured over predicted; out of sample except uniform
+the fast path's time (model over measured),time model (analysis/fastpath_model.py),EXP-75,1.000,EXP-75,uniform fill 2,1.015,
+the fast path's time (model over measured),time model (analysis/fastpath_model.py),EXP-75,1.000,EXP-75,scatterall12 fill 0,0.940,the overhead per MB grows less than linearly (EXP-75's post-hoc)
+the fast path's time (model over measured),time model (analysis/fastpath_model.py),EXP-70 (in-sample),1.000,EXP-70,hot,1.468,the model leaves out the destination's fixed write overhead at 15,000 pages (EXP-74's registration)

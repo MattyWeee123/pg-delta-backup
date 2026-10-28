@@ -1,0 +1,19 @@
+{
+ "EXP-80": {
+  "commit": "ca04163e3f6d",
+  "files": {
+   "analysis/exp80.py": "10b1eb9591b8be59689dfe4447fd5ab6369db8f1d8b92479bc64124beb457f5a",
+   "experiments/fastpath_crashed/crashed_standby_trials.py": "33fcddfc69bb68646c1face9d4f6e8fc01f9d0ca9bc4cb5850b2c7532775a21a",
+   "experiments/fastpath_crashed/s2e_control.py": "cb9b4c319780b4f6f4d1fdeffd514572bd1b6713bfc71901dde3555e1fdc89c8",
+   "experiments/tricky_copies/fastpath_check.py": "9a51dda947e2567384068080c91738acd9b943e0e3d2d3f8dc0376b806d9e025",
+   "experiments/tricky_copies/scenarios.py": "b1e8fbdfbc9eef2ecde36189939887085a71cea91561f7918537de4ba4c3bff3",
+   "pgdelta/cli.py": "9749b1e80f8e01753193487eb76bdabdde457a33e0746d046add81395a5cff4a",
+   "pgdelta/fastpath.py": "052e5c3a937b8f1f9a8e290bee06bb7ea362b3ff16274014a3bf42c0515419a9",
+   "pgdelta/live.py": "e71253b9328f28229bd69040f38784a07e29e7560f0d0ee466824686f09d21b6",
+   "pgdelta/receiver.py": "8f4ac65d16d316c4a5b013b8ae190ea4943c3f70d19b23500308d60e9dcaa9fa",
+   "pgdelta/sender.py": "021e3cc48ea36fc42df55621700ea774e700656a6525ffefe18f51981f6d828a",
+   "pgdelta/transport.py": "a20f36fccb1e5396bd3110383e8b79aac7f2c80ca111962864b75066fb9d5c3f",
+   "pgdelta/tree.py": "1d3aa5672923890636d4bd8759e3379ded75bd2430a14aefdf1408da8dbb62f3"
+  }
+ }
+}
