@@ -168,6 +168,33 @@ for at, redo in (('0/1800000', '0/1700000'), ('0/5800000', '0/5700000'), ('0/680
             fastpath.check_mode(None, 'live', False, diverged_basis=True)
 
 
+class WrittenRecords(unittest.TestCase):
+    def test_runs_read_whole_give_the_digest_of_each_page_read_alone_on_any_pool(self):
+        """EXP-77: the receiver's check reads each written run in one call, on the pool's workers when it has them;
+        the digest must be the one the page-by-page re-read gave, the last page short included."""
+        from pgdelta.tree import HashPool, written_records
+        hasher = Hasher(bytes(range(32)))
+        block, size = 8192, 8192 * 4100 + 1000  # 4,101 pages, the last one short
+        runs = [(0, 3), (10, 1), (100, 2000), (2200, 1500), (4095, 6)]
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'f'
+            path.write_bytes(os.urandom(size))
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                leaves = [(page, hasher.leaf(os.pread(fd, block, page * block)))
+                          for first, count in runs for page in range(first, first + count)]
+                expected = fastpath.written_digest(hasher, size, leaves)
+                self.assertEqual(fastpath.records_digest(hasher, size, written_records(fd, size, hasher, block, runs)),
+                                 expected)
+                for jobs, backend in ((1, 'process'), (2, 'thread'), (2, 'process')):
+                    with self.subTest(jobs=jobs, backend=backend), \
+                            HashPool(jobs, backend=backend, key=hasher.key, algorithm=hasher.algorithm) as pool:
+                        records = pool.written_records(path, fd, size, hasher, block, runs)
+                        self.assertEqual(fastpath.records_digest(hasher, size, records), expected)
+            finally:
+                os.close(fd)
+
+
 class Pages(unittest.TestCase):
     PLAN = fastpath.block_plan([(1663, 5, 16384, 0, 3, False), (1663, 5, 16384, 0, 131075, False),
                                 (1663, 5, 16384, 2, 0, False), (1663, 5, 16390, 0, 4, True),
@@ -494,6 +521,36 @@ class RealServer(unittest.TestCase):
         self.assertEqual(chosen['choice'], 'fill4')  # the fewest requests
         self.assertGreater(fast['files_chosen'], 0)
         self.check_copy(target)
+
+    def test_the_written_pages_are_re_read_off_the_main_loop_and_counted(self):
+        """EXP-77: with the pipelined verifier (the default) every written page is re-read and checked there, and its
+        time is reported."""
+        target, stats = self.refresh('fast-reread', 'stale', '--fill-gaps', '0')
+        fast, received = stats['fast_path'], stats['receiver']['fast_path']
+        self.assertTrue(fast['used'], fast['reasons'])
+        self.assertEqual(stats['receiver']['switches']['verify'], 'pipelined')
+        self.assertEqual(received['pages_reread'], fast['pages_chosen'])
+        self.assertGreater(received['reread_seconds'], 0)
+        self.check_copy(target)
+
+    def test_a_page_written_a_page_away_fails_the_session_either_way(self):
+        """The receiver's test switch writes one page run a page away: the written pages' check must fail the session,
+        on the pipelined verifier or in the main loop (--verify sequential), and B stays blocked."""
+        from pgdelta import receiver as receiver_module
+        from pgdelta.inplace import MARKER
+        for verify in ('pipelined', 'sequential'):
+            with self.subTest(verify=verify):
+                target = self.root / f'fast-misplaced-{verify}'
+                shutil.copytree(self.root / 'stale', target)
+                env = dict(subprocess_env(), **{receiver_module.MISPLACE_ENV: '1'})
+                result = subprocess.run(python_command(
+                    'local', '--source', self.source, '--source-kind', 'live', '--pg-controldata', CONTROLDATA,
+                    '--pg-conn', f'host={self.sockets} port=5432 user=t dbname=postgres', '--basis', target,
+                    '--in-place', '--fast-path', 'summaries', '--verify', verify), capture_output=True, text=True,
+                    cwd=REPO_ROOT, env=env, timeout=300)
+                self.assertEqual(result.returncode, 4, result.stderr[-2000:])
+                self.assertIn('the pages written do not match what the source sent', result.stderr)
+                self.assertTrue(os.path.lexists(target / MARKER))
 
     def test_a_crashed_copy_is_refused_and_refreshed_by_hashing(self):
         target, stats = self.refresh('refused', 'crashed')

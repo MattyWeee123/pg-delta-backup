@@ -89,7 +89,7 @@ from pgdelta.identity import gate, read_identity, reuse_policy
 from pgdelta.inventory import MODE_MASK, parse_entries, require_plain, scan
 from pgdelta.protocol import ChannelClosed
 from pgdelta.tree import (BACKENDS, DEFAULT_BACKEND, DEFAULT_JOBS, HashPool, _SizeChanged, hash_file,
-                          node_count, open_regular, page_count, pread_exact)
+                          node_count, open_regular, page_count, pread_exact, written_records)
 
 STAGING_INFIX = '.pgdelta-staging-'
 RECEIPT_SUFFIX = '.pgdelta-receipt.json'
@@ -380,7 +380,8 @@ class _Counts:
 
 
 class _Verifier:
-    """Re-hashes finished output files on the pool, in order, while the main loop writes the next file.
+    """Re-hashes finished output files on the pool, in order, while the main loop writes the next file; in the fast
+    path, re-reads each file's written pages and checks their digest (EXP-77).
 
     The first failure is kept in `error` and reported to the sender at
     once; the main loop raises it at its next check. finish() waits for
@@ -396,9 +397,10 @@ class _Verifier:
         self.thread = threading.Thread(target=self._run, name='pgdelta-verify', daemon=True)
         self.thread.start()
 
-    def submit(self, entry, size, digest, written=None):
-        """`written`: --verify-scope written's (index, runs, B's node digests, B's leaf digests) for this file."""
-        self.queue.put((entry, size, digest, written))
+    def submit(self, entry, size, digest, written=None, fast_runs=None):
+        """`written`: --verify-scope written's (index, runs, B's node digests, B's leaf digests) for this file.
+        `fast_runs`: the fast path's written runs of this file, whose pages are re-read and checked instead."""
+        self.queue.put((entry, size, digest, written, fast_runs))
 
     def finish(self):
         self.queue.put(None)
@@ -416,8 +418,10 @@ class _Verifier:
                 if item is None or receiver.stop.is_set():
                     return
                 started = time.perf_counter()
-                entry, size, digest, written = item
-                if written is not None:
+                entry, size, digest, written, fast_runs = item
+                if fast_runs is not None:
+                    receiver._check_written(entry, size, digest, fast_runs)
+                elif written is not None:
                     index, runs, nodes_b, leaves_b = written
                     receiver._verify_written(index, entry, size, digest, runs, nodes_b, leaves_b)
                 else:
@@ -460,7 +464,9 @@ class _Receiver:
         # each file the summaries chose is checked by the pages written (FILE_DONE_WRITTEN).
         self.summary_offer, self.summary_facts, self.summary_refused = False, None, None
         self.summary_pending = self.fast_mode = False
-        self.fast_counts = {'files_written_checked': 0, 'pages_reread': 0, 'reasons': []}
+        # reread_seconds: the time re-reading and checking the written pages took, on the verifier when there is
+        # one (EXP-77), else in the main loop.
+        self.fast_counts = {'files_written_checked': 0, 'pages_reread': 0, 'reread_seconds': 0.0, 'reasons': []}
         # --diverged-basis: the HELLO's offer; whether ACCEPT took it (B stopped cleanly, so its end is proven) with
         # B's wal_log_hints, read then; and what this end found in B's WAL when FORK_POINT came (None until then).
         self.diverged_offer = self.diverged = False
@@ -1358,7 +1364,9 @@ class _Receiver:
     def _file_done_written(self, payload):
         """--fast-path summaries: a file of which only the pages the summaries chose were sent, in place. The pages
         left are B's, unread; the pages written are re-read and their digest compared with that of what was sent
-        (pgdelta.fastpath.written_digest)."""
+        (pgdelta.fastpath.written_digest). With the pipelined verifier the re-reading runs there, on the pool, while
+        this loop takes the next file (EXP-77: in this loop it stalled the transfer at every file's end); COMPLETE
+        waits for it before anything is published."""
         if not self.fast_mode:
             raise ProtocolError('FILE_DONE_WRITTEN outside the fast path')
         index, size, digest = protocol.decode_file_done(payload)
@@ -1378,16 +1386,7 @@ class _Receiver:
             os.ftruncate(output.fd, size)
         if os.fstat(output.fd).st_size != size:
             raise ProtocolError(f'{entry.path} was rebuilt with the wrong length')
-        leaves, block = [], self.block
-        verified = time.perf_counter()
-        for first, count in output.runs:
-            for page in range(first, first + count):
-                data = pread_exact(output.fd, min(block, size - page * block), page * block)
-                leaves.append((page, self.hasher.leaf(data)))
-        self.fast_counts['pages_reread'] += len(leaves)
-        if fastpath.written_digest(self.hasher, size, leaves) != digest:
-            raise VerificationError(f'{entry.path}: the pages written do not match what the source sent')
-        self.verify_seconds += time.perf_counter() - verified
+        runs = list(output.runs)
         synced = time.perf_counter()
         if self.syncer is not None:
             fd, self.current = output.fd, None
@@ -1402,6 +1401,32 @@ class _Receiver:
         self.counts.files_verified += 1
         self.fast_counts['files_written_checked'] += 1
         self._accept_file(entry, size, digest)
+        if self.verifier is not None:
+            self.verifier.submit(entry, size, digest, fast_runs=runs)
+        else:
+            verified = time.perf_counter()
+            self._check_written(entry, size, digest, runs)
+            elapsed = time.perf_counter() - verified
+            self.verify_seconds += elapsed
+            self.verify_wait_seconds += elapsed
+
+    def _check_written(self, entry, size, digest, runs):
+        """The fast path's check of a file: its written pages re-read from the output (one read per run, on the pool's
+        workers where it has them) and their digest compared with that of what the source sent."""
+        started = time.perf_counter()
+        path = self._output_path(entry.path)
+        fd = open_regular(path)
+        try:
+            if self.pool is not None:
+                records = self.pool.written_records(path, fd, size, self.hasher, self.block, runs, stop=self.stop)
+            else:
+                records = written_records(fd, size, self.hasher, self.block, runs)
+        finally:
+            os.close(fd)
+        self.fast_counts['pages_reread'] += sum(count for _, count in runs)
+        self.fast_counts['reread_seconds'] += time.perf_counter() - started
+        if fastpath.records_digest(self.hasher, size, records) != digest:
+            raise VerificationError(f'{entry.path}: the pages written do not match what the source sent')
 
     def _append(self, payload):
         """A live source's APPEND: the files that follow the listed ones (its WAL and backup_label).

@@ -495,7 +495,12 @@ def fill_gaps(pages, gap):
 
 def written_digest(hasher, size, leaves):
     """The digest of a file's written pages: (page number, leaf digest) pairs in order, keyed as the session."""
-    return hasher.file(size, hasher.node(b''.join(_PAGE_NUMBER.pack(page) + leaf for page, leaf in leaves)))
+    return records_digest(hasher, size, b''.join(_PAGE_NUMBER.pack(page) + leaf for page, leaf in leaves))
+
+
+def records_digest(hasher, size, records):
+    """written_digest from the records already joined (tree.written_records: each page's number, then its leaf)."""
+    return hasher.file(size, hasher.node(records))
 
 
 def check_decision(decision):

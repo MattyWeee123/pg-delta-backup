@@ -64,6 +64,8 @@ READ_BYTES = 1 << 20
 # so the cost of passing a task and its result is small next to the hashing.
 TASK_BYTES = 8 << 20
 DEFAULT_JOBS = 1
+# The fast path's written-page records (pgdelta.fastpath.written_digest): each page's number, then its leaf digest.
+_PAGE_NUMBER = struct.Struct('>Q')
 BACKENDS = ('process', 'thread')
 DEFAULT_BACKEND = 'process'
 # Testing hook: "forkserver" instead of the default "spawn". With it the workers' CPU is not
@@ -184,6 +186,18 @@ def _worker_block_digests(path, identity, size, block, node_blocks, nodes):
         if (info.st_dev, info.st_ino) != identity:
             raise OSError(errno.ESTALE, 'the file was replaced while it was hashed', path)
         return [_block_node(fd, size, _WORKER.hasher, block, node_blocks, node) for node in nodes]
+    finally:
+        os.close(fd)
+
+
+def _worker_written_records(path, identity, size, block, runs):
+    """written_records for `runs` of the file at `path`, in a worker process (the fast path's check)."""
+    fd = open_regular(path)
+    try:
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) != identity:
+            raise OSError(errno.ESTALE, 'the file was replaced while it was re-read', path)
+        return written_records(fd, size, _WORKER.hasher, block, runs)
     finally:
         os.close(fd)
 
@@ -375,6 +389,29 @@ class HashPool:
                 return [part for chunk in self.map(task, chunks, stop=stop) for part in chunk]
         pool = SERIAL if self.backend == 'process' else self
         return pool.map(functools.partial(_block_node, fd, size, hasher, block, node_blocks), nodes, stop=stop)
+
+    def written_records(self, path, fd, size, hasher, block, runs, *, stop=None):
+        """written_records of `runs` (sorted (first page, count) pairs) of the regular file open as `fd`, on the
+        worker processes or threads when there is more than one task's worth (EXP-77: the fast path's re-reading,
+        off the receiver's main loop)."""
+        chunks, current, current_bytes = [], [], 0
+        for first, count in runs:
+            current.append((first, count))
+            current_bytes += count * block
+            if current_bytes >= TASK_BYTES:
+                chunks.append(tuple(current))
+                current, current_bytes = [], 0
+        if current:
+            chunks.append(tuple(current))
+        if self.backend == 'process' and len(chunks) > 1:
+            if hasher.key != self.key or hasher.algorithm != self.algorithm:
+                raise ValueError('the hasher and the hash pool use different keys or algorithms')
+            info = os.fstat(fd)
+            task = functools.partial(_worker_written_records, os.fspath(path), (info.st_dev, info.st_ino), size,
+                                     block)
+            return b''.join(self.map(task, chunks, stop=stop))
+        pool = SERIAL if self.backend == 'process' else self
+        return b''.join(pool.map(functools.partial(written_records, fd, size, hasher, block), chunks, stop=stop))
 
     def close(self):
         """Stop the workers, after the tasks already running finish. Safe while another thread uses the pool."""
@@ -606,6 +643,19 @@ def hash_file(path, key, block=BLOCK, node_blocks=NODE_BLOCKS, *, keep_leaves=Tr
         return FileTree(size, block, node_blocks, hasher.file(size, nodes), nodes, leaves)
     finally:
         os.close(fd)
+
+
+def written_records(fd, size, hasher, block, runs):
+    """The fast path's records of the pages in `runs` of the file open as `fd`: per page, its number (8 bytes, big
+    endian) and its leaf digest, in order (fastpath.written_digest's input). Each run is read in one call."""
+    out = []
+    for first, count in runs:
+        start = first * block
+        length = max(0, min(count * block, size - start))
+        view = memoryview(pread_exact(fd, length, start))
+        out += [_PAGE_NUMBER.pack(first + offset // block) + hasher.leaf(view[offset:offset + block])
+                for offset in range(0, length, block)]
+    return b''.join(out)
 
 
 def leaf_digests(fd, first_page, count, size, hasher, block=BLOCK):

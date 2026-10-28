@@ -24,6 +24,8 @@
 # An arm "fastNws" (EXP-75) is fastNw with --selector instead of a fill: it chooses its fill, or a full copy.
 # A "b" in place of the "w" (EXP-76) syncs on the worker with early write-back (--fsync worker-writeback). SERIES=1
 # samples both VMs' /data disk every 0.25 s around each run (disk_series.sh: series-dest.txt, series-source.txt).
+# A final "q" (EXP-77) has the receiver verify in its main loop (--verify sequential), where the fast path's written
+# pages are then re-read; without it they are re-read on the pipelined verifier (the default since EXP-77).
 set -u
 SRC=$1
 REPEATS=${2:-2}
@@ -144,12 +146,13 @@ EOF
       # since EXP-70 made 2 pages the default; none takes an old primary from its own WAL (EXP-71's default).
       # A final "s" has --selector choose the fill, or a full copy, instead (EXP-75).
       fast= fsync='--fsync main'
-      if [[ "$arm" =~ ^fast([0-9]*)([wb]?)(f([0-9]+)|s)?$ ]]; then
+      if [[ "$arm" =~ ^fast([0-9]*)([wb]?)(f([0-9]+)|s)?(q?)$ ]]; then
         fill="--fill-gaps ${BASH_REMATCH[4]:-0}"
         [ "${BASH_REMATCH[3]}" = s ] && fill=--selector
         fast="--fast-path summaries --read-ahead ${BASH_REMATCH[1]:-0} $fill --no-diverged-basis"
         [ "${BASH_REMATCH[2]}" = w ] && fsync='--fsync worker'
         [ "${BASH_REMATCH[2]}" = b ] && fsync='--fsync worker-writeback'
+        [ "${BASH_REMATCH[5]}" = q ] && fsync="$fsync --verify sequential"
       fi
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \

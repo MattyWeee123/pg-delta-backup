@@ -1,0 +1,6 @@
+pattern,arm,runs,seconds,source_io_s,dest_io_s,fsync_wait_s,backup_mode_s,fsync_effective
+uniform,fast8wf2,2,43.29,34.69,34.37,3.36,38.95,worker
+uniform,fast8bf2,2,41.48,33.65,32.5,0.04,40.37,worker-writeback
+scatterall12,fast8w,2,113.2,95.16,92.94,3.38,108.63,worker
+scatterall12,fast8b,2,116.95,83.56,94.67,0.05,115.86,worker-writeback
+scatterall12,full,2,100.95,93.95,95.4,,,

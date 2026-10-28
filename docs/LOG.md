@@ -4,6 +4,23 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (18:05 UTC): EXP-76 done (failed); the stall it found fixed; EXP-77 pre-registered
+
+- **EXP-76's deciding prediction failed.**
+  - **The tail fell as predicted:** early write-back on the worker cut the receiver's last wait from 3.4 to 0.04 s.
+  - **The transfer stretched:** `sync_file_range` stalled the receiver's main loop when the disk's queue was full. The result was 1.81 s saved where requests bind (uniform) and 3.75 s lost where bytes bind (scatterall12). `--fsync worker-writeback` stays opt-in.
+  - **`pg_basebackup` has the same last flush (about 3.6 s),** so the tail is no extra cost where the destination disk binds.
+  - **Rule 11's second uniform session is not run** (a recorded deviation): it can't change the verdict, and the receiver changes next.
+- **The timeline found the rest:** a stall at every 1 GiB file's end, with both disks dipping about 15–18 times per run.
+  - **The cause:** the receiver re-read every written page one `pread` at a time and hashed it in its main loop, 2.34 M pages at scatterall12. Its time was hidden, since `verify_seconds` is overwritten by the verification pool's busy time.
+  - **Accounted against `pg_basebackup` at scatterall12 (12.25 s):** the guard 5.3 s, the plan 0.9 s, the stalls about 5 s more of sending (about 9 s at `pg_basebackup`'s rate), and start and tail about 1 s.
+- **Fixed:** the check now runs on the pipelined verifier, on the pool, reading each written run in one call. COMPLETE still waits for every check before anything is published. Its time is reported as `fast_path.reread_seconds`.
+  - **Tests added:** the records' digest equals the page-by-page one on every pool; every page sent is re-read on a real server; and a page written one page away fails the session with exit 4 and B blocked, under both verify modes. No such test existed before.
+  - **Locally (scale 80):** 2.09–2.16 s against 2.34–2.56 s.
+- **EXP-77** times it on the VMs, with the check in the main loop (`--verify sequential`) against on the verifier, in the same two cells, with `pg_basebackup` and the timeline.
+  - **Deciding:** at least 3.0 s saved in scatterall12.
+  - **Also:** uniform no slower, the source disk's idle stretches under 1.5 s, every page still checked.
+
 ## 2026-10-28 (16:30 UTC): EXP-76 pre-registered: the fast path's tail, and a timeline of both disks
 
 - **Why:** EXP-75 found the fast path's fixed costs, not the disks, put `pg_basebackup` ahead at 96% of the pages. The statistics from EXP-74 and EXP-75 (16 fast runs) split those costs very evenly:
