@@ -169,3 +169,8 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 **Update, October 28: the guard's reading without the server's sort (EXP-78, local).**
 - **Where the reading's time went:** the server's grouping alone took 0.09 s of 0.41 s on the matched scale model. Sorting and de-duplicating each fork's blocks (`array_agg(DISTINCT … ORDER BY …)`) was most of the rest. The JSON and psql cost almost nothing.
 - **The fix:** unsorted with duplicates, which the sender's sets de-duplicate, took 0.460 of the time with identical plans. Built. The VMs time it next.
+
+**Update, October 28: the guard's change firm on the VMs, and the break-even re-placed (EXP-79, EXP-79b).**
+- **The guard, unsorted:** 0.55–0.57 of its time in two VM sessions (rule 11), about 0.65 µs per summary row against 1.15–1.30.
+- **With the current fast path,** `pg_basebackup` starts to win near 91% of the pages changed: 0.60 at 53%, 1.05 at 96%. Before EXP-77 and EXP-78 that was near 85%.
+- **A design lesson (EXP-79):** cells that update the same rows must not follow each other in one session without settling the source. Autovacuum's writes slowed two runs, and the cell itself changed.

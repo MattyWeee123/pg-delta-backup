@@ -101,5 +101,5 @@ The `ha` set in us-west1-b and -c. The smoke at scale 20 passed (5 runs, the cop
 
 ## What followed
 
-- **EXP-79b**, rule 11's second session for the deciding prediction, in EXP-75–77's order (uniform, then scatterall12, with `pg_basebackup`), so that prediction 3 can be tested on a comparable cell.
+- **EXP-79b**, rule 11's second session, in EXP-75–77's order: every prediction held (the guard 0.550; the fast path 106.23 s on EXP-77's cell). With this session's 0.567, the change is firm, and the break-even with the current code is near 91% ([EXP-79b](EXP-79b-guard-second-session.md)).
 - **The break-even** is re-placed after EXP-79b, from this session's scatter12 (0.604 at 53%) and EXP-79b's scatterall12, both with the current code.

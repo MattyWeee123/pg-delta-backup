@@ -4,6 +4,15 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (22:25 UTC): EXP-79b done: the guard's change firm, and `pg_basebackup` now wins only past about 91% of pages
+
+- **Every prediction held in rule 11's second session**, run in EXP-75–77's order (uniform, then scatterall12). The source wrote 0.03–0.12 GB per run, as in EXP-77.
+  - **The guard:** 0.550 of its time at 96% of the pages (2.92 s) and 0.545 in uniform. With EXP-79's 0.567, EXP-78's change is firm on the VMs.
+  - **The fast path on EXP-77's cell** took 106.23 s against 108.48 s (2.25 s below, bar 2.0), with `pg_basebackup` at 101.10 s (−0.15%).
+- **The break-even with the current code:** 0.604 at 53% (EXP-79's scatter12, clean runs) and 1.051 at 96% cross at about 91% of the pages, against 85% before. `fastpath-breakeven` now shows both sets.
+- **What is left at 96%:** 5.1 s, of which 2.9 s is the guard. The selector's model, fitted before these changes, is refitted next on new cells.
+- RESULTS, both READMEs and the research loop updated.
+
 ## 2026-10-28 (21:28 UTC): EXP-79 done (deciding held within rule 11's band); EXP-79b pre-registered
 
 - **The guard on the VMs, with EXP-78's unsorted reading:** 0.64–0.69 µs per summary row in every cell, against 1.15–1.30 µs. That is 0.531 (uniform), 0.541 (scatter12) and **0.567 (scatterall12, deciding; bar 0.60)** of its earlier times. uniform's refresh fell from 42.64 to 42.04 s.
