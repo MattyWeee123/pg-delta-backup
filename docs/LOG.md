@@ -19,6 +19,10 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - **One arm per mechanism:** 1 and 8 threads tell overlap apart from parallel reads.
   - **The harness:** `lab_exp64.sh` gains `PATTERNS` and `ARMS`, with defaults that reproduce EXP-64's plan exactly.
 - **Waiting on the region's quota:** us-west1 allows 16 N2D vCPUs and EXP-65's pair uses them, so EXP-64b runs after EXP-65's teardown.
+- **EXP-66 pre-registered** (research loop 1's second item: the `fio` sweep for idea 2). It runs on EXP-64b's pair after EXP-64b's runs, so it needs no VMs of its own.
+  - **The deciding question:** does the disk count a 32 KiB random write as one operation?
+  - **The model:** written before the data, it turns the measured rates into a gap-filled write time for EXP-64's page set.
+  - **The rule:** idea 2 is prototyped only if it cuts that time by at least 25%.
 
 ## 2026-10-27 (night): the fast path built (K11), checked live (EXP-63) and timed beyond memory (EXP-64); research loop 1
 
