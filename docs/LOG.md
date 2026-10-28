@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-27 (late night): overlapped source reads built; EXP-64b pre-registered
+
+- **Asked by the owner:** build the overlapped source reads for the fast path, and register EXP-64b on EXP-64's scattered cell.
+- **Built:** `--read-ahead THREADS` (pgdelta/sender.py, `_ReadAhead`). Reader threads read the fast path's chosen runs in sending order, up to 64 MiB ahead of the sending thread. The statistics record how long the sending thread waited on them.
+  - **Tests:** order, window and closing (unit), and a real-server refresh with 4 threads that matches the source. The full suite passes (1,598 tests).
+  - **One error path fixed before commit:** a failed file closed its handle while a later read of it could still be in flight. Handles now close only after the threads stop.
+- **EXP-64b pre-registered** before any run, on the uniform cell: hashing, the fast path with 0, 1 and 8 reader threads, and a full copy.
+  - **The deciding bar:** 0.80 of the unthreaded fast path. EXP-64's own timers give a bound of about 112 s (0.68).
+  - **One arm per mechanism:** 1 and 8 threads tell overlap apart from parallel reads.
+  - **The harness:** `lab_exp64.sh` gains `PATTERNS` and `ARMS`, with defaults that reproduce EXP-64's plan exactly.
+- **Waiting on the region's quota:** us-west1 allows 16 N2D vCPUs and EXP-65's pair uses them, so EXP-64b runs after EXP-65's teardown.
+
 ## 2026-10-27 (night): the fast path built (K11), checked live (EXP-63) and timed beyond memory (EXP-64); research loop 1
 
 - **Built:** `--fast-path summaries` (pgdelta/fastpath.py), opt-in, behind guard v2. Unit tests and two real-server refreshes pass. Planning EXP-63 found that `--reuse-any-basis` could let another cluster reach the fast path; it now checks identity itself.

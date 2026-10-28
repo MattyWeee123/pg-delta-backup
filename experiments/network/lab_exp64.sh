@@ -8,11 +8,15 @@
 #     setsid nohup bash experiments/network/lab_exp64.sh SOURCE_IP [REPEATS] [SEED] \
 #         > /data/exp04-results/exp64-lab.log 2>&1 < /dev/null &
 # SCALE (default 600, about 18 GB) and OUT change the size and the results directory (the smoke: SCALE=20).
+# PATTERNS (default "hot uniform") and ARMS (default "hash fast full") pick the cells; an arm "fastN" is the fast
+# path with --read-ahead N (EXP-64b: PATTERNS=uniform ARMS="hash fast fast1 fast8 full").
 set -u
 SRC=$1
 REPEATS=${2:-2}
 SEED=${3:-640}
 SCALE=${SCALE:-600}
+PATTERNS=${PATTERNS:-hot uniform}
+ARMS=${ARMS:-hash fast full}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
 R=${OUT:-/data/exp04-results/exp64}
@@ -55,7 +59,7 @@ dd if="$W/ddtest" of=/dev/null bs=1M iflag=direct 2> "$R/dd-read.txt"
 rm -f "$W/ddtest"
 
 i=0
-for pattern in hot uniform; do
+for pattern in $PATTERNS; do
   echo "$(date -u +%T) $pattern: B0, a base backup before the change"
   rm -rf "$B0"
   $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$B0" -X stream -c fast > "$R/B0-$pattern.log" 2>&1 \
@@ -65,10 +69,10 @@ for pattern in hot uniform; do
   on_src "cat $W/workload-$pattern.json" > "$R/workload-$pattern.json"
   SOURCE_STATE=$(psrc "$STATE")
   echo "$(date -u +%T) $pattern: workload done; source state $SOURCE_STATE"
-  python3 - "$REPEATS" "$SEED" "$pattern" > "$R/plan-$pattern.txt" <<'EOF'
+  python3 - "$REPEATS" "$SEED" "$pattern" $ARMS > "$R/plan-$pattern.txt" <<'EOF'
 import random, sys
-repeats, seed, pattern = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
-runs = [(arm, k) for arm in ('hash', 'fast', 'full') for k in range(repeats)]
+repeats, seed, pattern, arms = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4:]
+runs = [(arm, k) for arm in arms for k in range(repeats)]
 random.Random(seed + (pattern == 'uniform')).shuffle(runs)
 for arm, k in runs:
     print(arm, k)
@@ -90,7 +94,11 @@ EOF
       status=$?
       t1=$(date +%s.%N)
     else
-      fast=; [ "$arm" = fast ] && fast='--fast-path summaries'
+      case "$arm" in
+        fast) fast='--fast-path summaries' ;;
+        fast*) fast="--fast-path summaries --read-ahead ${arm#fast}" ;;
+        *) fast= ;;
+      esac
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
         --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 > "$d/receive.log" 2>&1 &
       rp=$!
@@ -105,7 +113,7 @@ EOF
       on_src "cat /tmp/exp64-send.json" > "$d/send.json"
     fi
     verify=null
-    if [ "$arm" = fast ] && [ "$status" = 0 ]; then
+    if [ "${arm#fast}" != "$arm" ] && [ "$status" = 0 ]; then
       # The refreshed copy recovers from its backup_label; its pgbench_accounts must equal the source's.
       $PGBIN/pg_ctl -D "$B" -l "$d/copy.log" -w -t 1800 \
         -o "-p 5433 -k /tmp -c listen_addresses='' -c summarize_wal=off" start > /dev/null 2>&1
