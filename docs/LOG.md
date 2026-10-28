@@ -16,6 +16,10 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - **The guard refuses** a B that wasn't stopped cleanly, whose WAL doesn't read through without a gap, that has neither checksums nor `wal_log_hints`, or whose WAL holds a record of an extension's resource manager or a Database or Tablespace record.
   - **Finding the checkpoint:** windows ending at the fork, each twice as long as the last, so the receiver doesn't read all the WAL B keeps (EXP-67's old primary keeps up to 40 GB).
   - **Tests:** a real failover, a standby promoted while its primary kept writing, both sides changing rows and creating a table of the same name. The old primary took the fast path with 4,019 blocks from its WAL, and the copy matched the server and passed `pg_amcheck`. Without the option, and with its WAL removed, it was refused and hashed, and both copies matched too. Unit tests cover the guard, the window search and the messages.
+- **EXP-03's classifier gains PostgreSQL's fuller heap mask, as an opt-in** (`classify.mask_heap_postgres`, moved from EXP-69b's post-hoc script).
+  - **What it masks:** the tuple's command id, a speculative insertion's ctid and the padding, as `heap_mask` does.
+  - **How it's used:** given a page's block number, `classify_pair` calls a page that differs only there `replay_only`. Registered analyses don't pass one, so their categories and counts are unchanged.
+  - **Checked:** EXP-69b's post-hoc check reproduces byte for byte.
 - **EXP-71 pre-registered:** idea 1 timed against `pg_rewind` and a re-clone on EXP-67's cells, with a new `union` arm in EXP-67's lab.
   - **The deciding prediction:** hot10 takes at most 0.5 of `pg_rewind`'s time (the model gives about 0.2).
   - **Uniform:** at most 0.75 of a re-clone's (about 0.57).

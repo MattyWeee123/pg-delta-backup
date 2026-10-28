@@ -21,6 +21,11 @@ primitives) and sorts each wrongly-skipped page into one category:
 - ``fsm``, ``vm``, ``init``: the page belongs to that fork (not masked further).
 - ``content``: the masked pages still differ, so the copy would hold stale data.
 - ``unclassified``: a main-fork page of an access method these masks don't know.
+- ``replay_only`` (only when classify_pair is given the page's block number; registered analyses don't, so their
+  categories are unchanged): a heap or sequence page that differs only in what PostgreSQL's heap_mask also masks
+  beyond the bits above: each tuple's command id (replay sets it to FirstCommandId), a speculative insertion's ctid,
+  and the padding after each tuple (mask_heap_postgres). EXP-69b found one such page counted as content: a tuple
+  the old primary inserted, which the server had only replayed.
 """
 from __future__ import annotations
 
@@ -38,6 +43,7 @@ LP_UNUSED, LP_NORMAL = 0, 1
 BTP_LEAF, BTP_SPLIT_END, BTP_HAS_GARBAGE = 1 << 0, 1 << 5, 1 << 6
 MAX_BT_CYCLE_ID = 0xFF7F
 SEQUENCE_MAGIC = 0x1717
+HEAP_SPECULATIVE_TOKEN = 0xFFFE  # ctid offset of a speculative insertion
 CATEGORIES = ('checksum_only', 'lsn_only', 'hint_bits_only', 'hint_bits_and_lsn', 'all_visible',
               'fsm', 'vm', 'init', 'content', 'unclassified')
 
@@ -98,6 +104,20 @@ def mask_heap(page, all_visible=False):
     return bytes(buf)
 
 
+def mask_heap_postgres(page, blkno, all_visible=False):
+    """mask_heap plus what PostgreSQL 17's heap_mask also masks: t_cid, a speculative ctid, padding (EXP-69b)."""
+    buf = bytearray(mask_heap(page, all_visible))
+    for index, (_pos, offset, flags, length) in enumerate(line_pointers(page), start=1):
+        if flags == LP_NORMAL and length >= 23 and offset + 23 <= BLOCK:
+            struct.pack_into('<I', buf, offset + 8, 0)  # t_cid
+            if struct.unpack_from('<H', buf, offset + 16)[0] == HEAP_SPECULATIVE_TOKEN:
+                struct.pack_into('<HHH', buf, offset + 12, blkno >> 16, blkno & 0xFFFF, index)
+        if flags in (1, 2) and length:  # normal or redirect-with-storage: the padding up to MAXALIGN
+            pad = (-length) % 8
+            buf[offset + length:offset + length + pad] = bytes(pad)
+    return bytes(buf)
+
+
 def mask_btree(page, all_visible=False):
     buf = bytearray(page)
     mask_common(buf, all_visible)
@@ -111,8 +131,9 @@ def mask_btree(page, all_visible=False):
     return bytes(buf)
 
 
-def classify_pair(kind, old_page, new_page):
-    """Category of a page pair that differs (see module docstring)."""
+def classify_pair(kind, old_page, new_page, blkno=None):
+    """Category of a page pair that differs (see module docstring). With the page's block number `blkno`, a heap or
+    sequence page that is content by the masks above but equal under mask_heap_postgres is ``replay_only``."""
     if kind in ('fsm', 'vm', 'init'):
         return kind
     same_lsn = old_page[:8] == new_page[:8]
@@ -131,6 +152,9 @@ def classify_pair(kind, old_page, new_page):
         return 'hint_bits_only' if same_lsn else 'hint_bits_and_lsn'
     if mask(old_page, all_visible=True) == mask(new_page, all_visible=True):
         return 'all_visible'
+    if blkno is not None and mask is mask_heap and (mask_heap_postgres(old_page, blkno, all_visible=True)
+                                                    == mask_heap_postgres(new_page, blkno, all_visible=True)):
+        return 'replay_only'
     return 'content'
 
 

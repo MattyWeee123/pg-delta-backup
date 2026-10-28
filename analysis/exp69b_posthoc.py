@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import struct
 import sys
 from pathlib import Path
 
@@ -22,26 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from experiments.tricky_copies import summaryscan, unionscan  # noqa: E402
-from experiments.tricky_copies.classify import classify_pair, line_pointers, mask_heap, page_kind  # noqa: E402
+from experiments.tricky_copies.classify import classify_pair, mask_heap_postgres, page_kind  # noqa: E402
 from experiments.tricky_copies.lsnscan import BLOCK, relation_kind  # noqa: E402
 from experiments.tricky_copies.pgcluster import PgBin  # noqa: E402
-
-HEAP_SPECULATIVE_TOKEN = 0xFFFE  # ctid offset of a speculative insertion
-
-
-def postgres_heap_mask(page, blkno):
-    """classify.mask_heap plus what PostgreSQL 17's heap_mask also masks: t_cid, a speculative ctid, padding."""
-    buf = bytearray(mask_heap(page))
-    for index, (_pos, offset, flags, length) in enumerate(line_pointers(page), start=1):
-        if flags == 1 and length >= 23 and offset + 23 <= BLOCK:
-            struct.pack_into('<I', buf, offset + 8, 0)  # t_cid
-            if struct.unpack_from('<H', buf, offset + 16)[0] == HEAP_SPECULATIVE_TOKEN:
-                struct.pack_into('<HHH', buf, offset + 12, blkno >> 16, blkno & 0xFFFF, index)
-        if flags in (1, 2) and length:  # normal or redirect-with-storage: the padding up to MAXALIGN
-            pad = (-length) % 8
-            buf[offset + length:offset + length + pad] = bytes(pad)
-    return bytes(buf)
-
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -74,7 +56,7 @@ def main(argv=None):
                         continue
                     counts['content_by_exp03'] += 1
                     if page_kind(old_page) == 'heap' and page_kind(new_page) == 'heap' and \
-                            postgres_heap_mask(old_page, i) == postgres_heap_mask(new_page, i):
+                            mask_heap_postgres(old_page, i) == mask_heap_postgres(new_page, i):
                         continue
                     counts['still_differ_by_postgres_mask'] += 1
                     examples.append({'file': rel, 'block': number})

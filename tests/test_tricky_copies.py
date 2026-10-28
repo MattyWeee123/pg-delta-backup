@@ -376,6 +376,20 @@ class ClassifyTest(unittest.TestCase):
                          'hint_bits_only')
         self.assertEqual(classify.classify_pair('main', leaf, bytes(BLOCK)), 'content')
 
+    def test_a_command_id_differs_only_where_postgres_masks_it_when_asked(self):
+        """EXP-69b: a tuple the old primary inserted keeps its command id; the server's replayed copy has 0."""
+        base = heap_page(0x10)
+        offset = struct.unpack_from('<I', base, 24)[0] & 0x7FFF
+        inserted = bytearray(base)
+        struct.pack_into('<I', inserted, offset + 8, 5)  # t_cid
+        self.assertEqual(classify.classify_pair('main', base, bytes(inserted)), 'content')  # registered analyses
+        self.assertEqual(classify.classify_pair('main', base, bytes(inserted), blkno=3), 'replay_only')
+        self.assertEqual(classify.classify_pair('main', base, heap_page(0x10, data=b'PAYLOAD!'), blkno=3), 'content')
+        padded = bytearray(heap_page(0x10, data=b'abc'))
+        padded[BLOCK - 1] = 9  # past the 27-byte tuple, in its padding
+        self.assertEqual(classify.classify_pair('main', heap_page(0x10, data=b'abc'), bytes(padded), blkno=0),
+                         'replay_only')
+
     def test_walk_matches_lsnscan_rule(self):
         with tempfile.TemporaryDirectory() as tmp:
             source, old = Path(tmp, 's'), Path(tmp, 'o')
