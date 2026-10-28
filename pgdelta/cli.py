@@ -272,6 +272,11 @@ def _rebuild_options(parser):
                              'sequential right after writing it. Either way every file is verified '
                              'before O is published; with --jobs 1 it is always sequential '
                              '(default: %(default)s)')
+    parser.add_argument('--crashed-standby', action='store_true',
+                        help='with the fast path offered and in place: also take a B that is a standby left in '
+                             'recovery by a crash or a kill ("in archive recovery"), its end proven by its minimum '
+                             'recovery point, as for a cleanly stopped standby. A primary that crashed stays refused '
+                             '(EXP-62). Remove a killed server\'s stale postmaster.pid first. Opt-in until EXP-80')
     parser.add_argument('--verify-scope', choices=('auto', *receiver.VERIFY_SCOPES), default='auto',
                         help='what is re-read to verify each file: all of it, or (in place) only the pages this run '
                              'wrote, every other part checked by the digests of B computed before anything was '
@@ -580,7 +585,8 @@ def _receive(args):
 
 def _receiver_engine(args):
     return {'jobs': args.jobs, 'hash_backend': args.hash_backend, 'rebuild': args.rebuild,
-            'verify': args.verify, 'fsync': args.fsync, 'verify_scope': _verify_scope(args)}
+            'verify': args.verify, 'fsync': args.fsync, 'verify_scope': _verify_scope(args),
+            'crashed_standby': getattr(args, 'crashed_standby', False)}
 
 
 def _verify_scope(args):

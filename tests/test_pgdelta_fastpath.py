@@ -558,6 +558,32 @@ class RealServer(unittest.TestCase):
                 self.assertIn('the pages written do not match what the source sent', result.stderr)
                 self.assertTrue(os.path.lexists(target / MARKER))
 
+    def test_a_killed_standby_takes_the_fast_path_only_with_crashed_standby(self):
+        """EXP-80: a standby of S killed in recovery ("in archive recovery") is refused, and hashed, without the option;
+        with --crashed-standby its end is its minimum recovery point, the fast path runs, and the copy recovers to S."""
+        standby = self.root / 'killed-standby'
+        self.cmd([PG_BIN / 'pg_basebackup', '-h', self.sockets, '-p', 5432, '-U', 't', '-D', standby, '-R', '-X',
+                  'stream', '-c', 'fast'])
+        self.ctl(standby, 'start', port=5434)
+        self.sql('UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid % 501 = 7')
+        self.ctl(standby, 'stop', port=5434, mode='immediate')
+        self.sql('UPDATE pgbench_accounts SET abalance = abalance + 2 WHERE aid % 499 = 3')
+        self.sql('CHECKPOINT')
+        for name, extra in (('killed-hashed', ()), ('killed-fast', ('--crashed-standby',))):
+            with self.subTest(option=bool(extra)):
+                shutil.copytree(standby, self.root / f'{name}-basis', symlinks=True)
+                target, stats = self.refresh(name, f'{name}-basis', *extra)
+                fast, received = stats['fast_path'], stats['receiver']['fast_path']
+                if extra:
+                    self.assertTrue(fast['used'], fast['reasons'])
+                    self.assertEqual(received['facts']['proof'], 'crashed standby')
+                else:
+                    self.assertFalse(fast['used'])
+                    self.assertIn('in archive recovery', received['refused'])
+                    self.assertIn('--crashed-standby', received['refused'])
+                (target / 'standby.signal').unlink(missing_ok=True)
+                self.check_copy(target)
+
     def test_a_crashed_copy_is_refused_and_refreshed_by_hashing(self):
         target, stats = self.refresh('refused', 'crashed')
         fast, received = stats['fast_path'], stats['receiver']['fast_path']

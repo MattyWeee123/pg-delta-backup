@@ -439,8 +439,10 @@ class _Verifier:
 class _Receiver:
     def __init__(self, channel, setup, jobs, hash_backend=DEFAULT_BACKEND, rebuild=DEFAULT_REBUILD,
                  verify=DEFAULT_VERIFY, prefetch=None, fsync=DEFAULT_FSYNC, launched=None, listening=None,
-                 verify_scope=DEFAULT_VERIFY_SCOPE):
+                 verify_scope=DEFAULT_VERIFY_SCOPE, crashed_standby=False):
         self.channel, self.setup = channel, setup
+        # --crashed-standby (EXP-80): a standby left in recovery by a crash may take the fast path.
+        self.crashed_standby = crashed_standby
         # --verify-scope written: B's node digests from the basis thread and the leaf digests it answered leaf
         # requests with, by file index, kept until the file is verified; and what the verification did.
         self.verify_scope = verify_scope
@@ -717,7 +719,7 @@ class _Receiver:
                                         'identity check')
             else:
                 self.summary_facts, self.summary_refused = fastpath.basis_facts(
-                    self.setup.basis, self.setup.pg_controldata, self.setup.marker)
+                    self.setup.basis, self.setup.pg_controldata, self.setup.marker, self.crashed_standby)
             if self.summary_facts is not None:
                 accept['summary'] = self.summary_facts
                 self.summary_pending = True  # B is read only if the sender's guard says no
@@ -1870,7 +1872,8 @@ def _rounded(seconds):
 def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None, pg_controldata=None,
                  reuse_any_basis=False, local_source=None, jobs=DEFAULT_JOBS, hash_backend=DEFAULT_BACKEND,
                  rebuild=DEFAULT_REBUILD, verify=DEFAULT_VERIFY, prefetch=None, in_place=False,
-                 fsync=DEFAULT_FSYNC, launched=None, listening=None, verify_scope=DEFAULT_VERIFY_SCOPE):
+                 fsync=DEFAULT_FSYNC, launched=None, listening=None, verify_scope=DEFAULT_VERIFY_SCOPE,
+                 crashed_standby=False):
     """Run one session as the receiver and return its statistics dict.
 
     Pass a ReceiverSetup from prepare_receiver(), or basis and output to run
@@ -1892,6 +1895,8 @@ def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None,
     receive command started and when its listener started listening; the
     protocol timers publish_s and hello_wait_s count from them, or, when
     they are None, from the session's start after the local checks (EXP-13).
+    `crashed_standby` lets the fast path take a standby that crashed in recovery, by its minimum recovery point
+    (pgdelta.fastpath.basis_facts; EXP-80).
     """
     if setup is None:
         try:
@@ -1905,4 +1910,4 @@ def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None,
                 pass
             raise
     return _Receiver(channel, setup, jobs, hash_backend, rebuild, verify, prefetch, fsync, launched,
-                     listening, verify_scope).run()
+                     listening, verify_scope, crashed_standby).run()

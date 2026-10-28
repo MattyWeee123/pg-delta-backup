@@ -11,6 +11,12 @@ does without the option:
   stopped standby's minimum recovery point (no page is written past it), or the latest end in a base backup's
   backup_manifest. A copy that crashed or was copied while running proves nothing without all of its WAL, and is
   refused. The last record in B's own pg_wal, where pg_waldump reads one, counts when it lies further;
+- with crashed_standby (EXP-80), a standby that crashed or was killed while in recovery ("in archive recovery") is
+  proven the same way as a cleanly stopped one: a standby advances its minimum recovery point in pg_control, synced,
+  before it writes any page whose LSN lies past it, so the point bounds every page on disk after a crash too, and a
+  standby writes no WAL of its own. Crash recovery first, as pg_rewind does for its target, is no proof: it replays
+  only the WAL B still holds and then marks B cleanly shut down (EXP-62's old primary that lost its WAL past the
+  split would pass), and it moves B's redo point past where B's pages stop matching the server's;
 - B's timeline, from B's redo point to its end, lies on S's timeline history (pg_rewind's divergence test): an old
   primary that kept writing after a failover is refused even when its redo point is before the split;
 - the server summarizes WAL (summarize_wal = on) and is PostgreSQL 17.11, 18.6 or later (earlier releases leave
@@ -108,8 +114,9 @@ def format_lsn(value):
 
 # --- the receiver: what B can prove about itself ------------------------------------------------------------------
 
-def basis_facts(basis, pg_controldata, marker):
-    """(facts, None) for ACCEPT's "summary", or (None, why B's lineage can't be proven)."""
+def basis_facts(basis, pg_controldata, marker, crashed_standby=False):
+    """(facts, None) for ACCEPT's "summary", or (None, why B's lineage can't be proven). crashed_standby: a standby
+    left "in archive recovery" by a crash counts, by its minimum recovery point (EXP-80)."""
     basis = Path(basis)
     if marker is not None:
         return None, 'B carries the marker of an interrupted in-place refresh, so it is a mix of two states'
@@ -140,15 +147,19 @@ def basis_facts(basis, pg_controldata, marker):
         if not ends:
             return None, f'B\'s backup_manifest lists no WAL range on timeline {timeline}'
         end, proof = max(ends), 'backup_manifest'
-    elif state in ('shut down', 'shut down in recovery'):
+    elif state in ('shut down', 'shut down in recovery') or (crashed_standby and state == 'in archive recovery'):
         redo, timeline = parse_lsn(identity['redo_lsn']), identity['timeline']
         end = parse_lsn(controldata_value(text, 'Latest checkpoint location'))
         proof = 'clean shutdown'
-        if state == 'shut down in recovery':
+        if state in ('shut down in recovery', 'in archive recovery'):
             recovery = controldata_value(text, 'Minimum recovery ending location') or '0/0'
-            end, proof = max(end, parse_lsn(recovery)), 'clean shutdown in recovery'
+            end = max(end, parse_lsn(recovery))
+            proof = 'clean shutdown in recovery' if state == 'shut down in recovery' else 'crashed standby'
     else:
-        return None, f'B was not stopped cleanly ({state}), so its end can\'t be proven without all of its WAL'
+        hint = (' (a standby that crashed in recovery is taken with --crashed-standby)'
+                if state == 'in archive recovery' else '')
+        return None, (f'B was not stopped cleanly ({state}), so its end can\'t be proven without all of its WAL'
+                      + hint)
     waldump = Path(pg_controldata).parent / 'pg_waldump'
     if not waldump.exists():
         return None, f'pg_waldump was not found beside {pg_controldata}, so B\'s own WAL was not read'

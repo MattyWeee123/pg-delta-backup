@@ -4,6 +4,19 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (23:28 UTC): EXP-80 pre-registered: crashed standbys by their minimum recovery point; crash recovery first found unsound
+
+- **The owner approved crash recovery first.** Three pilots changed it before anything was registered:
+  - **It works mechanically** (`postgres --single`), with `standby.signal` moved aside for a standby. But it moves B's redo point past where B's pages stop matching the server's.
+  - **It reopens EXP-62's blind spot.** S2e, a new scenario, is an old primary that crashed past a failover split and lost the WAL from there, its last checkpoint record kept. Guard v2 refused it and hashed it correctly. After crash recovery first, the guard took it as a clean shutdown, and **the copy was wrong**.
+  - **A standby has a sound proof without it:** its minimum recovery point bounds every page on disk even after a crash (PostgreSQL syncs it before writing past it), and a standby writes no WAL of its own.
+- **Built:** `--crashed-standby` (opt-in). A standby left "in archive recovery" gets the proof "crashed standby"; crashed primaries stay refused. A real-server test covers it with and without the option.
+- **EXP-80 (local):**
+  - **arms:** 100 randomized crashed standbys (immediate or SIGKILL, at random points of a load with DDL and truncations), 20 crashed-primary controls, 40 crash-recovery-first trials, and 3 fresh S2e builds;
+  - **deciding:** every crashed standby correct through the fast path.
+  - **Then on the VMs:** timing against hashing and a re-clone (EXP-80b).
+- **A residual risk, recorded:** a crashed old primary that lost its WAL past the split and was then crash-recovered by anyone fools guard v2, and `pg_rewind`'s same test.
+
 ## 2026-10-28 (23:07 UTC): research loop 2: the scorecard redone, and the next attack picked
 
 - **Why:** the owner's correction. The goal is open-ended (keep improving until pgdelta beats its competitors where it can), and recent work had drifted into fixed-cost tuning at a limit where a full copy wins on principle.

@@ -487,10 +487,12 @@ def promote_and_write(ctx, r):
     return r
 
 
-def build_s2(ctx, crash=False):
+def build_s2(ctx, crash=False, switch_before_split=False):
     """S2, or with ``crash`` S2b: P flushes its diverged pages without a checkpoint and
     stops with -m immediate, so B's REDO location stays before the fork. S2b's diverging
-    writes also update UNTOUCHED_TABLE (EXP-08's exposed pages); S2's are EXP-03's."""
+    writes also update UNTOUCHED_TABLE (EXP-08's exposed pages); S2's are EXP-03's.
+    ``switch_before_split`` (S2e, EXP-80): a WAL segment switch after P's last checkpoint, so its
+    checkpoint record lies in an earlier segment than the split."""
     p = ctx.new_primary('primary', conf=NO_CHECKPOINT_CONF if crash else None, role='old_copy')
     if crash:
         ctx.step('CREATE EXTENSION pg_buffercache on P, before R is cloned, so R has it too')
@@ -499,6 +501,11 @@ def build_s2(ctx, crash=False):
     ctx.step('writes on P (burst 1), replicated to R')
     p.psql(burst_sql(ctx.rows, 1))
     p.psql('CHECKPOINT;')
+    if switch_before_split:
+        ctx.step('switch P to a new WAL segment and write again, so the split lies past the checkpoint record\'s '
+                 'segment')
+        p.psql('SELECT pg_switch_wal();')
+        p.psql(burst_sql(ctx.rows, 2, vacuum=False))
     split = ctx.wait_replay(p, r)
     ctx.step('stop R cleanly: this is the split point')
     r.stop('fast')
@@ -535,6 +542,25 @@ def build_s2d(ctx):
     ctx.step(f"delete B's WAL from the split's segment on: {len(removed)} segments")
     ctx.facts['wal_removed'] = removed
     ctx.check('s2d_wal_removed', bool(removed), segments=removed)
+    return source
+
+
+def build_s2e(ctx):
+    """S2e (EXP-80): S2d, with P's last checkpoint record in an earlier WAL segment than the split, so B's
+    deleted WAL (the split's segment on) leaves that record. Crash recovery can then run on B: it replays to the
+    end of the WAL left, before the split, and marks B shut down, while B's pages keep the diverged writes."""
+    source = build_s2(ctx, crash=True, switch_before_split=True)
+    split = lsnscan.parse_lsn(ctx.facts['split_lsn'])
+    first = split // WAL_SEGMENT_BYTES
+    removed = []
+    for path in sorted((ctx.old_copy / 'pg_wal').iterdir()):
+        match = WAL_SEGMENT.match(path.name)
+        if match and (int(match.group(2), 16) << 32 | int(match.group(3), 16) << 24) // WAL_SEGMENT_BYTES >= first:
+            path.unlink()
+            removed.append(path.name)
+    ctx.step(f"delete B's WAL from the split's segment on: {len(removed)} segments")
+    ctx.facts['wal_removed'] = removed
+    ctx.check('s2e_wal_removed', bool(removed), segments=removed)
     return source
 
 
@@ -1019,6 +1045,11 @@ EXTRA_SCENARIOS = [
     Scenario('S2d', 'ex-primary-wal-lost', 'Ex-primary after a failover, its WAL past the split lost',
              "data directory of the old primary as S2b's, with its WAL segments from the split's on deleted",
              'wrong', 'correct; diverged pages detected and re-sent', build_s2d, None),
+    # EXP-80's: S2d with the old primary's last checkpoint record left, so crash recovery can run on it.
+    Scenario('S2e', 'ex-primary-wal-lost-recoverable', 'Ex-primary after a failover, its WAL past the split lost, '
+             'its last checkpoint record kept',
+             "data directory of the old primary as S2b's, after a WAL segment switch past its checkpoint, with its "
+             "WAL segments from the split's on deleted", 'wrong', 'correct; refused by guard v2', build_s2e, None),
     # EXP-69b's: a transaction open at the fork, committed and read on the old primary only.
     Scenario('S2h', 'hint-hazard-checksums', 'Ex-primary that committed and read a transaction open at the fork',
              'data directory of the old primary, with data checksums, whose hint bits name a transaction S never '
