@@ -43,7 +43,9 @@ REFUSE = {('kept', 'S2b'): 'not stopped cleanly', ('kept', 'S2d'): 'not stopped 
 CUT_REASON = 'before B\'s end'
 LAGS = ('hot10', 'uniform')
 SEGMENT = unionscan.WAL_SEGMENT_BYTES
-KINDS = ('wal_since_fork', 'wal_before_fork', 'wal_ahead', 'relation_blocks', 'fsm_vm_init', 'wal_summaries',
+# Changed after the data: wal_check splits off the segments S wrote after the lab recorded its LSN at the lag's end,
+# which held the WAL of the lab's own state check (a full read of pgbench_accounts after the lag's checkpoint).
+KINDS = ('wal_since_fork', 'wal_check', 'wal_before_fork', 'wal_ahead', 'relation_blocks', 'fsm_vm_init', 'wal_summaries',
          'other')
 
 
@@ -107,14 +109,16 @@ def read_status(folder):
     return out
 
 
-def wal_kind(name, s_tli, s_lsn):
+def wal_kind(name, s_tli, s_lsn, lag_lsn=None):
     found = unionscan.SEGMENT_NAME.match(name)
     if not found:
         return 'other'
     tli, start = int(found.group(1), 16), int(found.group(2), 16) << 32 | int(found.group(3), 16) << 24
     if tli < s_tli:
         return 'wal_before_fork'
-    return 'wal_ahead' if start > s_lsn else 'wal_since_fork'
+    if start > s_lsn:
+        return 'wal_ahead'
+    return 'wal_check' if lag_lsn is not None and start >= lag_lsn else 'wal_since_fork'
 
 
 def file_sizes(gz):
@@ -155,6 +159,8 @@ def part_b(vm):
         status = read_status(folder)
         fork = json.loads((Path(vm) / f'fork-{lag}.json').read_text())
         s_tli, s_lsn = fork['timeline'], parse_lsn(status['s_lsn'])
+        lag_path = Path(vm) / f'lag-{lag}.json'
+        lag_lsn = parse_lsn(json.loads(lag_path.read_text())['source_lsn']) if lag_path.exists() else None
         parsed = unionscan.parse_rewind_debug(gzip.open(folder / 'rewind-debug.log.gz', 'rt').read())
         diverged = re.search(r'servers diverged at WAL location ([0-9A-F/]+)',
                              gzip.open(folder / 'rewind-debug.log.gz', 'rt').read())
@@ -163,7 +169,7 @@ def part_b(vm):
         for path, size in parsed['bytes'].items():
             kind = unionscan.copy_kind(path)
             if kind == 'wal_segments':
-                kind = wal_kind(path.split('/')[-1], s_tli, s_lsn)
+                kind = wal_kind(path.split('/')[-1], s_tli, s_lsn, lag_lsn)
             by_kind[kind] += size
         text = gzip.open(folder / 'b0-waldump.txt.gz', 'rt').read()
         b_blocks = unionscan.block_refs(text, start=parse_lsn(status['redo']))[0]
@@ -262,20 +268,20 @@ def figure(rows, cells):
             x = i * 4 + j
             left.bar(x, value, 0.8, color=color, label=label if i == 0 else None)
             if wrong is not None:
-                left.annotate(f'{wrong:,}', (x, value), textcoords='offset points', xytext=(0, 3),
-                              ha='center', fontsize=7.5)
+                left.annotate(f'{wrong:,}', (x, value), textcoords='offset points', xytext=(0, 3 + 9 * (j == 2)),
+                              ha='center', fontsize=7)
     left.set_xticks([1 + 4 * i for i in range(len(shown))],
                     [f"{r['scenario']}, {'WAL kept' if r['variant'] == 'kept' else 'as EXP-61'}\n"
                      f"guard {'passed' if r['guard_ok'] else 'refused'}" for r in shown], fontsize=8)
     left.set_ylabel('pages')
-    left.set_ylim(0, max([r['union_sent'] for r in shown] + [r['pages_changed'] for r in shown] + [1]) * 1.25)
-    left.legend(fontsize=7.5, loc='lower center', bbox_to_anchor=(0.5, -0.45), ncol=1)
+    left.set_ylim(0, max([r['union_sent'] for r in shown] + [r['pages_changed'] for r in shown] + [1]) * 1.45)
+    left.legend(fontsize=7, loc='upper left', ncol=3)
     left.set_title('Local failovers: pages each path sends\n(the number above a bar: real wrong pages it leaves)',
                    fontsize=9.5)
-    colors = {'wal_since_fork': COLORS['purple'], 'wal_before_fork': COLORS['red'], 'wal_ahead': COLORS['orange'],
+    colors = {'wal_since_fork': COLORS['purple'], 'wal_check': COLORS['yellow'], 'wal_before_fork': COLORS['red'], 'wal_ahead': COLORS['orange'],
               'relation_blocks': COLORS['blue'], 'fsm_vm_init': COLORS['green'], 'wal_summaries': COLORS['sky'],
               'other': COLORS['grey']}
-    labels = {'wal_since_fork': "S's WAL since the fork", 'wal_before_fork': 'WAL segments before the fork',
+    labels = {'wal_since_fork': "S's WAL since the fork, to the lag's end", 'wal_check': "S's WAL after it: the lab's state check", 'wal_before_fork': 'WAL segments before the fork',
               'wal_ahead': "WAL segments past S's LSN", 'relation_blocks': 'relation blocks',
               'fsm_vm_init': 'FSM, VM and init forks', 'wal_summaries': 'WAL summaries', 'other': 'other files'}
     for i, c in enumerate(cells):
@@ -297,7 +303,7 @@ def figure(rows, cells):
     right.set_xlabel('MB')
     right.set_title("EXP-67's cells: what pg_rewind copies, and idea 1's blocks", fontsize=9.5)
     if cells:
-        right.legend(fontsize=7, loc='lower center', bbox_to_anchor=(0.5, -0.5), ncol=2)
+        right.legend(fontsize=6.5, loc='lower right')
     fig.suptitle('EXP-69: both sides\' block sets for an old primary after a failover (counted, not timed)',
                  fontsize=10.5)
     fig.tight_layout()

@@ -154,3 +154,13 @@ Data: `docs/experiments/data/exp67-cells.csv`; raw `results/exp04/exp67/` (not i
   - whether S's summaries cover the fork when S was a standby before its promotion.
 - **Prediction 2 held, and a re-clone beat both:** the selector (idea 4) gains `pg_rewind` as a third option. Its inputs would be the WAL since the fork and the share of pages it touches.
 - **EXP-68** is running on a fresh pair, launched right after this session's teardown.
+
+## Correction found after the data by EXP-69 (October 28)
+
+EXP-69's part B reran these cells with `pg_rewind --debug`. **The "4,077 MB beyond S's WAL since the fork" was S's own WAL.**
+- **Where it came from:** S wrote it after the lab recorded its LSN at the lag's end. The lab's state check read all of `pgbench_accounts` right after the lag's checkpoint, and with data checksums, each page's first hint bit since then wrote a full-page image: about 3.7 GB in uniform and 86 MB in hot10 (**inferred**, see EXP-69).
+- **What `pg_rewind`'s path did with it:** copied it and replayed it.
+  - **"WAL since the fork" in the figure** (1,737 and 8,001 MB) is to the lag's end. The standby replayed about 1.8 and 11.8 GB.
+  - **The replay rates, counted that way,** are 152 and 30.5 MB/s. The second matches EXP-65's 31 MB/s, which resolves the difference this write-up left unexplained.
+  - **Without the check's WAL,** uniform's `pg_rewind` path would have taken about 313 s, not 459 s (**inferred**).
+- **No verdict changes:** pgdelta took 0.57 of that (bar 0.85), and a re-clone was still 3.4 times faster than `pg_rewind`. The lab now also records S's LSN after the check.

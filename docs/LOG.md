@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-29 (early): EXP-69 part B done, `pg_rewind`'s 4 GB explained; EXP-70 running
+
+- **EXP-69 part B** (EXP-67's cells with diagnostics, 18 GB):
+  - **As registered,** 6 held both as registered and as amended; 7 and 8 failed.
+  - **Control:** `pg_rewind`'s blocks equal `pg_waldump`'s, about 20,000 per lag.
+- **The "4 GB extra" was S's own WAL,** written after the lab recorded S's LSN. The lab's state check read all of `pgbench_accounts` right after the lag's checkpoint, and with checksums each page's first hint bit logged a full-page image: 3.76 GB, about 6 KiB per changed page. S's WAL wasn't kept, so this is inferred.
+  - **For EXP-67:** its uniform `pg_rewind` path replayed about 11.8 GB, at 30.5 MB/s, matching EXP-65. Without the check's WAL it would be about 313 s, not 459 s. Its verdicts stand, and a correction note points to EXP-69.
+- **Idea 1's block set at scale** is 0.94 and 0.997 of hashing's pages. It is the case for building idea 1 next for the failover case.
+- **Found:** `fastpath.covered` treats a page header at a timeline switch on a segment boundary as a gap, a needless refusal. A fix with a test is queued.
+- **A figure change after the data:** part B's panel now splits off the WAL written by the state check. The labs now also record S's LSN after the check.
+- **EXP-70** (`--fill-gaps`) launched on a fresh pair right after part B's teardown.
+
 ## 2026-10-28 (late night): idea 2 built, EXP-70 pre-registered; EXP-69 part B running
 
 - **`--fill-gaps PAGES`** (sender, with `--fast-path`): each clean gap of at most PAGES pages between two chosen pages is sent too, so two runs become one read and one write (`fastpath.fill_gaps`).

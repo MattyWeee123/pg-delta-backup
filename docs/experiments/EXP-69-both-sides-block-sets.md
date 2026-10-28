@@ -1,6 +1,11 @@
 # EXP-69: For an old primary after a failover, is idea 1's send set correct, and what makes `pg_rewind` copy so much?
 
-Status: **part A done October 28, 2026; part B waits for EXP-68's VMs.**
+Status: **done October 28, 2026.**
+- **Part B (EXP-67's cells at 18 GB), as registered, 1 of 3 predictions held,** plus the amended 6. The two that failed rested on wrong premises, now explained:
+  - **The "4 GB extra" `pg_rewind` copied was S's own WAL,** written after the lab recorded S's LSN by the lab's own state check: a full read right after the lag's checkpoint, whose hint bits each logged a full-page image.
+  - **The summaries' coverage was asked of S's current LSN,** past its last summary.
+- **At scale, idea 1's block set is about what hashing sends** (0.94 and 0.997), and B's side is about 20,000 blocks.
+- **Part A,** below.
 - **Part A, as registered: 2 of 5 predictions held** (2 and 5). The deciding one failed: the guard refused S2c, which it should have passed.
 - **Post-hoc checks trace all three failures, none to a page the send set missed:**
   - a bug in the guard: it compared the start of B's last WAL record with an end pointer;
@@ -177,3 +182,72 @@ Part A showed that `pg_rewind` skips, by design, every block beyond the end of i
 - **Also reported:** whether B0's WAL from C's redo reaches B0's end. That is the guard condition part A's bug got wrong, now compared correctly. For a cleanly stopped B0, the latest checkpoint is its last record.
 
 The registered predictions 6–8 and their bars are unchanged.
+
+## Results, part B (October 28)
+
+The `ha` set in us-west1. The code deployed was the tree at commit 311fcdc, before EXP-68's new defaults. Part B's only timed arm is pgdelta's hashing after its guard refused, which those defaults don't change.
+- **Data:** PostgreSQL 17.11, the 17,788 MB database.
+- **A smoke first** at scale 20 recorded both lags' diagnostics.
+- **The hashing runs** (one per lag) matched S, taking 90.6 and 185.7 s.
+
+Data: `docs/experiments/data/exp69-rewind-copy.csv`; raw `results/exp04/exp69/` (not in git).
+
+| 18 GB old primary, EXP-67's cells | hot10 | uniform |
+|---|---:|---:|
+| **`pg_rewind`'s copy** (its fetched chunks), MB | **2,040** | **12,027** |
+| S's WAL since the fork, to the lag's end | 1,745 | 8,003 |
+| S's WAL after it, written by the lab's state check | 84 | **3,775** |
+| Relation blocks (B's changed blocks, from S) | 169 | 223 |
+| WAL segments from before the fork | 34 | 17 |
+| FSM, VM and init forks; summaries; other files | 8 | 10 |
+| **Blocks `pg_rewind` takes from B's WAL** | 20,165 | 20,062 |
+| Blocks `pg_waldump` names from C's record: the same set | 20,165 | 20,062 |
+| **Idea 1:** B's blocks (from C's redo); S's summarized blocks; union | 20,199; 12,091; **31,921** | 20,094; 616,170; **621,770** |
+| Pages pgdelta's hashing sent | 33,975 | 623,827 |
+
+The WAL rows are whole 16 MiB segments, split at the segment holding the lag's recorded LSN.
+
+| # | Prediction | Outcome, as registered |
+|---|---|---|
+| 6 | `pg_rewind`'s blocks equal `pg_waldump`'s | **Held,** both lags, none on one side only |
+| 6, amended | The same, past either side's end of file excluded; B0's WAL reaches its end | **Held,** both |
+| 7 | Idea 1's blocks 0.9–1.5 of hashing's pages sent, and S's summaries cover C's redo to S's LSN | **Failed:** the sizes held (0.940 and 0.997), the coverage didn't |
+| 8 | In uniform, relation blocks under a quarter of `pg_rewind`'s copy beyond S's WAL since the fork | **Failed:** 223 of 265 MB (0.84) |
+
+## Post-hoc checks, part B (written after the data; no verdict changes)
+
+1. **What the 4 GB was.**
+   - **The LSN moved after the lag ended:** S's LSN at the diagnostics was 86 MB (hot10) and 3,761 MB (uniform) past the LSN the lab recorded at the lag's end.
+   - **One query ran in between:** the lab's state check (`count(*)` and `sum(abalance)` over `pgbench_accounts`), right after the workload's closing `CHECKPOINT`.
+   - **Why it writes WAL:** with data checksums on, the first hint bit set on a page after a checkpoint writes a full-page image. The uniform lag left about 620,000 changed pages; 3.76 GB over them is about 6.0 KiB each. Hot10 left about 15,000, about 5.7 KiB each. S's WAL itself wasn't kept, so this is **inferred**.
+   - **So counted to S's LSN when `pg_rewind` ran,** its copy beyond S's WAL was only 216 and 265 MB. Most of that was B's blocks; the rest was a few older WAL segments and the forks it copies whole.
+   - **Prediction 8 asked the wrong question:** it assumed the extra wasn't WAL.
+2. **Why the coverage failed.**
+   - **The end of the range:** S's summaries run without a gap from C's redo to its last summarized point (6/C98F47B0 and 9/58407318), which is before S's LSN at the diagnostics. The WAL after that wasn't summarized yet. A real refresh, like the fast path, takes S's backup start (a checkpoint) and waits for the summarizer to reach it. The registered check asked for coverage to S's current LSN instead.
+   - **A hole at the fork, in uniform only:** the fork fell on a segment boundary (6/D2000000). S's new timeline's first summary starts after that segment's 40-byte page header (6/D2000028), so the contiguity test sees a hole holding no WAL record.
+   - **A finding for pgdelta's own guard:** its fast-path guard uses the same test (`fastpath.covered`). It would refuse a range that crosses a timeline switch landing on a segment boundary. That is safe, since it then hashes, but needless.
+3. **Idea 1's size at 18 GB.**
+   - **Its block set** is 31,921 and 621,770 blocks, 0.94 and 0.997 of the pages hashing sends.
+   - **B's side is about 20,000 blocks** in both lags: B's 10,000 updated rows, each with its page, the page of its new version, and an index page.
+   - **`pg_rewind` takes the same 20,000 blocks,** then copies and replays all of S's WAL since the fork: 1.8 and 11.8 GB.
+
+## What part B means for EXP-67 and idea 1
+
+- **EXP-67's uniform `pg_rewind` time included the lab's own WAL.** Its rewound standby replayed up to S's LSN when `pg_rewind` ran: about 11.8 GB, not the 8,001 MB its figure labels.
+  - **Replay rates, counted that way:** 30.5 MB/s in uniform, matching EXP-65's 31 MB/s, and 152 MB/s in hot10.
+  - **Without the check's WAL:** the uniform `pg_rewind` path would have taken about 313 s, not 459 s (**inferred**: about 24 s less copying and 124 s less replay).
+  - **EXP-67's verdicts stand:** pgdelta took 0.57 of that time, and a re-clone 0.29.
+  - **The extra WAL isn't unrealistic in kind:** on a real new primary with checksums, every read after a checkpoint can write full-page images too. Its amount depends on what reads the data after the failover.
+- **Idea 1 at scale (inferred).** Its block sets are about the size hashing sends, and of the same kind as the fast path's.
+  - **hot10:** about 32,000 pages. EXP-68's hot cell sent 14,712 pages in 1.77 s, so this would take a few seconds, against `pg_rewind`'s 36.4 s.
+  - **uniform:** about 622,000 pages. EXP-68's scattered cell sent 619,251 pages in 76.5 s, so about 77 s, against `pg_rewind`'s 459 s (313 s without the check's WAL) and a re-clone's 91 s.
+
+**Limitations:** one session, counted not timed. pgdelta's hashing ran once per lag. S's WAL wasn't kept, so the hint-bit cause is inferred from the LSNs, the query between them, and the per-page sizes.
+
+## What follows (applied)
+
+- **Idea 1's prototype is next** for the failover case, registered and timed against `pg_rewind` and a re-clone on EXP-67's cells.
+  - **Its lab now also records S's LSN after the state check** (`lab_exp67.sh`, `source_lsn_after_check`), so the WAL the check writes is counted.
+  - **Its timing must say whether that WAL is included.**
+- **The fast-path guard's needless refusal** at a timeline switch on a segment boundary is to be fixed: a hole holding only a page header is allowed, and a test promotes a standby exactly at a segment boundary.
+- **EXP-67's write-up** carries a correction note pointing here.

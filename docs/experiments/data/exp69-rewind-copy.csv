@@ -1,0 +1,3 @@
+lag,rewind_exit,need_mb,fetched_mb,lsn_since_fork_mb,beyond_wal_since_fork_mb,wal_since_fork_mb,wal_check_mb,wal_before_fork_mb,wal_ahead_mb,relation_blocks_mb,fsm_vm_init_mb,wal_summaries_mb,other_mb,rewind_blocks,only_pg_rewind,only_waldump,b_blocks,s_blocks,s_limits,summaries_cover,union_blocks,hash_pages_sent,only_waldump_inside_both,b0_wal_reaches_end
+hot10,0,1944,2039.5,1823.2,216.3,1744.8,83.9,33.6,0.0,168.9,8.2,0.1,0.1,20165,0,0,20199,12091,0,False,31921,33975,0,True
+uniform,0,11470,12027.2,11762.0,265.2,8002.7,3774.9,16.8,0.0,222.9,8.2,1.7,0.1,20062,0,0,20094,616170,0,False,621770,623827,0,True

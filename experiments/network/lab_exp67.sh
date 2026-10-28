@@ -121,7 +121,11 @@ for lag in hot10 uniform; do
   done
   S_LSN=$(psrc "SELECT pg_current_wal_lsn()")
   SOURCE_STATE=$(psrc "$STATE")
-  echo "{\"lag\": \"$lag\", \"source_lsn\": \"$S_LSN\", \"source_state\": \"$SOURCE_STATE\"}" > "$R/lag-$lag.json"
+  # EXP-69: the state check reads all of pgbench_accounts after the lag's checkpoint, and with checksums each page's
+  # first hint bit since then writes a full-page image (3.7 GB of WAL in EXP-67's uniform lag). S's LSN after it is
+  # recorded too; the copies are made after it.
+  S_LSN_CHECKED=$(psrc "SELECT pg_current_wal_lsn()")
+  echo "{\"lag\": \"$lag\", \"source_lsn\": \"$S_LSN\", \"source_state\": \"$SOURCE_STATE\", \"source_lsn_after_check\": \"$S_LSN_CHECKED\"}" > "$R/lag-$lag.json"
   echo "$(date -u +%T) $lag: source at $S_LSN, state $SOURCE_STATE"
   if [ "$DIAG" = 1 ]; then
     diag "$lag" "$(python3 -c "import json; print(json.load(open('$R/fork-$lag.json'))['b0_timeline'])")"
