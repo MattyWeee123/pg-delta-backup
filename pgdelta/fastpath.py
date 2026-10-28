@@ -42,6 +42,9 @@ from pgdelta.identity import controldata_value, read_controldata
 
 MODE = 'summaries'
 MODES = (MODE,)
+# The CLI's --read-ahead with --fast-path: 8 reader threads reach the disk's operation rate, and 16 add nothing
+# (EXP-64b, EXP-68).
+DEFAULT_READ_AHEAD = 8
 # The first releases whose WAL summaries register visibility-map changes (commit f581fa7, August 2026).
 SUMMARY_FIXED = {17: 170011, 18: 180006}
 DEFAULT_TABLESPACE, GLOBAL_TABLESPACE = 1663, 1664

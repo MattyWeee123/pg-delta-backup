@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-28 (night): EXP-68 done, the fast path beats a full copy at 28% of pages; EXP-69 part B running
+
+- **EXP-68:** all 7 predictions held, all 14 runs correct, on the `ha` set in us-west1; its VMs were deleted after the fetch.
+  - **With the receiver's syncs on its worker thread,** 8 reader threads took 76.5 s, against 101.9 s syncing in the main loop (0.751) and a full copy's 90.9 s (0.842).
+  - **16 threads** added nothing (0.998). The hot cell gained: 1.77 against 1.96 s.
+  - **The destination** completed 1.018 write requests per run of the plan.
+- **What binds now is the source's operation rate:** the sender waits 43 s on its readers, and the source's disk was busy 61.7 s for 254,547 reads, about the cap EXP-66 measured.
+- **Idea 2's rule** (EXP-66's, re-applied on the real page set) says to prototype it. The model without filling is within 14% of the measured writing; filling gaps of up to 2 pages cuts it by 41%.
+- **Applied, as registered:** `--read-ahead` defaults to 8 with `--fast-path`, and the receiver's `--fsync` defaults to `auto` (the worker when the fast path is offered, else the main loop). Tests cover both.
+- **A figure panel added after the data:** "sender waiting on its reader threads". No score changed.
+- **EXP-69 part B** launched on a fresh pair right after EXP-68's teardown.
+
 ## 2026-10-28 (evening): EXP-69b done, idea 1's copy is right wherever its fixed guard passes
 
 - **As registered, 4 of 5 predictions held.** Over 8 builds and a WAL-cut copy:

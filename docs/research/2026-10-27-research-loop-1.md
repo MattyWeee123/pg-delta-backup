@@ -115,3 +115,8 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
   - a hint check that couldn't tell common history from B's own;
   - a page classifier that doesn't mask command IDs as PostgreSQL does.
 - **Next:** EXP-69 part B (EXP-67's cells with diagnostics, after EXP-68), then idea 1's prototype, timed against `pg_rewind`.
+
+**Update, October 28: EXP-68.**
+- **Item 0b is done:** with the receiver's syncs on a worker thread, the fast path refreshed the scattered cell (28% of pages) in 76.5 s, 0.842 of a full copy. It wins there now with no new algorithm. Read-ahead 8 and the worker are its defaults.
+- **The source's operation rate binds:** 254,547 reads at the disk's cap, about 62 s.
+- **Item 4 (idea 2) is triggered:** EXP-66's rule, re-applied on the real page set, says to prototype it. Filling gaps of up to 2 pages cuts the operations from 249,246 to about 72,000 on each side (modelled: 38.6 s of writes, against 65.4 s unfilled).

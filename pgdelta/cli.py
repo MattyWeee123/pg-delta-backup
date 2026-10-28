@@ -11,7 +11,7 @@ import tempfile
 import time
 import traceback
 
-from pgdelta import datadir, flush, inplace, live, placement, prefetch, receiver, sender, transport
+from pgdelta import datadir, fastpath, flush, inplace, live, placement, prefetch, receiver, sender, transport
 from pgdelta.errors import EXIT_TRANSFER_FAILURE, InvalidInput, PgDeltaError, TransferError
 from pgdelta.hashing import ALGORITHMS, DEFAULT_ALGORITHM, NODE_BLOCKS
 from pgdelta.identity import read_identity
@@ -192,11 +192,11 @@ def _compress_option(parser):
                              'EXP-62). Otherwise the session hashes both copies as without it. Pages left unsent '
                              'are not verified; the pages written are. The session\'s role needs EXECUTE on '
                              'pg_get_wal_summarizer_state, pg_available_wal_summaries and pg_wal_summary_contents')
-    parser.add_argument('--read-ahead', type=_non_negative_int, default=0, metavar='THREADS',
+    parser.add_argument('--read-ahead', type=_non_negative_int, default=None, metavar='THREADS',
                         help='with --fast-path: read the chosen pages on THREADS threads, in sending order and up to '
                              '64 MiB ahead of the sending thread, so the source\'s scattered reads overlap the '
                              'sending and the receiver\'s writes; 0 reads one run at a time in the sending thread '
-                             '(EXP-64b) (default: %(default)s)')
+                             f'(EXP-64b, EXP-68) (default: {fastpath.DEFAULT_READ_AHEAD} with --fast-path)')
     parser.add_argument('--plan-out', type=Path, default=None, metavar='PATH',
                         help='with --fast-path, where the guard lets it run: write its plan to PATH as JSON, each '
                              'listed file with its size, whether it goes whole, and its chosen pages as [first, '
@@ -238,12 +238,13 @@ def _rebuild_options(parser):
                              'pass over B, and was shown correct in 3,000 randomized trials (EXP-32, EXP-33, EXP-35) '
                              '(default: %(default)s)')
     # T3 arm (b): where the output files are fsynced.
-    parser.add_argument('--fsync', choices=flush.FSYNC_MODES, default=flush.DEFAULT_FSYNC,
+    parser.add_argument('--fsync', choices=flush.FSYNC_CHOICES, default=flush.DEFAULT_FSYNC,
                         help='where each finished output file is fsynced: main, in the main loop before the '
                              'next file; writeback, the same, after starting write-back every 8 MiB written '
                              '(Linux sync_file_range; elsewhere as main); worker, on a background thread '
-                             'while the main loop goes on. Every fsync completes before publication or '
-                             'commit either way (default: %(default)s)')
+                             'while the main loop goes on; auto, worker when the fast path is offered and main '
+                             'otherwise (EXP-68). Every fsync completes before publication or commit either way '
+                             '(default: %(default)s)')
 
 
 def _target_options(parser):
@@ -564,7 +565,15 @@ def _sender_kwargs(args, identity):
             'compress': None if getattr(args, 'compress', 'off') == 'off' else args.compress,
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
             'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
-            'read_ahead': getattr(args, 'read_ahead', 0), 'plan_out': getattr(args, 'plan_out', None)}
+            'read_ahead': _read_ahead(args), 'plan_out': getattr(args, 'plan_out', None)}
+
+
+def _read_ahead(args):
+    """--read-ahead as given, else fastpath.DEFAULT_READ_AHEAD with --fast-path and 0 without."""
+    threads = getattr(args, 'read_ahead', None)
+    if threads is None:
+        return fastpath.DEFAULT_READ_AHEAD if getattr(args, 'fast_path', None) else 0
+    return threads
 
 
 def _source_identity(args):

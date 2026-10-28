@@ -241,6 +241,10 @@ class RealServer(unittest.TestCase):
         self.assertEqual(received['files_written_checked'], fast['files_chosen'])
         self.assertLess(stats['pages']['sent'], stats['pages']['total'] / 2)
         self.assertNotIn('BASIS_NODES', stats['receiver']['bytes_written']['by_message_type'])  # B never hashed
+        # EXP-68's defaults with --fast-path: 8 reader threads, and the receiver's syncs on its worker thread.
+        self.assertEqual(fast['read_ahead']['threads'], 8)
+        self.assertEqual(stats['receiver']['fsync_mode'], 'worker')
+        self.assertTrue(received['fsync_auto'])
         self.check_copy(target)
 
     def test_read_ahead_threads_give_the_same_copy(self):
@@ -273,6 +277,7 @@ class RealServer(unittest.TestCase):
         self.assertFalse(fast['used'])
         self.assertIn('not stopped cleanly', received['refused'])
         self.assertIn('not stopped cleanly', fast['reasons'][0])
+        self.assertEqual(stats['receiver']['fsync_mode'], 'main')  # auto: no lineage facts, so the main loop
         self.assertGreater(stats['receiver']['bytes_written']['by_message_type']['BASIS_NODES']['frames'], 0)
         self.check_copy(target)
 

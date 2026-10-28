@@ -220,13 +220,15 @@ def figure(cells, model_rows):
     left.set_ylabel('seconds to refresh about 18 GB (median)')
     left.set_title('Scattered changes (uniform 1%, 28% of pages)', fontsize=10)
     fast_arms = [arm for arm in arms if arm != 'full']
+    # Changed after the data: the sender's wait on its reader threads added, the part that binds with the worker.
     parts = (('receiver waiting for data', COLORS['grey'], 'recv_wait_s'),
              ('receiver writing (and syncing, in loop)', COLORS['red'], 'rebuild_s'),
-             ('sender blocked sending', COLORS['sky'], 'blocked_s'))
+             ('sender blocked sending', COLORS['sky'], 'blocked_s'),
+             ('sender waiting on its reader threads', COLORS['green'], 'read_wait_s'))
     for j, (label, color, key) in enumerate(parts):
-        middle.barh([k * 4 + j for k in range(len(fast_arms))],
+        middle.barh([k * 5 + j for k in range(len(fast_arms))],
                     [cells[('uniform', arm)][key] or 0 for arm in fast_arms], 0.8, color=color, label=label)
-    middle.set_yticks([k * 4 + 1 for k in range(len(fast_arms))], [LABELS[arm].replace('\n', ' ') for arm in fast_arms],
+    middle.set_yticks([k * 5 + 1.5 for k in range(len(fast_arms))], [LABELS[arm].replace('\n', ' ') for arm in fast_arms],
                       fontsize=8)
     middle.invert_yaxis()
     middle.set_xlabel('seconds (median)')

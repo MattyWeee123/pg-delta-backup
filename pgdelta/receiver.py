@@ -81,7 +81,7 @@ from pgdelta import __version__, fastpath, flush, inplace, placement, protocol, 
 from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
-from pgdelta.flush import DEFAULT_FSYNC, FSYNC_MODES, WRITEBACK_BYTES
+from pgdelta.flush import DEFAULT_FSYNC, FSYNC_CHOICES, WRITEBACK_BYTES
 from pgdelta.hashing import (ALGORITHMS, DEFAULT_ALGORITHM, DIGEST_SIZE, KEY_SIZE, SUB_BLOCK, FilesDigest, Hasher,
                              usable)
 from pgdelta.identity import gate, read_identity, reuse_policy
@@ -473,7 +473,7 @@ class _Receiver:
         self.verifier, self.copier = None, _Copier()
         # fsync placement (pgdelta.flush): the mode asked for, the one in effect (known once the run
         # starts, for "writeback"), and the worker if any.
-        self.fsync, self.syncer = fsync, None
+        self.fsync, self.syncer, self.fsync_auto = fsync, None, False
         self.fsync_effective = None if fsync == 'writeback' else fsync
         self.writeback = False
         self.writeback_calls, self.writeback_seconds, self.fsync_wait_seconds = 0, 0.0, 0.0
@@ -608,7 +608,7 @@ class _Receiver:
             raise InvalidInput(f'jobs must be a positive integer, not {self.jobs!r}')
         for label, value, choices in (('hash backend', self.hash_backend, BACKENDS),
                                       ('rebuild', self.rebuild, REBUILDS), ('verify', self.verify, VERIFY_MODES),
-                                      ('fsync', self.fsync, FSYNC_MODES)):
+                                      ('fsync', self.fsync, FSYNC_CHOICES)):
             if value not in choices:
                 raise InvalidInput(f'{label} must be one of {", ".join(choices)}, not {value!r}')
         if self.verify_scope not in VERIFY_SCOPES:
@@ -629,11 +629,18 @@ class _Receiver:
             self.verifier = _Verifier(self)
 
     def _start_fsync(self):
-        """Writeback where the platform has it (else as "main"); a worker thread for "worker"."""
-        if self.fsync == 'writeback':
+        """Writeback where the platform has it (else as "main"); a worker thread for "worker"; for "auto", the
+        worker when the fast path is offered and B's lineage facts were read (EXP-68), else main."""
+        if self.fsync == 'auto':
+            # Reported as the mode it resolved to, so a session without the fast path keeps its COMPLETE frame's
+            # bytes; fast_path.fsync_auto says it was chosen.
+            self.fsync_auto = True
+            self.fsync = self.fsync_effective = 'worker' if self.summary_facts is not None else 'main'
+        mode = self.fsync
+        if mode == 'writeback':
             self.writeback = flush.writeback_available()
             self.fsync_effective = 'writeback' if self.writeback else 'main'
-        elif self.fsync == 'worker':
+        elif mode == 'worker':
             self.syncer = flush.FsyncWorker(stop=self.stop, on_error=self._fsync_failed)
 
     def _fsync_failed(self, exc):
@@ -1782,7 +1789,7 @@ class _Receiver:
         if self.summary_offer:
             # Only when offered, so a session without --fast-path keeps its COMPLETE frame's bytes.
             stats['fast_path'] = {'offered': True, 'facts': self.summary_facts, 'refused': self.summary_refused,
-                                  'used': self.fast_mode, **self.fast_counts}
+                                  'used': self.fast_mode, 'fsync_auto': self.fsync_auto, **self.fast_counts}
         if self.misplaced_write is not None:
             stats['test_misplaced_write'] = self.misplaced_write
         return stats

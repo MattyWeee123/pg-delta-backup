@@ -25,8 +25,12 @@ import time
 
 from pgdelta.errors import TransferError
 
-FSYNC_MODES = ('main', 'writeback', 'worker')
-DEFAULT_FSYNC = 'main'
+FSYNC_MODES = ('main', 'writeback', 'worker')  # where files are fsynced
+FSYNC_CHOICES = ('auto', *FSYNC_MODES)
+# auto: worker when the fast path is offered and B's lineage facts were read, main otherwise. With the fast path,
+# syncing in the main loop stopped the receiver reading while the sender's reads waited; on a worker the two sides
+# overlap (EXP-68: 76.5 s against 101.9 s on 18 GB with 28% of pages changed, below a full copy's 90.9 s).
+DEFAULT_FSYNC = 'auto'
 WRITEBACK_BYTES = 8 << 20  # writeback: start write-back of the current file every this many bytes written
 FSYNC_QUEUE_FILES = 32  # worker: finished files waiting for their fsync before the main loop has to wait
 SYNC_FILE_RANGE_WRITE = 2  # <fcntl.h>: start write-out of dirty pages not already under write-out

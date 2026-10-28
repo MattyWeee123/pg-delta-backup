@@ -1,6 +1,11 @@
 # EXP-68: With the receiver's syncs off its main loop, does the fast path beat a full copy on scattered changes?
 
-Status: **pre-registered October 28, 2026, before any run.** One VM pair (the `ha` set), about 2 hours with the data load, after EXP-67. It follows from EXP-64b's and EXP-66's results: their "what follows" sections name each part of it.
+Status: **done October 28, 2026 (one session, 14 runs, all correct; all 7 predictions held, the deciding one 0.099 from its bar).**
+- **With the receiver's syncs on its worker thread,** the fast path refreshed EXP-64's scattered cell (18 GB, 28% of pages) in **76.5 s**. That is against 101.9 s syncing in the main loop (0.751) and **90.9 s for a full copy (0.842)**: the fast path now beats `pg_basebackup` there with no new algorithm.
+- **Now the source's reads bind:** its disk was busy 61.7 s for 254,547 reads, at about the operation rate EXP-66 measured. Idea 2's rule, re-applied on the real page set, says to prototype gap-filled I/O.
+- **Applied as registered:** `--read-ahead 8` and the worker are now the fast path's defaults.
+
+Pre-registered October 28, before any run (commit b98effd). One VM pair (the `ha` set), about 2 hours with the data load, after EXP-67. It follows from EXP-64b's and EXP-66's results: their "what follows" sections name each part of it.
 
 ## Question
 
@@ -89,3 +94,83 @@ On the uniform cell unless named.
 - **If 1 fails:** the syncs weren't what held the receiver. The counters and timers say what did: the disks' operation rates, or the verifier's re-reads of written pages competing with the writes.
 - **If 4 fails:** the receiver's writes don't reach the disk as one request per run. EXP-66's cost model is then wrong for the receiver, and idea 2's rule is reported but not applied.
 - **Idea 2:** prototyped (with its own registration) only if the re-applied rule says so. Otherwise it is set aside with its reason recorded.
+
+## Results (October 28)
+
+The `ha` set in us-west1-a and -b; the runs ended at 04:49 UTC, and the VMs were then deleted.
+- **The server:** PostgreSQL 17.11, a 17,788 MB database, `summarize_wal` on.
+- **Every run** and every pgdelta receiver exited 0, and every fast copy's `pgbench_accounts` equalled the source's.
+- **Every fast run** used the fast path, its guard passing on B0's `backup_manifest`. The `w` arms synced on the worker, and the others in the main loop.
+- **Plans:** each cell's plans were identical. The uniform cell's plan was 619,251 pages in 249,404 runs, and every threaded uniform run read exactly 249,404 runs.
+
+A smoke at scale 20 ran first (in memory):
+- **hot:** `fast` 1.10 s, `fast8w` 0.96 s;
+- **uniform:** `fast8` 2.75 s, `fast16` 2.71 s, `fast8w` 2.55 s, `fast16w` 2.78 s, a full copy 6.31 s.
+
+Data: `docs/experiments/data/exp68-cells.csv` and `exp68-model.csv`; raw `results/exp04/exp68/` (not in git).
+
+![The receiver's syncs off its main loop: times, where they went, and gap-filled writes on the real page set](../figures/exp68-syncs.svg)
+
+| Scattered changes, 18 GB (medians of 2) | `fast8` | `fast16` | `fast8w` | `fast16w` | full copy |
+|---|---:|---:|---:|---:|---:|
+| **Seconds** | 101.9 | 102.2 | **76.5** | 76.3 | 90.9 |
+| Receiver waiting for data | 42.6 | 42.8 | 59.8 | 59.6 | |
+| Receiver writing (and syncing, in loop) | 57.6 | 57.6 | 14.9 | 15.0 | |
+| Its sync worker busy / its loop waiting for it | | | 53.0 / 5.9 | 53.1 / 5.9 | |
+| Sender blocked sending | 61.1 | 61.4 | 15.8 | 15.6 | |
+| Sender waiting on its reader threads | 21.6 | 20.7 | **43.4** | 43.4 | |
+| Source disk: reads; busy seconds | 254,526; 52.0 | 254,225; 49.4 | 254,547; **61.7** | 254,558; 62.0 | 137,680; 83.9 |
+| Destination disk: writes; busy seconds | 253,934; 50.5 | 253,933; 50.7 | 255,260; 53.3 | 255,323; 53.4 | 69,566; 84.8 |
+
+The hot cell: `fast` 1.96 s, `fast8w` 1.77 s.
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | Deciding: `fast8w` at most 0.85 of `fast8` | **Held, 0.751** (0.099 from the bar: no second session under rule 11) |
+| 2 | `fast8w` at most 1.0 of a full copy | **Held, 0.842** |
+| 3 | `fast16w` within 10% of `fast8w` | **Held, 0.998** |
+| 4 | `fast8`'s destination: 0.7–1.5 write requests per run of the plan | **Held, 1.018** |
+| 5 | Hot: `fast8w` at most max(`fast` + 0.3 s, 1.15 × `fast`) | **Held,** 1.77 against 1.96 s |
+| 6 | Every run correct and as configured | **Held** |
+| 7 | Controls: `fast8` within 10% of 102.77 s, the full copy within 5% of 90.96 s | **Held,** 101.88 and 90.90 s |
+
+**EXP-66's rule, re-applied on the real page set** (249,246 runs in the files not sent whole):
+- **The model's control:** without filling, the model gives 65.4 s, against `fast8`'s measured writing and syncing of 57.6 s. That is within 30%.
+- **The best fill:** filling gaps of up to 2 pages takes 71,647 writes and 38.6 s, a cut of 41.0%.
+- **The verdict: prototype idea 2.**
+
+**A change to the figure after the data, no score changed:** the middle panel adds "sender waiting on its reader threads". With the worker, that is the part that binds.
+
+## What it means (with a committee's reading)
+
+- **The overlap worked as modelled, though not all the way.** Syncing in the main loop stopped the receiver reading while each file synced, which blocked the sender for 61 s.
+  - **On the worker,** the sender is blocked only 15.8 s and the receiver's own loop works 14.9 s. The worker syncs for 53 s alongside them.
+  - **The registration's model** gave about 65 s (0.63); the measured 76.5 s is 0.751.
+- **What binds now is the source's operation rate.** With the receiver out of the way:
+  - the sender waits 43 s on its reader threads;
+  - the source's disk is busy 61.7 s for 254,547 reads, about 4,125 per busy second. EXP-66 measured that disk's cap for random reads at queue depth 8 at about 4,198 a second.
+  - 16 threads changed nothing (0.998), as a disk at its cap predicts.
+  - The destination's disk was busy 53.3 s for 255,260 writes.
+
+  So both sides now run at about one operation per run of the plan, against the same operation rate, overlapped. The 76.5 s is about 62 s of source reads, plus the guard's 4.7 s, plus the start and the end.
+- **Idea 2 attacks exactly that.** One write request per run was confirmed (1.018), and EXP-66 showed the disk counts a write of up to 32 KiB as one operation. So filling clean gaps of 1–2 pages cuts the operations on both sides:
+  - from 249,246 runs to 71,647, by the model;
+  - at the cost of 238,764 extra pages (+39%), which the bandwidth term starts to charge for.
+
+  The model's writes fall to 38.6 s. The same holds for the source's reads (**inferred**: EXP-66 measured reads' cost by size only at 8 KiB).
+- **For research loop 1's crossover:** EXP-64 placed the fast path's break-even against a full copy below 28% of pages. At 28% it now takes 0.842 of a full copy, so the break-even lies above 28%; where exactly isn't measured.
+- **The hot cell didn't suffer, and in memory nothing was lost** (the smoke). That met the registered condition for making both the default.
+
+**Limitations:**
+- **One disk type:** a balanced persistent disk, whose operation cap is now the binding constant. An SSD persistent disk or a local SSD has other caps; the fast path's margin over a full copy depends on them.
+- **One size and one change shape:** one session, one size, and the uniform pattern at 28% of pages.
+- **Statistics:** medians of 2, with the two repeats within 0.4% of each other.
+- **Idea 2's model** prices writes from EXP-66's `fio` rates on this disk, and reads by assumption.
+
+## What follows (applied)
+
+- **Defaults, as registered for 1, 2, 3 and 5 holding** (with tests). Both apply only to the CLI; the library defaults are unchanged.
+  - **`--read-ahead`** now defaults to 8 with `--fast-path` (0 without).
+  - **The receiver's `--fsync`** defaults to `auto`: the worker when the fast path is offered and B's lineage facts were read, the main loop otherwise. The statistics give the resolved mode as `fsync` and `fsync_mode`, so a session without the fast path sends the same bytes as before, and `fast_path.fsync_auto` says the mode was chosen automatically.
+- **Idea 2 is next for the scattered case:** gap-filled reads and writes in the fast path's plan, prototyped with its own registration. Its model: the operations fall from 249,246 to about 72,000 on each side.
+- **The selector (idea 4)** is re-sized to these constants when it is built.
