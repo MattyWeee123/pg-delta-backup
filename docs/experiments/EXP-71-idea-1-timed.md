@@ -1,6 +1,6 @@
 # EXP-71: With idea 1 built in, does pgdelta refresh an old primary after a failover faster than `pg_rewind` and a re-clone?
 
-Status: **done October 29, 2026: all 6 predictions held,** and `--diverged-basis` is now on with `--fast-path`, as registered. Pre-registered the same day, before any run. One VM pair (the `ha` set), about 2.5 hours with the data load. It follows EXP-69 part B and EXP-69b, which showed idea 1's send set is correct wherever its guard passes and about the size of hashing's at 18 GB, and research loop 1, which names this the case pgdelta still loses (EXP-67).
+Status: **done October 28, 2026: all 6 predictions held,** and `--diverged-basis` is now on with `--fast-path`, as registered. Pre-registered the same day, before any run. One VM pair (the `ha` set), about 2.5 hours with the data load. It follows EXP-69 part B and EXP-69b, which showed idea 1's send set is correct wherever its guard passes and about the size of hashing's at 18 GB, and research loop 1, which names this the case pgdelta still loses (EXP-67).
 
 ## Question
 
@@ -107,7 +107,7 @@ EXP-69b found its copies correct wherever its guard passes, and found the guard'
 - **If 4 fails:** the failing copy is kept and diffed page by page against S (EXP-69b's tools). The option stays opt-in until the cause is fixed and re-tested.
 - **If 2 fails and 1 holds:** idea 1 serves the hot case, and the selector (idea 4) weighs a re-clone for scattered ones.
 
-## Results (October 29)
+## Results (October 28)
 
 The `ha` set in us-west1-b and -c (us-west1-a had no capacity); the runs ended at 09:11 UTC, and the VMs and disks were then deleted.
 - **The server:** PostgreSQL 17.11, a 17,788 MB database, data checksums and `summarize_wal` on.

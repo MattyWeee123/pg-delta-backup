@@ -1,6 +1,6 @@
 # EXP-70: Do gap-filled reads and writes (idea 2) make the fast path faster on scattered changes?
 
-Status: **done October 29, 2026 (one session, 14 runs, all correct; all 6 predictions held, the deciding one 0.242 from its bar). `--fill-gaps 2` is now the fast path's default.** Pre-registered October 28, before any run. One VM pair (the `ha` set), after EXP-69's part B. It follows EXP-68's result: re-applied on the real page set, EXP-66's rule says to prototype idea 2.
+Status: **done October 28, 2026 (one session, 14 runs, all correct; all 6 predictions held, the deciding one 0.242 from its bar). `--fill-gaps 2` is now the fast path's default.** Pre-registered October 28, before any run. One VM pair (the `ha` set), after EXP-69's part B. It follows EXP-68's result: re-applied on the real page set, EXP-66's rule says to prototype idea 2.
 
 ## Question
 
@@ -89,7 +89,7 @@ On the uniform cell unless named.
 - **If 2 fails:** the filled runs didn't reach the disks as single requests. The block layer's request size limit or the sender's 1 MiB run cap would be checked first.
 - **If 3 fails (`fast8wf4` faster):** the best fill lies beyond 2. The model's bandwidth term overstates the cost of larger I/O here, and the default is set from the measured curve instead.
 
-## Results (October 29)
+## Results (October 28)
 
 The `ha` set in us-west1-b and -c; the runs ended at 07:05 UTC, and the VMs were then deleted.
 - **The server:** PostgreSQL 17.11, a 17,788 MB database, `summarize_wal` on.

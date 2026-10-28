@@ -127,18 +127,18 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 - **Found:** the fast-path guard needlessly refuses a range that crosses a timeline switch landing on a segment boundary, over a page-header hole that holds no WAL record. To be fixed with a test.
 - **The guard fix is done** (a page-header hole is no gap), with a unit test.
 
-**Update, October 29: EXP-70 (idea 2, item 4).**
+**Update, October 28: EXP-70 (idea 2, item 4).**
 - **Item 4 is done:** filling clean gaps of up to 2 pages refreshed the scattered cell in 46.6 s. That is 0.608 of no filling and **0.512 of a full copy**, better than the model's 0.69. `--fill-gaps 2` is the fast path's default.
 - **1 page gave nearly all of it** (47.4 s). Past it, both disks move bytes at a full copy's rate while busy, so each further page filled costs its transfer time. Filling 4 pages took 1.20 times as long as 2.
 - **What binds now:** about 12 s of fixed costs per run (the guard's 4.7 s among them) plus the bytes sent at the disks' byte rate.
 - **The selector (idea 4)** should choose the fill from the link's and disks' rates, since where bytes cost more than operations, less filling is better.
 - **Next:** idea 1's prototype for the failover case, then the fast path's fixed costs.
 
-**Update, October 29: idea 1 built (`--diverged-basis`), EXP-71 pre-registered.**
+**Update, October 28: idea 1 built (`--diverged-basis`), EXP-71 pre-registered.**
 - **The build:** pgdelta's fast path now handles an old primary that kept writing after the fork, with B's own WAL standing in for B's changes since the last common checkpoint, as `pg_rewind` reads it. A real failover in the tests matched the server and passed `pg_amcheck`.
 - **EXP-71** times it against `pg_rewind` and a re-clone on EXP-67's cells.
 
-**Update, October 29: EXP-71 done; the failover case is closed.**
+**Update, October 28: EXP-71 done; the failover case is closed.**
 - **All 6 predictions held.** pgdelta with idea 1 refreshed EXP-67's old primary in 6.9 s for hot rows (`pg_rewind` 35.1 s, 0.197) and 48.2 s for scattered rows (a re-clone 91.1 s, 0.529; `pg_rewind` 457.5 s). Every copy matched, and `pg_amcheck` passed.
 - **The model held:** about 7 s and 52 s. B's side cost 0.65 s and about 20,000 blocks, exactly EXP-69's count.
 - **Applied as registered:** `--diverged-basis` is on with `--fast-path`.

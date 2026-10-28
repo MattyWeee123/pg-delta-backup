@@ -18,10 +18,14 @@ A HashPool decides where node work runs:
   pgdelta. ("forkserver", for tests only, makes them children of the fork
   server, which nobody waits for, so their CPU is missing from all three;
   "fork" is never used, as it is unsafe once threads run.) They ignore
-  SIGINT (Ctrl-C reaches the whole process group; the parent decides) and
-  exit on their own if the parent dies. Each worker reports its pid on a
-  pipe when it has started, so the pool knows when the first and when the
-  last of them was ready.
+  SIGINT (Ctrl-C reaches the whole process group; the parent decides) from
+  the moment they start: the parent blocks SIGINT while it spawns them, a
+  child inherits that mask, and its initializer ignores SIGINT before
+  unblocking it, so a Ctrl-C during a worker's imports is dropped there,
+  not raised (CI caught one, October 28). The parent's own SIGINT stays
+  pending until it unblocks. They exit on their own if the parent dies.
+  Each worker reports its pid on a pipe when it has started, so the pool
+  knows when the first and when the last of them was ready.
 - "thread": `jobs` worker threads sharing the caller's file descriptor,
   one node per task (EXP-05). Python's interpreter lock makes this slower
   than one thread beyond about 3 threads; it is kept for comparison.
@@ -36,6 +40,7 @@ most 2 MiB for a 1 GiB relation segment); node digests likewise.
 """
 from __future__ import annotations
 
+import contextlib
 from collections import deque
 from concurrent.futures import (BrokenExecutor, CancelledError, ProcessPoolExecutor, ThreadPoolExecutor,
                                 wait)
@@ -114,8 +119,12 @@ _WORKER = _WorkerState()
 
 def _worker_init(key, ready=None, algorithm=DEFAULT_ALGORITHM):
     # Ctrl-C reaches every process in the foreground group; only the parent acts on it, and it
-    # shuts the pool down. SIGTERM keeps its default: a worker told to stop, stops.
+    # shuts the pool down. SIGTERM keeps its default: a worker told to stop, stops. The worker
+    # started with SIGINT blocked (_sigint_blocked), so one sent during its imports was held: it is
+    # dropped now, as ignored.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    if hasattr(signal, 'pthread_sigmask'):
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT})
     _WORKER.hasher = Hasher(key, algorithm)
     parent = multiprocessing.parent_process()
     if parent is not None:
@@ -139,6 +148,20 @@ def _exit_with_parent(sentinel):
 
 def _worker_ping():
     return os.getpid()
+
+
+@contextlib.contextmanager
+def _sigint_blocked():
+    """SIGINT blocked in this thread meanwhile, so processes it spawns start with it blocked (the mask survives
+    fork and exec); a SIGINT to this process waits, pending, or goes to another thread."""
+    if not hasattr(signal, 'pthread_sigmask'):
+        yield
+        return
+    previous = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+    try:
+        yield
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous)
 
 
 def _worker_hash_nodes(path, identity, size, block, node_blocks, keep_leaves, nodes):
@@ -224,8 +247,9 @@ class HashPool:
             self._ready_thread = threading.Thread(target=self._watch_ready, args=(reader, started),
                                                   name='pgdelta-pool-ready', daemon=True)
             self._ready_thread.start()
-            for _ in range(self.jobs):
-                self._executor.submit(_worker_ping)
+            with _sigint_blocked():  # each submit here spawns a worker, which starts with SIGINT blocked
+                for _ in range(self.jobs):
+                    self._executor.submit(_worker_ping)
         except BaseException:
             self.close()
             raise

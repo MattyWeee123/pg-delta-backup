@@ -864,6 +864,27 @@ class WorkerLifetimeTests(unittest.TestCase):
         self.assertNotIn('Traceback', stderr)  # the workers ignore SIGINT; only the parents act on it
         self.check_clean(group, output)
 
+    def test_ctrl_c_while_the_workers_start(self):
+        """Ctrl-C to the group right after a pool spawns its workers, while they import: none may die of it. CI
+        once caught a worker still importing when the group test's SIGINT came (October 28)."""
+        script = textwrap.dedent('''
+            import os, signal, sys, time
+            from pgdelta.tree import HashPool, _worker_ping
+            signal.signal(signal.SIGINT, lambda *_: None)  # this parent notes Ctrl-C and goes on
+            pool = HashPool(2, backend='process', key=bytes(32))
+            os.killpg(0, signal.SIGINT)
+            deadline = time.monotonic() + 60
+            while pool.ready_seconds is None and time.monotonic() < deadline:
+                time.sleep(0.02)
+            print(len(pool.ready_pids), pool._executor.submit(_worker_ping).result(timeout=60))
+            pool.close()
+        ''')
+        result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=120,
+                                cwd=REPO_ROOT, env=subprocess_env(), start_new_session=True)
+        self.assertNotIn('Traceback', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.split()[0], '2', result.stdout)
+
     def test_sigkill_of_the_sender_mid_run(self):
         for method in ('spawn', 'forkserver'):
             if method not in multiprocessing.get_all_start_methods():

@@ -2,13 +2,20 @@
 
 A dated record of what was done, why, and what came out of it. Newest entries first.
 Experiments have their own write-ups in [docs/experiments/](experiments/).
+Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
 
 
 
 
 
-## 2026-10-29 (late afternoon): TLS transport fixed: one SSL object was used by two threads at once
+## 2026-10-28 (09:50 UTC): a Ctrl-C while the hashing workers start no longer breaks the pool
+
+- **Found from CI:** the TLS fix's run (f29ceaa) failed in `test_ctrl_c_to_the_whole_process_group_mid_run`. A worker was still importing `hashlib` when the test's SIGINT reached the process group, and printed a `KeyboardInterrupt` traceback. The pool doesn't wait for its workers before work starts, and a worker ignored SIGINT only once its initializer ran, after its imports.
+- **A new test** sends SIGINT to the group right after a pool spawns two workers. On the code before the fix the workers died and the pool broke (`BrokenProcessPool`) in 3 of 3 runs.
+- **The fix** (`tree._sigint_blocked`): the parent blocks SIGINT in the spawning thread while the pool starts its workers. A child inherits that mask across fork and exec, and its initializer ignores SIGINT before unblocking it, so a Ctrl-C during its imports is dropped. The parent's own Ctrl-C stays pending until it unblocks, so it isn't lost. The new test passed 3 of 3 runs.
+
+## 2026-10-28 (09:34 UTC): TLS transport fixed: one SSL object was used by two threads at once
 
 - **Found from CI:** the Experiment tests on 4918b34 hung for 1 h 45 min in `test_a_session_over_tls_builds_the_same_copy` (earlier runs took about 4 min); the run was cancelled. The same commit's code passed on 9eb2eb0's run, so the hang was intermittent.
 - **The cause:** a session reads on one thread while another writes, and pgdelta's TLS did both on one `ssl.SSLSocket`. OpenSSL forbids using one SSL object from two threads at once, and CPython leaves that to the caller.
@@ -20,7 +27,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - **Bulk throughput,** measured locally on one way: about 1,650 MiB/s against the old transport's 670, in three interleaved trials.
   - **EXP-58** gets a note: its TLS cost was measured on the old transport, so it is likely an upper bound now (inferred). No run there failed.
 
-## 2026-10-29 (afternoon): EXP-71 done, `--diverged-basis` on with the fast path
+## 2026-10-28 (09:20 UTC): EXP-71 done, `--diverged-basis` on with the fast path
 
 - **EXP-71** (one session, 12 runs, all correct; both `pg_amcheck --heapallindexed` checks passed): all 6 predictions held.
   - **Deciding, hot rows updated 10 times:** pgdelta with idea 1 took 6.9 s against `pg_rewind`'s 35.1 s (0.197; the model gave 0.2) and a re-clone's 90.8 s.
@@ -32,7 +39,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 - **Research loop 1's failover case is closed.** Next: the fast path's fixed costs (the guard took 5.4 s of the scattered session's 46.8 s), then the selector (idea 4).
 - **The pipeline** ran without a pause (us-west1-a had no capacity, so us-west1-b and -c); the VMs and disks were deleted after the fetch.
 
-## 2026-10-29 (midday): idea 1 built into pgdelta (`--diverged-basis`); EXP-71 pre-registered
+## 2026-10-28 (07:30 UTC): idea 1 built into pgdelta (`--diverged-basis`); EXP-71 pre-registered
 
 - **`--diverged-basis`** (sender, with `--fast-path summaries`; offered in HELLO, so other sessions' bytes are unchanged). It is for an old primary that kept writing after the server's timeline left its own, which the guard refused until now.
   - **The exchange:** the sender names the fork (`FORK_POINT`). The receiver finds the last checkpoint before it in B's own WAL and lists every block B's WAL names from its redo point through B's end (`BASIS_WAL`).
@@ -48,7 +55,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - **The deciding prediction:** hot10 takes at most 0.5 of `pg_rewind`'s time (the model gives about 0.2).
   - **Uniform:** at most 0.75 of a re-clone's (about 0.57).
 
-## 2026-10-29 (morning): EXP-70 done, `--fill-gaps 2` is the fast path's default
+## 2026-10-28 (07:14 UTC): EXP-70 done, `--fill-gaps 2` is the fast path's default
 
 - **EXP-70** (one session, 14 runs, all correct): all 6 predictions held.
   - **Deciding:** filling clean gaps of up to 2 pages took 0.608 of no filling (46.6 against 76.6 s); the model gave 0.69.
@@ -61,7 +68,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
   - `lab_exp65.sh` and EXP-63's `fastpath_check.py`, missed when EXP-68 changed the defaults, now pass their registered settings explicitly.
 - **The pipeline paused once** on a transient `gcloud` SSL error at the smoke's records check. The VMs were kept as designed, the records were checked by hand, and the registered run resumed on the same pair. The VMs were then deleted.
 
-## 2026-10-29 (early): EXP-69 part B done, `pg_rewind`'s 4 GB explained; EXP-70 running
+## 2026-10-28 (05:54 UTC): EXP-69 part B done, `pg_rewind`'s 4 GB explained; EXP-70 running
 
 - **EXP-69 part B** (EXP-67's cells with diagnostics, 18 GB):
   - **As registered,** 6 held both as registered and as amended; 7 and 8 failed.
