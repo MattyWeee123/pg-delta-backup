@@ -45,6 +45,8 @@ from pgdelta.tree import (BACKENDS, DEFAULT_BACKEND, DEFAULT_JOBS, HashPool, has
 STATS_SCHEMA_VERSION = 1
 DEFAULT_WINDOW = 4
 RUN_BYTES = 1 << 20
+# --read-ahead (EXP-64b): how far the fast path's reader threads may read ahead of the sending thread.
+READ_AHEAD_BYTES = 64 << 20
 JOIN_SECONDS = 10.0
 
 
@@ -264,6 +266,68 @@ class _Job:
     digest: object = None
 
 
+class _ReadAhead:
+    """--read-ahead (EXP-64b): the fast path's chosen runs, read on `threads` threads in sending order, up to
+    READ_AHEAD_BYTES ahead of the sending thread, so that the source's scattered reads overlap the sending and the
+    receiver's writes instead of alternating with them (EXP-64: 99 s of reads one at a time while the receiver
+    waited 105 s). `runs` lists (file index, entry, first page, page count, bytes) in the order they are sent."""
+
+    def __init__(self, reader, runs, threads, window, block):
+        self.reader, self.runs, self.block, self.window = reader, iter(runs), block, window
+        self.pool = ThreadPoolExecutor(threads, thread_name_prefix='pgdelta-read')
+        self.pending, self.handles, self.inflight, self.exhausted = deque(), {}, 0, False
+        self.wait_seconds, self.reads = 0.0, 0
+        try:
+            self._fill()
+        except BaseException:
+            self.close()
+            raise
+
+    def _fill(self):
+        while not self.exhausted and (self.inflight < self.window or not self.pending):
+            try:
+                index, entry, first, count, length = next(self.runs)
+            except StopIteration:
+                self.exhausted = True
+                return
+            handle = self.handles.get(index)
+            if handle is None:
+                handle = self.handles[index] = self.reader.open(entry)
+            future = self.pool.submit(handle.read, first * self.block, length)
+            self.pending.append((index, first, count, length, future))
+            self.inflight += length
+
+    def next(self, index, first):
+        """The next run's bytes; it must be file `index`'s run starting at page `first`."""
+        if not self.pending:
+            raise TransferError('read-ahead ran out of runs')
+        run_index, run_first, _, length, future = self.pending.popleft()
+        if (run_index, run_first) != (index, first):
+            raise TransferError(f'read-ahead out of order: file {run_index} page {run_first}, expected {index} {first}')
+        started = time.perf_counter()
+        data = future.result()
+        self.wait_seconds += time.perf_counter() - started
+        self.inflight -= length
+        self.reads += 1
+        self._fill()
+        return data
+
+    def done(self, index):
+        """File `index`'s runs are all taken, so no read of it is in flight: its handle is closed. (After a failure,
+        close() closes the rest once the threads have stopped.)"""
+        handle = self.handles.pop(index, None)
+        if handle is not None:
+            handle.close()
+
+    def close(self):
+        for *_, future in self.pending:
+            future.cancel()
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        for handle in self.handles.values():
+            handle.close()
+        self.handles.clear()
+
+
 def _parse_accept(accept, file_count):
     mode, reason = accept.get('mode'), accept.get('reason')
     if mode not in ('reuse', 'full') or not isinstance(reason, str):
@@ -289,8 +353,11 @@ class _Sender:
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                  hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-                 fast_path=None):
+                 fast_path=None, read_ahead=0):
         self.started = time.perf_counter()
+        # --read-ahead (EXP-64b): the fast path's chosen pages read on this many threads ahead of sending (0: one run
+        # at a time in the sending thread, as in EXP-64); and what the reading did.
+        self.read_ahead, self.ahead = read_ahead, None
         # --fast-path summaries (pgdelta.fastpath): offered in HELLO; `fast` is the summaries' block plan once the
         # guard let it run, and the listed files then go by fast_path's rules, B unread.
         self.fast_path, self.fast = fast_path, None
@@ -432,7 +499,7 @@ class _Sender:
         return self.block
 
     def _run(self):
-        fastpath.check_mode(self.fast_path, self.source_kind, self.subpage)
+        fastpath.check_mode(self.fast_path, self.source_kind, self.subpage, self.read_ahead)
         if self.source_kind not in datadir.SOURCE_KINDS:
             raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
                                f'not {self.source_kind!r}')
@@ -592,57 +659,78 @@ class _Sender:
 
     def _send_fast(self, entries):
         """--fast-path summaries: each listed file in order. Where the summaries chose its pages, only those go, read
-        now, then FILE_DONE_WRITTEN with the digest of what was sent; any other file goes whole by the usual path."""
+        now, then FILE_DONE_WRITTEN with the digest of what was sent; any other file goes whole by the usual path.
+        With --read-ahead, the chosen runs are read on reader threads ahead of the sending thread (_ReadAhead)."""
         blocks_per_segment = (self.identity or {}).get('blocks_per_segment') or (1 << 30) // self.block
         counts = self.fast_counts
+        plans = []
         for index, entry in enumerate(entries):
-            self.inbox.check()
             basis_size = self.basis_sizes.get(index) if self.reuse else None
             unlogged = self.selection is not None and self.selection.source_path(entry.path) != entry.path
-            pages, whole = fastpath.pages_to_send(entry.path, entry.size, basis_size, self.fast, self.block,
-                                                  blocks_per_segment, whole=unlogged)
-            if whole:
-                counts['files_whole'] += 1
-                self._finish(self._whole_job(index, entry))
-                continue
-            counts['files_chosen'] += 1
-            counts['pages_chosen'] += len(pages)
-            sent, leaves = 0, []
-            started = time.perf_counter()
-            try:
-                handle = self.reader.open(entry)
-            except OSError as exc:
-                raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
-            try:
-                for first, count in matching.runs(pages, self.max_run):
-                    offset = first * self.block
-                    length = min(count * self.block, entry.size - offset)
-                    try:
-                        data = handle.read(offset, length)
-                    except OSError as exc:
-                        raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
-                    view = memoryview(data)
-                    leaves += [(page, self.hasher.leaf(view[(page - first) * self.block:(page - first + 1) * self.block]))
-                               for page in range(first, first + count)]
-                    self.inbox.check()
-                    self._send_run(index, first, data)
-                    sent += length
-                self._drain_runs()
-            finally:
+            plans.append((index, entry, basis_size, *fastpath.pages_to_send(
+                entry.path, entry.size, basis_size, self.fast, self.block, blocks_per_segment, whole=unlogged)))
+        if self.read_ahead:
+            runs = [(index, entry, first, count, min(count * self.block, entry.size - first * self.block))
+                    for index, entry, _, pages, whole in plans if not whole
+                    for first, count in matching.runs(pages, self.max_run)]
+            self.ahead = _ReadAhead(self.reader, runs, self.read_ahead, READ_AHEAD_BYTES, self.block)
+        try:
+            for plan in plans:
+                self._send_fast_file(*plan)
+        finally:
+            if self.ahead is not None:
+                self.ahead.close()
+
+    def _send_fast_file(self, index, entry, basis_size, pages, whole):
+        """One listed file in fast mode (_send_fast): whole by the usual path, or its chosen pages and FILE_DONE_WRITTEN."""
+        counts = self.fast_counts
+        self.inbox.check()
+        if whole:
+            counts['files_whole'] += 1
+            self._finish(self._whole_job(index, entry))
+            return
+        counts['files_chosen'] += 1
+        counts['pages_chosen'] += len(pages)
+        sent, leaves = 0, []
+        started = time.perf_counter()
+        try:
+            handle = None if self.ahead is not None else self.reader.open(entry)
+        except OSError as exc:
+            raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
+        try:
+            for first, count in matching.runs(pages, self.max_run):
+                offset = first * self.block
+                length = min(count * self.block, entry.size - offset)
+                try:
+                    data = (self.ahead.next(index, first) if self.ahead is not None
+                            else handle.read(offset, length))
+                except OSError as exc:
+                    raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
+                view = memoryview(data)
+                leaves += [(page, self.hasher.leaf(view[(page - first) * self.block:(page - first + 1) * self.block]))
+                           for page in range(first, first + count)]
+                self.inbox.check()
+                self._send_run(index, first, data)
+                sent += length
+            self._drain_runs()
+            if self.ahead is not None:
+                self.ahead.done(index)
+        finally:
+            if handle is not None:
                 handle.close()
-            self.hash_source += time.perf_counter() - started
-            digest = fastpath.written_digest(self.hasher, entry.size, leaves)
-            self._send(protocol.FILE_DONE_WRITTEN, protocol.encode_file_done(index, entry.size, digest))
-            self.files_digest.add(entry.path, entry.size, digest)
-            total = -(-entry.size // self.block)
-            self.files['total'] += 1
-            if basis_size != entry.size:
-                self.files['size_mismatch'] += 1
-            self.files['unchanged' if not pages and basis_size == entry.size else 'changed'] += 1
-            self.pages['total'] += total
-            self.pages['sent'] += len(pages)
-            self.pages['reused'] += total - len(pages)
-            self.pages['sent_bytes'] += sent
+        self.hash_source += time.perf_counter() - started
+        digest = fastpath.written_digest(self.hasher, entry.size, leaves)
+        self._send(protocol.FILE_DONE_WRITTEN, protocol.encode_file_done(index, entry.size, digest))
+        self.files_digest.add(entry.path, entry.size, digest)
+        total = -(-entry.size // self.block)
+        self.files['total'] += 1
+        if basis_size != entry.size:
+            self.files['size_mismatch'] += 1
+        self.files['unchanged' if not pages and basis_size == entry.size else 'changed'] += 1
+        self.pages['total'] += total
+        self.pages['sent'] += len(pages)
+        self.pages['reused'] += total - len(pages)
+        self.pages['sent_bytes'] += sent
 
     def _whole_job(self, index, entry):
         """A listed file sent whole in fast mode: hashed as read (pg_control pinned), every page sent, its digest
@@ -1076,7 +1164,11 @@ class _Sender:
                if self.subpage else {}),
             # --fast-path: whether the guard let it run and why not, and what the summaries chose; absent without it.
             **({'fast_path': {'requested': self.fast_path,
-                              **{k: round(v, 6) if isinstance(v, float) else v for k, v in self.fast_counts.items()}}}
+                              **{k: round(v, 6) if isinstance(v, float) else v for k, v in self.fast_counts.items()},
+                              'read_ahead': {'threads': self.read_ahead, 'window_bytes': READ_AHEAD_BYTES,
+                                             'reads': None if self.ahead is None else self.ahead.reads,
+                                             'wait_seconds': None if self.ahead is None
+                                             else round(self.ahead.wait_seconds, 6)}}}
                if self.fast_path else {}),
         }
 
@@ -1086,7 +1178,7 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-               fast_path=None):
+               fast_path=None, read_ahead=0):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -1119,8 +1211,10 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     512-byte blocks that differ from B's.
     `fast_path` "summaries" (pgdelta.fastpath, a live source only) offers to send only the blocks the server's WAL
     summaries list since B's redo point, without reading B; the receiver proves B's lineage, the guard here
-    decides, and otherwise the session is as without it.
+    decides, and otherwise the session is as without it. `read_ahead` threads read the fast path's chosen pages ahead
+    of the sending thread (0: one run at a time in it).
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
-                   pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, fast_path).run()
+                   pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, fast_path,
+                   read_ahead).run()

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from pgdelta import fastpath
+from pgdelta import fastpath, sender
 from pgdelta.errors import InvalidInput, ProtocolError
 from pgdelta.hashing import Hasher
 from pgdelta_cluster import CONTROLDATA, PG_BIN, SKIP_REASON, available
@@ -104,9 +104,48 @@ class Pages(unittest.TestCase):
             with self.assertRaises(ProtocolError):
                 fastpath.check_decision(bad)
         fastpath.check_mode(None, 'datadir', False)
-        for mode, kind, sub in (('summaries', 'datadir', False), ('summaries', 'live', True), ('other', 'live', False)):
+        fastpath.check_mode('summaries', 'live', False, 4)
+        for mode, kind, sub, ahead in (('summaries', 'datadir', False, 0), ('summaries', 'live', True, 0),
+                                       ('other', 'live', False, 0), (None, 'live', False, 4),
+                                       ('summaries', 'live', False, -1)):
             with self.assertRaises(InvalidInput):
-                fastpath.check_mode(mode, kind, sub)
+                fastpath.check_mode(mode, kind, sub, ahead)
+
+
+class ReadAhead(unittest.TestCase):
+    """EXP-64b's reader threads: runs come back in sending order, at most the window ahead, handles closed."""
+
+    class Reader:
+        def __init__(self):
+            self.opened, self.closed, self.reads = [], [], []
+
+        def open(self, entry):
+            reader = self
+            self.opened.append(entry)
+
+            class Handle:
+                def read(self, offset, length):
+                    reader.reads.append((entry, offset))
+                    return bytes([len(entry)]) * length
+
+                def close(self):
+                    reader.closed.append(entry)
+            return Handle()
+
+    def test_runs_in_order_within_the_window(self):
+        reader = self.Reader()
+        runs = [(0, 'a', 0, 1, 8192), (0, 'a', 5, 2, 16384), (1, 'bb', 3, 1, 8192)]
+        ahead = sender._ReadAhead(reader, runs, threads=3, window=16384, block=8192)
+        self.assertLessEqual(len(ahead.pending), 2)  # the window: 16 KiB, then one more run
+        self.assertEqual(ahead.next(0, 0), b'\x01' * 8192)
+        self.assertEqual(ahead.next(0, 5), b'\x01' * 16384)
+        ahead.done(0)
+        self.assertEqual(reader.closed, ['a'])
+        with self.assertRaises(Exception):
+            ahead.next(1, 4)  # out of order
+        ahead.close()
+        self.assertEqual(sorted(reader.opened), ['a', 'bb'])
+        self.assertEqual(sorted(reader.closed), ['a', 'bb'])
 
 
 @unittest.skipUnless(available() and (PG_BIN / 'pgbench').exists() and (PG_BIN / 'pg_waldump').exists(), SKIP_REASON)
@@ -166,14 +205,14 @@ class RealServer(unittest.TestCase):
     STATE = ("SELECT md5(string_agg(aid || ':' || abalance, ',' ORDER BY aid)) || '/' || "
              "(SELECT count(*) FROM gone) || '/' || (SELECT sum(g) FROM fresh) FROM pgbench_accounts")
 
-    def refresh(self, name, basis):
+    def refresh(self, name, basis, *extra):
         target = self.root / name
         shutil.copytree(self.root / basis, target)
         stats_path = self.root / f'{name}.json'
         result = subprocess.run(python_command(
             'local', '--source', self.source, '--source-kind', 'live', '--pg-controldata', CONTROLDATA,
             '--pg-conn', f'host={self.sockets} port=5432 user=t dbname=postgres', '--basis', target, '--in-place',
-            '--fast-path', 'summaries', '--stats-json', stats_path), capture_output=True, text=True, cwd=REPO_ROOT,
+            '--fast-path', 'summaries', '--stats-json', stats_path, *extra), capture_output=True, text=True, cwd=REPO_ROOT,
             env=subprocess_env(), timeout=300)
         self.assertEqual(result.returncode, 0, result.stderr)
         return target, json.loads(stats_path.read_text())
@@ -199,6 +238,14 @@ class RealServer(unittest.TestCase):
         self.assertEqual(received['files_written_checked'], fast['files_chosen'])
         self.assertLess(stats['pages']['sent'], stats['pages']['total'] / 2)
         self.assertNotIn('BASIS_NODES', stats['receiver']['bytes_written']['by_message_type'])  # B never hashed
+        self.check_copy(target)
+
+    def test_read_ahead_threads_give_the_same_copy(self):
+        target, stats = self.refresh('fast-ahead', 'stale', '--read-ahead', '4')
+        fast = stats['fast_path']
+        self.assertTrue(fast['used'], fast['reasons'])
+        self.assertEqual(fast['read_ahead']['threads'], 4)
+        self.assertGreater(fast['read_ahead']['reads'], 0)
         self.check_copy(target)
 
     def test_a_crashed_copy_is_refused_and_refreshed_by_hashing(self):

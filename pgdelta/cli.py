@@ -157,6 +157,16 @@ def _jobs_option(parser, what, sides=1, live=False):
     parser.add_argument('--hash-backend', choices=BACKENDS, default=DEFAULT_BACKEND, help=argparse.SUPPRESS)
 
 
+def _non_negative_int(text):
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f'not a whole number: {text!r}') from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f'must be 0 or more, not {value}')
+    return value
+
+
 def _compress_option(parser):
     parser.add_argument('--compress', choices=('off', 'zstd'), default='off',
                         help='compress the pages sent with zstd (level 3), where the receiver can decompress; '
@@ -182,6 +192,11 @@ def _compress_option(parser):
                              'EXP-62). Otherwise the session hashes both copies as without it. Pages left unsent '
                              'are not verified; the pages written are. The session\'s role needs EXECUTE on '
                              'pg_get_wal_summarizer_state, pg_available_wal_summaries and pg_wal_summary_contents')
+    parser.add_argument('--read-ahead', type=_non_negative_int, default=0, metavar='THREADS',
+                        help='with --fast-path: read the chosen pages on THREADS threads, in sending order and up to '
+                             '64 MiB ahead of the sending thread, so the source\'s scattered reads overlap the '
+                             'sending and the receiver\'s writes; 0 reads one run at a time in the sending thread '
+                             '(EXP-64b) (default: %(default)s)')
 
 
 def _hash_option(parser):
@@ -544,7 +559,8 @@ def _sender_kwargs(args, identity):
             'live_timeout': args.live_timeout, 'hash_algorithm': args.hash,
             'compress': None if getattr(args, 'compress', 'off') == 'off' else args.compress,
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
-            'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None)}
+            'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
+            'read_ahead': getattr(args, 'read_ahead', 0)}
 
 
 def _source_identity(args):
