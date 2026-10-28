@@ -1,6 +1,13 @@
 """--selector (EXP-74; research loop 1's idea 4): once the guard has run, the sender knows the fast path's plan, every
-page it will read and write. From it this predicts the fast path's time at each fill (fastpath.fill_gaps) and a full
-copy's, from each disk's two limits, and the sender takes the fastest: that fill, or every listed file sent whole.
+page it will read and write. From it this predicts the fast path's time at each fill (fastpath.fill_gaps), from each
+disk's two limits, and the sender takes the fastest fill. It also predicts a full copy's time (pg_basebackup's), and
+the statistics and the log say when that is faster.
+
+Why a full copy is only a recommendation: within pgdelta a full copy is its own pipeline with every page chosen, and
+fill 0's pages are a subset of those, so by this model pgdelta's own full copy never beats its fill 0. A full copy wins
+only by avoiding pgdelta's overhead per MB (pg_basebackup's 5.7 s fixed against about 1 ms per MB). And as built, a
+file the fast path sends whole is read twice (hashed in full, then read again to send), so sending every file whole
+would take about twice as long. Whether to run pg_basebackup instead is the operator's call.
 
 The model is EXP-74's (analysis/fastpath_model.py). Tested on cells it hadn't seen, it put every fast arm within
 2.6% and both full copies within 0.1%, and picked the fastest arm measured in both cells:
@@ -11,11 +18,11 @@ The model is EXP-74's (analysis/fastpath_model.py). Tested on cells it hadn't se
 - **the transfer:** the busier disk;
 - **the rest:** the guard, already spent, plus OVERHEAD_S and OVERHEAD_S_PER_MB per megabyte sent (fitted on
   EXP-70);
-- **a full copy:** FULL_FIXED_S plus every listed file's bytes at Disks.bytes_per_second (EXP-70's full copy).
+- **a full copy (pg_basebackup):** FULL_FIXED_S plus every listed file's bytes at Disks.bytes_per_second (EXP-70's
+  full copy).
 
 The default limits are EXP-74's pair's: n2d-highcpu-8 VMs with 150 GiB balanced persistent disks. The request count
-was 33-41% high for long runs there (those plans were bound by bytes, so it didn't matter). A full copy here is
-pgdelta's own, every file sent whole with B unread. EXP-74 timed `pg_basebackup` instead.
+was 33-41% high for long runs there (those plans were bound by bytes, so it didn't matter).
 """
 from __future__ import annotations
 
@@ -97,8 +104,8 @@ def predict_full(listed_bytes, disks):
 
 
 def choose(pages_by_file, whole_bytes, listed_bytes, guard_s, block, max_run, disks=Disks(), fills=FILLS):
-    """({'fill0': seconds, ..., 'full': seconds}, the fastest: a fill's pages, or None for a full copy). On a tie the
-    first listed wins: less filling, and a full copy last. `pages_by_file`: each file's sorted unfilled pages."""
+    """({'fill0': seconds, ..., 'full': seconds}, the fastest fill's pages). On a tie less filling wins. 'full' is
+    pg_basebackup's predicted time, for the caller to report. `pages_by_file`: each file's sorted unfilled pages."""
     max_request = max(1, REQUEST_BYTES // block)
     shapes = [segments(pages) for pages in pages_by_file]
     candidates = []
@@ -108,6 +115,5 @@ def choose(pages_by_file, whole_bytes, listed_bytes, guard_s, block, max_run, di
             p, r = filled(lengths, gaps, gap, max_run, max_request)
             pages, requests = pages + p, requests + r
         candidates.append((f'fill{gap}', gap, predict(pages, requests, whole_bytes, guard_s, block, disks)))
-    candidates.append((FULL, None, predict_full(listed_bytes, disks)))
     _, fill, _ = min(candidates, key=lambda c: c[2])
-    return {name: seconds for name, _, seconds in candidates}, fill
+    return {**{name: seconds for name, _, seconds in candidates}, FULL: predict_full(listed_bytes, disks)}, fill

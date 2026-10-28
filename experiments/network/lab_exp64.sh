@@ -19,6 +19,9 @@
 # pgbench_accounts' rows, chosen by a hash of each row's key in one statement (the same rows whatever the table's
 # physical order), since the uniform workload's batches of 100
 # rows would take hours at such fractions: with about 27 rows a page, 1 - (1 - N/100)^27 of the heap's pages.
+# A pattern "scatterallN" (EXP-75) changes N% of events' rows the same way too (payload upper-cased, so its length is
+# unchanged), so nearly every relation of the database changes; each copy's check then counts the events changed.
+# An arm "fastNws" (EXP-75) is fastNw with --selector instead of a fill: it chooses its fill, or a full copy.
 set -u
 SRC=$1
 REPEATS=${2:-2}
@@ -77,11 +80,18 @@ for pattern in $PATTERNS; do
   rm -rf "$B0"
   $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$B0" -X stream -c fast > "$R/B0-$pattern.log" 2>&1 \
     || { echo "B0 failed"; exit 1; }
-  if [[ "$pattern" =~ ^scatter([0-9]+)$ ]]; then
-    frac=$(python3 -c "print(${BASH_REMATCH[1]} / 100)")
+  CHECK=$STATE
+  if [[ "$pattern" =~ ^scatter(all)?([0-9]+)$ ]]; then
+    n=${BASH_REMATCH[2]}
+    frac=$(python3 -c "print($n / 100)")
     w0=$(date +%s.%N)
-    psrc "UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE abs(hashint4(aid + 74)) % 10000 < ${BASH_REMATCH[1]}00" \
+    psrc "UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE abs(hashint4(aid + 74)) % 10000 < ${n}00" \
       > /dev/null || { echo "workload failed"; exit 1; }
+    if [ -n "${BASH_REMATCH[1]}" ]; then
+      psrc "UPDATE events SET payload = upper(payload) WHERE abs(hashint8(id + 74)) % 10000 < ${n}00" \
+        > /dev/null || { echo "workload failed"; exit 1; }
+      CHECK="SELECT ($STATE) || ':' || (SELECT count(*) FROM events WHERE payload <> lower(payload))"
+    fi
     w1=$(date +%s.%N)
     echo "{\"pattern\": \"$pattern\", \"fraction\": $frac, \"seconds\": $(python3 -c "print(round($w1 - $w0, 1))")}" \
       > "$R/workload-$pattern.json"
@@ -90,14 +100,15 @@ for pattern in $PATTERNS; do
       > $W/workload-$pattern.json" || { echo "workload failed"; exit 1; }
     on_src "cat $W/workload-$pattern.json" > "$R/workload-$pattern.json"
   fi
-  SOURCE_STATE=$(psrc "$STATE")
+  SOURCE_STATE=$(psrc "$CHECK")
   echo "$(date -u +%T) $pattern: workload done; source state $SOURCE_STATE"
   arms_var="ARMS_$pattern"; arms=${!arms_var:-$ARMS}
   python3 - "$REPEATS" "$SEED" "$pattern" $arms > "$R/plan-$pattern.txt" <<'EOF'
 import random, sys
 repeats, seed, pattern, arms = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4:]
 runs = [(arm, k) for arm in arms for k in range(repeats)]
-random.Random(seed + (pattern == 'uniform') + (int(pattern[7:]) if pattern.startswith('scatter') else 0)).shuffle(runs)
+digits = ''.join(c for c in pattern if c.isdigit())  # scatterN and scatterallN: N
+random.Random(seed + (pattern == 'uniform') + (int(digits) if pattern.startswith('scatter') else 0)).shuffle(runs)
 for arm, k in runs:
     print(arm, k)
 EOF
@@ -123,9 +134,12 @@ EOF
       # "fast" reads one run at a time and syncs in the main loop, as in EXP-64; fastN reads on N threads; a "w"
       # syncs on the worker; "fK" fills clean gaps of up to K pages (EXP-70's --fill-gaps), and no "fK" fills none,
       # since EXP-70 made 2 pages the default; none takes an old primary from its own WAL (EXP-71's default).
+      # A final "s" has --selector choose the fill, or a full copy, instead (EXP-75).
       fast= fsync='--fsync main'
-      if [[ "$arm" =~ ^fast([0-9]*)(w?)(f([0-9]+))?$ ]]; then
-        fast="--fast-path summaries --read-ahead ${BASH_REMATCH[1]:-0} --fill-gaps ${BASH_REMATCH[4]:-0} --no-diverged-basis"
+      if [[ "$arm" =~ ^fast([0-9]*)(w?)(f([0-9]+)|s)?$ ]]; then
+        fill="--fill-gaps ${BASH_REMATCH[4]:-0}"
+        [ "${BASH_REMATCH[3]}" = s ] && fill=--selector
+        fast="--fast-path summaries --read-ahead ${BASH_REMATCH[1]:-0} $fill --no-diverged-basis"
         [ -n "${BASH_REMATCH[2]}" ] && fsync='--fsync worker'
       fi
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
@@ -154,7 +168,7 @@ EOF
       # The refreshed copy recovers from its backup_label; its pgbench_accounts must equal the source's.
       $PGBIN/pg_ctl -D "$B" -l "$d/copy.log" -w -t 1800 \
         -o "-p 5433 -k /tmp -c listen_addresses='' -c summarize_wal=off" start > /dev/null 2>&1
-      COPY_STATE=$($PGBIN/psql -h /tmp -p 5433 -U study -d postgres -qAtX -c "$STATE" 2>&1)
+      COPY_STATE=$($PGBIN/psql -h /tmp -p 5433 -U study -d postgres -qAtX -c "$CHECK" 2>&1)
       $PGBIN/pg_ctl -D "$B" -m fast -w stop > /dev/null 2>&1
       verify="{\"source\": \"$SOURCE_STATE\", \"copy\": \"$COPY_STATE\", \"match\": $([ "$SOURCE_STATE" = "$COPY_STATE" ] && echo true || echo false)}"
     fi

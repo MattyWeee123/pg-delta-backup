@@ -707,8 +707,8 @@ class _Sender:
             pages, whole = fastpath.pages_to_send(entry.path, entry.size, basis_size, self.fast, self.block,
                                                   blocks_per_segment, whole=unlogged)
             plans.append((index, entry, basis_size, pages, whole))
-        if self.selector is not None and self._select(plans) is None:
-            plans = [(index, entry, basis_size, [], True) for index, entry, basis_size, _, _ in plans]
+        if self.selector is not None:
+            self._select(plans)
         if self.fill_gaps:
             for i, (index, entry, basis_size, pages, whole) in enumerate(plans):
                 if not whole:
@@ -730,20 +730,20 @@ class _Sender:
                 self.ahead.close()
 
     def _select(self, plans):
-        """--selector (pgdelta.selector, EXP-74): each fill's and a full copy's time, predicted from the unfilled plan,
-        the guard's time and the disks' limits. The fastest sets the fill; a full copy (None) sends every listed file
-        whole, B unread. Returns the fill, or None."""
+        """--selector (pgdelta.selector, EXP-74): each fill's time, predicted from the unfilled plan, the guard's time
+        and the disks' limits; the fastest sets the fill. pg_basebackup's predicted time is recorded beside them, and
+        whether it is faster: a recommendation, since pgdelta's own full copy can't beat its fill 0."""
         started = time.perf_counter()
         options, fill = selector.choose([pages for *_, pages, whole in plans if not whole],
                                         sum(entry.size for _, entry, _, _, whole in plans if whole),
                                         sum(entry.size for _, entry, *_ in plans), self.fast_counts['guard_seconds'],
                                         self.block, self.max_run, self.selector)
-        self.fill_gaps = fill or 0
-        self.selector_counts = {'choice': selector.FULL if fill is None else f'fill{fill}',
+        self.fill_gaps = fill
+        self.selector_counts = {'choice': f'fill{fill}',
                                 'predicted_seconds': {name: round(s, 2) for name, s in options.items()},
+                                'full_copy_predicted_faster': options[selector.FULL] < options[f'fill{fill}'],
                                 'seconds': round(time.perf_counter() - started, 6),
                                 'disks': asdict(self.selector)}
-        return fill
 
     def _send_fast_file(self, index, entry, basis_size, pages, whole):
         """One listed file in fast mode (_send_fast): whole by the usual path, or its chosen pages and FILE_DONE_WRITTEN."""
@@ -1300,8 +1300,9 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     chosen pages are sent too (fastpath.fill_gaps), so fewer, larger reads and writes carry them.
     `diverged_basis` extends the fast path to a B that kept writing after the server's timeline left its own (an old
     primary after a failover): the blocks B's own WAL names since the checkpoint before the fork are sent too.
-    `selector`, a pgdelta.selector.Disks, has the fast path choose its fill, or a full copy, once the guard has run:
-    the fastest by EXP-74's model of the plan on those disks (the fill given is then replaced).
+    `selector`, a pgdelta.selector.Disks, has the fast path choose its fill once the guard has run: the fastest by
+    EXP-74's model of the plan on those disks (the fill given is then replaced). The statistics also say whether
+    pg_basebackup is predicted faster.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,

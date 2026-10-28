@@ -469,8 +469,9 @@ class RealServer(unittest.TestCase):
         chosen = fast['selector']
         predicted = chosen['predicted_seconds']
         self.assertEqual(set(predicted), {'fill0', 'fill1', 'fill2', 'fill4', 'full'})
-        self.assertEqual(predicted[chosen['choice']], min(predicted.values()))  # rounded to 0.01 s: ties possible
-        self.assertTrue(chosen['choice'].startswith('fill'), chosen)
+        fills = {k: v for k, v in predicted.items() if k != 'full'}
+        self.assertEqual(fills[chosen['choice']], min(fills.values()))  # rounded to 0.01 s: ties possible
+        self.assertFalse(chosen['full_copy_predicted_faster'])
         gap = int(chosen['choice'][4:])
         self.assertEqual((fast.get('fill_gaps') or {}).get('gap_pages', 0), gap)
         self.assertGreater(fast['files_chosen'], 0)
@@ -479,19 +480,19 @@ class RealServer(unittest.TestCase):
                 self.assertTrue(after == first + count or after - (first + count) > gap, f)
         self.check_copy(target)
 
-    def test_the_selector_sends_every_file_whole_where_a_full_copy_is_predicted_faster(self):
-        """Disks that read 1 page a second: the model predicts a full copy faster, so every listed file goes whole
-        over B, which is never read, and the copy recovers to the source."""
-        target, stats = self.refresh('fast-full', 'stale', '--selector', '--selector-read-ops', '1')
+    def test_the_selector_still_takes_a_fill_where_pg_basebackup_is_predicted_faster(self):
+        """Disks that read 1 page a second: pg_basebackup is predicted faster, which the statistics say; the fast path
+        still runs, at the fill with the fewest requests, and the copy recovers to the source."""
+        target, stats = self.refresh('fast-slow-disks', 'stale', '--selector', '--selector-read-ops', '1')
         fast = stats['fast_path']
         self.assertTrue(fast['used'], fast['reasons'])
-        self.assertEqual(fast['selector']['choice'], 'full')
-        self.assertEqual(fast['selector']['disks']['read_ops'], 1.0)
-        self.assertEqual(fast['files_chosen'], 0)
-        self.assertGreater(fast['files_whole'], 0)
-        self.assertNotIn('fill_gaps', fast)
-        self.assertEqual(stats['pages']['reused'], 0)
-        self.assertNotIn('BASIS_NODES', stats['receiver']['bytes_written']['by_message_type'])  # B never hashed
+        chosen = fast['selector']
+        self.assertTrue(chosen['full_copy_predicted_faster'])
+        self.assertEqual(chosen['disks']['read_ops'], 1.0)
+        fills = {k: v for k, v in chosen['predicted_seconds'].items() if k != 'full'}
+        self.assertEqual(fills[chosen['choice']], min(fills.values()))
+        self.assertEqual(chosen['choice'], 'fill4')  # the fewest requests
+        self.assertGreater(fast['files_chosen'], 0)
         self.check_copy(target)
 
     def test_a_crashed_copy_is_refused_and_refreshed_by_hashing(self):

@@ -224,10 +224,10 @@ def _compress_option(parser):
                              'EXP-69, EXP-69b, EXP-71) (default: on with --fast-path)')
     parser.add_argument('--selector', action='store_true',
                         help='with --fast-path, where the guard lets it run: predict its time from its plan at each '
-                             'fill (0, 1, 2 and 4 pages) and a full copy\'s, from the disks\' limits below, and take '
-                             'the fastest: that fill, or every listed file sent whole with B unread. Replaces '
-                             '--fill-gaps. In EXP-74 the model put every fast arm within 2.6%% of its time and picked '
-                             'the fastest arm measured in both cells; as built here it is not yet timed '
+                             'fill (0, 1, 2 and 4 pages), from the disks\' limits below, and take the fastest fill '
+                             '(replaces --fill-gaps). Where pg_basebackup is predicted faster, the log and the '
+                             'statistics say so. In EXP-74 the model put every fast arm within 2.6%% of its time and '
+                             'picked the fastest arm measured in both cells; as built here it is not yet timed '
                              '(off by default)')
     parser.add_argument('--selector-read-ops', type=_positive_float, default=selector.Disks.read_ops, metavar='N',
                         help='with --selector: the source disk\'s reads per second at its cap '
@@ -703,6 +703,11 @@ def _run_sender_command(args, run, protected):
         f'{stats["gate_reason"]}): {pages["sent"]} of {pages["total"]} '
         f'pages sent; {up["total"]} bytes to the destination, {down["total"]} bytes back; '
         f'{stats["timings_seconds"]["total"]:.3f} s')
+    chosen = (stats.get('fast_path') or {}).get('selector') or {}
+    if chosen.get('full_copy_predicted_faster'):
+        predicted = chosen['predicted_seconds']
+        log(f'note: on the given disks\' limits, pg_basebackup is predicted faster than the fast path here '
+            f'({predicted["full"]} s against {predicted[chosen["choice"]]} s at {chosen["choice"]})')
     return 0
 
 

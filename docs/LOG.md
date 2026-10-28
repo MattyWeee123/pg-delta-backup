@@ -4,6 +4,21 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (14:59 UTC): EXP-75 pre-registered (the selector timed); a full copy becomes a recommendation
+
+- **Why EXP-75:** EXP-74 registered timing the selector in a later session, and its cells never reached a full copy's win.
+- **A finding while designing it, from the code:** in fast mode, a file sent whole is read and hashed in full, then read again to send, in the sending thread and outside the read-ahead.
+  - That path was built for the few files the summaries don't cover.
+  - The selector's first build used it to send a whole database when a full copy was predicted faster. That would have read about 21 GB twice on 8 GB VMs, roughly twice `pg_basebackup`'s time.
+- **And by the model, pgdelta's own full copy can't beat its fill 0:** it is the same pipeline with every page chosen, and fill 0's pages are a subset of those. A full copy wins only by avoiding pgdelta's overhead of about 1 ms per MB.
+- **So the selector chooses among the fills only.** It still predicts `pg_basebackup`'s time, and the statistics (`full_copy_predicted_faster`) and the log say when that is faster. Whether to run it instead is the operator's call. Tests updated; the real-server test with slow disks checks the flag.
+- **EXP-75's cells:**
+  - EXP-70's `uniform` cell, bound by requests (`--selector` against fill 2);
+  - `scatterall12`, new: 12% of the rows of both `pgbench_accounts` and `events`, so nearly every page changes (`--selector` against fill 0 and `pg_basebackup`).
+- **Deciding:** the selector within 5% of the fixed fill in each cell.
+- **Also predicted:** its flag is right on both sides, and in `scatterall12` `pg_basebackup` takes at most 0.95 of the fast path's time. That would be the first measured cell past the break-even.
+- **The web console** still redirects the built-in browser to CMU's sign-in, which I don't complete. The project is reached through `gcloud`, which created and deleted both VM sets today.
+
 ## 2026-10-28 (14:35 UTC): the selector built into the sender (`--selector`, off by default)
 
 - **Why:** EXP-74's predictions 1–3 held, and its registration said that if they did, the selector goes into the sender behind an option, off by default.

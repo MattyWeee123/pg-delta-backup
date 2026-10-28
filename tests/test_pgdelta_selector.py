@@ -52,23 +52,26 @@ class Choice(unittest.TestCase):
             whole = rng.randint(0, 50) * 10**6
             listed = whole + sum(len(p) for p in plan.values()) * model.PAGE * rng.choice((1, 1.2, 3))
             guard = rng.uniform(0, 5)
-            expected, pick = model.select(plan, whole, listed, guard)
+            expected, _ = model.select(plan, whole, listed, guard)
             options, fill = selector.choose(list(plan.values()), whole, listed, guard, model.PAGE, model.MAX_RUN)
             self.assertEqual(set(options), set(expected))
             for name, seconds in expected.items():
                 self.assertAlmostEqual(options[name], seconds, delta=0.03, msg=(trial, name))
-            if abs(sorted(expected.values())[1] - expected[pick]) > 0.05:  # no near-tie the model's rounding decides
-                self.assertEqual(selector.FULL if fill is None else f'fill{fill}', pick, trial)
+            fills = {k: v for k, v in expected.items() if k != selector.FULL}  # it chooses among the fills only
+            best = min(fills, key=fills.get)
+            if abs(sorted(fills.values())[1] - fills[best]) > 0.05:  # no near-tie the model's rounding decides
+                self.assertEqual(f'fill{fill}', best, trial)
 
-    def test_less_filling_wins_a_tie_and_a_full_copy_wins_where_little_is_left_unchanged(self):
+    def test_less_filling_wins_a_tie_and_a_full_copy_is_only_predicted(self):
         # Nothing chosen: every fill predicts the same, and fill 0 wins the tie.
         options, fill = selector.choose([], 0, 10**9, 1.0, 8192, 128)
         self.assertEqual(fill, 0)
         self.assertEqual(len({options[f'fill{k}'] for k in selector.FILLS}), 1)
         # Every page of an 8.2 GB file chosen and nothing else listed: the fast path pays its overhead per MB on top
-        # of the same bytes, which outweighs a full copy's fixed 5.7 s above about 4.2 GB.
+        # of the same bytes, which outweighs pg_basebackup's fixed 5.7 s above about 4.2 GB. pgdelta's own full copy
+        # would be this plan, so a fill is still chosen, and pg_basebackup is predicted faster.
         options, fill = selector.choose([list(range(1000000))], 0, 1000000 * 8192, 1.0, 8192, 128)
-        self.assertIsNone(fill)
+        self.assertEqual(fill, 0)
         self.assertLess(options['full'], options['fill0'])
         # Disks slow at operations favour filling: every other page of a file.
         _, fill = selector.choose([list(range(0, 20000, 2))], 0, 10**10, 0.5, 8192, 128,
