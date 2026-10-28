@@ -213,6 +213,12 @@ class Pages(unittest.TestCase):
                   (1664, 0, 1262, 0, [0], None), (1700, 5, 1, 0, [0], None)]
         self.assertEqual(fastpath.grouped_plan(groups), fastpath.block_plan(rows))
         self.assertEqual(fastpath.grouped_plan([]), {})
+        # EXP-78: the server returns each fork's blocks unsorted and repeated; the plan is the same. Its OIDs come as
+        # JSON strings.
+        unsorted = [('1663', '5', '16384', 0, [9, 3, 3], None), ('1663', '5', '16390', 0, [2], 4),
+                    ('1663', '5', '16391', 1, None, 0), ('1664', '0', '1262', 0, [0, 0], None),
+                    ('1700', '5', '1', 0, [0], None)]
+        self.assertEqual(fastpath.grouped_plan(unsorted), fastpath.block_plan(rows))
 
     def test_listed_blocks_go_by_segment(self):
         self.assertEqual(self.pages('base/5/16384', 10 * 8192, 10 * 8192), ([3], False))

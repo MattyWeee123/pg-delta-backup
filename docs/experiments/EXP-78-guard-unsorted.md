@@ -1,6 +1,6 @@
 # EXP-78: Does the guard's summary reading get faster without the server's sort?
 
-Status: **pre-registered October 28, 2026, before any run.** Local, minutes. It follows EXP-77, after which the guard is the fast path's largest fixed cost where nearly every page changed: 5.3 s of the 7.2 s left against `pg_basebackup`, for 4.6 M summary rows.
+Status: **done October 28, 2026: both predictions held.** Unsorted with duplicates, the reading took 0.460 of today's time (0.187 against 0.407 s), with identical plans in all 5 runs. Built into the sender. Pre-registered the same day, before any run; local, minutes. It follows EXP-77, after which the guard is the fast path's largest fixed cost where nearly every page changed: 5.3 s of the 7.2 s left against `pg_basebackup`, for 4.6 M summary rows.
 
 ## Question
 
@@ -44,3 +44,38 @@ So the sort and de-duplication is most of B's time, not the JSON or the transfer
 
 - **If 1 holds:** `live.summary_blocks` returns the blocks unsorted with their duplicates, and `grouped_plan` de-duplicates them as it already does. The real-server test that compares the grouped plan with the plan of every summary row stays as the check. The next VM session times the guard. D4's split is weighed then, against its complexity: more connections to the source during backup mode.
 - **If 1 fails:** the server's sort isn't where B's time goes on a fresh model, and the pilot's split is re-measured before anything changes.
+
+## Results
+
+PostgreSQL 17.11 on the Mac, `LC_ALL=C`. The model was built in 233 s: 22 summaries, 792,595 summary rows, 330,129 distinct blocks. Data: `docs/experiments/data/exp78-guard.csv`.
+
+![EXP-78: the guard's reading of the summaries, today's against unsorted, over 4 connections, and the grouping alone](../figures/exp78-guard.svg)
+
+*How to read it:* each bar is a reading's median over 5 repeats, and the dots are the runs.
+
+| Reading | Median (s) | The runs (s) | Against B | Plan equal to B's |
+|---|---|---|---|---|
+| B: sorted, distinct (the sender until now) | 0.407 | 0.402–0.457 | 1 | |
+| **D: unsorted, duplicates kept** | **0.187** | 0.180–0.196 | **0.460** | 5 of 5 |
+| D over 4 connections | 0.132 | 0.121–0.133 | 0.323 | 5 of 5 |
+| The server's grouping without the arrays | 0.091 | 0.090–0.135 | 0.224 | |
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | **Deciding:** D at most 0.65 of B, with D's plan equal to B's in every run | **Held:** 0.460, 5 of 5 equal |
+| 2 | D's plan equals B's in every repeat | **Held** |
+
+**Rule 11:** 0.460 is 0.19 from the bar, so no second session.
+
+**Reported:**
+- **D over 4 connections** took 0.323 of B; that is 0.70 of D's time.
+- **B** took 0.51 µs per summary row here, against the VMs' 1.15 µs (EXP-75, scatterall12). If the ratio holds there, the guard's 5.3 s at 4.6 M rows becomes about 2.4 s. That is a projection; the VMs time it.
+
+## What followed
+
+- **Built:** `live.summary_blocks` returns each fork's blocks unsorted, with their duplicates, and `fastpath.grouped_plan` de-duplicates them into sets as it did.
+  - The real-server test comparing the grouped plan with the plan of every summary row passes unchanged.
+  - The unit test gained unsorted, repeated blocks with OIDs as strings, as the server sends them.
+  - 1,649 tests pass.
+- **D4's split is not built.** It saves another 0.3 of D's time, but opens 3 more connections to the source during backup mode. It is weighed after the VMs time D.
+- **Next:** the next VM session times the guard with D, beside EXP-77's cells.

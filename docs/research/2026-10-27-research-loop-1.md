@@ -165,3 +165,7 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 - **The tail is the last flush,** and `pg_basebackup` pays it too. Early write-back on the sync worker moved it into the transfer, which lost where bytes bind (EXP-76: 3.75 s slower), so it stays opt-in.
 - **A stall at every 1 GiB file's end** was the receiver re-reading each written page one at a time in its main loop. Reading each run in one call, on the verifier, removed it. At 96% of the pages the fast path fell from 113.2 to 108.5 s, 1.07 of `pg_basebackup`'s time (EXP-77; its deciding comparison, the check's place alone, saved only 0.44 s).
 - **What is left there,** 7.2 s, is mostly the guard (5.3 s for 4.6 M summary rows) and the plan (0.9 s). The guard is the next target.
+
+**Update, October 28: the guard's reading without the server's sort (EXP-78, local).**
+- **Where the reading's time went:** the server's grouping alone took 0.09 s of 0.41 s on the matched scale model. Sorting and de-duplicating each fork's blocks (`array_agg(DISTINCT … ORDER BY …)`) was most of the rest. The JSON and psql cost almost nothing.
+- **The fix:** unsorted with duplicates, which the sender's sets de-duplicate, took 0.460 of the time with identical plans. Built. The VMs time it next.

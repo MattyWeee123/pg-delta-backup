@@ -452,7 +452,8 @@ def block_plan(rows):
 
 def grouped_plan(groups):
     """block_plan's plan from summary rows grouped per relation fork on the server (live.summary_blocks):
-    (tablespace, database, relfilenode, fork, its distinct blocks or None, its lowest limit block or None)."""
+    (tablespace, database, relfilenode, fork, its blocks in any order and possibly repeated, or None, its lowest limit
+    block or None)."""
     plan = {}
     for tablespace, database, relfilenode, fork, blocks, limit in groups:
         path = relation_path(int(tablespace), int(database), int(relfilenode), int(fork))

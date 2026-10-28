@@ -4,6 +4,21 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (20:05 UTC): EXP-78 done (local): the guard's reading without the server's sort; project access checked
+
+- **Project access, read-only, through `gcloud`** (the owner's credentials):
+  - the project is ACTIVE, with the Compute, Logging, Monitoring and Storage APIs enabled;
+  - quotas: 32 vCPUs across all regions (the binding limit); `n2d` CPUs 16 per region, exactly one ha pair;
+  - usage 0, so no VMs are left.
+  - The web console still asks for CMU's sign-in in the built-in browser, which I don't complete. Using the owner's own Chrome needs their agreement, which is asked for.
+- **The guard's reading, in parts** (a pilot, then EXP-78, pre-registered before its run):
+  - the server's grouping alone took 0.09 s of 0.41 s at scale 320;
+  - the sorted, distinct arrays were most of the rest; the JSON and psql almost nothing.
+  - **The pilot's first merge was wrong:** the server returns OIDs as JSON strings. It was found by its plans not matching, and fixed before EXP-78.
+- **EXP-78 (held):** unsorted with duplicates took 0.460 of today's time (0.187 against 0.407 s), with identical plans in 5 of 5 runs. Over 4 connections: 0.323, not built (3 more connections to the source).
+- **Built:** `live.summary_blocks` returns each fork's blocks unsorted; `grouped_plan` de-duplicates them as before. The unit test gained unsorted, repeated blocks; the real-server plan test passes; 1,649 tests pass.
+  - **Projected for the VMs** (not measured): the guard at scatterall12 from 5.3 to about 2.4 s. The next VM session times it.
+
 ## 2026-10-28 (19:27 UTC): EXP-77 done: its deciding prediction failed, but the stall is gone
 
 - **Deciding (failed):** with both arms reading each written run in one call, the check on the verifier saved only 0.44 s over the main loop in scatterall12 (bar 3.0 s).
