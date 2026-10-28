@@ -35,6 +35,8 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | On a busy primary with a large dirty set? | **The start checkpoint dominates, not pgdelta:** with about 4.9 GB dirty on a balanced persistent disk, a fast checkpoint (pgdelta's default, `pg_basebackup -c fast`) nearly stalled the load for 30 s (27.5 s of work lost); a spread one (`pg_basebackup`'s default) ran it half short for 4.5 minutes (51.8 s lost). `--checkpoint spread` exists; which O4 number governs is open (EXP-57) | One session, one VM |
 | On a busy primary? | At 2 source workers on 8 vCPUs, and 4 on 16, v1 costs the load no more than `pg_basebackup`. **With BLAKE3 it refreshes 2.1× faster than `pg_basebackup` on 8 vCPUs, and 2.1× on 16 at 4 workers** (EXP-28, -30, -39) | Three sessions (4 workers on 8 vCPUs missed in one of them) |
 
+![The fast path beyond memory, step by step (EXP-64 to EXP-70), and the old primary after a failover (EXP-67, EXP-71)](figures/fastpath-progress.svg)
+
 ![v1 against native incremental at DR](figures/exp36-incremental-b.svg)
 
 ![BLAKE3 on a busy primary](figures/exp30-blake3.svg)
