@@ -61,6 +61,10 @@ diag() {
   redo=$($PGBIN/pg_waldump --path "$B0/pg_wal" --timeline "$2" --start "$c" -n 1 2>/dev/null \
     | sed -n 's/.*CHECKPOINT_[A-Z]* redo \([0-9A-F/]*\);.*/\1/p')
   echo "checkpoint $c redo $redo b_timeline $2" >> "$dd/status.txt"
+  # Amended before part B ran (EXP-69): each relation file's size on both sides, and B0's own end.
+  echo "b0_checkpoint $($PGBIN/pg_controldata "$B0" | sed -n 's/^Latest checkpoint location: *//p')" >> "$dd/status.txt"
+  (cd "$B0" && find base global -type f -printf '%p %s\n') | gzip > "$dd/b0-files.txt.gz"
+  on_src "cd $ROOT/data && find base global -type f -printf '%p %s\\n'" | gzip > "$dd/source-files.txt.gz"
   $PGBIN/pg_waldump --path "$B0/pg_wal" --timeline "$2" --start "$redo" 2>&1 | gzip > "$dd/b0-waldump.txt.gz"
   psrc "COPY (SELECT s.tli, s.start_lsn, s.end_lsn, c.reltablespace, c.reldatabase, c.relfilenode, c.relforknumber, c.relblocknumber, c.is_limit_block FROM pg_available_wal_summaries() s, pg_wal_summary_contents(s.tli, s.start_lsn, s.end_lsn) c WHERE s.end_lsn > '$redo') TO STDOUT WITH CSV" \
     | gzip > "$dd/s-summaries.csv.gz"

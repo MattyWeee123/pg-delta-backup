@@ -39,7 +39,8 @@ def build(out):
     for variant, ids in BUILDS.items():
         for sid in ids:
             spec = SPECS[sid]
-            if (Path(out) / variant / spec.dirname / 'scenario.json').exists():
+            done = Path(out) / variant / spec.dirname / 'scenario.json'
+            if done.exists() and json.loads(done.read_text()).get('built_ok'):
                 continue
             meta = scenarios.build_scenario(spec, Path(out) / variant, bins=bins, default_bin=default, keep=True,
                                             verbose=False, wal_summaries=True,
@@ -87,7 +88,7 @@ def check(scenario):
     meta = json.loads((scenario / 'scenario.json').read_text())
     binp = PgBin(meta['postgresql']['source_backup']['bindir'])
     waldump = binp.tool('pg_waldump')
-    old_info, source_info, threshold = meta['old_info'], meta['source_info'], meta['threshold']
+    old_info, source_info, threshold = meta['old_copy'], meta['source_backup'], meta['threshold']
     result = unionscan.score_scenario(scenario, old_info, source_info, threshold, waldump)
     ours = result.pop('b_main_blocks_from_record', None)
     work = Path(tempfile.mkdtemp(prefix='union-', dir=scenario))
@@ -119,7 +120,7 @@ def check(scenario):
 
 
 def main(argv=None):
-    out = Path((sys.argv[1:] if argv is None else argv)[0])
+    out = Path((sys.argv[1:] if argv is None else argv)[0]).resolve()  # the harness compares absolute paths
     build(out)
     for variant in BUILDS:
         for scenario in sorted(p for p in (out / variant).iterdir() if (p / 'scenario.json').exists()):

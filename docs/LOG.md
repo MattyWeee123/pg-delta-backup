@@ -8,6 +8,24 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-28 (afternoon): EXP-69 part A done; part B amended before its run
+
+- **Part A, as registered: 2 of 5 predictions held, the deciding one failed.**
+  - Idea 1's guard passed S2 (0 real wrong pages, where S's summaries alone left 1,276), but refused S2c, which it should have passed.
+  - Its hint check flagged 19 pages.
+  - `pg_rewind` took 13 fewer blocks than `pg_waldump` named.
+- **Post-hoc checks (`analysis/exp69_posthoc.py`) trace each failure, none to a missed page:**
+  - **S2c:** the guard compared the start of B's last WAL record with a standby's end pointer. B's WAL reads through to its end.
+  - **The 19 pages:** their hints (82 tuples, `XMIN_COMMITTED`) name transaction 791, which S committed too. They were set before the common checkpoint (same page LSN on both sides), so they are common history and harmless.
+  - **The extra blocks:** all lie beyond S's end of file. `pg_rewind` truncates them by design.
+- **Where B's WAL was complete,** the send set left 0 real wrong pages in all 4 builds. **Where it was lost** (S2d), 1,443 were left, and the guard refused.
+- **Driver bugs:** two, fixed before any page was scored (a relative path, and the scenario's keys). They are recorded in the write-up.
+- **Part B, amended before its run:** prediction 6 is also scored with blocks beyond either side's end of file excluded, and the diagnostics record file sizes and B0's own end.
+- **Next:** EXP-69b, registered before any run, re-tests part A with three changes:
+  - the end check fixed;
+  - a hint check that tests each transaction's fate on S;
+  - a scenario that makes the hint danger real (B without checksums or `wal_log_hints`, a transaction open at the fork and committed on B).
+
 ## 2026-10-28 (midday): EXP-69 pre-registered, idea 1's premises; EXP-68 running
 
 - **Why now:** EXP-67 said idea 1 (both sides' block sets, for an old primary after a failover) is next, after a measurement of what it rests on: its correctness and guard, and why `pg_rewind` copied 4 GB beyond S's WAL.

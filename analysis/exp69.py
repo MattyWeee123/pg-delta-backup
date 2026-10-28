@@ -117,6 +117,22 @@ def wal_kind(name, s_tli, s_lsn):
     return 'wal_ahead' if start > s_lsn else 'wal_since_fork'
 
 
+def file_sizes(gz):
+    out = {}
+    with gzip.open(gz, 'rt') as f:
+        for line in f:
+            path, size = line.rstrip('\n').rsplit(' ', 1)
+            out[path] = int(size)
+    return out
+
+
+def inside_both(base, block, s_sizes, b_sizes):
+    """Whether a block lies inside its file on both sides (amended 6: pg_rewind skips the rest by design)."""
+    segno, inseg = divmod(block, summaryscan.SEGMENT_BLOCKS)
+    name = base + (f'.{segno}' if segno else '')
+    return name in s_sizes and name in b_sizes and (inseg + 1) * 8192 <= min(s_sizes[name], b_sizes[name])
+
+
 def summary_blocks(csv_gz):
     blocks, limits, ranges = {}, {}, set()
     with gzip.open(csv_gz, 'rt') as f:
@@ -169,6 +185,13 @@ def part_b(vm):
                 for d in sorted(Path(vm).glob('run-*'))
                 if json.loads((d / 'meta.json').read_text())['lag'] == lag and (d / 'send.json').exists()]
         wal_since_fork = s_lsn - fork_lsn
+        amended = {}
+        if (folder / 'b0-files.txt.gz').exists():  # amended before part B ran
+            s_sizes, b_sizes = file_sizes(folder / 'source-files.txt.gz'), file_sizes(folder / 'b0-files.txt.gz')
+            amended = {
+                'only_waldump_inside_both': sum(inside_both(k, n, s_sizes, b_sizes)
+                                                for k in keys for n in ours.get(k, set()) - theirs.get(k, set())),
+                'b0_wal_reaches_end': (unionscan.block_refs(text)[2] or 0) >= parse_lsn(status['b0_checkpoint'])}
         total = sum(by_kind.values())
         cells.append({'lag': lag, 'rewind_exit': status.get('rewind_exit'), 'need_mb': parsed['need_mb'],
                       'fetched_mb': round(total / 1e6, 1), 'lsn_since_fork_mb': round(wal_since_fork / 1e6, 1),
@@ -179,7 +202,7 @@ def part_b(vm):
                       'only_waldump': sum(len(ours.get(k, set()) - theirs.get(k, set())) for k in keys),
                       'b_blocks': unionscan.count(b_blocks), 's_blocks': unionscan.count(s_blocks),
                       's_limits': len(limits), 'summaries_cover': covered, 'union_blocks': unionscan.count(union),
-                      'hash_pages_sent': statistics.median(sent) if sent else None})
+                      'hash_pages_sent': statistics.median(sent) if sent else None, **amended})
     return cells
 
 
@@ -190,6 +213,12 @@ def score_b(cells):
     six = all(c['rewind_exit'] == '0' and c['only_pg_rewind'] == 0 and c['only_waldump'] == 0 for c in cells)
     print(f"6. {'HELD' if six else 'FAILED'}: pg_rewind against pg_waldump at scale "
           f"{[(c['lag'], c['rewind_exit'], c['rewind_blocks'], c['only_pg_rewind'], c['only_waldump']) for c in cells]}")
+    if all('only_waldump_inside_both' in c for c in cells):
+        amended = all(c['rewind_exit'] == '0' and c['only_pg_rewind'] == 0 and c['only_waldump_inside_both'] == 0
+                      for c in cells)
+        print(f"6 (amended before part B ran). {'HELD' if amended else 'FAILED'}: blocks inside both files only "
+              f"{[(c['lag'], c['only_pg_rewind'], c['only_waldump_inside_both']) for c in cells]}; "
+              f"B0's WAL reaches its end {[(c['lag'], c['b0_wal_reaches_end']) for c in cells]}")
     ratios = [(c['lag'], round(c['union_blocks'] / c['hash_pages_sent'], 3) if c['hash_pages_sent'] else None,
                c['summaries_cover']) for c in cells]
     seven = all(r is not None and 0.9 <= r <= 1.5 and cover for _, r, cover in ratios)
@@ -216,8 +245,15 @@ def write(name, table):
 
 def figure(rows, cells):
     plotting.style()
-    fig, (left, right) = plt.subplots(1, 2, figsize=(10.4, 4.3))
-    shown = [r for r in rows if r['guard_ok']]
+    if cells:
+        fig, (left, right) = plt.subplots(1, 2, figsize=(12.4, 4.6), gridspec_kw={'width_ratios': [1.5, 1]})
+    else:  # part B not run yet
+        fig, left = plt.subplots(figsize=(8.4, 4.6))
+        right = None
+    # Changed after the data: every case where the union was scored, passed or refused (registered: passed only).
+    by = {(r['variant'], r['scenario']): r for r in rows}
+    order = [('kept', 'S2'), ('kept', 'S2c'), ('default', 'S2c'), ('kept', 'S2b'), ('kept', 'S2d')]
+    shown = [by[k] for k in order if k in by and by[k]['union_sent'] is not None]
     for i, r in enumerate(shown):
         bars = (('pages that differ (hashing sends these)', r['pages_changed'], COLORS['black'], None),
                 ("S's summaries alone (EXP-61)", r['naive_sent'], COLORS['orange'], r['naive_real_wrong']),
@@ -226,14 +262,16 @@ def figure(rows, cells):
             x = i * 4 + j
             left.bar(x, value, 0.8, color=color, label=label if i == 0 else None)
             if wrong is not None:
-                left.annotate(f'{wrong:,}\nreal wrong', (x, value), textcoords='offset points', xytext=(0, 3),
-                              ha='center', fontsize=7)
+                left.annotate(f'{wrong:,}', (x, value), textcoords='offset points', xytext=(0, 3),
+                              ha='center', fontsize=7.5)
     left.set_xticks([1 + 4 * i for i in range(len(shown))],
-                    [f"{r['scenario']}" + (" (B's WAL kept)" if r['variant'] == 'kept' else '') for r in shown])
+                    [f"{r['scenario']}, {'WAL kept' if r['variant'] == 'kept' else 'as EXP-61'}\n"
+                     f"guard {'passed' if r['guard_ok'] else 'refused'}" for r in shown], fontsize=8)
     left.set_ylabel('pages')
     left.set_ylim(0, max([r['union_sent'] for r in shown] + [r['pages_changed'] for r in shown] + [1]) * 1.25)
     left.legend(fontsize=7.5, loc='lower center', bbox_to_anchor=(0.5, -0.45), ncol=1)
-    left.set_title('Local failovers: what each path sends and leaves wrong', fontsize=9.5)
+    left.set_title('Local failovers: pages each path sends\n(the number above a bar: real wrong pages it leaves)',
+                   fontsize=9.5)
     colors = {'wal_since_fork': COLORS['purple'], 'wal_before_fork': COLORS['red'], 'wal_ahead': COLORS['orange'],
               'relation_blocks': COLORS['blue'], 'fsm_vm_init': COLORS['green'], 'wal_summaries': COLORS['sky'],
               'other': COLORS['grey']}
@@ -249,10 +287,17 @@ def figure(rows, cells):
                 bottom += value
         right.barh(i + 0.35, c['union_blocks'] * 8192 / 1e6, 0.25, color=COLORS['blue'], hatch='//',
                    edgecolor=COLORS['black'], lw=0.5, label="idea 1's blocks (8 KiB each)" if i == 0 else None)
+    if right is None:
+        fig.suptitle("EXP-69, part A: both sides' block sets for an old primary after a failover (counted)",
+                     fontsize=10.5)
+        fig.tight_layout()
+        print(plotting.save(fig, 'exp69-union'))
+        return
     right.set_yticks(range(len(cells)), [c['lag'] for c in cells])
     right.set_xlabel('MB')
     right.set_title("EXP-67's cells: what pg_rewind copies, and idea 1's blocks", fontsize=9.5)
-    right.legend(fontsize=7, loc='lower center', bbox_to_anchor=(0.5, -0.5), ncol=2)
+    if cells:
+        right.legend(fontsize=7, loc='lower center', bbox_to_anchor=(0.5, -0.5), ncol=2)
     fig.suptitle('EXP-69: both sides\' block sets for an old primary after a failover (counted, not timed)',
                  fontsize=10.5)
     fig.tight_layout()

@@ -1,0 +1,165 @@
+{
+  "default/S2": {
+    "guard": {
+      "ok": false,
+      "reasons": [
+        "no checkpoint before the fork in B's own WAL"
+      ]
+    },
+    "wal_reaches_end": null
+  },
+  "default/S2c": {
+    "guard": {
+      "ok": false,
+      "reasons": [
+        "B's WAL from the common checkpoint's redo ends at 0/BB7D088, before B's end 0/BB7D0B0"
+      ]
+    },
+    "wal_reaches_end": {
+      "end": "0/BB7D0B0",
+      "last_record_start": "0/BB7D088",
+      "reads_through": true,
+      "stderr": ""
+    },
+    "only_waldump_blocks": {
+      "beyond S's end of file": 15
+    }
+  },
+  "kept/S2": {
+    "guard": {
+      "ok": true,
+      "reasons": []
+    },
+    "wal_reaches_end": {
+      "end": "0/9A1D940",
+      "last_record_start": "0/9A1D940",
+      "reads_through": true,
+      "stderr": ""
+    },
+    "only_waldump_blocks": {
+      "beyond S's end of file": 13
+    },
+    "b_only_hints": {
+      "tuples": 82,
+      "pages": 19,
+      "by_hint": {
+        "XMIN_COMMITTED": 82,
+        "XMIN_INVALID": 0,
+        "XMAX_COMMITTED": 0,
+        "XMAX_INVALID": 0
+      },
+      "pages_lsn_before_redo": 19,
+      "fates_on_s": {
+        "xmin committed": 82,
+        "xmax None": 82
+      },
+      "examples": [
+        {
+          "file": "base/5/16404",
+          "block": 666,
+          "b_page_lsn": "0/8D0FE20",
+          "s_page_lsn": "0/8D0FE20",
+          "xmin": 791,
+          "xmax": 0,
+          "b_only_hints": [
+            "XMIN_COMMITTED"
+          ],
+          "xmin_on_s": "committed",
+          "xmax_on_s": null,
+          "b_page_before_redo": true
+        },
+        {
+          "file": "base/5/16404",
+          "block": 667,
+          "b_page_lsn": "0/8D00550",
+          "s_page_lsn": "0/8D00550",
+          "xmin": 791,
+          "xmax": 0,
+          "b_only_hints": [
+            "XMIN_COMMITTED"
+          ],
+          "xmin_on_s": "committed",
+          "xmax_on_s": null,
+          "b_page_before_redo": true
+        },
+        {
+          "file": "base/5/16404",
+          "block": 667,
+          "b_page_lsn": "0/8D00550",
+          "s_page_lsn": "0/8D00550",
+          "xmin": 791,
+          "xmax": 0,
+          "b_only_hints": [
+            "XMIN_COMMITTED"
+          ],
+          "xmin_on_s": "committed",
+          "xmax_on_s": null,
+          "b_page_before_redo": true
+        },
+        {
+          "file": "base/5/16404",
+          "block": 667,
+          "b_page_lsn": "0/8D00550",
+          "s_page_lsn": "0/8D00550",
+          "xmin": 791,
+          "xmax": 0,
+          "b_only_hints": [
+            "XMIN_COMMITTED"
+          ],
+          "xmin_on_s": "committed",
+          "xmax_on_s": null,
+          "b_page_before_redo": true
+        },
+        {
+          "file": "base/5/16404",
+          "block": 667,
+          "b_page_lsn": "0/8D00550",
+          "s_page_lsn": "0/8D00550",
+          "xmin": 791,
+          "xmax": 0,
+          "b_only_hints": [
+            "XMIN_COMMITTED"
+          ],
+          "xmin_on_s": "committed",
+          "xmax_on_s": null,
+          "b_page_before_redo": true
+        }
+      ]
+    }
+  },
+  "kept/S2b": {
+    "guard": {
+      "ok": false,
+      "reasons": [
+        "B was not stopped cleanly (in production), so its end can't be proven without all of its WAL"
+      ]
+    },
+    "wal_reaches_end": null
+  },
+  "kept/S2c": {
+    "guard": {
+      "ok": false,
+      "reasons": [
+        "B's WAL from the common checkpoint's redo ends at 0/BB7D0E0, before B's end 0/BB7D108"
+      ]
+    },
+    "wal_reaches_end": {
+      "end": "0/BB7D108",
+      "last_record_start": "0/BB7D0E0",
+      "reads_through": true,
+      "stderr": ""
+    },
+    "only_waldump_blocks": {
+      "beyond S's end of file": 15
+    }
+  },
+  "kept/S2d": {
+    "guard": {
+      "ok": false,
+      "reasons": [
+        "B was not stopped cleanly (in production), so its end can't be proven without all of its WAL"
+      ]
+    },
+    "wal_reaches_end": null
+  }
+}
