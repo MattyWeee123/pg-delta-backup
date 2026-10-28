@@ -2,6 +2,11 @@
 
 A CMU student project with Google's AlloyDB team: a tool that brings an older physical copy of a PostgreSQL cluster up to date by sending only the pages that changed, verifying every reused page by hash.
 
+**Status, October 29, 2026:** the WAL-summary fast path (`--fast-path summaries`, opt-in; PostgreSQL 17.11+ with `summarize_wal` on) changes the HA picture beyond memory ([what the evidence says](docs/RESULTS.md)):
+- **An 18 GB copy on 8 GB VMs:** local changes refreshed in 1.98 s against a full copy's 90.7 s ([EXP-64](docs/experiments/EXP-64-fast-path-beyond-memory.md)); scattered changes touching 28% of the pages in 46.6 s, 0.51 of a full copy ([EXP-70](docs/experiments/EXP-70-fill-gaps.md)).
+- **An old primary after a failover:** 6.9 s against `pg_rewind`'s 35.1 s for hot rows, and 48.2 s against a re-clone's 91.1 s for scattered rows ([EXP-71](docs/experiments/EXP-71-idea-1-timed.md)).
+- **Where its guard can't prove the old copy's lineage,** pgdelta hashes both copies as before, and the October 26 status below holds.
+
 **Status, October 26, 2026:** see **[what the evidence says](docs/RESULTS.md)**, a one-page summary with its figures. In short:
 - **v1** refreshes an old copy in place from the running server, in backup mode.
 - **No wrong copy** in 14,000 randomized refreshes, from stopped and live sources (10,000 + 2,000 stopped, 1,000 + 1,000 live). A power loss mid-refresh left the copy blocked or complete in 16 of 16 resets.

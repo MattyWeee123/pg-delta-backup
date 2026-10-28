@@ -1,0 +1,3 @@
+lag,check_wal_mb,full_runs,full_s,pg_rewind_s,rewind_over_full,rewind_runs,rewind_s,union_b_blocks,union_b_records,union_b_wal_s,union_guard_s,union_over_full,union_over_rewind,union_pages_chosen,union_pages_sent,union_runs,union_s,wal_since_fork_mb
+hot10,85.8,2,90.805,23.503,0.387,2,35.135,20199.0,30013.0,0.6505000000000001,1.0634065,0.076,0.197,31925.0,34814.0,2,6.915,1737.4
+uniform,3760.8,2,91.133,71.806,5.02,2,457.47,20094.0,29809.0,0.651,5.4422755,0.529,0.105,862054.0,864947.0,2,48.199,8001.2

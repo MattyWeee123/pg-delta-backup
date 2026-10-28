@@ -239,6 +239,17 @@ class Pages(unittest.TestCase):
         self.assertEqual(cli._fill_gaps(Namespace(fast_path=None, fill_gaps=None)), 0)
         self.assertEqual(cli._fill_gaps(Namespace()), 0)
 
+    def test_the_cli_takes_an_old_primary_with_the_fast_path_unless_told_not_to(self):
+        from argparse import Namespace
+
+        from pgdelta import cli
+        self.assertIs(fastpath.DEFAULT_DIVERGED_BASIS, True)
+        self.assertIs(cli._diverged_basis(Namespace(fast_path='summaries', diverged_basis=None)), True)
+        self.assertIs(cli._diverged_basis(Namespace(fast_path='summaries', diverged_basis=False)), False)
+        self.assertIs(cli._diverged_basis(Namespace(fast_path=None, diverged_basis=None)), False)
+        self.assertIs(cli._diverged_basis(Namespace(fast_path=None, diverged_basis=True)), True)  # check_mode refuses
+        self.assertIs(cli._diverged_basis(Namespace()), False)
+
 
 class ReadAhead(unittest.TestCase):
     """EXP-64b's reader threads: runs come back in sending order, at most the window ahead, handles closed."""
@@ -504,7 +515,7 @@ class FailedOver(unittest.TestCase):
             self.ctl(target, 'stop', 5433, check=False)
 
     def test_the_old_primary_takes_the_fast_path_with_its_own_wal(self):
-        target, stats = self.refresh('diverged', '--diverged-basis')
+        target, stats = self.refresh('diverged')  # --diverged-basis is on with --fast-path (EXP-71)
         fast, received = stats['fast_path'], stats['receiver']['fast_path']
         self.assertTrue(fast['used'], fast['reasons'])
         diverged = fast['diverged_basis']
@@ -516,7 +527,7 @@ class FailedOver(unittest.TestCase):
         self.check_copy(target)
 
     def test_without_the_option_the_old_primary_is_refused_and_hashed(self):
-        target, stats = self.refresh('refused')
+        target, stats = self.refresh('refused', '--no-diverged-basis')
         self.assertFalse(stats['fast_path']['used'])
         self.assertIn('past where', stats['fast_path']['reasons'][0])
         self.assertNotIn('diverged_basis', stats['fast_path'])
@@ -527,7 +538,7 @@ class FailedOver(unittest.TestCase):
             segments = sorted(p for p in (target / 'pg_wal').iterdir() if p.name.startswith('00000001'))
             for path in segments[:-1]:  # only the segment holding the shutdown checkpoint stays
                 path.unlink()
-        target, stats = self.refresh('no-wal', '--diverged-basis', prepare=drop_old_wal)
+        target, stats = self.refresh('no-wal', prepare=drop_old_wal)
         fast = stats['fast_path']
         self.assertFalse(fast['used'])
         self.assertIn('refused', fast['diverged_basis'])

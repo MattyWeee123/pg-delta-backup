@@ -1,6 +1,6 @@
 # EXP-71: With idea 1 built in, does pgdelta refresh an old primary after a failover faster than `pg_rewind` and a re-clone?
 
-Status: **pre-registered October 29, 2026, before any run.** One VM pair (the `ha` set), about 2.5 hours with the data load. It follows EXP-69 part B and EXP-69b, which showed idea 1's send set is correct wherever its guard passes and about the size of hashing's at 18 GB, and research loop 1, which names this the case pgdelta still loses (EXP-67).
+Status: **done October 29, 2026: all 6 predictions held,** and `--diverged-basis` is now on with `--fast-path`, as registered. Pre-registered the same day, before any run. One VM pair (the `ha` set), about 2.5 hours with the data load. It follows EXP-69 part B and EXP-69b, which showed idea 1's send set is correct wherever its guard passes and about the size of hashing's at 18 GB, and research loop 1, which names this the case pgdelta still loses (EXP-67).
 
 ## Question
 
@@ -106,3 +106,78 @@ EXP-69b found its copies correct wherever its guard passes, and found the guard'
   - or the pages sent.
 - **If 4 fails:** the failing copy is kept and diffed page by page against S (EXP-69b's tools). The option stays opt-in until the cause is fixed and re-tested.
 - **If 2 fails and 1 holds:** idea 1 serves the hot case, and the selector (idea 4) weighs a re-clone for scattered ones.
+
+## Results (October 29)
+
+The `ha` set in us-west1-b and -c (us-west1-a had no capacity); the runs ended at 09:11 UTC, and the VMs and disks were then deleted.
+- **The server:** PostgreSQL 17.11, a 17,788 MB database, data checksums and `summarize_wal` on.
+- **Every run** and every pgdelta receiver exited 0, and every copy's `pgbench_accounts` equalled S's, so B's own 10,000 changes were gone from each.
+- **Every union run took the fast path with B's WAL.** C, the last checkpoint before the fork, was found in both lags one segment before it (6/61000080 before 6/62000060, 6/D7000080 before 6/D8000000). B has data checksums, so its `wal_log_hints` (off) didn't matter.
+- **Both copies checked with `pg_amcheck --all --heapallindexed` passed,** with no output.
+- **The smoke** at scale 20 (in memory, deciding nothing) ran every arm once, all correct: hot10 `rewind` 2.69 s, `union` 1.91 s, `full` 6.54 s; uniform 6.13, 3.81 and 6.61 s. Each union run took B's WAL and passed `pg_amcheck`.
+
+Data: `docs/experiments/data/exp71-cells.csv`; raw `results/exp04/exp71/` (not in git).
+
+![EXP-71: seconds to a current copy of an 18 GB old primary after a failover, per arm and lag](../figures/exp71-union.svg)
+
+| Seconds to a current copy (medians of 2) | hot10 | uniform |
+|---|---:|---:|
+| WAL S wrote since the fork | 1,737 MB | 8,001 MB |
+| **`rewind`:** `pg_rewind`, then replay to S's LSN | 35.1 (35.11, 35.16) | 457.5 (457.31, 457.63) |
+| — of which `pg_rewind` itself | 23.5 | 71.8 |
+| **`union`:** pgdelta with idea 1, then started | **6.9** (6.97, 6.85) | **48.2** (48.12, 48.27) |
+| — of which pgdelta's session | 5.6 | 46.8 |
+| **`full`:** `pg_basebackup` re-clone, then started | 90.8 (90.81, 90.80) | 91.1 (91.10, 91.16) |
+| EXP-67's pgdelta (the guard refused B, so it hashed both copies) | 90.2 | 177.9 |
+| `union` / `rewind` | **0.197** | **0.105** |
+| `union` / `full` | 0.076 | **0.529** |
+
+What the union arm did (the same in both repeats of each lag):
+
+| | hot10 | uniform |
+|---|---:|---:|
+| B's WAL from C's redo point: records; blocks named | 30,013; 20,199 | 29,809; 20,094 |
+| Seconds the receiver spent reading it (`pg_waldump`, both passes) | 0.65 | 0.65 |
+| Guard seconds (the summaries from C's redo point) | 1.06 (15 summaries) | 5.4 (22 summaries, 1.47 M rows) |
+| Pages chosen before filling; filled (gaps of up to 2) | 31,918; 7 | 621,769; 240,285 |
+| Pages sent (with the 140 files sent whole) | 34,814 (0.29 GB) | 864,947 (7.09 GB) |
+| Of 2,175,904 pages in the copy, sent | 1.6% | 39.8% |
+
+| # | Prediction | Outcome |
+|---|---|---|
+| 1 | Deciding: hot10, `union` at most 0.5 of `rewind` | **Held, 0.197** (the model gave 0.2; 0.30 from the bar, so no second session under rule 11) |
+| 2 | Uniform: `union` at most 0.75 of `full` | **Held, 0.529** (the model gave 0.57) |
+| 3 | Uniform: `union` at most 0.5 of `rewind` | **Held, 0.105** (the model gave 0.11). Against EXP-69's inferred 313 s without the check's WAL, 0.154 |
+| 4 | Every copy correct; every union run took the fast path with B's WAL, C before the fork; both `pg_amcheck` checks pass | **Held** |
+| 5 | B's blocks within 15% of EXP-69's 20,199 and 20,094 | **Held, exactly equal:** 20,199 and 20,094 |
+| 6 | Controls: `rewind` within 15% of 36.44 and 459.0 s; `full` within 5% of 90.92 and 91.10 s | **Held:** 35.14 and 457.5 s (0.96, 1.00); 90.81 and 91.13 s (1.00, 1.00) |
+
+**Reported, not predicted:**
+- **The state check's WAL** (S's hint bits after the lag's checkpoint, EXP-69): 85.8 MB after hot10 and 3,761 MB after uniform. `rewind` replays it; `union` sends the pages it touched, which the summaries list.
+- **B's blocks equal EXP-69's `pg_waldump` count exactly,** in both lags. The lab's seeds make the workload the same, and the receiver lists the same blocks `pg_waldump` names.
+
+## What it means (with a committee's reading)
+
+- **The failover case is no longer one pgdelta loses.** On EXP-67's cells, pgdelta with idea 1 is the fastest of the three:
+  - **hot10:** 6.9 s, against `pg_rewind`'s 35.1 s and a re-clone's 90.8 s. EXP-67's pgdelta took 90.2 s, since its guard refused B and it hashed both copies.
+  - **uniform:** 48.2 s, against a re-clone's 91.1 s and `pg_rewind`'s 457.5 s. EXP-67's pgdelta took 177.9 s.
+- **The model was close in both cells:** 6.9 s against about 7 s, and 48.2 s against about 52 s. The uniform session (46.8 s) matches EXP-70's scattered cell with the same fill (46.6 s), and its pages before filling (621,769, B's side included) are close to that cell's 616,363. B's side costs almost nothing: 20,000 blocks against 600,000, and 0.65 s to read B's WAL.
+- **Why it beats `pg_rewind`:** `pg_rewind` sends the same blocks for B's side, but B must then start and replay all the WAL S wrote since the fork: 1.7 GB and 11.6 s after hot10, 8.0 GB plus the check's 3.8 GB and 386 s after uniform. Idea 1 sends S's current copy of each page once, so how much WAL S wrote doesn't matter, only which pages it touched.
+- **Why it beats a re-clone:** it sends 1.6% of the pages for hot10 and 40% for uniform (with filled gaps), where the re-clone sends all of them.
+- **The two checks a committee would ask for both passed:** every copy's rows equalled S's, B's own changes undone, and `pg_amcheck --heapallindexed` passed on the first union copy per lag. EXP-69b had already compared idea 1's copies page by page against S on EXP-03's tricky copies.
+
+**Limitations:**
+- **One failover shape:** a clean shutdown of the old primary, 10,000 of its own changes, and two lags. An old primary that crashed, or whose WAL since C is gone, is refused, and pgdelta hashes as before (the missing WAL is tested locally; neither is timed).
+- **One environment:** 18 GB, balanced persistent disks, one region. The cells are EXP-67's, and the times are medians of 2 (the repeats were within 1.8% of each other).
+- **Data checksums were on.** Without checksums or `wal_log_hints` the guard refuses, as EXP-69b found it must.
+- **What wasn't run:** an old primary with an extension's resource manager in its WAL, or with Database or Tablespace records since C. The receiver refuses those (tested with unit tests only).
+
+## What follows (applied)
+
+- **`--diverged-basis` is now on with `--fast-path`,** as registered for predictions 1–4 holding (`fastpath.DEFAULT_DIVERGED_BASIS`; `--no-diverged-basis` turns it off). It applies only to the CLI; the library default stays off.
+  - **Tests:** the real-failover test now takes the fast path with no option, `--no-diverged-basis` is refused and hashed, and a unit test covers how the CLI resolves the option. The receiver still accepts only a clean shutdown, so a session against any other basis is unchanged apart from HELLO's offer.
+- **The lab scripts keep their registered arms:** `lab_exp67.sh`'s fast arm, `lab_exp64.sh`'s and `lab_exp65.sh`'s fast arms and EXP-63's `fastpath_check.py` pass `--no-diverged-basis`.
+- **Research loop 1's failover case is closed,** as registered.
+- **Next, per research loop 1:**
+  - **the fast path's fixed costs:** the guard alone took 5.4 s of the uniform session's 46.8 s, reading 1.47 million summary rows;
+  - **the selector (idea 4),** which should pick the fill from the link's and disks' rates.

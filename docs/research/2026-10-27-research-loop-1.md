@@ -138,3 +138,9 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 - **The build:** pgdelta's fast path now handles an old primary that kept writing after the fork, with B's own WAL standing in for B's changes since the last common checkpoint, as `pg_rewind` reads it. A real failover in the tests matched the server and passed `pg_amcheck`.
 - **EXP-71** times it against `pg_rewind` and a re-clone on EXP-67's cells.
 
+**Update, October 29: EXP-71 done; the failover case is closed.**
+- **All 6 predictions held.** pgdelta with idea 1 refreshed EXP-67's old primary in 6.9 s for hot rows (`pg_rewind` 35.1 s, 0.197) and 48.2 s for scattered rows (a re-clone 91.1 s, 0.529; `pg_rewind` 457.5 s). Every copy matched, and `pg_amcheck` passed.
+- **The model held:** about 7 s and 52 s. B's side cost 0.65 s and about 20,000 blocks, exactly EXP-69's count.
+- **Applied as registered:** `--diverged-basis` is on with `--fast-path`.
+- **Next:** the fast path's fixed costs (the guard took 5.4 s of the scattered session's 46.8 s), then the selector (idea 4).
+

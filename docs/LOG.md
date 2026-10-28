@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-29 (afternoon): EXP-71 done, `--diverged-basis` on with the fast path
+
+- **EXP-71** (one session, 12 runs, all correct; both `pg_amcheck --heapallindexed` checks passed): all 6 predictions held.
+  - **Deciding, hot rows updated 10 times:** pgdelta with idea 1 took 6.9 s against `pg_rewind`'s 35.1 s (0.197; the model gave 0.2) and a re-clone's 90.8 s.
+  - **1% of rows scattered:** 48.2 s against a re-clone's 91.1 s (0.529) and `pg_rewind`'s 457.5 s (0.105).
+  - **B's side:** 20,199 and 20,094 blocks from B's WAL, exactly EXP-69's `pg_waldump` count, read in 0.65 s. C, the last checkpoint before the fork, was one segment before it in both lags.
+  - **Controls:** `pg_rewind` and the re-clone within 4% of EXP-67's times.
+- **Applied as registered:** `--diverged-basis` is on with `--fast-path` (CLI only; `fastpath.DEFAULT_DIVERGED_BASIS`; `--no-diverged-basis` turns it off), with tests. The receiver still accepts it only for a cleanly stopped basis.
+  - The lab scripts keep their registered arms: EXP-67's fast arm, EXP-64's and EXP-65's fast arms and EXP-63's `fastpath_check.py` pass `--no-diverged-basis`.
+- **Research loop 1's failover case is closed.** Next: the fast path's fixed costs (the guard took 5.4 s of the scattered session's 46.8 s), then the selector (idea 4).
+- **The pipeline** ran without a pause (us-west1-a had no capacity, so us-west1-b and -c); the VMs and disks were deleted after the fetch.
+
 ## 2026-10-29 (midday): idea 1 built into pgdelta (`--diverged-basis`); EXP-71 pre-registered
 
 - **`--diverged-basis`** (sender, with `--fast-path summaries`; offered in HELLO, so other sessions' bytes are unchanged). It is for an old primary that kept writing after the server's timeline left its own, which the guard refused until now.

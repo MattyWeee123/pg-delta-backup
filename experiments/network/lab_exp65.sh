@@ -102,13 +102,13 @@ EOF
         start_copy "$B" "$d/copy.log" || status=$?
         for x in $(seq 7200); do [ "$(pcopy "SELECT pg_last_wal_replay_lsn() >= '$S_LSN'")" = t ] && break; sleep 0.2; done ;;
       fast)
-        # EXP-65's settings, pinned since EXP-68 and EXP-70 changed the fast path's defaults.
+        # EXP-65's settings, pinned since EXP-68, EXP-70 and EXP-71 changed the fast path's defaults.
         python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
           --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 --fsync main > "$d/receive.log" 2>&1 &
         rp=$!
         for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
         on_src "python3 -m pgdelta send --source $ROOT/data --source-kind live --pg-conn '$CONN' --connect $DEST:7000 \
-          --pg-controldata $PGBIN/pg_controldata --jobs 4 --hash blake3 --fast-path summaries --read-ahead 0 --fill-gaps 0 \
+          --pg-controldata $PGBIN/pg_controldata --jobs 4 --hash blake3 --fast-path summaries --read-ahead 0 --fill-gaps 0 --no-diverged-basis \
           --stats-json /tmp/exp65-send.json" > "$d/send.log" 2>&1 || status=$?
         wait "$rp"; rstatus=$?
         [ "$status" = 0 ] && { start_copy "$B" "$d/copy.log" || status=$?; }

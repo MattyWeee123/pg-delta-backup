@@ -3,8 +3,8 @@
 # (B), brought current from the new primary (S) three ways, from a fresh copy of it each time, both VMs' caches
 # dropped:
 #   rewind  the standard: pg_rewind from S, then B started as S's standby until it has replayed to S's LSN;
-#   fast    pgdelta live, in place, --fast-path summaries requested (its guard should refuse a diverged B, so the
-#           session hashes both copies), then the copy started until it accepts connections;
+#   fast    pgdelta live, in place, --fast-path summaries --no-diverged-basis (its guard should refuse a diverged B,
+#           so the session hashes both copies), then the copy started until it accepts connections;
 #   full    one pg_basebackup -X stream into a new directory, then started the same way;
 #   union   (EXP-71) pgdelta live, in place, --fast-path summaries --diverged-basis (idea 1: the blocks B's own WAL
 #           names since the checkpoint before the fork, plus the summaries' since), with 8 reader threads, gaps of up
@@ -167,7 +167,7 @@ EOF
         for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
         on_src "python3 -m pgdelta send --source $ROOT/data --source-kind live --pg-conn '$CONN' --connect $DEST:7000 \
           --pg-controldata $PGBIN/pg_controldata --jobs 4 --hash blake3 --fast-path summaries --read-ahead 0 --fill-gaps 0 \
-          --stats-json /tmp/exp67-send.json" > "$d/send.log" 2>&1 || status=$?
+          --no-diverged-basis --stats-json /tmp/exp67-send.json" > "$d/send.log" 2>&1 || status=$?
         wait "$rp"; rstatus=$?
         [ "$status" = 0 ] && { start_copy "$B" "$d/copy.log" || status=$?; }
         on_src "cat /tmp/exp67-send.json" > "$d/send.json" ;;

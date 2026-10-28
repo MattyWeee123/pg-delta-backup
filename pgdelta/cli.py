@@ -203,13 +203,13 @@ def _compress_option(parser):
                              'the disks\' operation rates (EXP-68), and a balanced persistent disk counts a write of '
                              'up to 32 KiB as one operation (EXP-66, EXP-70) '
                              f'(default: {fastpath.DEFAULT_FILL_GAPS} with --fast-path)')
-    parser.add_argument('--diverged-basis', action='store_true',
+    parser.add_argument('--diverged-basis', action=argparse.BooleanOptionalAction, default=None,
                         help='with --fast-path: also refresh an old primary that kept writing after the server\'s '
                              'timeline left its own (a failover), as pg_rewind would accept it. The receiver lists '
                              'the blocks B\'s own WAL names from the checkpoint before the fork through B\'s end, '
                              'and these go with the summaries\' blocks since that checkpoint. B must have been '
                              'stopped cleanly, keep that WAL, and have data checksums or wal_log_hints (idea 1, '
-                             'EXP-69, EXP-69b)')
+                             'EXP-69, EXP-69b, EXP-71) (default: on with --fast-path)')
     parser.add_argument('--plan-out', type=Path, default=None, metavar='PATH',
                         help='with --fast-path, where the guard lets it run: write its plan to PATH as JSON, each '
                              'listed file with its size, whether it goes whole, and its chosen pages as [first, '
@@ -579,7 +579,7 @@ def _sender_kwargs(args, identity):
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
             'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
             'read_ahead': _read_ahead(args), 'plan_out': getattr(args, 'plan_out', None),
-            'fill_gaps': _fill_gaps(args), 'diverged_basis': getattr(args, 'diverged_basis', False)}
+            'fill_gaps': _fill_gaps(args), 'diverged_basis': _diverged_basis(args)}
 
 
 def _read_ahead(args):
@@ -596,6 +596,15 @@ def _fill_gaps(args):
     if pages is None:
         return fastpath.DEFAULT_FILL_GAPS if getattr(args, 'fast_path', None) else 0
     return pages
+
+
+def _diverged_basis(args):
+    """--diverged-basis or --no-diverged-basis as given, else fastpath.DEFAULT_DIVERGED_BASIS with --fast-path and
+    off without."""
+    on = getattr(args, 'diverged_basis', None)
+    if on is None:
+        return fastpath.DEFAULT_DIVERGED_BASIS if getattr(args, 'fast_path', None) else False
+    return on
 
 
 def _source_identity(args):

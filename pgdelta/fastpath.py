@@ -68,6 +68,9 @@ DEFAULT_READ_AHEAD = 8
 # The CLI's --fill-gaps with --fast-path: filling clean gaps of up to 2 pages cut the scattered cell's refresh to
 # 0.61 of no filling, and 4 pages took 1.20 times as long as 2 (EXP-70).
 DEFAULT_FILL_GAPS = 2
+# The CLI's --diverged-basis with --fast-path: on EXP-67's old primary after a failover, it took 0.20 of pg_rewind's
+# time (hot rows) and 0.53 of a re-clone's (scattered rows), every copy correct (EXP-71).
+DEFAULT_DIVERGED_BASIS = True
 # The first releases whose WAL summaries register visibility-map changes (commit f581fa7, August 2026).
 SUMMARY_FIXED = {17: 170011, 18: 180006}
 DEFAULT_TABLESPACE, GLOBAL_TABLESPACE = 1663, 1664
