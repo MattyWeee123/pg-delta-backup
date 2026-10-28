@@ -6,10 +6,13 @@ wrapping the ssh process's pipes exactly as spawn_local_receiver does.
 
 TCP may run inside mutual TLS 1.3 (O6; --tls-cert, --tls-key, --tls-ca on send and receive): each end presents a
 certificate the other end's CA signed, so only an authorized sender can write into B, and the pages and the
-session's hash key (in HELLO) never cross the network in clear.
+session's hash key (in HELLO) never cross the network in clear. A session reads on one thread while another writes,
+which OpenSSL forbids on one SSL object, so the TLS state is an ssl.SSLObject over memory BIOs, used only under a
+lock, with the socket's own reads and writes outside it (_TlsConnection).
 """
 from __future__ import annotations
 
+import io
 import ipaddress
 import os
 from pathlib import Path
@@ -17,6 +20,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 
 from pgdelta.errors import InvalidInput, TransferError
@@ -123,23 +127,152 @@ def tls_context(cert, key, ca, *, server):
     return context
 
 
+_RECV_BYTES = 1 << 16
+
+
+class _TlsConnection:
+    """One TLS connection over a TCP socket that one thread may read while another writes.
+
+    OpenSSL forbids using one SSL object from two threads at once, and ssl.SSLSocket leaves that to its caller:
+    a session's reading thread and sending thread, each in SSL_read and SSL_write on one SSLSocket, crashed the
+    process (SIGBUS in OpenSSL's BIO code) within 30 rounds of a full-duplex stress, and hung CI's TLS session test
+    (October 28). Here the TLS state is an ssl.SSLObject over two memory BIOs, touched only under `_state`; the
+    socket's recv and sendall run outside it. `_sending` keeps the TLS records in the order they were made: whoever
+    holds it sends everything pending. A reader whose read made records (a TLS 1.3 key update's answer) sends them
+    only if `_sending` is free, and otherwise leaves them to its holder, which looks again after letting go, so a
+    reader never waits on a writer blocked by the peer.
+    """
+
+    def __init__(self, sock, tls, incoming, outgoing):
+        self.sock, self._tls, self._incoming, self._outgoing = sock, tls, incoming, outgoing
+        self._state, self._sending = threading.Lock(), threading.Lock()
+
+    def settimeout(self, seconds):
+        self.sock.settimeout(seconds)
+
+    def readinto(self, buffer):
+        if not len(buffer):
+            return 0
+        while True:
+            with self._state:
+                try:
+                    count = self._tls.read(len(buffer), buffer)
+                except ssl.SSLWantReadError:
+                    count = None
+                except (ssl.SSLZeroReturnError, ssl.SSLEOFError):
+                    count = 0  # the peer closed, with or without close_notify, as SSLSocket's ragged EOFs read
+                made = self._outgoing.pending
+            if made and self._sending.acquire(blocking=False):
+                self._send_pending()
+            if count is not None:
+                return count
+            data = self.sock.recv(_RECV_BYTES)
+            with self._state:
+                if data:
+                    self._incoming.write(data)
+                else:
+                    self._incoming.write_eof()
+
+    def write(self, data):
+        self._sending.acquire()
+        try:
+            with self._state:
+                written = self._tls.write(data)
+        except BaseException:
+            self._sending.release()  # a refused peer's alert, say: the close's flush comes back here
+            raise
+        self._send_pending()
+        return written
+
+    def _send_pending(self):
+        """Send every record pending, holding `_sending`, then let it go and look again (see the class)."""
+        try:
+            while True:
+                with self._state:
+                    records = self._outgoing.read()
+                if not records:
+                    break
+                self.sock.sendall(records)
+        finally:
+            self._sending.release()
+        with self._state:
+            made = self._outgoing.pending
+        if made and self._sending.acquire(blocking=False):
+            self._send_pending()
+
+
+class _TlsStream(io.RawIOBase):
+    """One direction of a _TlsConnection as a raw stream, for io.BufferedReader or io.BufferedWriter. Closing it
+    leaves the connection and its socket open, as closing one of a socket's makefile() streams does."""
+
+    def __init__(self, connection, mode):
+        super().__init__()
+        self._connection, self._mode = connection, mode
+
+    def readable(self):
+        return self._mode == 'r'
+
+    def writable(self):
+        return self._mode == 'w'
+
+    def readinto(self, buffer):
+        return self._connection.readinto(buffer)
+
+    def write(self, data):
+        return self._connection.write(data)
+
+
+def _handshake(sock, tls, server_side):
+    """The TLS handshake on `sock` through memory BIOs: the _TlsConnection, and the SSLObject for what was agreed.
+    A refused handshake's alert is sent before the error is raised, as SSLSocket sends it."""
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    secure = tls.wrap_bio(incoming, outgoing, server_side=server_side)
+    while True:
+        try:
+            secure.do_handshake()
+            done = True
+        except ssl.SSLWantReadError:
+            done = False
+        except ssl.SSLError:
+            try:
+                sock.sendall(outgoing.read())
+            except OSError:
+                pass
+            raise
+        records = outgoing.read()
+        if records:
+            sock.sendall(records)
+        if done:
+            return _TlsConnection(sock, secure, incoming, outgoing), secure
+        data = sock.recv(_RECV_BYTES)
+        if not data:
+            raise ssl.SSLEOFError('the peer closed the connection during the TLS handshake')
+        incoming.write(data)
+
+
 def _secure(sock, tls, server_side):
-    """`sock` wrapped in TLS after the handshake, and what was negotiated; (sock, None) without `tls`."""
+    """`sock` with TLS after the handshake, as (a _TlsConnection, what was negotiated); (sock, None) without `tls`."""
     if tls is None:
         return sock, None
     try:
-        secure = tls.wrap_socket(sock, server_side=server_side)
+        connection, secure = _handshake(sock, tls, server_side)
     except (OSError, ssl.SSLError) as exc:
         sock.close()
         raise TransferError(f'TLS handshake failed: {exc}') from exc
     peer = dict(item for part in (secure.getpeercert() or {}).get('subject', ()) for item in part)
-    return secure, {'version': secure.version(), 'cipher': secure.cipher()[0], 'peer': peer.get('commonName')}
+    return connection, {'version': secure.version(), 'cipher': secure.cipher()[0], 'peer': peer.get('commonName')}
 
 
 def socket_channel(sock, tls=None):
-    """A Channel over a connected TCP socket; `tls`, what _secure negotiated on it, is kept as channel.tls."""
+    """A Channel over a connected TCP socket, or over a _TlsConnection on one (what _secure returned); `tls`, what
+    _secure negotiated, is kept as channel.tls."""
+    if isinstance(sock, _TlsConnection):
+        connection, sock = sock, sock.sock
+        reader = io.BufferedReader(_TlsStream(connection, 'r'))
+        writer = io.BufferedWriter(_TlsStream(connection, 'w'))
+    else:
+        reader, writer = sock.makefile('rb'), sock.makefile('wb')
     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    reader, writer = sock.makefile('rb'), sock.makefile('wb')
 
     def close(reader, writer):
         # Half-close, then drain until the peer closes too, so a final ERROR

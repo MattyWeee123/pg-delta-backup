@@ -4,7 +4,8 @@ A throwaway CA, a receiver and a sender certificate, and a rogue CA's sender cer
 command (the tests skip without it). A session over TLS builds the same copy as one in clear. A relay between
 the two ends records the stream: a marker from S's changed page crosses in clear without TLS, and never with it.
 A sender whose certificate another CA signed, and a sender that speaks no TLS, are refused before anything is
-written.
+written. Both ends may read and write at once, as a session's threads do (OpenSSL forbids that on one SSL object,
+which crashed or hung TLS sessions until the transport kept its TLS state under a lock; October 28).
 """
 import random
 import shutil
@@ -206,6 +207,53 @@ class TlsTests(unittest.TestCase):
         self.assertIn('TLS handshake failed', str(outcome.receiver_error))
         self.assertIsNotNone(outcome.sender_error)
         self.assertFalse(output.exists())
+
+    def test_both_ends_read_and_write_at_once(self):
+        """16 MiB each way, each end writing on one thread while another reads, every byte checked. Through one
+        ssl.SSLSocket this crashed the process (SIGBUS in OpenSSL) or hung, though rarely at this size: a stress of
+        64 MiB rounds failed within 30 (experiments/tls_duplex_stress.py)."""
+        listener = transport.listen('127.0.0.1', 0)
+        chunk, chunks = 1 << 16, 256
+        stream = {end: [random.Random(f'{end}{i}').randbytes(chunk) for i in range(4)] for end in 'ab'}
+        channels, errors, received = {}, [], {}
+
+        def pump(end, channel):
+            def write():
+                try:
+                    for i in range(chunks):
+                        channel._writer.write(stream[end][i % 4])
+                    channel._writer.flush()
+                except BaseException as exc:
+                    errors.append((end, 'write', exc))
+            writer = threading.Thread(target=write)
+            writer.start()
+            peer, count = 'b' if end == 'a' else 'a', 0
+            try:
+                for i in range(chunks):
+                    if bytes(channel._read_exact(chunk)) == stream[peer][i % 4]:
+                        count += 1
+            except BaseException as exc:
+                errors.append((end, 'read', exc))
+            writer.join(60)
+            received[end] = count
+
+        def serve():
+            channels['b'] = transport.accept_channel(listener, tls=self.context('receiver', server=True))
+            pump('b', channels['b'])
+
+        server = threading.Thread(target=serve)
+        server.start()
+        channels['a'] = transport.connect_channel('127.0.0.1', listener.getsockname()[1], tls=self.context('sender'))
+        client = threading.Thread(target=pump, args=('a', channels['a']))
+        client.start()
+        for thread in (client, server):
+            thread.join(120)
+        hung = [thread.name for thread in (client, server) if thread.is_alive()]
+        for channel in channels.values():
+            channel.abort() if hung else channel.close()
+        self.assertEqual(hung, [], 'a TLS stream stopped moving')
+        self.assertEqual(errors, [])
+        self.assertEqual(received, {'a': chunks, 'b': chunks})
 
     def test_a_missing_certificate_is_invalid_input(self):
         with self.assertRaises(InvalidInput):

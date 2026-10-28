@@ -8,6 +8,18 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-29 (late afternoon): TLS transport fixed: one SSL object was used by two threads at once
+
+- **Found from CI:** the Experiment tests on 4918b34 hung for 1 h 45 min in `test_a_session_over_tls_builds_the_same_copy` (earlier runs took about 4 min); the run was cancelled. The same commit's code passed on 9eb2eb0's run, so the hang was intermittent.
+- **The cause:** a session reads on one thread while another writes, and pgdelta's TLS did both on one `ssl.SSLSocket`. OpenSSL forbids using one SSL object from two threads at once, and CPython leaves that to the caller.
+  - **A full-duplex stress** (`experiments/tls_duplex_stress.py`: each end writing on one thread while reading on another, every byte checked) crashed the process with SIGBUS in OpenSSL's `bio_write_intern`. That happened within 30 rounds of 64 MiB, three times in three tries (rounds 29, 0 and 3). Python 3.14.7, OpenSSL 3.6.4, on the Mac.
+  - **The TLS tests,** repeated 150 times on an untouched checkout, hung once.
+- **The fix** (`transport._TlsConnection`): the TLS state is an `ssl.SSLObject` over memory BIOs, touched only under a lock, and the socket's `recv` and `sendall` run outside it. A second lock keeps records in order, and a reader never waits on a writer blocked by the peer.
+  - **A first version deadlocked** on a refused handshake: a failed write kept the send lock, and the close's flush then waited on it. The TLS tests caught it, and it was fixed before anything was committed.
+- **Evidence for the fix:** 100 of 100 stress rounds (6.4 GiB each way, every byte checked), and 150 of 150 test repeats without a hang. A new test sends 16 MiB each way at once.
+  - **Bulk throughput,** measured locally on one way: about 1,650 MiB/s against the old transport's 670, in three interleaved trials.
+  - **EXP-58** gets a note: its TLS cost was measured on the old transport, so it is likely an upper bound now (inferred). No run there failed.
+
 ## 2026-10-29 (afternoon): EXP-71 done, `--diverged-basis` on with the fast path
 
 - **EXP-71** (one session, 12 runs, all correct; both `pg_amcheck --heapallindexed` checks passed): all 6 predictions held.

@@ -51,7 +51,8 @@ With them, the connection runs inside mutual TLS 1.3. Each end presents its own 
 - **It protects** the changed pages and the session's hash key, which travels in the sender's HELLO, from anyone on the path. It also keeps any party without a certificate from writing into B.
 - **The CA is meant to be private**, made for pgdelta's hosts. The client checks the receiver's certificate against it, not against a host name.
 - **The statistics record** the version, cipher and the peer certificate's common name (`tls`), and on the sender the handshake's time.
-- **What it costs:** at 2 Gbit/s and 60 ms, 1.033 of the in-clear time for a 2.1 GB refresh, and 1.148 at 5 Gbit/s, with 0.3–0.6% more bytes and a 67 ms handshake ([EXP-58](../docs/experiments/EXP-58-native-tls-cost.md)).
+- **What it costs:** at 2 Gbit/s and 60 ms, 1.033 of the in-clear time for a 2.1 GB refresh, and 1.148 at 5 Gbit/s, with 0.3–0.6% more bytes and a 67 ms handshake ([EXP-58](../docs/experiments/EXP-58-native-tls-cost.md)). EXP-58 measured the transport before the fix below. Locally the fixed one moved bulk data about 2.4 times as fast, so these costs are likely an upper bound (inferred, not re-measured on VMs).
+- **Both ends read while they write,** on two threads. OpenSSL forbids using one SSL object from two threads at once, so the TLS state is an `ssl.SSLObject` over memory buffers, used only under a lock, and the socket is read and written outside it. Through one `ssl.SSLSocket`, as pgdelta did until October 28, a full-duplex stress crashed the process (SIGBUS in OpenSSL) within 30 rounds of 64 MiB, three times in three tries, and CI's TLS session test hung once. With the lock, 100 rounds passed ([experiments/tls_duplex_stress.py](../experiments/tls_duplex_stress.py)).
 
 Making a CA and the two certificates with `openssl`:
 
