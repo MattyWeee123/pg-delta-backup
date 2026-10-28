@@ -4,6 +4,12 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (22:40 UTC): the GCP web console reached
+
+- **On the owner's authorization,** the console was opened in the owner's own Chrome (Claude in Chrome), where they were already signed in. The built-in browser has no session and stops at CMU's sign-in, which only the owner completes.
+- **What it shows:** the project's welcome page (Postgres Delta Backup, under andrew.cmu.edu) and Compute Engine's VM list. The list is empty, matching `gcloud`: no VM is left running.
+- **Nothing was changed in the console.** The tab was closed after. Project access for the experiments stays through `gcloud`, as before.
+
 ## 2026-10-28 (22:25 UTC): EXP-79b done: the guard's change firm, and `pg_basebackup` now wins only past about 91% of pages
 
 - **Every prediction held in rule 11's second session**, run in EXP-75–77's order (uniform, then scatterall12). The source wrote 0.03–0.12 GB per run, as in EXP-77.
