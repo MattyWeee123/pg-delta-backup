@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import re
 import statistics
 from pathlib import Path
 
@@ -22,6 +23,24 @@ from plotting import COLORS, plt
 ROOT = Path(__file__).resolve().parents[1]
 ARMS = ('replay', 'fast', 'full')
 LABELS = {'replay': 'archive replay (WAL already local)', 'fast': 'pgdelta fast path', 'full': 'pg_basebackup re-clone'}
+
+
+def lsn(text):
+    high, low = text.split('/')
+    return (int(high, 16) << 32) + int(low, 16)
+
+
+def replayed_bytes(results, lag, source_lsn):
+    """The WAL a replay run applied: from its copy's 'redo starts at' to the source's LSN (added after the data: the
+    archive also held WAL from before B0's redo point, so its size overstates what replay paid for)."""
+    for meta_path in sorted(Path(results).glob('run-*/meta.json')):
+        meta = json.loads(meta_path.read_text())
+        log = meta_path.parent / 'copy.log'
+        if meta['lag'] == lag and meta['arm'] == 'replay' and log.exists():
+            found = re.search(r'redo starts at ([0-9A-F]+/[0-9A-F]+)', log.read_text())
+            if found:
+                return lsn(source_lsn) - lsn(found.group(1))
+    return None
 
 
 def runs(results):
@@ -50,6 +69,8 @@ def main(argv=None):
         info_path = Path(a.results) / f'lag-{lag}.json'
         info = json.loads(info_path.read_text()) if info_path.exists() else {}
         cell = {'lag': lag, 'archive_mb': round(info.get('archive_bytes', 0) / 1e6, 1)}
+        replayed = replayed_bytes(a.results, lag, info['source_lsn']) if info else None
+        cell['replayed_mb'] = round(replayed / 1e6, 1) if replayed else None
         for arm in ARMS:
             mine = [r['seconds'] for r in rows if r['lag'] == lag and r['arm'] == arm and r['status'] == 0]
             cell[f'{arm}_s'] = round(statistics.median(mine), 2) if mine else None
@@ -94,8 +115,9 @@ def figure(cells):
             ax.bar(i * 4 + j, value, 0.8, color=colors[arm], label=LABELS[arm] if i == 0 else None)
             ax.annotate(f'{value:.1f}', (i * 4 + j, value), textcoords='offset points', xytext=(0, 3), ha='center',
                         fontsize=8.5)
-    ax.set_xticks([1, 5], [f"hot rows updated 10x\n({cells['hot10']['archive_mb']:,.0f} MB of WAL)",
-                           f"1% of rows, scattered\n({cells['uniform']['archive_mb']:,.0f} MB of WAL)"])
+    wal = {lag: cells[lag].get('replayed_mb') or cells[lag]['archive_mb'] for lag in cells}
+    ax.set_xticks([1, 5], [f"hot rows updated 10x\n({wal['hot10']:,.0f} MB of WAL replayed)",
+                           f"1% of rows, scattered\n({wal['uniform']:,.0f} MB of WAL replayed)"])
     ax.set_ylabel('seconds to a current copy (median)')
     ax.legend(fontsize=8.5, loc='upper left')
     ax.set_title('A standby 18 GB, behind: archive replay, the fast path, a re-clone (8 GB VMs)', fontsize=10)

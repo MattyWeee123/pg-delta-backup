@@ -8,6 +8,15 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-28 (early): EXP-65 done, the fast path against archive replay; EXP-64b and EXP-66 running
+
+- **EXP-65:** all 4 predictions held, on the `ha` set in us-west1; its VMs were deleted after the fetch.
+  - **Hot rows updated 10 times:** the fast path took 3.1 s, against 19.8 s for replay with the archive already local (0.156) and 90.9 s for a re-clone.
+  - **1% of rows scattered:** 166.2 s, against 256.2 s for replay (0.649) and 91.0 s for a re-clone. That's a replication of EXP-64's 164.8 s from a cleanly stopped standby.
+  - **The mechanism:** replay pays per WAL record and, beyond memory, waits on data-file reads (31 MB/s of WAL against 89 MB/s); the fast path pays once per page.
+- **A label fixed after the data:** the figure had shown the archive's size. It now shows the WAL replay applied, from each copy's `redo starts at`. Scores unchanged.
+- **Next:** EXP-64b, then EXP-66, are running on a fresh pair (launched right after EXP-65's teardown, because of the region's N2D quota).
+
 ## 2026-10-27 (late night): overlapped source reads built; EXP-64b pre-registered
 
 - **Asked by the owner:** build the overlapped source reads for the fast path, and register EXP-64b on EXP-64's scattered cell.
