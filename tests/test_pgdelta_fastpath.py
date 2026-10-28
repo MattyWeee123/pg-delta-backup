@@ -49,6 +49,22 @@ class Guard(unittest.TestCase):
                                               summaries=[(1, L('0/1000000'), L('0/3000000')),
                                                          (2, L('0/3000000'), L('0/8000000'))]))[0])
 
+    def test_a_timeline_switch_on_a_segment_boundary_leaves_only_a_page_header_which_is_no_gap(self):
+        """PostgreSQL 17.11's summaries at such a switch (EXP-69): the old timeline's ends on the boundary, the new
+        timeline's first starts after the segment's 40-byte long header. No record lies in a page header."""
+        history = {'00000002.history': '1\t0/3000000\tno recovery target specified\n'}
+        stopped_before = {**FACTS, 'end': '0/2800000'}
+        for start, ok in (('0/3000028', True), ('0/3000018', True), ('0/3000030', False), ('0/3000050', False)):
+            result = fastpath.guard(stopped_before, source(timeline=2, history=history,
+                                                           summaries=[(1, L('0/1000000'), L('0/3000000')),
+                                                                      (2, L(start), L('0/8000000'))]))
+            self.assertEqual(result[0], ok, (start, result))
+        # Only at a page boundary: a 40-byte hole anywhere else is a gap.
+        self.assertFalse(fastpath.covered([(1, L('0/1000000'), L('0/3000100')), (1, L('0/3000128'), L('0/8000000'))],
+                                          1, L('0/2000000'), L('0/8000000')))
+        self.assertTrue(fastpath.covered([(1, L('0/1000000'), L('0/3002000')), (1, L('0/3002018'), L('0/8000000'))],
+                                         1, L('0/2000000'), L('0/8000000')))
+
     def test_a_gap_in_the_summaries_or_another_major_is_refused(self):
         ok, reasons = fastpath.guard(FACTS, source(summaries=[(1, L('0/3000000'), L('0/8000000'))]))
         self.assertFalse(ok)

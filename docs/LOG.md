@@ -19,6 +19,7 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 - **Found:** `fastpath.covered` treats a page header at a timeline switch on a segment boundary as a gap, a needless refusal. A fix with a test is queued.
 - **A figure change after the data:** part B's panel now splits off the WAL written by the state check. The labs now also record S's LSN after the check.
 - **EXP-70** (`--fill-gaps`) launched on a fresh pair right after part B's teardown.
+- **The guard fix, done:** `fastpath.covered` now treats a hole of exactly one WAL page header (24 or 40 bytes) at a page boundary as no gap, since no record lies in a page header. A unit test covers the shape PostgreSQL 17.11 produced in EXP-69 (one timeline's summary ending at 6/D2000000, the next starting at 6/D2000028), and holes that must still refuse. The experiment harness's own check is unchanged, so registered analyses reproduce.
 
 ## 2026-10-28 (late night): idea 2 built, EXP-70 pre-registered; EXP-69 part B running
 

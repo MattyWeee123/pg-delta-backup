@@ -15,7 +15,9 @@ does without the option:
   primary that kept writing after a failover is refused even when its redo point is before the split;
 - the server summarizes WAL (summarize_wal = on) and is PostgreSQL 17.11, 18.6 or later (earlier releases leave
   some visibility-map changes out of the summaries), and its summaries cover B's redo point to the backup's start
-  without a gap.
+  without a gap. A hole of exactly one WAL page header at a page boundary holds no record, so it is no gap: a new
+  timeline that begins on a segment boundary has its first summary start after the segment's long header (EXP-69:
+  6/D2000000 and 6/D2000028).
 
 What is sent, as PostgreSQL's own incremental backup chooses (basebackup_incremental.c):
 - of a relation's main and visibility-map forks: the blocks the summaries list in that range, every block from
@@ -178,11 +180,16 @@ def ranges(path, lo, hi):
     return [(tli, max(begin, lo), min(switch, hi)) for tli, begin, switch in path if max(begin, lo) < min(switch, hi)]
 
 
+WAL_PAGE = 8192  # XLOG_BLCKSZ
+PAGE_HEADERS = (24, 40)  # SizeOfXLogShortPHD; SizeOfXLogLongPHD, the first page of a segment
+
+
 def covered(summaries, timeline, lo, hi):
-    """Whether summaries [(tli, start, end), ...] on `timeline` cover [lo, hi) without a gap."""
+    """Whether summaries [(tli, start, end), ...] on `timeline` cover [lo, hi) without a gap. A hole of exactly one
+    page header at a page boundary is no gap: no record lies in a page header."""
     point = lo
     for _, start, end in sorted((s for s in summaries if s[0] == timeline), key=lambda s: s[1]):
-        if start <= point < end:
+        if start <= point < end or (point % WAL_PAGE == 0 and start - point in PAGE_HEADERS and point < end):
             point = end
         if point >= hi:
             return True
