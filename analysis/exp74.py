@@ -152,7 +152,8 @@ def figure(cells, picks, scatter, name):
                 ax.plot([x - 0.4, x + 0.4], [c['predicted_s']] * 2, color=COLORS['black'], lw=1.2,
                         label='model' if i == 0 and j == 0 else None)
             mark = ' *' if (picks.get(pattern) or {}).get('pick') == (f'fill{FILL[arm]}' if arm in FILL else 'full') else ''
-            ax.annotate(f"{c['seconds']:.1f}{mark}", (x, c['seconds']), textcoords='offset points', xytext=(0, 3),
+            top = max(c['seconds'], c.get('predicted_s') or 0)  # above the model's line too
+            ax.annotate(f"{c['seconds']:.1f}{mark}", (x, top), textcoords='offset points', xytext=(0, 3),
                         ha='center', fontsize=8)
     fractions = {p: (by.get((p, 'fast8w')) or {}).get('page_fraction') for p in scatter}
     ax.set_xticks([i * 5 + 1.5 for i in range(len(scatter))],

@@ -4,6 +4,18 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (14:30 UTC): EXP-74 done, the model and selector held; the guard's grouped reading confirmed on the VMs
+
+- **The selector (deciding, held):** in both new cells (4% and 12% of rows changed) it picked fill 0 from the unfilled plan and the guard's time. Fill 0 was the fastest arm measured in both.
+  - In scatter4, fill 2 took 1.050 of fill 0's time, so the choice mattered. In scatter12 the fills were within 0.7%, so that cell tested only the fast path against a full copy.
+- **The model:** every fast arm within 2.6% of its prediction (7 arms, 0.974–1.024), and both full copies within 0.1%.
+  - Its byte term was right. Its request count was 33–41% high for long runs, which didn't matter because those plans were bound by bytes.
+- **The guard on the VMs:** 1.91 s against EXP-70's 4.70 s on the same summary rows (0.406, bar 0.6). The scattered cell took 43.8 s, against EXP-70's 46.6.
+- **Not reached: a cell where a full copy wins.** The fast path took 0.59 and 0.64 of a full copy.
+  - The updated table was 92% and 100% changed. The database's untouched 8.4 GB caps the fast path at about half of the listed pages.
+  - The model puts the break-even at about 85% of the listed bytes for byte-bound plans (not measured).
+- **Next, as registered:** the selector goes into the sender, behind an option and off by default.
+
 ## 2026-10-28 (13:43 UTC): EXP-72 done, TLS costs about 2% on the fixed transport
 
 - **Sign-in:** `gcloud`'s stored credentials still failed to refresh at first, in the owner's terminal too. A sign-in at 12:54 UTC took, and both pipelines started at 12:55 (EXP-74's after a fix: its script wasn't executable).

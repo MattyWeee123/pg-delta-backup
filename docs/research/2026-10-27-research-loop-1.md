@@ -148,3 +148,9 @@ Mechanisms taken from the papers themselves (extracts in the session's `scratchp
 - **The guard's time is the summary reading,** linear in rows (about 3.2 µs per row on the VMs). It is not a fixed cost: at the scattered cell it is 4.7 s because there are 1.46 M rows.
 - **Reading them in one query grouped per relation fork halves it** with the VMs' duplication: 0.456 and 0.472 locally, with identical plans. It is now the sender's reading. On the VMs that projects to about 2.5 s saved per scattered refresh, still to be measured.
 - **Next:** time it on the VMs (with EXP-72), then the rest of the about 12 s per run with neither disk busy (EXP-70's post-hoc check): the start, the listing and the final syncs.
+
+**Update, October 28: the grouped reading on the VMs, and the selector's model (EXP-74).**
+- **The guard on the VMs:** 1.91 s against EXP-70's 4.70 s on the same summary rows (0.406; the projection was about 0.46). That is 1.1–1.3 µs per row, against 3.2. The scattered cell took 43.8 s, against EXP-70's 46.6.
+- **The model** (the plan's requests and bytes against each disk's limits, constants from earlier sessions) predicted all 7 fast arms within 2.6%, in cells it hadn't seen, and both full copies within 0.1%.
+- **The selector** picked fill 0 at 4% and 12% of rows changed, where the plans are bound by bytes. That was the fastest arm in both cells; in EXP-70's scattered cell, bound by requests, fill 2 is. So idea 4 is confirmed for choosing the fill. It is built into the sender next, off by default.
+- **Not reached:** a cell where a full copy wins. This database's untouched 8.4 GB caps the fast path at about half of the pages. The model puts the break-even at about 85% of the listed bytes for byte-bound plans (not measured).
