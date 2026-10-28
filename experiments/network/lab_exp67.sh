@@ -13,11 +13,17 @@
 #     setsid nohup bash experiments/network/lab_exp67.sh SOURCE_IP [REPEATS] [SEED] \
 #         > /data/exp04-results/exp67-lab.log 2>&1 < /dev/null &
 # SCALE (default 600, about 18 GB) and OUT change the size and the results directory (the smoke: SCALE=20).
+# ARMS (default "rewind fast full") picks the timed arms. DIAG=1 (EXP-69) records, after each lag and before its
+# runs, what pg_rewind would copy and idea 1's two block sets, in diag-LAG/: pg_rewind --dry-run --debug on a fresh
+# copy of B0, S's data directory by top-level entry and pg_wal's files, B0's WAL from the last common checkpoint's
+# redo (pg_waldump), and S's WAL summaries from that redo on (EXP-69: DIAG=1 ARMS=fast, 1 repeat).
 set -u
 SRC=$1
 REPEATS=${2:-2}
 SEED=${3:-670}
 SCALE=${SCALE:-600}
+ARMS=${ARMS:-rewind fast full}
+DIAG=${DIAG:-0}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
 R=${OUT:-/data/exp04-results/exp67}
@@ -40,6 +46,28 @@ start_copy() {  # $1: data directory; started on 5433 without archiving or summa
     -o "-p 5433 -k /tmp -c listen_addresses='' -c archive_mode=off -c summarize_wal=off" start > /dev/null 2>&1
 }
 stop_copy() { $PGBIN/pg_ctl -D "$1" -m fast -w stop > /dev/null 2>&1; }
+# EXP-69 (DIAG=1): $1 the lag, $2 B0's timeline. Run before the lag's timed runs, with S idle.
+diag() {
+  local dd="$R/diag-$1" c redo
+  mkdir -p "$dd"
+  rm -rf "$B"; cp -a "$B0" "$B"
+  $PGBIN/pg_rewind --target-pgdata="$B" --source-server="host=$SRC port=5432 user=study dbname=postgres" \
+    --dry-run --debug --progress > "$dd/rewind-debug.log" 2>&1
+  echo "rewind_exit $?" > "$dd/status.txt"
+  rm -rf "$B"
+  echo "s_lsn $(psrc "SELECT pg_current_wal_lsn()")" >> "$dd/status.txt"
+  on_src "cd $ROOT/data && du -sk -- * | sort -k2 && ls -l pg_wal" > "$dd/source-listing.txt"
+  c=$(sed -n 's/.*last common checkpoint at \([0-9A-F/]*\) on timeline.*/\1/p' "$dd/rewind-debug.log")
+  redo=$($PGBIN/pg_waldump --path "$B0/pg_wal" --timeline "$2" --start "$c" -n 1 2>/dev/null \
+    | sed -n 's/.*CHECKPOINT_[A-Z]* redo \([0-9A-F/]*\);.*/\1/p')
+  echo "checkpoint $c redo $redo b_timeline $2" >> "$dd/status.txt"
+  $PGBIN/pg_waldump --path "$B0/pg_wal" --timeline "$2" --start "$redo" 2>&1 | gzip > "$dd/b0-waldump.txt.gz"
+  psrc "COPY (SELECT s.tli, s.start_lsn, s.end_lsn, c.reltablespace, c.reldatabase, c.relfilenode, c.relforknumber, c.relblocknumber, c.is_limit_block FROM pg_available_wal_summaries() s, pg_wal_summary_contents(s.tli, s.start_lsn, s.end_lsn) c WHERE s.end_lsn > '$redo') TO STDOUT WITH CSV" \
+    | gzip > "$dd/s-summaries.csv.gz"
+  psrc "COPY (SELECT tli, start_lsn, end_lsn FROM pg_available_wal_summaries() ORDER BY tli, start_lsn) TO STDOUT WITH CSV" \
+    > "$dd/s-summary-ranges.csv"
+  gzip -f "$dd/rewind-debug.log"
+}
 STATE="SELECT count(*) || ':' || sum(abalance) FROM pgbench_accounts"
 CLUSTER_ARGS="--root $ROOT --bin-dir $PGBIN --log-dir $W/logs"
 WORKLOAD_ARGS="$CLUSTER_ARGS --scale $SCALE --fraction 0.01 --seed 20261022 --hot-percent 1.0 --batch-size 100"
@@ -91,10 +119,14 @@ for lag in hot10 uniform; do
   SOURCE_STATE=$(psrc "$STATE")
   echo "{\"lag\": \"$lag\", \"source_lsn\": \"$S_LSN\", \"source_state\": \"$SOURCE_STATE\"}" > "$R/lag-$lag.json"
   echo "$(date -u +%T) $lag: source at $S_LSN, state $SOURCE_STATE"
-  python3 - "$REPEATS" "$SEED" "$lag" > "$R/plan-$lag.txt" <<'EOF'
+  if [ "$DIAG" = 1 ]; then
+    diag "$lag" "$(python3 -c "import json; print(json.load(open('$R/fork-$lag.json'))['b0_timeline'])")"
+    echo "$(date -u +%T) $lag: diagnostics recorded ($(head -1 "$R/diag-$lag/status.txt"))"
+  fi
+  python3 - "$REPEATS" "$SEED" "$lag" $ARMS > "$R/plan-$lag.txt" <<'EOF'
 import random, sys
-repeats, seed, lag = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
-runs = [(arm, k) for arm in ('rewind', 'fast', 'full') for k in range(repeats)]
+repeats, seed, lag, arms = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4:]
+runs = [(arm, k) for arm in arms for k in range(repeats)]
 random.Random(seed + (lag == 'uniform')).shuffle(runs)
 for arm, k in runs:
     print(arm, k)

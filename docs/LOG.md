@@ -8,6 +8,20 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-28 (midday): EXP-69 pre-registered, idea 1's premises; EXP-68 running
+
+- **Why now:** EXP-67 said idea 1 (both sides' block sets, for an old primary after a failover) is next, after a measurement of what it rests on: its correctness and guard, and why `pg_rewind` copied 4 GB beyond S's WAL.
+- **Found while checking formats** (a probe on one S2 build, before registering):
+  - **Retained WAL is a precondition:** EXP-61's S2 can't be rewound at all. B's shutdown checkpoint had recycled the WAL back to the last common checkpoint, and `pg_rewind` failed for want of it. Idea 1 shares that condition, so EXP-69 builds B with its WAL kept, as `pg_rewind`'s users must, and keeps EXP-61's builds as the refused case.
+  - **Its debug output gives the whole copy plan:** `pg_rewind --debug` lists every block it takes, every file it copies whole and every chunk it fetches. Even in S2, most of its copy was whole WAL segments, some past S's current LSN.
+- **EXP-69's two parts:**
+  - **Part A, local:** idea 1's send set scored on EXP-03's failover scenarios, its guard on crashed, cut-WAL and recycled-WAL cases, and `pg_rewind`'s blocks as the control.
+  - **Part B, on the VMs after EXP-68:** EXP-67's cells rerun with diagnostics: `pg_rewind`'s copy by kind, B's WAL, S's summaries and S's directory.
+- **New code:**
+  - `unionscan.py` and `union_check.py`, with 10 unit tests on the tools' own output shapes;
+  - `lab_exp67.sh` gains `ARMS` and `DIAG`, its defaults unchanged;
+  - `analysis/exp69.py`, dry-run on synthetic results; it caught a column collision and a refusal phrase that didn't match the guard's actual text.
+
 ## 2026-10-28 (late morning): EXP-67 done, `pg_rewind` against pgdelta; EXP-68 running
 
 - **EXP-67:** all 3 predictions held, all 12 copies correct, on the `ha` set in us-west1; its VMs were deleted after the fetch.
