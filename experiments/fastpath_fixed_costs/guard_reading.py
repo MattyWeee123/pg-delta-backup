@@ -12,6 +12,11 @@ from the start on, through one pgdelta.live.Session:
   sorted array, and its lowest limit block), then the same plan structure.
 Each run checks that B's plan equals A's. Writes docs/experiments/data/exp73-guard.csv and the figure exp73-guard, and
 scores the registered predictions.
+
+EXP-73b (--batches 20 --state-check --deciding-bar 0.5 --exp 73b): the lag in 20 batches, and after its last
+checkpoint the lab's state check (a read of all of pgbench_accounts, whose hint bits log a page image of each changed
+page with checksums), then a checkpoint, so a block appears in about as many summaries as on the VMs (EXP-73's
+post-hoc check). Its outputs are exp73b-guard.csv and exp73b-guard.
 """
 import argparse
 import csv
@@ -47,8 +52,11 @@ GROUPED_SQL = ("SELECT coalesce(json_agg(json_build_array(ts, db, rel, fork, blo
                "GROUP BY 1, 2, 3, 4) AS g")
 
 
+ENV = dict(os.environ, LC_ALL='C', LANG='C')  # macOS: the postmaster refuses to start without a valid locale
+
+
 def run(*args, **kwargs):
-    return subprocess.run([str(a) for a in args], check=True, capture_output=True, text=True, **kwargs)
+    return subprocess.run([str(a) for a in args], check=True, capture_output=True, text=True, env=ENV, **kwargs)
 
 
 class Cluster:
@@ -65,20 +73,24 @@ class Cluster:
         return run(PG_BIN / 'psql', '-X', '-At', '-v', 'ON_ERROR_STOP=1', '-d', self.conninfo, '-c', statement).stdout.strip()
 
     def stop(self):
-        subprocess.run([str(PG_BIN / 'pg_ctl'), '-D', str(self.data), '-m', 'fast', '-w', 'stop'], capture_output=True)
+        subprocess.run([str(PG_BIN / 'pg_ctl'), '-D', str(self.data), '-m', 'fast', '-w', 'stop'], capture_output=True,
+                       env=ENV)
         shutil.rmtree(self.sockets, True)
 
 
-def build(cluster, scale, seed):
+def build(cluster, scale, seed, batches=5, state_check=False):
     run(PG_BIN / 'pgbench', '-i', '-q', '-s', scale, '-d', cluster.conninfo)
     cluster.sql('CHECKPOINT')
     start = cluster.sql('SELECT pg_current_wal_lsn()')
     rows = 100000 * scale
     chosen = random.Random(seed).sample(range(1, rows + 1), rows // 100)
-    for batch in range(5):
-        part = chosen[batch::5]
+    for batch in range(batches):
+        part = chosen[batch::batches]
         cluster.sql('UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid = ANY(ARRAY['
                     + ','.join(map(str, part)) + '])')
+        cluster.sql('CHECKPOINT')
+    if state_check:  # the lab's state check after the lag's checkpoint (EXP-67, EXP-69)
+        cluster.sql('SELECT count(*), sum(abalance) FROM pgbench_accounts')
         cluster.sql('CHECKPOINT')
     switched = cluster.sql('SELECT pg_switch_wal()')
     cluster.sql('CHECKPOINT')
@@ -137,9 +149,15 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--scales', default='20,80')
     ap.add_argument('--repeats', type=int, default=3)
-    ap.add_argument('--out', default=str(ROOT / 'docs' / 'experiments' / 'data' / 'exp73-guard.csv'))
-    ap.add_argument('--figure', default='exp73-guard')
+    ap.add_argument('--batches', type=int, default=5)
+    ap.add_argument('--state-check', action='store_true')
+    ap.add_argument('--deciding-bar', type=float, default=0.4)
+    ap.add_argument('--exp', default='73')
+    ap.add_argument('--out')
+    ap.add_argument('--figure')
     a = ap.parse_args()
+    a.out = a.out or str(ROOT / 'docs' / 'experiments' / 'data' / f'exp{a.exp}-guard.csv')
+    a.figure = a.figure or f'exp{a.exp}-guard'
     print(run(PG_BIN / 'postgres', '--version').stdout.strip(), flush=True)
     records = []
     for scale in [int(s) for s in a.scales.split(',')]:
@@ -147,7 +165,7 @@ def main():
             cluster = Cluster(Path(temp))
             try:
                 started = time.perf_counter()
-                _, summaries = build(cluster, scale, seed=73 + scale)
+                _, summaries = build(cluster, scale, seed=73 + scale, batches=a.batches, state_check=a.state_check)
                 print(f'scale {scale}: built in {time.perf_counter() - started:.0f} s, {len(summaries)} summaries',
                       flush=True)
                 session = Session(cluster.conninfo, psql=PG_BIN / 'psql')
@@ -175,21 +193,21 @@ def main():
         w = csv.DictWriter(f, fieldnames=list(records[0]))
         w.writeheader()
         w.writerows(records)
-    score(records)
-    figure(records, a.figure)
+    score(records, a.deciding_bar)
+    figure(records, a.figure, a.exp)
 
 
 def med(records, scale, method, key):
     return statistics.median(r[key] for r in records if r['scale'] == scale and r['method'] == method)
 
 
-def score(records):
+def score(records, bar=0.4):
     scales = sorted({r['scale'] for r in records})
     big, small = scales[-1], scales[0]
     ratio = med(records, big, 'B', 'seconds') / med(records, big, 'A', 'seconds')
     equal = all(r['plan_equal'] for r in records)
-    print(f"1 (deciding). {'HELD' if ratio <= 0.4 and equal else 'FAILED'}: at scale {big}, B / A {ratio:.3f} (bar 0.4)"
-          + ('; within 0.05 of the bar (rule 11)' if abs(ratio - 0.4) <= 0.05 else ''))
+    print(f"1 (deciding). {'HELD' if ratio <= bar and equal else 'FAILED'}: at scale {big}, B / A {ratio:.3f} (bar {bar})"
+          + ('; within 0.05 of the bar (rule 11)' if abs(ratio - bar) <= 0.05 else ''))
     print(f"2. {'HELD' if equal else 'FAILED'}: plans equal in every run: {equal}")
     per_row = {s: med(records, s, 'A', 'seconds') / next(r['rows'] for r in records if r['scale'] == s and r['method'] == 'A')
                for s in scales}
@@ -206,9 +224,16 @@ def score(records):
                       f"{next(r['forks'] for r in records if r['scale'] == s)} forks, "
                       f"{next(r['summaries'] for r in records if r['scale'] == s)} summaries" for s in scales)
           + f" (rows at {big}: {rows_big})")
+    for s in scales:
+        rows = next(r['rows'] for r in records if r['scale'] == s and r['method'] == 'A')
+        blocks = next(r['distinct_blocks'] for r in records if r['scale'] == s)
+        b_block = med(records, s, 'B', 'seconds') / blocks
+        print(f"Duplication and the post-hoc model at scale {s}: {rows / blocks:.2f} rows per block; B per block "
+              f"{b_block * 1e6:.2f} us; B / A {med(records, s, 'B', 'seconds') / med(records, s, 'A', 'seconds'):.3f}, "
+              f"EXP-73's model 0.825 / duplication = {0.825 / (rows / blocks):.3f}")
 
 
-def figure(records, name):
+def figure(records, name, exp='73'):
     import plotting
     from plotting import COLORS, plt
     plotting.style()
@@ -233,7 +258,7 @@ def figure(records, name):
                   [f'pgbench scale {s}\n({rows[s]:,} summary rows)' for s in scales])
     ax.set_ylabel('seconds to read the summaries into a plan (median of 3)')
     ax.legend(fontsize=8, loc='upper left')
-    ax.set_title("EXP-73: the guard's summary reading, today's (A) against grouped on the server (B)", fontsize=10)
+    ax.set_title(f"EXP-{exp}: the guard's summary reading, today's (A) against grouped on the server (B)", fontsize=10)
     print(plotting.save(fig, name))
 
 
