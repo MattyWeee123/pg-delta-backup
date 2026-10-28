@@ -4,6 +4,19 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (23:07 UTC): research loop 2: the scorecard redone, and the next attack picked
+
+- **Why:** the owner's correction. The goal is open-ended (keep improving until pgdelta beats its competitors where it can), and recent work had drifted into fixed-cost tuning at a limit where a full copy wins on principle.
+- **The scorecard** ([research loop 2](research/2026-10-28-research-loop-2.md), figure `loop2-scorecard`): per situation, the standard tool and the strongest competitor, checked against primary sources (PostgreSQL 18, pgBackRest 2.60.0, WAL-G 3.0.9, Barman 3.20.1, pg_probackup 2.5.16, CloudNativePG 1.30.1, Patroni 4.1.5, Google Cloud's disk docs).
+  - **Wins, measured:** an old primary after a failover; a standby behind with an archive; the fast path up to about 91% of pages; DR re-seeds; pgBackRest to a usable copy.
+  - **Loss, measured:** copies whose lineage can't be proven (crashed; summaries off), where hashing must read all of B.
+  - **Open:** native incremental and WAL-G catch-up against the fast path; cloud disk clones.
+- **Novelty, documented:** no tool found applies WAL summaries, or a WAL-scan block list, in place. PostgreSQL's own incremental path always writes a new directory and rebuilds every changed file.
+- **The pick:** the crashed copy.
+  - **What:** finish its crash recovery first, as `pg_rewind` does (documented), then use the fast path.
+  - **Why:** it is the only measured loss that isn't a hard limit, and the bound says it is an algorithm problem.
+  - **Next:** EXP-80 (local, then VMs), then one session against native incremental and WAL-G catch-up.
+
 ## 2026-10-28 (22:40 UTC): the GCP web console reached
 
 - **On the owner's authorization,** the console was opened in the owner's own Chrome (Claude in Chrome), where they were already signed in. The built-in browser has no session and stops at CMU's sign-in, which only the owner completes.
