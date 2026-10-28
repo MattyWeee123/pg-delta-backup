@@ -1,4 +1,4 @@
-"""Where output files are fsynced (--fsync main|writeback|worker, T3 arm b).
+"""Where output files are fsynced (--fsync main|writeback|worker|worker-writeback, T3 arm b).
 
 Every mode must give the same output and the same statistics, apart from
 timings and the fsync statistics themselves, for a new copy and in place.
@@ -32,6 +32,9 @@ from test_pgdelta_parallel import build_shapes
 KEY = bytes(range(32))
 MIB = 1 << 20
 EXPECTED_WRITEBACK = 'writeback' if flush.writeback_available() else 'main'
+# Each mode's effective mode here: the write-back modes fall back where sync_file_range is missing.
+EFFECTIVE = {'writeback': EXPECTED_WRITEBACK,
+             'worker-writeback': 'worker-writeback' if flush.writeback_available() else 'worker'}
 
 
 def options(fsync, jobs=1, rebuild='copy-patch', verify='pipelined', in_place=False):
@@ -75,10 +78,9 @@ class ModeTests(FsyncTestCase):
                         self.assertEqual(snapshot(basis if in_place else output), snapshot(self.source))
                         stats = outcome.receiver
                         self.assertEqual(stats['fsync'], fsync)
-                        self.assertEqual(stats['fsync_effective'],
-                                         EXPECTED_WRITEBACK if fsync == 'writeback' else fsync)
+                        self.assertEqual(stats['fsync_effective'], EFFECTIVE.get(fsync, fsync))
                         self.assertGreaterEqual(stats['fsync_seconds'], 0)
-                        if fsync != 'worker':
+                        if fsync not in ('worker', 'worker-writeback'):
                             self.assertEqual(stats['fsync_wait_seconds'], 0)
                         results.setdefault(in_place, {})[label] = comparable(outcome)
         for in_place, runs in results.items():
@@ -94,8 +96,9 @@ class ModeTests(FsyncTestCase):
         pg_shapes(self.source, self.basis)
         rng = random.Random(32)
         write_tree(self.source, {'a/big': rng.randbytes(9 * MIB)})
-        cases = {fsync: ({}, EXPECTED_WRITEBACK if fsync == 'writeback' else fsync) for fsync in flush.FSYNC_MODES}
+        cases = {fsync: ({}, EFFECTIVE.get(fsync, fsync)) for fsync in flush.FSYNC_MODES}
         cases['writeback refused'] = ({'writeback_available': True, 'start_writeback': False}, 'main')
+        cases['worker-writeback refused'] = ({'writeback_available': True, 'start_writeback': False}, 'worker')
         for label, (patches, effective) in cases.items():
             fsync = label.split()[0]
             output = self.root / f'O-{label.replace(" ", "_")}'
@@ -123,17 +126,18 @@ class ModeTests(FsyncTestCase):
             calls.append((os.fstat(fd).st_ino, offset, length))
             return True
 
-        for rebuild in ('copy-patch', 'gap-fill'):
+        for fsync, rebuild in (('writeback', 'copy-patch'), ('writeback', 'gap-fill'),
+                               ('worker-writeback', 'copy-patch')):
             calls.clear()
-            output = self.root / f'O-{rebuild}'
+            output = self.root / f'O-{fsync}-{rebuild}'
             with mock.patch.object(flush, 'writeback_available', return_value=True), \
                     mock.patch.object(flush, 'start_writeback', record):
                 outcome = transfer(self.source, self.basis, output, node_blocks=128,
-                                   **options('writeback', rebuild=rebuild))
-            with self.subTest(rebuild=rebuild):
+                                   **options(fsync, rebuild=rebuild))
+            with self.subTest(fsync=fsync, rebuild=rebuild):
                 self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
                 self.assertEqual(snapshot(output), snapshot(self.source))
-                self.assertEqual(outcome.receiver['fsync_effective'], 'writeback')
+                self.assertEqual(outcome.receiver['fsync_effective'], fsync)
                 self.assertEqual(outcome.receiver['writeback_calls'], len(calls))
                 by_file = {}
                 for inode, offset, length in calls:
@@ -181,14 +185,20 @@ class ModeTests(FsyncTestCase):
             write_tree(source, dict(control, **{'base/1/big': new}))
             write_tree(basis, dict(control, **{'base/1/big': old}))
             output = None if in_place else self.root / f'O-{label[:3]}'
-            outcome = transfer(source, basis, output, node_blocks=128, **options('writeback', in_place=in_place))
-            with self.subTest(case=label):
-                self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
-                self.assertIsNone(outcome.receiver_error, repr(outcome.receiver_error))
-                self.assertEqual(snapshot(basis if in_place else output), snapshot(source))
-                stats = outcome.receiver
-                self.assertEqual((stats['fsync_effective'], stats['fsync_mode']), ('writeback', 'writeback'))
-                self.assertGreaterEqual(stats['writeback_calls'], 2)
+            for fsync in ('writeback', 'worker-writeback'):
+                target = basis if in_place else output.with_name(f'{output.name}-{fsync}')
+                if in_place:
+                    shutil.rmtree(basis)
+                    write_tree(basis, dict(control, **{'base/1/big': old}))
+                outcome = transfer(source, basis, None if in_place else target, node_blocks=128,
+                                   **options(fsync, in_place=in_place))
+                with self.subTest(case=label, fsync=fsync):
+                    self.assertIsNone(outcome.sender_error, repr(outcome.sender_error))
+                    self.assertIsNone(outcome.receiver_error, repr(outcome.receiver_error))
+                    self.assertEqual(snapshot(target), snapshot(source))
+                    stats = outcome.receiver
+                    self.assertEqual((stats['fsync_effective'], stats['fsync_mode']), (fsync, fsync))
+                    self.assertGreaterEqual(stats['writeback_calls'], 2)
 
     def test_writeback_refused_by_the_filesystem_falls_back_to_main(self):
         rng = random.Random(31)

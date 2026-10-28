@@ -12,6 +12,10 @@
   (FsyncWorker), which fsyncs and closes it while the main loop goes on.
   Nothing is published or committed until every file handed over has been
   fsynced, and any fsync error fails the run.
+- "worker-writeback": "worker", with write-back started early as in
+  "writeback", so the worker's fsyncs, and the last ones the session waits
+  for, have little left to flush (EXP-76). Where the call is refused it is
+  "worker", and the statistics say so.
 """
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ import time
 
 from pgdelta.errors import TransferError
 
-FSYNC_MODES = ('main', 'writeback', 'worker')  # where files are fsynced
+FSYNC_MODES = ('main', 'writeback', 'worker', 'worker-writeback')  # where files are fsynced
 FSYNC_CHOICES = ('auto', *FSYNC_MODES)
 # auto: worker when the fast path is offered and B's lineage facts were read, main otherwise. With the fast path,
 # syncing in the main loop stopped the receiver reading while the sender's reads waited; on a worker the two sides

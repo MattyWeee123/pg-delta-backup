@@ -4,6 +4,22 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (16:30 UTC): EXP-76 pre-registered: the fast path's tail, and a timeline of both disks
+
+- **Why:** EXP-75 found the fast path's fixed costs, not the disks, put `pg_basebackup` ahead at 96% of the pages. The statistics from EXP-74 and EXP-75 (16 fast runs) split those costs very evenly:
+  - launch 0.55 s;
+  - the guard 1.9–5.3 s;
+  - a tail of 3.5–4.1 s after `pg_backup_stop`, nearly all the receiver waiting for its sync worker's last fsyncs (3.1–3.8 s);
+  - about 8 s at `scatterall12` that the statistics can't place.
+- **Built:**
+  - **`--fsync worker-writeback`:** the sync worker with early write-back every 8 MiB (`sync_file_range`), so the last fsyncs have little left to flush. Tests extended to it; the real call runs on Linux in CI.
+  - **The sender's phase times:** guard start and the sending's first and last file, as wall-clock times in its statistics.
+  - **The lab:** arm letter `b` for `worker-writeback`; `SERIES=1` samples both VMs' disks every 0.25 s (`disk_series.sh`).
+- **EXP-76:** the `uniform` and `scatterall12` cells, worker against worker-writeback, and `pg_basebackup`'s timeline beside them.
+  - **Deciding:** at least 2.0 s saved in each cell.
+  - **Also:** the receiver's wait under 1 s, backup mode within 3%, and the guard using neither disk.
+- **The web console:** still CMU's sign-in in the built-in browser. Moving to the owner's own Chrome needs their agreement, so it is asked for.
+
 ## 2026-10-28 (16:18 UTC): EXP-75 done, the selector held, and pg_basebackup's win placed near 85% of pages
 
 - **Every prediction held.**

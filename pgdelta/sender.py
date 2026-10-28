@@ -376,7 +376,10 @@ class _Sender:
         self.fast_path, self.fast = fast_path, None
         self.fast_counts = {'used': False, 'reasons': [], 'summaries': 0, 'summary_rows': 0, 'relations': 0,
                             'files_chosen': 0, 'files_whole': 0, 'pages_chosen': 0, 'guard_seconds': 0.0,
-                            'summarizer_wait_seconds': None, 'summarized_lsn': None}
+                            'summarizer_wait_seconds': None, 'summarized_lsn': None,
+                            # Wall-clock times (time.time()), to place the guard and the sending on a timeline of
+                            # the disks (EXP-76): the guard's start, and the first and last listed file sent.
+                            'guard_started_utc': None, 'sending_started_utc': None, 'sending_ended_utc': None}
         self.hash_algorithm = hash_algorithm
         # --compress zstd: offered in HELLO; the codec exists once the receiver accepted it (pgdelta.compress).
         self.compress, self.codec = compress, None
@@ -654,6 +657,7 @@ class _Sender:
         if not isinstance(facts, dict):
             raise ProtocolError('ACCEPT summary must be an object')
         started = time.perf_counter()
+        counts['guard_started_utc'] = time.time()
         source = dict(self.live.summary_source(), identity=self.identity)
         counts['summarizer_wait_seconds'] = source['summarizer_wait_seconds']
         counts['summarized_lsn'] = (None if source['summarized_lsn'] is None
@@ -722,12 +726,14 @@ class _Sender:
                     for index, entry, _, pages, whole in plans if not whole
                     for first, count in matching.runs(pages, self.max_run)]
             self.ahead = _ReadAhead(self.reader, runs, self.read_ahead, READ_AHEAD_BYTES, self.block)
+        counts['sending_started_utc'] = time.time()
         try:
             for plan in plans:
                 self._send_fast_file(*plan)
         finally:
             if self.ahead is not None:
                 self.ahead.close()
+        counts['sending_ended_utc'] = time.time()
 
     def _select(self, plans):
         """--selector (pgdelta.selector, EXP-74): each fill's time, predicted from the unfilled plan, the guard's time

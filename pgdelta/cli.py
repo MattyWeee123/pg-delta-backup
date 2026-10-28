@@ -283,7 +283,8 @@ def _rebuild_options(parser):
                         help='where each finished output file is fsynced: main, in the main loop before the '
                              'next file; writeback, the same, after starting write-back every 8 MiB written '
                              '(Linux sync_file_range; elsewhere as main); worker, on a background thread '
-                             'while the main loop goes on; auto, worker when the fast path is offered and main '
+                             'while the main loop goes on; worker-writeback, worker after starting write-back '
+                             'the same way (elsewhere as worker); auto, worker when the fast path is offered and main '
                              'otherwise (EXP-68). Every fsync completes before publication or commit either way '
                              '(default: %(default)s)')
 

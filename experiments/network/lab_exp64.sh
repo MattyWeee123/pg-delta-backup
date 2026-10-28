@@ -22,6 +22,8 @@
 # A pattern "scatterallN" (EXP-75) changes N% of events' rows the same way too (payload upper-cased, so its length is
 # unchanged), so nearly every relation of the database changes; each copy's check then counts the events changed.
 # An arm "fastNws" (EXP-75) is fastNw with --selector instead of a fill: it chooses its fill, or a full copy.
+# A "b" in place of the "w" (EXP-76) syncs on the worker with early write-back (--fsync worker-writeback). SERIES=1
+# samples both VMs' /data disk every 0.25 s around each run (disk_series.sh: series-dest.txt, series-source.txt).
 set -u
 SRC=$1
 REPEATS=${2:-2}
@@ -30,6 +32,7 @@ SCALE=${SCALE:-600}
 PATTERNS=${PATTERNS:-hot uniform}
 ARMS=${ARMS:-hash fast full}
 PLAN=${PLAN:-0}
+SERIES=${SERIES:-0}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
 R=${OUT:-/data/exp04-results/exp64}
@@ -123,6 +126,11 @@ EOF
     fi
     drop
     disks | sed 's/^/before /' > "$d/diskstats.txt"
+    if [ "$SERIES" = 1 ]; then
+      bash experiments/network/disk_series.sh > "$d/series-dest.txt" 2> /dev/null & sp=$!
+      on_src "nohup bash experiments/network/disk_series.sh > /tmp/exp64-series.txt 2> /dev/null < /dev/null & echo \$! > /tmp/exp64-series.pid"
+      sleep 0.5  # a few samples before t0
+    fi
     rstatus=null status= plan=null
     if [ "$arm" = full ]; then
       t0=$(date +%s.%N)
@@ -136,11 +144,12 @@ EOF
       # since EXP-70 made 2 pages the default; none takes an old primary from its own WAL (EXP-71's default).
       # A final "s" has --selector choose the fill, or a full copy, instead (EXP-75).
       fast= fsync='--fsync main'
-      if [[ "$arm" =~ ^fast([0-9]*)(w?)(f([0-9]+)|s)?$ ]]; then
+      if [[ "$arm" =~ ^fast([0-9]*)([wb]?)(f([0-9]+)|s)?$ ]]; then
         fill="--fill-gaps ${BASH_REMATCH[4]:-0}"
         [ "${BASH_REMATCH[3]}" = s ] && fill=--selector
         fast="--fast-path summaries --read-ahead ${BASH_REMATCH[1]:-0} $fill --no-diverged-basis"
-        [ -n "${BASH_REMATCH[2]}" ] && fsync='--fsync worker'
+        [ "${BASH_REMATCH[2]}" = w ] && fsync='--fsync worker'
+        [ "${BASH_REMATCH[2]}" = b ] && fsync='--fsync worker-writeback'
       fi
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
@@ -157,6 +166,12 @@ EOF
       on_src "cat /tmp/exp64-send.json" > "$d/send.json"
     fi
     disks | sed 's/^/after /' >> "$d/diskstats.txt"
+    if [ "$SERIES" = 1 ]; then
+      sleep 0.5  # a few samples after t1
+      kill "$sp"; wait "$sp" 2> /dev/null
+      on_src 'kill $(cat /tmp/exp64-series.pid); sleep 0.3; cat /tmp/exp64-series.txt; rm -f /tmp/exp64-series.txt /tmp/exp64-series.pid' \
+        > "$d/series-source.txt"
+    fi
     if [ "$PLAN" = 1 ] && [ "${arm#fast}" != "$arm" ] && on_src "test -s /tmp/exp64-plan.json"; then
       plan="\"$(on_src "sha256sum /tmp/exp64-plan.json" | cut -c1-16)\""
       [ -s "$R/plan-runs-$pattern.json.gz" ] || on_src "gzip -c /tmp/exp64-plan.json" > "$R/plan-runs-$pattern.json.gz"

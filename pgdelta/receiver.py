@@ -46,8 +46,9 @@ reuses, is refreshed in place, by one run at a time.
 
 Where files are fsynced (`fsync`, pgdelta.flush): in the main loop
 ("main", default), there with early write-back on Linux ("writeback"), or
-on a background thread ("worker"); publication or the commit waits for
-every fsync either way.
+on a background thread ("worker"), with early write-back too
+("worker-writeback"); publication or the commit waits for every fsync
+either way.
 
 A live source (pgdelta.live) says in HELLO that files follow the listed
 ones ("appends": true): once every listed file is done, one APPEND lists
@@ -479,7 +480,7 @@ class _Receiver:
         # fsync placement (pgdelta.flush): the mode asked for, the one in effect (known once the run
         # starts, for "writeback"), and the worker if any.
         self.fsync, self.syncer, self.fsync_auto = fsync, None, False
-        self.fsync_effective = None if fsync == 'writeback' else fsync
+        self.fsync_effective = None if fsync in ('writeback', 'worker-writeback') else fsync
         self.writeback = False
         self.writeback_calls, self.writeback_seconds, self.fsync_wait_seconds = 0, 0.0, 0.0
         # In place: B was blocked (marker written, with run_id) and, later, committed (pg_control renamed
@@ -645,8 +646,11 @@ class _Receiver:
         if mode == 'writeback':
             self.writeback = flush.writeback_available()
             self.fsync_effective = 'writeback' if self.writeback else 'main'
-        elif mode == 'worker':
+        elif mode in ('worker', 'worker-writeback'):
             self.syncer = flush.FsyncWorker(stop=self.stop, on_error=self._fsync_failed)
+            if mode == 'worker-writeback':
+                self.writeback = flush.writeback_available()
+                self.fsync_effective = mode if self.writeback else 'worker'
 
     def _fsync_failed(self, exc):
         if not self.stop.is_set():
@@ -1073,8 +1077,8 @@ class _Receiver:
         started = time.perf_counter()
         if flush.start_writeback(output.fd, output.dirty_start, output.dirty_end - output.dirty_start):
             self.writeback_calls += 1
-        else:  # refused on this filesystem: fsync at the end of each file only, as "main" does
-            self.writeback, self.fsync_effective = False, 'main'
+        else:  # refused on this filesystem: fsync at the end of each file only, as "main" (or "worker") does
+            self.writeback, self.fsync_effective = False, 'main' if self.syncer is None else 'worker'
         self.writeback_seconds += time.perf_counter() - started
         output.dirty_bytes = 0
 
