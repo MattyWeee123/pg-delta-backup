@@ -113,6 +113,20 @@ class Pages(unittest.TestCase):
         fastpath.check_mode('summaries', 'live', False, 0, 'plan.json')
         with self.assertRaises(InvalidInput):
             fastpath.check_mode(None, 'live', False, 0, 'plan.json')
+        fastpath.check_mode('summaries', 'live', False, 8, None, 2)
+        for fill in (-1, 1.5):
+            with self.assertRaises(InvalidInput):
+                fastpath.check_mode('summaries', 'live', False, 8, None, fill)
+        with self.assertRaises(InvalidInput):
+            fastpath.check_mode(None, 'live', False, 0, None, 2)
+
+    def test_fill_gaps_joins_runs_across_short_clean_gaps_only(self):
+        pages = [0, 1, 4, 6, 7, 20, 22]
+        self.assertEqual(fastpath.fill_gaps(pages, 0), pages)
+        self.assertEqual(fastpath.fill_gaps(pages, 1), [0, 1, 4, 5, 6, 7, 20, 21, 22])
+        self.assertEqual(fastpath.fill_gaps(pages, 2), [0, 1, 2, 3, 4, 5, 6, 7, 20, 21, 22])
+        self.assertEqual(fastpath.fill_gaps([], 3), [])
+        self.assertEqual(fastpath.fill_gaps([5], 3), [5])
 
 
 class ReadAhead(unittest.TestCase):
@@ -269,6 +283,22 @@ class RealServer(unittest.TestCase):
         self.assertEqual(len(plan['files']) - len(chosen), fast['files_whole'])
         self.assertEqual(sum(n for f in chosen for _, n in f['runs']), fast['pages_chosen'])
         self.assertEqual(sum(len(f['runs']) for f in chosen), fast['read_ahead']['reads'])
+        self.check_copy(target)
+
+    def test_filled_gaps_give_the_same_copy_in_fewer_runs(self):
+        """EXP-70's arm: clean gaps of up to 2 pages sent too; the plan lists the filled pages, read as fewer runs."""
+        plan_path = self.root / 'fast-filled-plan.json'
+        target, stats = self.refresh('fast-filled', 'stale', '--fill-gaps', '2', '--plan-out', plan_path)
+        fast = stats['fast_path']
+        self.assertTrue(fast['used'], fast['reasons'])
+        self.assertEqual(fast['fill_gaps']['gap_pages'], 2)
+        self.assertGreater(fast['fill_gaps']['pages_filled'], 0)  # the stale copy's changes leave short gaps
+        chosen = [f for f in json.loads(plan_path.read_text())['files'] if not f['whole']]
+        self.assertEqual(sum(n for f in chosen for _, n in f['runs']), fast['pages_chosen'])
+        self.assertEqual(sum(len(f['runs']) for f in chosen), fast['read_ahead']['reads'])
+        for f in chosen:  # no two runs of a file are separated by a gap the fill should have closed
+            for (first, count), (after, _) in zip(f['runs'], f['runs'][1:]):
+                self.assertTrue(after == first + count or after - (first + count) > 2, f)
         self.check_copy(target)
 
     def test_a_crashed_copy_is_refused_and_refreshed_by_hashing(self):

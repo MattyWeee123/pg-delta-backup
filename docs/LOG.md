@@ -8,6 +8,14 @@ Experiments have their own write-ups in [docs/experiments/](experiments/).
 
 
 
+## 2026-10-28 (late night): idea 2 built, EXP-70 pre-registered; EXP-69 part B running
+
+- **`--fill-gaps PAGES`** (sender, with `--fast-path`): each clean gap of at most PAGES pages between two chosen pages is sent too, so two runs become one read and one write (`fastpath.fill_gaps`).
+  - **Tests:** a real-server refresh with `--fill-gaps 2` fills more than 0 pages, and its copy recovers to the source's state and passes `pg_amcheck`.
+  - **What EXP-68 found it attacks:** the fast path's scattered case is bound by the disks' operation rate, and the rule re-applied on the real page set says to prototype idea 2.
+- **EXP-70 pre-registered:** fills of 0, 1, 2 and 4 pages on EXP-64's uniform cell, and 0 and 2 on the hot cell. The deciding prediction: filling gaps of up to 2 pages takes at most 0.85 of no fill (the model gives 0.69).
+- **The lab scripts' arms are now explicit:** EXP-68 changed the fast path's defaults, so `lab_exp64.sh` and `lab_exp67.sh` pass every setting, and old arms keep their registered meaning.
+
 ## 2026-10-28 (night): EXP-68 done, the fast path beats a full copy at 28% of pages; EXP-69 part B running
 
 - **EXP-68:** all 7 predictions held, all 14 runs correct, on the `ha` set in us-west1; its VMs were deleted after the fetch.

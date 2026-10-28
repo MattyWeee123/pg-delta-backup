@@ -275,6 +275,22 @@ def pages_to_send(path, size, basis_size, plan, block, blocks_per_segment, whole
     return sorted(chosen), False
 
 
+def fill_gaps(pages, gap):
+    """--fill-gaps (EXP-70): sorted pages plus every clean gap of at most `gap` pages between two of them, so two
+    runs of chosen pages become one read on S and one write on B. A balanced persistent disk counts a write of up to
+    32 KiB as one operation (EXP-66), and the fast path's scattered case is bound by operations on both sides
+    (EXP-68). The pages filled are read from S and sent like the chosen ones; B's copy of them is overwritten."""
+    if gap <= 0 or not pages:
+        return pages
+    out = [pages[0]]
+    for page in pages[1:]:
+        if page - out[-1] - 1 <= gap:
+            out.extend(range(out[-1] + 1, page + 1))
+        else:
+            out.append(page)
+    return out
+
+
 def written_digest(hasher, size, leaves):
     """The digest of a file's written pages: (page number, leaf digest) pairs in order, keyed as the session."""
     return hasher.file(size, hasher.node(b''.join(_PAGE_NUMBER.pack(page) + leaf for page, leaf in leaves)))
@@ -290,12 +306,16 @@ def check_decision(decision):
     return decision['use'], reasons
 
 
-def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None):
+def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gaps=0):
     if type(read_ahead) is not int or read_ahead < 0:
         raise InvalidInput(f'read-ahead must be a whole number of threads, not {read_ahead!r}')
+    if type(fill_gaps) is not int or fill_gaps < 0:
+        raise InvalidInput(f'fill-gaps must be a whole number of pages, not {fill_gaps!r}')
     if mode is None:
         if read_ahead:
             raise InvalidInput('--read-ahead reads the fast path\'s chosen pages, so it needs --fast-path')
+        if fill_gaps:
+            raise InvalidInput('--fill-gaps fills gaps between the fast path\'s chosen pages, so it needs --fast-path')
         if plan_out is not None:
             raise InvalidInput('--plan-out writes the fast path\'s plan, so it needs --fast-path')
         return

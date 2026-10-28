@@ -354,13 +354,15 @@ class _Sender:
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                  hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-                 fast_path=None, read_ahead=0, plan_out=None):
+                 fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0):
         self.started = time.perf_counter()
         # --read-ahead (EXP-64b): the fast path's chosen pages read on this many threads ahead of sending (0: one run
         # at a time in the sending thread, as in EXP-64); and what the reading did.
         self.read_ahead, self.ahead = read_ahead, None
         # --plan-out (EXP-68): where the fast path's plan is written, once the guard let it run.
         self.plan_out = plan_out
+        # --fill-gaps (EXP-70): clean gaps of at most this many pages between chosen pages are sent too; how many.
+        self.fill_gaps, self.pages_filled = fill_gaps, 0
         # --fast-path summaries (pgdelta.fastpath): offered in HELLO; `fast` is the summaries' block plan once the
         # guard let it run, and the listed files then go by fast_path's rules, B unread.
         self.fast_path, self.fast = fast_path, None
@@ -502,7 +504,8 @@ class _Sender:
         return self.block
 
     def _run(self):
-        fastpath.check_mode(self.fast_path, self.source_kind, self.subpage, self.read_ahead, self.plan_out)
+        fastpath.check_mode(self.fast_path, self.source_kind, self.subpage, self.read_ahead, self.plan_out,
+                            self.fill_gaps)
         if self.source_kind not in datadir.SOURCE_KINDS:
             raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
                                f'not {self.source_kind!r}')
@@ -670,8 +673,13 @@ class _Sender:
         for index, entry in enumerate(entries):
             basis_size = self.basis_sizes.get(index) if self.reuse else None
             unlogged = self.selection is not None and self.selection.source_path(entry.path) != entry.path
-            plans.append((index, entry, basis_size, *fastpath.pages_to_send(
-                entry.path, entry.size, basis_size, self.fast, self.block, blocks_per_segment, whole=unlogged)))
+            pages, whole = fastpath.pages_to_send(entry.path, entry.size, basis_size, self.fast, self.block,
+                                                  blocks_per_segment, whole=unlogged)
+            if self.fill_gaps and not whole:
+                filled = fastpath.fill_gaps(pages, self.fill_gaps)
+                self.pages_filled += len(filled) - len(pages)
+                pages = filled
+            plans.append((index, entry, basis_size, pages, whole))
         if self.plan_out is not None:
             _write_plan(self.plan_out, self.block, plans, self.max_run)
         if self.read_ahead:
@@ -1173,7 +1181,10 @@ class _Sender:
                               'read_ahead': {'threads': self.read_ahead, 'window_bytes': READ_AHEAD_BYTES,
                                              'reads': None if self.ahead is None else self.ahead.reads,
                                              'wait_seconds': None if self.ahead is None
-                                             else round(self.ahead.wait_seconds, 6)}}}
+                                             else round(self.ahead.wait_seconds, 6)},
+                              # --fill-gaps: pages_chosen counts the pages filled too; absent without it.
+                              **({'fill_gaps': {'gap_pages': self.fill_gaps, 'pages_filled': self.pages_filled}}
+                                 if self.fill_gaps else {})}}
                if self.fast_path else {}),
         }
 
@@ -1195,7 +1206,7 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-               fast_path=None, read_ahead=0, plan_out=None):
+               fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -1230,9 +1241,10 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     summaries list since B's redo point, without reading B; the receiver proves B's lineage, the guard here
     decides, and otherwise the session is as without it. `read_ahead` threads read the fast path's chosen pages ahead
     of the sending thread (0: one run at a time in it). `plan_out`, a path, receives the fast path's plan as JSON
-    where it runs (_write_plan).
+    where it runs (_write_plan). `fill_gaps` pages: clean gaps of at most that many pages between the fast path's
+    chosen pages are sent too (fastpath.fill_gaps), so fewer, larger reads and writes carry them.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
                    pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, fast_path,
-                   read_ahead, plan_out).run()
+                   read_ahead, plan_out, fill_gaps).run()

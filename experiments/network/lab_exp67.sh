@@ -154,11 +154,11 @@ EOF
       fast)
         tr=null
         python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
-          --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 > "$d/receive.log" 2>&1 &
+          --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 --fsync main > "$d/receive.log" 2>&1 &
         rp=$!
         for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
         on_src "python3 -m pgdelta send --source $ROOT/data --source-kind live --pg-conn '$CONN' --connect $DEST:7000 \
-          --pg-controldata $PGBIN/pg_controldata --jobs 4 --hash blake3 --fast-path summaries \
+          --pg-controldata $PGBIN/pg_controldata --jobs 4 --hash blake3 --fast-path summaries --read-ahead 0 \
           --stats-json /tmp/exp67-send.json" > "$d/send.log" 2>&1 || status=$?
         wait "$rp"; rstatus=$?
         [ "$status" = 0 ] && { start_copy "$B" "$d/copy.log" || status=$?; }

@@ -9,11 +9,12 @@
 #         > /data/exp04-results/exp64-lab.log 2>&1 < /dev/null &
 # SCALE (default 600, about 18 GB) and OUT change the size and the results directory (the smoke: SCALE=20).
 # PATTERNS (default "hot uniform") and ARMS (default "hash fast full") pick the cells; an arm "fastN" is the fast
-# path with --read-ahead N (EXP-64b: PATTERNS=uniform ARMS="hash fast fast1 fast8 full"), and "fastNw" the same with
-# the receiver's --fsync worker. ARMS_<pattern> (e.g. ARMS_hot) overrides ARMS for that pattern. Each run records
+# path with --read-ahead N (EXP-64b: PATTERNS=uniform ARMS="hash fast fast1 fast8 full"), "fastNw" the same with
+# the receiver's --fsync worker, and "fastNwfK" with --fill-gaps K too (EXP-70). Every other arm syncs in the main
+# loop and "fast" reads one run at a time, as when they were registered. ARMS_<pattern> (e.g. ARMS_hot) overrides ARMS for that pattern. Each run records
 # /proc/diskstats for /data on both VMs just before t0 and just after t1 (diskstats.txt). PLAN=1 has every fast run
 # write its plan (--plan-out); each run's digest of it goes in meta.json, and the first plan per pattern is kept as
-# plan-runs-PATTERN.json.gz (EXP-68: PATTERNS="hot uniform" ARMS_hot="fast fast8w"
+# plan-runs-PATTERN.json.gz, and per arm plan-runs-PATTERN-ARM.json.gz (EXP-68: PATTERNS="hot uniform" ARMS_hot="fast fast8w"
 # ARMS_uniform="fast8 fast16 fast8w fast16w full" PLAN=1).
 set -u
 SRC=$1
@@ -105,13 +106,15 @@ EOF
       status=$?
       t1=$(date +%s.%N)
     else
-      threads=${arm#fast}; threads=${threads%w}
-      case "$arm" in
-        fast) fast='--fast-path summaries' ;;
-        fast*) fast="--fast-path summaries --read-ahead $threads" ;;
-        *) fast= ;;
-      esac
-      fsync=; [ "${arm%w}" != "$arm" ] && fsync='--fsync worker'
+      # Every setting explicit, since EXP-68 made 8 reader threads and the sync worker the fast path's defaults:
+      # "fast" reads one run at a time and syncs in the main loop, as in EXP-64; fastN reads on N threads; a "w"
+      # syncs on the worker; "fK" fills clean gaps of up to K pages (EXP-70's --fill-gaps).
+      fast= fsync='--fsync main'
+      if [[ "$arm" =~ ^fast([0-9]*)(w?)(f([0-9]+))?$ ]]; then
+        fast="--fast-path summaries --read-ahead ${BASH_REMATCH[1]:-0}"
+        [ -n "${BASH_REMATCH[4]}" ] && fast="$fast --fill-gaps ${BASH_REMATCH[4]}"
+        [ -n "${BASH_REMATCH[2]}" ] && fsync='--fsync worker'
+      fi
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
         --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 $fsync > "$d/receive.log" 2>&1 &
@@ -130,6 +133,8 @@ EOF
     if [ "$PLAN" = 1 ] && [ "${arm#fast}" != "$arm" ] && on_src "test -s /tmp/exp64-plan.json"; then
       plan="\"$(on_src "sha256sum /tmp/exp64-plan.json" | cut -c1-16)\""
       [ -s "$R/plan-runs-$pattern.json.gz" ] || on_src "gzip -c /tmp/exp64-plan.json" > "$R/plan-runs-$pattern.json.gz"
+      # EXP-70: the first plan per pattern and arm too, since --fill-gaps changes the plan.
+      [ -s "$R/plan-runs-$pattern-$arm.json.gz" ] || on_src "gzip -c /tmp/exp64-plan.json" > "$R/plan-runs-$pattern-$arm.json.gz"
     fi
     verify=null
     if [ "${arm#fast}" != "$arm" ] && [ "$status" = 0 ]; then
