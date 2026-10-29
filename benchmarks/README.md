@@ -53,6 +53,12 @@ Include raw values and failed trials; report speedup only where the recovery gua
 
 ## Running the consolidated CLI
 
+The current live engine is also available as `pg_delta_live` and
+`pg_delta_live_summaries`. It avoids full source staging, requires local
+PGDATA access, and reports engine/WAL verification separately from manifests
+and restores. See [the live comparison runbook](LIVE.md) for local and GCP
+commands, source provenance, and the Docker/HammerDB overlay.
+
 Both the configurable CLI and the [native recovery suite](NATIVE.md) use the same backup adapters and result schema. See [the consolidation and tool decisions](CONSOLIDATION.md). Sam's HammerDB workload is retained in [workloads/hammerdb](workloads/hammerdb/README.md).
 
 The CLI runs one method from the [registry](methods.py): a full backup, a native incremental followed by reconstruction, or a staged transfer (`rsync_staged`, `pg_delta_staged`) that captures S and refreshes a copy of an old basis from it. It verifies manifests and required WAL; its success status is `PASS_MANIFEST_ONLY`. It does not itself restore the database or orchestrate HammerDB. The native suite adds those fixture-specific recovery tests. Adding a method means registering it in `methods.py`; see [CONSOLIDATION.md](CONSOLIDATION.md#adding-a-method).

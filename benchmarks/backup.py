@@ -2,6 +2,8 @@
 
 Schema v3 records manifest verification separately from restore correctness,
 and carries a transfer phase and its byte counts for delta/transfer methods.
+Live methods extend its status vocabulary with PASS_ENGINE_ONLY and identify
+their verifier in verification.kind; the structural key set is unchanged.
 The caller supplies command execution so every frontend retains its own logs.
 Methods themselves live in benchmarks/methods.py.
 """
@@ -24,6 +26,7 @@ from benchmarks.resources import ResourceSampler
 EXIT_OK, EXIT_INVALID_INPUT, EXIT_IO_FAILURE, EXIT_VERIFICATION_FAILURE = 0, 2, 3, 4
 CHECKSUM_ALGORITHMS = ('CRC32C', 'SHA224', 'SHA256', 'SHA384', 'SHA512')
 SCHEMA_VERSION = 3
+SUCCESS_STATUSES = frozenset({'PASS_MANIFEST_ONLY', 'PASS_ENGINE_ONLY'})
 RESULT_KEYS = (
     'schema_version', 'run_id', 'method', 'backup', 'verification',
     'basis_verification', 'increment_verification', 'combination',
@@ -325,9 +328,11 @@ def build_result(run_id, method, backup, verification, backup_file_bytes, *,
                  basis_verification=None, increment_verification=None, combination=None,
                  transfer=None, transfer_stats=None,
                  output_file_bytes=None, method_seconds=None, verified_seconds=None,
-                 failure=None):
+                 failure=None, success_status='PASS_MANIFEST_ONLY'):
     status, exit_code = failure or classify(backup, verification)
-    verified = status == 'PASS_MANIFEST_ONLY'
+    if status == 'PASS_MANIFEST_ONLY':
+        status = success_status
+    verified = status in SUCCESS_STATUSES
     phases = (backup, increment_verification, combination, transfer)
     if method_seconds is None and backup is not None:
         method_seconds = sum(p['duration_seconds'] for p in phases if p is not None)
@@ -355,7 +360,8 @@ def build_result(run_id, method, backup, verification, backup_file_bytes, *,
 
 
 def _context(method, *, run_id, output, tools, execute, host, port, user, basis,
-             increment, capture_path, checksum, checkpoint, progress, read_log, read_file):
+             increment, capture_path, checksum, checkpoint, progress, read_log, read_file,
+             source_pgdata=None, method_options=None):
     # Imported here because methods.py builds on this module's command helpers.
     from benchmarks import methods
     spec = methods.get(method)
@@ -368,13 +374,14 @@ def _context(method, *, run_id, output, tools, execute, host, port, user, basis,
         port=port, user=user, basis=basis,
         capture=capture_path if capture_path is not None else increment,
         checksum=checksum, checkpoint=checkpoint, progress=progress,
-        read_log=read_log, read_file=read_file or read_text)
+        read_log=read_log, read_file=read_file or read_text,
+        source_pgdata=source_pgdata, options=method_options)
 
 
 def prepare_backup(method, *, run_id, output, tools, execute, host, port=5432,
                    user='postgres', basis=None, increment=None, capture_path=None,
                    checksum='SHA256', checkpoint='fast', progress=False,
-                   read_log=None, read_file=None):
+                   read_log=None, read_file=None, source_pgdata=None, method_options=None):
     """Run a method's untimed preparation early, e.g. before a workload starts.
 
 Returns its phase records, or None for a method without preparation. Pass the
@@ -384,7 +391,8 @@ result to run_backup(prepared=...) with the same arguments.
         method, run_id=run_id, output=output, tools=tools, execute=execute, host=host,
         port=port, user=user, basis=basis, increment=increment, capture_path=capture_path,
         checksum=checksum, checkpoint=checkpoint, progress=progress,
-        read_log=read_log, read_file=read_file)
+        read_log=read_log, read_file=read_file, source_pgdata=source_pgdata,
+        method_options=method_options)
     return spec.prepare(ctx) if spec.prepare else None
 
 
@@ -426,7 +434,7 @@ def run_backup(method, *, run_id, output, tools, execute, host, port=5432,
                user='postgres', basis=None, increment=None, capture_path=None,
                checksum='SHA256', checkpoint='fast', progress=False,
                basis_verification=None, prepared=None, read_log=None, read_file=None,
-               after_verification=None):
+               after_verification=None, source_pgdata=None, method_options=None):
     """Prepare -> method phases -> verify, with one shared v3 record.
 
 B0 verification and method preparation are prerequisites outside refresh
@@ -436,7 +444,7 @@ successful performance sample. capture_path (or its older name increment) is
 the separate capture directory of methods that declare one.
 
 after_verification, if given, is called once, right after the timed phases
-and the final pg_verifybackup (also when a phase failed and verification was
+and final method verification (also when a phase failed and verification was
 skipped), before any harness-only check such as the staged methods' output
 check, so a frontend can close its measurement window there. It is not
 called when the run stops at FAIL_BASIS or FAIL_PREPARE, before the timer.
@@ -445,7 +453,8 @@ called when the run stops at FAIL_BASIS or FAIL_PREPARE, before the timer.
         method, run_id=run_id, output=output, tools=tools, execute=execute, host=host,
         port=port, user=user, basis=basis, increment=increment, capture_path=capture_path,
         checksum=checksum, checkpoint=checkpoint, progress=progress,
-        read_log=read_log, read_file=read_file)
+        read_log=read_log, read_file=read_file, source_pgdata=source_pgdata,
+        method_options=method_options)
     if prepared is not None and spec.prepare is None:
         raise ValueError(f'{spec.name} has no preparation phase')
     basis_check = basis_verification
@@ -471,8 +480,11 @@ called when the run stops at FAIL_BASIS or FAIL_PREPARE, before the timer.
     failure = phases.get('failure')
     verification = None
     if failure is None:
-        verification = execute('verification', verify_command(
-            tools['pg_verifybackup'], output, manifest=phases.get('verify_manifest')))
+        if spec.verify is not None:
+            verification = spec.verify(ctx, phases)
+        else:
+            verification = execute('verification', verify_command(
+                tools['pg_verifybackup'], output, manifest=phases.get('verify_manifest')))
     verified_seconds = time.perf_counter() - start
     if after_verification is not None:
         after_verification()
@@ -490,4 +502,5 @@ called when the run stops at FAIL_BASIS or FAIL_PREPARE, before the timer.
         increment_verification=phases.get('increment_verification'),
         combination=phases.get('combination'), transfer=phases.get('transfer'),
         transfer_stats=stats, output_file_bytes=directory_bytes(output),
-        method_seconds=method_seconds, verified_seconds=verified_seconds, failure=failure)
+        method_seconds=method_seconds, verified_seconds=verified_seconds, failure=failure,
+        success_status=spec.success_status)

@@ -1,9 +1,9 @@
 """Run one backup method from the registry using the shared benchmark adapters.
 
-Methods are listed in benchmarks/methods.py: native full or incremental, or a
-staged transfer (rsync, pgdelta) that refreshes a copy of an old basis.
-This command checks the manifest and required WAL, not logical restore
-correctness. PASS_MANIFEST_ONLY must never be promoted to a restore PASS.
+Methods are listed in benchmarks/methods.py: native full/incremental, staged
+transfers and source-local live pgdelta. Native/staged methods check the
+manifest; live methods check engine receipts and packaged WAL. Neither
+PASS_MANIFEST_ONLY nor PASS_ENGINE_ONLY is a logical restore verdict.
 Use native_baseline for the disposable recovery suite; HammerDB is a separate
 workload generator. See benchmarks/CONSOLIDATION.md.
 """
@@ -32,6 +32,7 @@ from benchmarks.backup import (
     tree_snapshot, verify_command as verification_argv,
 )
 from benchmarks import methods
+from benchmarks.provenance import source_provenance
 
 def pg_basebackup_full(args, backup_dir):
     return basebackup_command(args.pg_basebackup, backup_dir, host=args.host,
@@ -53,7 +54,7 @@ METHODS = {'pg_basebackup_full': pg_basebackup_full,
            'pg_basebackup_incremental': pg_basebackup_incremental}
 # Executables a method may need; each maps to a --flag of the same name.
 TOOL_FLAGS = ('pg_basebackup', 'pg_verifybackup', 'pg_combinebackup', 'rsync', 'python',
-              'pg_controldata')
+              'pg_controldata', 'psql', 'pg_waldump')
 LOGS = {'backup': 'pg_basebackup.log', 'verification': 'pg_verifybackup.log'}
 
 
@@ -143,7 +144,8 @@ def parse_args(argv=None):
     parser.add_argument('--manifest-checksums', choices=CHECKSUM_ALGORITHMS, default='SHA256')
     parser.add_argument('--checkpoint', choices=('fast', 'spread'), default='fast')
     parser.add_argument('--timeout', type=float, default=3600)
-    parser.add_argument('--source-pgdata', help='Optional source path checked for output overlap')
+    parser.add_argument('--source-pgdata', help='Source data directory, required for live pgdelta on the execution host')
+    parser.add_argument('--pgdelta-jobs', type=int, help='Explicit pgdelta live worker count')
     parser.add_argument('--progress', action='store_true')
     parser.add_argument('--pg-basebackup', default='pg_basebackup')
     parser.add_argument('--pg-verifybackup', default='pg_verifybackup')
@@ -156,10 +158,16 @@ def parse_args(argv=None):
                         help='pgdelta command prefix; default: PYTHON -m pgdelta')
     parser.add_argument('--pg-controldata', default=None,
                         help='passed to pgdelta as --pg-controldata when given')
+    parser.add_argument('--psql', default='psql')
+    parser.add_argument('--pg-waldump', default='pg_waldump')
     args = parser.parse_args(argv)
     if not 0 < args.timeout < float('inf'):
         parser.error('timeout must be finite and positive')
     spec = methods.get(args.method)
+    if spec.source_local and (not args.source_pgdata or not args.pg_controldata):
+        parser.error('--source-pgdata and --pg-controldata are required for live pgdelta')
+    if args.pgdelta_jobs is not None and args.pgdelta_jobs < 1:
+        parser.error('--pgdelta-jobs must be positive')
     if spec.needs_basis != (args.basis is not None):
         parser.error(f'--basis is required for {args.method}' if spec.needs_basis
                      else f'--basis is not accepted for {args.method}')
@@ -208,6 +216,7 @@ def main(argv=None):
         print(f'error: {exc}', file=sys.stderr)
         return EXIT_INVALID_INPUT
     run_dir.mkdir(parents=True, exist_ok=False)
+    atomic_json(run_dir / 'source-provenance.json', source_provenance())
     write_versions(run_dir / 'versions.txt', args)
     commands = []
 
@@ -231,7 +240,8 @@ def main(argv=None):
         basis=args.basis,
         capture_path=run_dir / spec.capture_dir if spec.capture_dir else None,
         checksum=args.manifest_checksums, checkpoint=args.checkpoint, progress=args.progress,
-        read_log=lambda stage: log_path(stage).read_text(encoding='utf-8'))
+        read_log=lambda stage: log_path(stage).read_text(encoding='utf-8'),
+        source_pgdata=args.source_pgdata, method_options={'jobs': args.pgdelta_jobs})
     if basis_before is not None:
         started = time.perf_counter()
         try:

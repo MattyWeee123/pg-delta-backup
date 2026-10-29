@@ -23,6 +23,7 @@ line each; newlines inside an argument (python -c source) are written as \\n.
 """
 
 import os
+import json
 import sqlite3
 import sys
 import time
@@ -154,6 +155,14 @@ def main(argv):
             sys.stdout.write(RSYNC_VERSION if '--version' in argv else RSYNC_STATS)
         elif program == 'cat' and argv[-1].endswith('backup_manifest'):
             sys.stdout.write(os.environ.get('STUB_MANIFEST', MANIFEST))
+        elif program == 'cat' and argv[-1].endswith('pgdelta-stats.json'):
+            print(os.environ.get('STUB_LIVE_STATS', json.dumps({
+                'bytes_source_to_dest': {'total': 100}, 'bytes_dest_to_source': {'total': 7},
+                'source_kind': 'live', 'fast_path': {'requested': 'summaries', 'used': True}})))
+        elif program in ('python', 'python3') and '--stats' in argv and '--pg-waldump' in argv:
+            print(json.dumps({'status': 'pass', 'kind': 'pgdelta_receipt_and_wal',
+                              'recovery_endpoint': {'system_identifier': '1234', 'timeline': 1,
+                                                    'lsn': '0/3000050', 'source': 'pgdelta.live.stop_lsn'}}))
         else:
             print('stub exec ok')
         return 0

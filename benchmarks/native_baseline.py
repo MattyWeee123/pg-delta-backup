@@ -29,6 +29,7 @@ from benchmarks import methods
 from benchmarks.backup import (atomic_json, basebackup_command, directory_bytes,
                                prepare_backup, run_backup, run_command, verify_basis)
 from benchmarks.resources import ResourceSampler
+from benchmarks.provenance import source_provenance
 from benchmarks.native_oracle import (backup_endpoint, check_operation_prefix,
                                       check_replay_endpoint, cutoff_options,
                                       successful_operations)
@@ -534,6 +535,9 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
             execute=trial.backup_phase, read_log=trial.read_log, host=trial.socket,
             user='bench', basis=basis if spec.needs_basis else None,
             capture_path=trial.root / spec.capture_dir if spec.capture_dir else None)
+        if spec.source_local:
+            adapter.update(source_pgdata=trial.source,
+                           method_options={'jobs': getattr(trial.args, 'pgdelta_jobs', None)})
         # Preparation (e.g. copying B for rsync) stays outside the workload window.
         prepared = prepare_backup(method, **adapter) if spec.prepare else None
         # B was verified above; its checksum policy also runs before the workload.
@@ -637,7 +641,12 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
         record["status"] = "pass"
         return record
     if mode == "active":
-        cutoff = backup_endpoint(output, record['system_identifier'])
+        if spec.source_local:
+            cutoff = backup_result['verification']['report']['recovery_endpoint']
+            if cutoff['system_identifier'] != record['system_identifier']:
+                raise RuntimeError('Live output recovery endpoint belongs to another source')
+        else:
+            cutoff = backup_endpoint(output, record['system_identifier'])
         record['recovery_endpoint'] = cutoff
         # Flush reference WAL beyond the boundary, so exclusive LSN recovery
         # can observe the next record. Never expose this archive to candidate.
@@ -655,11 +664,11 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
             acknowledged=acknowledged)
         record["pitr_restore"] = trial.restore(output, "pitr-restore", expected, target)
         record["active_package_exact_cutoff_oracle"] = "pass"
-        record["correctness_scope"] = "self-contained exact logical match at manifest end LSN against independent B0/archive reference; additional later PITR check"
+        record["correctness_scope"] = "self-contained exact logical match at declared backup end LSN against independent B0/archive reference; additional later PITR check"
     else:
         record['self_contained_restore'] = trial.restore(output, 'package-restore', expected)
         record["correctness_scope"] = "self-contained exact logical match to quiescent source"
-    if negative_controls:
+    if negative_controls and not spec.source_local:
         corrupted = trial.root / "corrupted"
         shutil.copytree(output, corrupted)
         files = json.loads((corrupted / "backup_manifest").read_text())["Files"]
@@ -683,6 +692,10 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
         if same_state(expected, stale["state"]):
             raise RuntimeError("Stale backup negative control matched new state")
         record["negative_controls"] = {"corrupt_data": "rejected", "missing_wal": "rejected", "stale_backup": "rejected"}
+    elif negative_controls:
+        record['negative_controls'] = {
+            'manifest_corruption_controls': 'not applicable: live pgdelta emits no manifest',
+            'note': 'Live evidence/WAL and recovery fault controls run in test_live_benchmark.py'}
     trial.verify(basis)
     if sha256(basis / "backup_manifest") != basis_manifest_sha:
         raise RuntimeError("Basis manifest changed")
@@ -728,6 +741,8 @@ def extra_tools(args, chosen) -> dict:
                  else shutil.which("pg_controldata"))
         if found and Path(found).is_file():
             tools["pg_controldata"] = found
+    if any(methods.get(method).source_local for method in chosen) and not tools.get('pg_controldata'):
+        raise ValueError('Live pgdelta requires pg_controldata beside the PostgreSQL tools')
     return tools
 
 
@@ -748,11 +763,14 @@ def main(argv=None):
                         help="interpreter for the basis copy and python -m pgdelta")
     parser.add_argument("--pgdelta", default=None,
                         help="pgdelta command prefix; default: PYTHON -m pgdelta")
+    parser.add_argument('--pgdelta-jobs', type=int, help='Explicit live pgdelta worker count')
     args = parser.parse_args(argv)
     if args.rows < 100 or math.gcd(args.rows, 48271) != 1 or not 0 < args.change_fraction <= 1:
         parser.error("rows must be >=100 and coprime to 48271; change fraction must be in (0,1]")
     if args.repeats < 1 or args.duration < 4 or args.rate < 10:
         parser.error("repeats >=1, duration >=4 seconds and rate >=10 required")
+    if args.pgdelta_jobs is not None and args.pgdelta_jobs < 1:
+        parser.error('--pgdelta-jobs must be positive')
     if args.output.exists():
         parser.error("Output must not already exist")
     try:
@@ -771,6 +789,7 @@ def main(argv=None):
         "postgres_version": version, "python_version": platform.python_version(),
         "platform": platform.platform(), "cpu_count": os.cpu_count(),
         "commit": os.environ.get("GITHUB_SHA"), "image_digest": os.environ.get("BENCH_IMAGE_DIGEST"),
+        'source_provenance': source_provenance(),
         "config": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
         "units": {"duration": "seconds", "size": "bytes", "latency": "milliseconds"},
         "cache_policy": "uncontrolled OS cache; fresh cluster per trial; no cold-cache claim",

@@ -136,13 +136,14 @@ def phase(exit_code=0, duration=1.0, error=None):
 class RegistryTests(unittest.TestCase):
     def test_built_in_methods_are_registered(self):
         self.assertEqual(methods.names(), ('pg_basebackup_full', 'pg_basebackup_incremental',
+                                           'pg_delta_live', 'pg_delta_live_summaries',
                                            'pg_delta_staged', 'rsync_staged'))
         self.assertFalse(methods.get('pg_basebackup_full').needs_basis)
         for name in ('pg_basebackup_incremental', 'rsync_staged', 'pg_delta_staged'):
             self.assertTrue(methods.get(name).needs_basis)
-        # Only incremental reuses basis bytes unchecked, so only it verifies B first.
+        # Incremental and live in-place methods verify immutable B before use.
         self.assertEqual([n for n in methods.names() if methods.get(n).trusts_basis],
-                         ['pg_basebackup_incremental'])
+                         ['pg_basebackup_incremental', 'pg_delta_live', 'pg_delta_live_summaries'])
 
     def test_unknown_method_is_a_value_error(self):
         for name in ('rsync', None, ['list']):

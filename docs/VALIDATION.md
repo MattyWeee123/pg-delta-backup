@@ -2,6 +2,57 @@
 
 Latest update: October 29, 2026. The controlled performance baseline remains incomplete.
 
+## Live pgdelta benchmark integration, October 29, 2026
+
+The shared registry now includes `pg_delta_live` and
+`pg_delta_live_summaries`. They prepare a separate old copy and refresh it
+directly from live PGDATA, without staging a new full backup. Their
+`PASS_ENGINE_ONLY` verdict validates engine completion evidence and packaged
+WAL, not a PostgreSQL manifest or logical recovery. The native suite adds the
+independent exact-stop-LSN recovery comparison. Default native methods remain
+unchanged. [LIVE.md](../benchmarks/LIVE.md) contains local, GCP working-tree
+export and Docker/HammerDB commands; the
+[implementation note](specs/2026-10-29-live-benchmark-adapter.md) maps the files.
+
+Validation on the same local PostgreSQL 17.11/Python 3.14.8 environment:
+
+- The final **nine-trial comparison passed** at 20,000 account rows, one
+  repetition, 12 seconds, 100 offered scripts/second and one live worker:
+  active/quiescent full, native incremental, live hashing and live summaries,
+  plus no-backup control. All four active exact-cutoff verdicts passed;
+  summary use was confirmed in both summary trials. Evidence is retained
+  locally under `results/live-comparison-2026-10-29/` (git-ignored). These
+  timings are descriptive smoke measurements, not an optimization claim.
+- The full repository suite passed: **1,680 tests, 256 skipped**, run at nice
+  priority 0. The skips cover unavailable optional dependencies/environments.
+  The first run inherited this app's nice -8 priority and exposed an existing
+  CPU-reference test assumption; priority was normalized for the rerun,
+  without changing the experiment or its test expectation.
+- All **11 live adapter tests passed with PostgreSQL available**: both live
+  methods matched independent references under load, summary use was
+  confirmed, a public CLI capture restored correctly, mismatched receipts
+  and missing packaged WAL were rejected. Pure tests cover failure statuses,
+  unsafe variants, source requirements, output aliases and conninfo escaping.
+- All **13 active-cutoff tests passed with PostgreSQL available**, including
+  native full/incremental recovery, lost-transfer/ledger fault injection,
+  wrong-cutoff reference and missing-package-WAL controls.
+- All **76 HammerDB tests** and **70 method/report tests** passed. The Docker
+  stub exercises source-local commands, preparation before workload launch
+  and bad live statistics. A newly discovered acceptance gap was fixed:
+  failed/missing backup verification cannot produce an accepted degradation
+  pair, even when its observation windows match.
+- A working-tree archive including new untracked modules was extracted
+  without `.git`; its benchmark/engine source hash matched the local tree.
+  New provenance records distinguish actual code from a branch's last commit.
+- All five Bash blocks in LIVE.md passed syntax checks. The workflow and both
+  Compose YAML files parsed successfully; the runbook's local links resolve.
+
+Live Docker/HammerDB execution and GCP execution were not performed locally.
+The workflow now includes a live/native comparison and real live-adapter
+fault tests, to run when this work is committed and submitted. No cloud
+resources were created. This is correctness/measurement integration, not a
+new controlled performance result or a TPROC-C recovery oracle.
+
 ## Native active-cutoff oracle, October 29, 2026
 
 The native runner now checks active packages at the manifest's exact end LSN

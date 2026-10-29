@@ -20,6 +20,7 @@ def preparation_inclusive_seconds(row):
 
 
 def render(data):
+    provenance = data.get('source_provenance') or {}
     trials = [{**row, 'method': method_name(row['method'])} for row in data['trials']]
     for row in trials:
         row['preparation_inclusive_seconds'] = preparation_inclusive_seconds(row)
@@ -28,8 +29,9 @@ def render(data):
     lines = ['# Native PostgreSQL backup smoke measurements', '',
              '**Scope: real local backups and restores; not a controlled network performance baseline.**', '',
              f"Run status: **{data['status']}**. PostgreSQL: {data['postgres_version']}.", '',
-             f"Source commit: `{data.get('commit')}`. Base image: `{data.get('image_digest')}`.", '',
-             '| Method | Source workload | Accepted trials | Median capture seconds | Median verified backup seconds | Median captured MiB | Median preparation + method seconds |',
+             f"Source commit: `{data.get('commit') or provenance.get('git_commit')}`. Base image: `{data.get('image_digest')}`.", '',
+             f"Actual code SHA256: `{provenance.get('code_sha256', 'unavailable')}`. Working tree dirty: `{provenance.get('working_tree_dirty', 'unavailable')}`.", '',
+             '| Method | Source workload | Accepted trials | Median capture seconds | Median verified backup seconds | Median capture/output MiB | Median preparation + method seconds |',
              '|---|---|---:|---:|---:|---:|---:|']
     for mode in ('quiescent', 'active'):
         for method in names:
@@ -38,16 +40,29 @@ def render(data):
                 values = [r[field] / factor for r in rows if r.get(field) is not None]
                 return f'{statistics.median(values):.3f}' if values else 'unavailable'
             lines.append(f"| {method} | {mode} | {len(rows)} | {median('capture_seconds')} | {median('verified_backup_seconds')} | {median('capture_bytes', 1024**2)} | {median('preparation_inclusive_seconds')} |")
-    lines += ['', 'Capture size includes bundled WAL and metadata. It is **not network traffic**.', '',
+    lines += ['', 'Capture size includes bundled WAL and metadata. For live pgdelta it is the refreshed output size, including reused files; for native incremental it is the increment size. It is **not network traffic** or bytes read.', '',
               'Verified time includes capture, incremental-input verification and combination or the staged transfer where applicable, normal synchronization, and output verification. Common B0 setup and method preparation (such as copying B0 for rsync) are excluded. Restore testing is additional.', '',
               'The staged methods are not timed on the same terms. rsync_staged copies B0 into the output as untimed preparation and its timer covers only the in-place update, while pg_delta_staged builds the output from B0 and the new capture inside its timed transfer. The last column adds recorded preparation time to method time (capture through transfer, before verification) and is the like-for-like comparison of the two. It is unavailable for trials that did not record method time.', '',
               '## Correctness', '',
-              'Quiescent trials compare full ordered data exports and supported schema against the source after writes are fenced. New active trials recover the package using only bundled WAL to its manifest end LSN and compare against an independent B0 plus archived-WAL restore at that exact boundary. They also reconcile external transaction IDs and check rollback/in-flight/post-capture exclusions. Reference recovery uses additional WAL; candidate recovery cannot. A separate later named-target comparison remains PITR-assisted.', '',
+              'Quiescent trials compare full ordered data exports and supported schema against the source after writes are fenced. New active trials recover the package using only bundled WAL to its declared end LSN (the native manifest End-LSN or validated live pgdelta stop_lsn) and compare against an independent B0 plus archived-WAL restore at that exact boundary. They also reconcile external transaction IDs and check rollback/in-flight/post-capture exclusions. Reference recovery uses additional WAL; candidate recovery cannot. A separate later named-target comparison remains PITR-assisted.', '',
               'Only an explicit exact-cutoff verdict of pass establishes that check. Historical active PASS records without it establish package startup/invariants and later PITR agreement only.', '',
               '| Trial | Status | Package logical comparison | Exact active cutoff | PITR logical comparison |',
               '|---|---|---|---|---|']
     for row in trials:
         lines.append(f"| {row['run_id']} | {row['status']} | {row.get('self_contained_restore', {}).get('logical_match', 'not applicable')} | {row.get('active_package_exact_cutoff_oracle', 'not checked')} | {row.get('pitr_restore', {}).get('logical_match', 'not applicable')} |")
+    live_rows = [row for row in trials if row['method'] in ('pg_delta_live', 'pg_delta_live_summaries')]
+    if live_rows:
+        lines += ['', '## Live pgdelta verification and path', '',
+                  '`PASS_ENGINE_ONLY` checks the engine completion receipt and packaged WAL. It is not manifest verification or a restore verdict. The restore verdicts above are separate. Preparation copies B0 into a new output before the workload; include that cost when comparing total provisioning work.', '',
+                  '| Trial | Adapter verdict | Summary fast path used | Guard reasons |',
+                  '|---|---|---|---|']
+        for row in live_rows:
+            backup = row.get('backup_result') or {}
+            reported = (backup.get('transfer_stats') or {}).get('reported') or {}
+            fast = reported.get('fast_path') or {}
+            used = fast.get('used', False)
+            reasons = '; '.join(map(str, fast.get('reasons') or [])) or 'none'
+            lines.append(f"| {row['run_id']} | {backup.get('status', 'unavailable')} | {used} | {reasons} |")
     lines += ['', '## Limits and reproduction', '',
               '- Tiny synthetic database, fresh cluster per trial, uncontrolled host cache and shared CI hardware when run in Actions.',
               '- Fixed low offered transaction rate checks active capture; it is not a calibrated application-capacity experiment.',

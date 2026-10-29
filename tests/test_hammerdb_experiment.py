@@ -5,6 +5,7 @@ database written by HammerDB CLI v6.0 and the container log it emitted.
 No HammerDB, PostgreSQL or Docker is required.
 """
 
+import os
 import sqlite3
 import subprocess
 import tempfile
@@ -433,6 +434,22 @@ class PairRecordTests(unittest.TestCase):
         self.assertIn('recovery_window', record['backup'])
         self.assertIn('matched_window', record['control'])
 
+    def test_failed_or_missing_backup_verification_rejects_performance_pair(self):
+        for backup in ({'status': 'FAIL_VERIFY'}, {'status': 'FAIL_TRANSFER'}, None,
+                       {'status': 'PASS_ENGINE_ONLY', 'integrity_verified': False}):
+            arguments = self.pair()
+            arguments['backup_result'] = backup
+            record = build_pair_record(**arguments)
+            with self.subTest(backup=backup):
+                self.assertFalse(record['accepted'])
+                self.assertIsNone(record['throughput_loss_fraction'])
+                self.assertIsNone(record['latency']['increase_fraction'])
+
+    def test_engine_verified_backup_can_form_a_performance_pair(self):
+        arguments = self.pair()
+        arguments['backup_result'] = {'status': 'PASS_ENGINE_ONLY', 'integrity_verified': True}
+        self.assertTrue(build_pair_record(**arguments)['accepted'])
+
     def test_backup_outside_the_window_is_rejected(self):
         # Capture starts before ramp-up completes, as a mistimed run would.
         record = build_pair_record(**self.pair(analysis_start=at(30, 0)))
@@ -695,6 +712,37 @@ class StubDockerTests(unittest.TestCase):
 
     def incremental_options(self):
         return self.options(method='pg_basebackup_incremental', basis='/results/basis')
+
+    def live_options(self):
+        return self.options(method='pg_delta_live_summaries', basis='/results/basis',
+            source_pgdata='/var/lib/postgresql/data', pgdelta_jobs=1,
+            tools={'pg_verifybackup': 'pg_verifybackup', 'python': 'python3',
+                   'pg_controldata': 'pg_controldata', 'psql': 'psql', 'pg_waldump': 'pg_waldump'})
+
+    def test_live_method_uses_container_source_and_preserves_engine_only_scope(self):
+        trial = run_trial('backup', options=self.live_options(),
+                          directory=self.root / 'live', sleep=lambda _: None)
+        result = trial['backup_result']
+        self.assertEqual(result['status'], 'PASS_ENGINE_ONLY')
+        self.assertFalse(result['restore_tested'])
+        self.assertEqual(result['network_bytes'], 107)
+        calls = (self.state / 'docker.log').read_text().splitlines()
+        start = next(i for i, line in enumerate(calls) if line.startswith('run '))
+        prepare = next(i for i, line in enumerate(calls) if 'shutil.copytree' in line)
+        self.assertLess(prepare, start)
+        engine = next(line for line in calls if ' -m pgdelta local ' in line)
+        self.assertIn('--source /var/lib/postgresql/data --source-kind live', engine)
+        self.assertIn('--fast-path summaries', engine)
+        self.assertFalse(any(' pg_basebackup ' in line for line in calls))
+        self.assertFalse(any('pg_verifybackup /results/out/' in line for line in calls))
+
+    def test_live_bad_statistics_reject_the_trial(self):
+        with mock.patch.dict(os.environ, {'STUB_LIVE_STATS': '{}'}):
+            trial = run_trial('backup', options=self.live_options(),
+                              directory=self.root / 'live-bad', sleep=lambda _: None)
+        self.assertEqual(trial['backup_result']['status'], 'FAIL_TRANSFER')
+        self.assertFalse(trial['backup_result']['integrity_verified'])
+        self.assertIsNone(trial['backup_result']['time_to_verified_seconds'])
 
     def test_trusted_basis_is_verified_before_the_workload_starts(self):
         """Verifying B reads all of it, so it must not load the measured run."""

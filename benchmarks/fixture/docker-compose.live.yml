@@ -1,0 +1,7 @@
+# Optional overlay for source-local live pgdelta. Read-only access must use
+# the source server's original absolute PGDATA path: live mode checks inode
+# identity against SHOW data_directory. No source files are written by runner.
+services:
+  runner:
+    volumes:
+      - pgdata:/var/lib/postgresql/data:ro

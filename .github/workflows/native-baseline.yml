@@ -74,6 +74,20 @@ jobs:
             -e BENCH_IMAGE_DIGEST -e GITHUB_SHA \
             -v "$PWD/results/native:/results" --entrypoint python3 pg-native-bench \
             -m benchmarks.cli_smoke --output /results/run/cli-smoke
+      - name: Compare live pgdelta with native methods and restore at exact cutoffs
+        run: |
+          docker run --rm --network none --cpus=2 --memory=2g --shm-size=256m \
+            -e BENCH_IMAGE_DIGEST -e GITHUB_SHA \
+            -v "$PWD/results/native:/results" pg-native-bench \
+            --output /results/run/live-methods --rows 20000 --repeats 1 --duration 12 --rate 100 \
+            --methods pg_basebackup_full,pg_basebackup_incremental,pg_delta_live,pg_delta_live_summaries \
+            --pgdelta-jobs 1
+      - name: Exercise live adapter receipt and WAL fault controls
+        run: |
+          docker run --rm --network none --cpus=2 --memory=2g --shm-size=256m \
+            -e PGDELTA_TEST_PG_BIN=/usr/lib/postgresql/17/bin \
+            -v "$PWD/tests:/workspace/tests:ro" --entrypoint python3 pg-native-bench \
+            -m unittest discover -s tests -p test_live_benchmark.py -v
       - name: Make container evidence readable to the host runner
         if: always()
         run: |
@@ -114,4 +128,9 @@ jobs:
         run: |
           if test -f results/native/run/results.json; then
             python -m benchmarks.report_native results/native/run/results.json --output "$GITHUB_STEP_SUMMARY"
+          fi
+          if test -f results/native/run/live-methods/results.json; then
+            python -m benchmarks.report_native results/native/run/live-methods/results.json \
+              --output results/native/run/live-methods/report.md
+            cat results/native/run/live-methods/report.md >> "$GITHUB_STEP_SUMMARY"
           fi

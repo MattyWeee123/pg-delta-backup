@@ -5,6 +5,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 git \
 RUN mkdir /results && chown postgres:postgres /results
 WORKDIR /workspace
 COPY --chown=postgres:postgres benchmarks /workspace/benchmarks
+COPY --chown=postgres:postgres pgdelta /workspace/pgdelta
 USER postgres
 
 FROM runtime AS cli

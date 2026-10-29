@@ -34,6 +34,13 @@ PITR-assisted comparison remains separately reported. Candidate recovery never
 receives that supplementary WAL. See [the runbook](../benchmarks/NATIVE.md) for
 scope, commands and regression fault injections.
 
+The opt-in `pg_delta_live` and `pg_delta_live_summaries` benchmark methods use
+the same oracle at the engine's validated `live.stop_lsn`. Live outputs have
+no PostgreSQL manifest: completion-receipt and packaged-WAL validation is
+reported as `PASS_ENGINE_ONLY`, and the exact logical restore verdict stays
+separate. See [LIVE.md](../benchmarks/LIVE.md) for how to run that comparison
+locally or on GCP and how summary guard fallback is disclosed.
+
 ## What the sponsor clarified
 
 The supplied screenshots show Ben selecting valid recovery with appropriate guarantees over byte identity with pg_basebackup.
