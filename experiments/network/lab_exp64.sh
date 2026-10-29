@@ -29,6 +29,17 @@
 # CRASHED=1 (EXP-80b): each pattern's B0 is a standby instead (pg_basebackup -R), started on dest before the change and
 # killed with pg_ctl -m immediate KILL_AFTER seconds (default 30) into it, while the change goes on to its end on the
 # source; and a final "c" on a fast arm passes the receiver --crashed-standby. Each copy's check removes standby.signal.
+# EXP-81, the competitors in their best modes, with dest's /data on XFS with reflinks (reformat_dest_xfs.sh):
+# - "incr": native incremental, pg_basebackup --incremental against B0's manifest (B0 itself, never started: a
+#   backup chain), then pg_combinebackup --copy-file-range (each reused block shared, not copied, on XFS) into a new
+#   directory, synced by syncfs; its output is the copy checked.
+# - STANDBY_TOO=1: each pattern also gets B0s, a standby (pg_basebackup -R) started, caught up and stopped cleanly
+#   before the change; an arm "sb_X" runs arm X on a copy of B0s instead of B0.
+# - "walg" (on B0s: "sb_walg"): WAL-G's catch-up, catchup-receive on dest and catchup-send on the source, then a
+#   sync of /data, since WAL-G's receiver syncs nothing; its copy is checked as the standby it stays, once it has
+#   replayed to the source's current LSN.
+# Every copy of B0 or B0s is a real one (cp --reflink=never: on XFS cp would otherwise share blocks with B0), and each
+# run records dest's received network bytes (net_rx_bytes) and, for incr and walg, its phases' seconds.
 set -u
 SRC=$1
 REPEATS=${2:-2}
@@ -40,6 +51,8 @@ PLAN=${PLAN:-0}
 SERIES=${SERIES:-0}
 CRASHED=${CRASHED:-0}
 KILL_AFTER=${KILL_AFTER:-30}
+STANDBY_TOO=${STANDBY_TOO:-0}
+WALG=${WALG:-/usr/local/bin/wal-g}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
 R=${OUT:-/data/exp04-results/exp64}
@@ -51,7 +64,16 @@ SSRC=(ssh -n -i "$KEY" -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=accept-
 export PATH="$PATH:/usr/sbin:/sbin"
 PGBIN=/usr/lib/postgresql/17/bin
 ROOT=/data/exp64/src
-B0=$W/B0 B=$W/B FULL=$W/full
+B0=$W/B0 B=$W/B FULL=$W/full B0S=$W/B0s INC=$W/inc
+NETIF=$(ip route show default | awk '{print $5; exit}')
+netrx() { awk -v i="$NETIF:" '$1 == i {print $2}' /proc/net/dev; }
+pcopy() { $PGBIN/psql -h /tmp -p "$1" -U study -d postgres -qAtX -c "$2" 2>&1; }
+# Wait until the server on port $1 has replayed to the source's current LSN (at most 600 s).
+caught_up() {
+  local target; target=$(psrc "SELECT pg_current_wal_lsn()")
+  for x in $(seq 600); do [ "$(pcopy "$1" "SELECT pg_last_wal_replay_lsn() >= '$target'")" = t ] && return 0; sleep 1; done
+  return 1
+}
 CONN="host=$ROOT/s port=5432 user=study dbname=postgres"
 on_src() { "${SSRC[@]}" "export PATH=\$PATH:/usr/sbin:/sbin; cd ~/pgd; $1"; }
 psrc() { on_src "$PGBIN/psql -h $ROOT/s -p 5432 -U study -d postgres -qAtX -v ON_ERROR_STOP=1 -c \"$1\""; }
@@ -97,6 +119,17 @@ for pattern in $PATTERNS; do
     echo "$(date -u +%T) $pattern: B0, a base backup before the change"
     $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$B0" -X stream -c fast > "$R/B0-$pattern.log" 2>&1 \
       || { echo "B0 failed"; exit 1; }
+  fi
+  if [ "$STANDBY_TOO" = 1 ]; then
+    rm -rf "$B0S"
+    $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$B0S" -R -X stream -c fast > "$R/B0s-$pattern.log" 2>&1 \
+      || { echo "B0s failed"; exit 1; }
+    $PGBIN/pg_ctl -D "$B0S" -l "$R/standby-$pattern.log" -w -t 300 \
+      -o "-p 5434 -k /tmp -c listen_addresses='' -c summarize_wal=off" start > /dev/null 2>&1 || { echo "B0s failed"; exit 1; }
+    caught_up 5434 || { echo "B0s did not catch up"; exit 1; }
+    $PGBIN/pg_ctl -D "$B0S" -m fast -w stop > /dev/null 2>&1
+    echo "$(date -u +%T) $pattern: B0s, a standby caught up and stopped before the change: $($PGBIN/pg_controldata "$B0S" | \
+      grep -E 'cluster state' | sed 's/.*: *//')"
   fi
   CHECK=$STATE
   [[ "$pattern" =~ ^scatterall[0-9]+$ ]] && \
@@ -147,10 +180,11 @@ EOF
   while read -r arm k; do
     d="$R/run-$(printf %02d "$i")"
     mkdir -p "$d"
-    rm -rf "$B" "$FULL"
-    copied=null
-    if [ "$arm" != full ]; then
-      c0=$(date +%s.%N); cp -a "$B0" "$B"; c1=$(date +%s.%N)
+    rm -rf "$B" "$FULL" "$INC"
+    copied=null base=$B0 a=$arm
+    [ "${arm#sb_}" != "$arm" ] && base=$B0S a=${arm#sb_}
+    if [ "$a" != full ] && [ "$a" != incr ]; then
+      c0=$(date +%s.%N); cp -a --reflink=never "$base" "$B"; c1=$(date +%s.%N)
       copied=$(python3 -c "print(round($c1 - $c0, 2))")
     fi
     drop
@@ -160,8 +194,34 @@ EOF
       on_src "nohup bash experiments/network/disk_series.sh > /tmp/exp64-series.txt 2> /dev/null < /dev/null & echo \$! > /tmp/exp64-series.pid"
       sleep 0.5  # a few samples before t0
     fi
-    rstatus=null status= plan=null
-    if [ "$arm" = full ]; then
+    rstatus=null status= plan=null phases=null
+    rx0=$(netrx)
+    if [ "$a" = incr ]; then
+      t0=$(date +%s.%N)
+      $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$INC" --incremental="$B0/backup_manifest" -X stream -c fast \
+        --no-sync > "$d/incr.log" 2>&1
+      status=$?
+      ti=$(date +%s.%N)
+      [ "$status" = 0 ] && { $PGBIN/pg_combinebackup "$B0" "$INC" -o "$FULL" --copy-file-range --manifest-checksums=NONE \
+        --sync-method=syncfs >> "$d/incr.log" 2>&1; status=$?; }
+      t1=$(date +%s.%N)
+      ib=$(du -sb "$INC" 2> /dev/null | cut -f1)
+      phases="{\"capture_s\": $(python3 -c "print(round($ti - $t0, 3))"), \"combine_s\": $(python3 -c "print(round($t1 - $ti, 3))"), \"incremental_bytes\": ${ib:-null}}"
+    elif [ "$a" = walg ]; then
+      $WALG catchup-receive "$B" 7000 > "$d/walg-receive.log" 2>&1 &
+      rp=$!
+      for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
+      t0=$(date +%s.%N)
+      on_src "PGHOST=$ROOT/s PGPORT=5432 PGUSER=study PGDATABASE=postgres WALG_FILE_PREFIX=/tmp/walg-unused \
+        $WALG catchup-send $ROOT/data $DEST:7000" > "$d/walg-send.log" 2>&1
+      status=$?
+      [ "$status" = 0 ] || kill "$rp" 2> /dev/null  # a sender that never connected leaves the receiver waiting
+      wait "$rp"; rstatus=$?
+      ts=$(date +%s.%N)
+      sync -f "$B"
+      t1=$(date +%s.%N)
+      phases="{\"catchup_s\": $(python3 -c "print(round($ts - $t0, 3))"), \"sync_s\": $(python3 -c "print(round($t1 - $ts, 3))")}"
+    elif [ "$a" = full ]; then
       t0=$(date +%s.%N)
       $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$FULL" -X stream -c fast > "$d/full.log" 2>&1
       status=$?
@@ -173,7 +233,7 @@ EOF
       # since EXP-70 made 2 pages the default; none takes an old primary from its own WAL (EXP-71's default).
       # A final "s" has --selector choose the fill, or a full copy, instead (EXP-75).
       fast= fsync='--fsync main'
-      if [[ "$arm" =~ ^fast([0-9]*)([wb]?)(f([0-9]+)|s)?(q?)(c?)$ ]]; then
+      if [[ "$a" =~ ^fast([0-9]*)([wb]?)(f([0-9]+)|s)?(q?)(c?)$ ]]; then
         fill="--fill-gaps ${BASH_REMATCH[4]:-0}"
         [ "${BASH_REMATCH[3]}" = s ] && fill=--selector
         fast="--fast-path summaries --read-ahead ${BASH_REMATCH[1]:-0} $fill --no-diverged-basis"
@@ -197,6 +257,7 @@ EOF
       on_src "cat /tmp/exp64-send.json" > "$d/send.json"
     fi
     disks | sed 's/^/after /' >> "$d/diskstats.txt"
+    rx1=$(netrx)
     if [ "$SERIES" = 1 ]; then
       sleep 0.5  # a few samples after t1
       kill "$sp"; wait "$sp" 2> /dev/null
@@ -210,21 +271,26 @@ EOF
       [ -s "$R/plan-runs-$pattern-$arm.json.gz" ] || on_src "gzip -c /tmp/exp64-plan.json" > "$R/plan-runs-$pattern-$arm.json.gz"
     fi
     verify=null
-    if [ "${arm#fast}" != "$arm" ] && [ "$status" = 0 ]; then
-      # The refreshed copy recovers from its backup_label; its pgbench_accounts must equal the source's.
-      rm -f "$B/standby.signal"  # CRASHED: B0 was a standby; the copy is started as a server of its own
-      $PGBIN/pg_ctl -D "$B" -l "$d/copy.log" -w -t 1800 \
+    if { [ "${a#fast}" != "$a" ] || [ "$a" = incr ] || [ "$a" = walg ]; } && [ "$status" = 0 ]; then
+      # The refreshed copy recovers from its backup_label; its pgbench_accounts must equal the source's. incr's copy
+      # is its new directory. A fast copy of a standby is started as a server of its own (no standby.signal); walg's
+      # stays a standby, as WAL-G's catch-up leaves it, and is read once it has replayed to the source's LSN.
+      cdir=$B
+      [ "$a" = incr ] && cdir=$FULL
+      [ "$a" = walg ] || rm -f "$cdir/standby.signal"
+      $PGBIN/pg_ctl -D "$cdir" -l "$d/copy.log" -w -t 1800 \
         -o "-p 5433 -k /tmp -c listen_addresses='' -c summarize_wal=off" start > /dev/null 2>&1
-      COPY_STATE=$($PGBIN/psql -h /tmp -p 5433 -U study -d postgres -qAtX -c "$CHECK" 2>&1)
-      $PGBIN/pg_ctl -D "$B" -m fast -w stop > /dev/null 2>&1
+      [ "$a" = walg ] && { caught_up 5433 || echo "walg's standby did not catch up" >> "$d/copy.log"; }
+      COPY_STATE=$(pcopy 5433 "$CHECK")
+      $PGBIN/pg_ctl -D "$cdir" -m fast -w stop > /dev/null 2>&1
       verify="{\"source\": \"$SOURCE_STATE\", \"copy\": \"$COPY_STATE\", \"match\": $([ "$SOURCE_STATE" = "$COPY_STATE" ] && echo true || echo false)}"
     fi
-    printf '{"run": %s, "pattern": "%s", "arm": "%s", "repeat": %s, "t0": %s, "t1": %s, "status": %s, "receiver_status": %s, "copy_seconds": %s, "verify": %s, "plan": %s}\n' \
-      "$i" "$pattern" "$arm" "$k" "$t0" "$t1" "$status" "$rstatus" "$copied" "$verify" "$plan" > "$d/meta.json"
+    printf '{"run": %s, "pattern": "%s", "arm": "%s", "repeat": %s, "t0": %s, "t1": %s, "status": %s, "receiver_status": %s, "copy_seconds": %s, "verify": %s, "plan": %s, "phases": %s, "net_rx_bytes": %s}\n' \
+      "$i" "$pattern" "$arm" "$k" "$t0" "$t1" "$status" "$rstatus" "$copied" "$verify" "$plan" "$phases" "$((rx1 - rx0))" > "$d/meta.json"
     echo "$(date -u +%T) run $i: $pattern $arm repeat $k: $(python3 -c "print(round($t1 - $t0, 2))") s, exit $status" \
       "$([ "$verify" != null ] && python3 -c "import json,sys; print('match', json.loads(sys.argv[1])['match'])" "$verify")"
     i=$((i + 1))
   done < "$R/plan-$pattern.txt"
 done
-rm -rf "$B" "$FULL" "$B0"
+rm -rf "$B" "$FULL" "$B0" "$B0S" "$INC"
 echo "$(date -u +%T) done"
