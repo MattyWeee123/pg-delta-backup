@@ -4,6 +4,28 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (09:46 UTC): EXP-82c done: summaries on demand 0.045 of hashing's time for local changes
+
+- **Every prediction held,** on a source that never summarized (checked at set-up: "summarizer at 0/0"), with a slot keeping the WAL since the old copy:
+
+  | Cell | Summaries on demand | page-lsn | Hashing | On demand / hashing |
+  |---|---|---|---|---|
+  | hot | 3.95 s (2.3 s summarizing 0.3–0.5 GB, 1.7 s refreshing) | 87.7 s | 87.7 s | **0.045** |
+  | uniform | 100.6 s (58.9 s summarizing 11.9 GB at 203 MB/s, 41.7 s refreshing) | 88.5 s | 185.1 s | 0.544 |
+
+  - page-lsn repeated EXP-82b (1.00, 0.478).
+  - 12 of 12 copies were correct.
+  - The scorer was unchanged but for EXP-82c's own figure function (disclosed).
+- **The routes:**
+  - the faster one reads fewer bytes: the WAL since B plus the fast path's pages, against all of S;
+  - on demand wins for local changes (0.045 of page-lsn), page-lsn where the WAL nears the database (1.14).
+- **Research loop 3:** the summaries-off row has a route with no loss: on demand where the WAL is kept, page-lsn where it is gone.
+- **Next:**
+  - a selector between them;
+  - the cost of `summarize_wal` on a busy server;
+  - the held-out session before any default changes.
+- **Proxy fidelity:** on demand's local ratios (0.82, 1.55) against the VMs' (0.045, 0.54) are logged; the in-memory model misses disk-bound effects.
+
 ## 2026-10-29 (08:25 UTC): EXP-82c pre-registered: summaries on demand on the VMs, the source as one that never summarized
 
 - **What runs:** the on-demand arm again, with page-lsn and hashing (a second session for page-lsn). The lab's set-up now turns summaries off, restarts the source, clears its summaries and checks the summarizer never ran.

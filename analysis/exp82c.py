@@ -19,6 +19,8 @@ from pathlib import Path
 import exp68
 import exp76
 import exp82b
+import plotting
+from plotting import COLORS, plt
 
 ROOT = Path(__file__).resolve().parents[1]
 CELLS = ('hot', 'uniform')
@@ -82,7 +84,37 @@ def main(argv=None):
               f"{ph.get('refresh_s')} s, summaries {fast.get(r['run'], {}).get('summaries')}, summary rows "
               f"{fast.get(r['run'], {}).get('summary_rows')}")
     exp76.write_csv(a.out, cells)
-    exp82b.figure(by, ratio, a.figure)
+    figure(by, ratio, a.figure)
+
+
+def figure(by, ratio, name):
+    """EXP-82b's figure, with this session's title and arms (a layout change after the data; no score depends on it)."""
+    plotting.style()
+    fig, ax = plt.subplots(figsize=(8.6, 4.4))
+    colors = {'sb_hash': COLORS['grey'], 'sb_lsn': COLORS['blue'], 'sb_od': COLORS['green']}
+    for i, pattern in enumerate(CELLS):
+        for j, arm in enumerate(ARMS):
+            c = by.get((pattern, arm))
+            if not c:
+                continue
+            x = i * (len(ARMS) + 1) + j
+            if arm == 'sb_od' and c.get('summarize_s') is not None and c.get('refresh_s') is not None:
+                first = c['seconds'] * c['summarize_s'] / (c['summarize_s'] + c['refresh_s'])
+                ax.bar(x, first, 0.8, color=colors[arm], label='summaries on demand: summarize (dark) + refresh'
+                       if i == 0 else None)
+                ax.bar(x, c['seconds'] - first, 0.8, bottom=first, color=colors[arm], alpha=0.45)
+            else:
+                ax.bar(x, c['seconds'], 0.8, color=colors[arm], label=exp82b.LABELS[arm] if i == 0 else None)
+            ax.annotate(f"{c['seconds']:.1f} s", (x, c['seconds']), textcoords='offset points', xytext=(0, 3),
+                        ha='center', fontsize=8)
+    ax.set_xticks([i * (len(ARMS) + 1) + 1 for i in range(len(CELLS))],
+                  [f"{p}\n(on demand / hashing {ratio(p, 'sb_od', 'sb_hash')}; / page-lsn {ratio(p, 'sb_od', 'sb_lsn')};"
+                   f"\npage-lsn / hashing {ratio(p, 'sb_lsn', 'sb_hash')})" for p in CELLS], fontsize=8.5)
+    ax.set_ylabel('seconds to refresh an 18 GB standby\n(median of 2)')
+    ax.set_ylim(0, ax.get_ylim()[1] * 1.3)
+    ax.legend(fontsize=7.5, loc='upper left')
+    ax.set_title('EXP-82c: summaries on demand, on a source that never summarized WAL', fontsize=10)
+    print(plotting.save(fig, name))
 
 
 if __name__ == '__main__':

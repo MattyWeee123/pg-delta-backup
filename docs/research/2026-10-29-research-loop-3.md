@@ -124,3 +124,25 @@ The full notes, with every citation: [the prior-art report](#sources). The mecha
 
 - **The prior-art report:** a research pass over primary sources on October 29, read at PostgreSQL `REL_17_STABLE` 85a3871, wal-g 924c478, pg_probackup 8f52525 and ptrack cf5fc9b.
 - **The citations:** the WAL-G and `pg_probackup` documentation and source files named above; PostgreSQL's `walsummarizer.c`, `basebackup_incremental.c`, `visibilitymap.c`, `freespace/README`, `transam/README` and pg_rewind's `filemap.c` and `parsexlog.c`; the Percona, Oracle, Microsoft and Broadcom documentation for section 4's last row.
+
+## 7. What the pass found (EXP-82, EXP-82b, EXP-82c)
+
+| Situation | pgdelta's route | Against hashing (today) | Against WAL-G's catch-up | Against a re-clone |
+|---|---|---|---|---|
+| Summaries off, **WAL gone** | `--fast-path page-lsn` | 0.47–0.48 (uniform), 1.00 (hot); two sessions | 0.81 (uniform), 1.00 (hot) | 0.97–0.98: both read all of S, the bound |
+| Summaries off, **WAL since B kept** | Summaries on demand | 0.045 (hot), 0.54 (uniform) | 0.045 (hot, across sessions) | 0.044 (hot, across sessions) |
+
+- **Correctness:**
+  - 120 of 120 page-lsn and 20 of 20 on-demand copies locally (EXP-82);
+  - every copy on the VMs;
+  - EXP-82's negative control showed the threshold must be B's redo point, not its end.
+- **The bound held:**
+  - page-lsn's scan of S took 86.7–86.9 s, \|S\| / R;
+  - the summarizer read WAL at 203 MB/s, the disk's rate;
+  - so the faster route is the one that reads fewer bytes: W (the WAL since B's redo point) plus the fast path's pages, against \|S\|.
+- **A harness defect, disclosed:** EXP-82b's source summarized throughout (the VM sources' base configuration turns `summarize_wal` on), voiding its on-demand runs. The lab now checks the condition at set-up, and EXP-82c re-ran them.
+- **The local proxy (rule 13) failed for both,** as EXP-82 anticipated. In memory, hashing costs CPU and the summarizer reads cached WAL, so the local ratios missed the VMs' by up to 18x. Logged in `proxy-fidelity.csv`.
+- **Next:**
+  - a selector between the two routes, by W against \|S\| (both known before any page is read);
+  - what `summarize_wal` costs a busy server, which decides whether the advice is simply to leave it on;
+  - the held-out session (rule 15) before `--crashed-standby`, `--selector` or page-lsn becomes a default.

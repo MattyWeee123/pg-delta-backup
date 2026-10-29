@@ -27,6 +27,9 @@ ROWS = [
     ('A crashed standby, summaries on\n(--crashed-standby; Oct 29 update)',
      [('re-clone', WIN, '0.02 hot, 0.46 uniform;\n0.02-0.23 of hashing (EXP-80b)'),
       ('WAL-G catch-up', OPEN, 'inferred a win: it reads all of S\nas for a clean standby (EXP-81)')]),
+    ('Summaries off, WAL kept\n(summaries on demand; Oct 29 update)',
+     [('replay of that WAL', OPEN, 'not re-timed; the summaries path\nbeat archive replay (EXP-65)'),
+      ('WAL-G catch-up', WIN, '0.045 hot (EXP-82c/82b, across\nsessions); uniform: page-lsn 0.81')]),
     ('Summaries off, WAL gone\n(--fast-path page-lsn; Oct 29 update)',
      [('re-clone', TIE, '0.97 hot, 0.98 uniform: both read\nall of S, a limit (EXP-82b)'),
       ('WAL-G catch-up', WIN, '1.00 hot, 0.81 uniform; 0.47 of\nhashing uniform (EXP-82b)')]),
@@ -47,7 +50,7 @@ ROWS = [
 
 def main():
     plotting.style()
-    fig, ax = plt.subplots(figsize=(11.5, 6.4))
+    fig, ax = plt.subplots(figsize=(11.5, 0.95 * len(ROWS) + 0.8))  # room for two-line headings
     ax.set_xlim(0, 3)
     ax.set_ylim(0, len(ROWS))
     ax.axis('off')
@@ -57,13 +60,13 @@ def main():
         for j, (competitor, verdict, evidence) in enumerate(cells):
             x = 1 + j
             ax.add_patch(plt.Rectangle((x + 0.02, y + 0.06), 0.96, 0.88, color=SHADE[verdict], alpha=0.55, lw=0))
-            ax.text(x + 0.5, y + 0.66, f'{competitor}: {verdict.upper()}' if verdict != NA else '', ha='center',
-                    va='center', fontsize=8, weight='bold')
-            ax.text(x + 0.5, y + 0.30, evidence, ha='center', va='center', fontsize=7.2)
+            ax.text(x + 0.5, y + 0.86, f'{competitor}: {verdict.upper()}', ha='center', va='top', fontsize=8,
+                    weight='bold')
+            ax.text(x + 0.5, y + 0.12, evidence, ha='center', va='bottom', fontsize=7.2)
     ax.text(1.5, len(ROWS) + 0.15, 'against the standard tool', ha='center', fontsize=9, weight='bold')
     ax.text(2.5, len(ROWS) + 0.15, 'against the strongest competitor', ha='center', fontsize=9, weight='bold')
-    ax.set_title("Research loop 2: pgdelta's best path per situation (time ratios: pgdelta / theirs)", fontsize=10,
-                 pad=18)
+    ax.set_title("pgdelta's best path per situation (time ratios: pgdelta / theirs; research loops 2 and 3)", fontsize=10,
+                 pad=30)
     print(plotting.save(fig, 'loop2-scorecard'))
 
 
