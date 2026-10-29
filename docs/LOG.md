@@ -4,6 +4,27 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (05:11 UTC): research loop 3: copies without WAL summaries; two candidates built and tested
+
+- **The pass:** [research loop 3](research/2026-10-29-research-loop-3.md), with its [prior-art report](research/2026-10-29-summaries-off-prior-art.md) (WAL-G, `pg_probackup`, PTRACK, pg_rewind and PostgreSQL's incremental backup from source; ARIES's pageLSN; Percona, Oracle, SQL Server and VMware).
+- **The bound:**
+  - Without a record of what changed, every page of S must be read once (about 86 s on the ha set).
+  - Hashing also reads B, which in uniform queues the writes on dest's disk (180 s against WAL-G's 109 s).
+  - Reading only S gives parity with WAL-G, not a large win. Reading the WAL instead of S, where it is kept, costs in proportion to the WAL.
+- **Candidate 1, `--fast-path page-lsn`:**
+  - pages at or past B's **redo point** (`pg_probackup`'s threshold; WAL-G uses the checkpoint record);
+  - the visibility and free-space maps whole;
+  - data checksums or `wal_log_hints` required (pg_rewind's condition; without them a page marked all-visible keeps its LSN);
+  - guard v2 for lineage;
+  - a scanner thread ahead of the sender.
+- **Candidate 2, summaries on demand:** turning `summarize_wal` on makes PostgreSQL 17 summarize from the oldest WAL still on disk (`walsummarizer.c`), so where S kept the WAL since B's redo point the existing fast path runs.
+- **Tests:**
+  - real-server refreshes of a clean copy, a base backup and a killed standby by page-lsn;
+  - on a server that never summarized, the summaries refused, page-lsn run, then summaries turned on covering B;
+  - page-lsn's pages a subset of the summaries' in the same state.
+  - 1,658+ tests pass.
+- **Next:** EXP-82, the local scale model (correctness trials, a negative control, timings against hashing), then EXP-82b on the VMs against hashing and WAL-G.
+
 ## 2026-10-29 (04:34 UTC): the research loop and the RSI rules in one place (WORKFLOW.md)
 
 - **The owner asked** that the RSI rules and their research workflow always be referenced together when a decision comes back to them, and kept in the same spot.

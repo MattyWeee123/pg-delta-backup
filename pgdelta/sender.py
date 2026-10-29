@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import os
+import queue
 import threading
 import time
 
@@ -662,12 +663,17 @@ class _Sender:
         counts['summarizer_wait_seconds'] = source['summarizer_wait_seconds']
         counts['summarized_lsn'] = (None if source['summarized_lsn'] is None
                                     else fastpath.format_lsn(source['summarized_lsn']))
-        ok, reasons = fastpath.guard(facts, source)
+        page = self.fast_path == fastpath.PAGE_LSN
+        ok, reasons = fastpath.guard(facts, source, summaries=not page)
         common = None
-        fork = fastpath.diverged_fork(facts, source) if not ok and self.diverged_basis else None
+        fork = fastpath.diverged_fork(facts, source) if not ok and self.diverged_basis and not page else None
         if fork is not None and accept.get('diverged') is True:
             common, ok, reasons = self._basis_wal(facts, source, fork)
-        if ok:
+        if ok and page:
+            # page-lsn: no plan before sending; each main-fork file is scanned on the server as it comes (_send_lsn).
+            self.fast, self.lsn_threshold = {}, fastpath.parse_lsn(facts['redo'])
+            counts.update(lsn_threshold=facts['redo'], files_scanned=0, pages_scanned=0, scan_seconds=0.0)
+        elif ok:
             redo = common['redo'] if common is not None else facts['redo']
             spans = fastpath.ranges(fastpath.history_path(source['history'], source['timeline']),
                                     fastpath.parse_lsn(redo), source['start_lsn'])
@@ -702,6 +708,8 @@ class _Sender:
         """--fast-path summaries: each listed file in order. Where the summaries chose its pages, only those go, read
         now, then FILE_DONE_WRITTEN with the digest of what was sent; any other file goes whole by the usual path.
         With --read-ahead, the chosen runs are read on reader threads ahead of the sending thread (_ReadAhead)."""
+        if self.fast_path == fastpath.PAGE_LSN:
+            return self._send_lsn(entries)
         blocks_per_segment = (self.identity or {}).get('blocks_per_segment') or (1 << 30) // self.block
         counts = self.fast_counts
         plans = []
@@ -733,6 +741,62 @@ class _Sender:
         finally:
             if self.ahead is not None:
                 self.ahead.close()
+        counts['sending_ended_utc'] = time.time()
+
+    def _send_lsn(self, entries):
+        """--fast-path page-lsn: each listed file in order, as _send_fast sends it, its pages chosen by a scan of the
+        server's copy (pgdelta.fastpath.lsn_pages). A scanner thread runs up to fastpath.LSN_LOOKAHEAD files ahead
+        of the sending thread, so the chosen pages are read again from the page cache; --read-ahead is not used."""
+        counts, work, stop = self.fast_counts, queue.Queue(maxsize=fastpath.LSN_LOOKAHEAD), threading.Event()
+
+        def scan():
+            try:
+                for index, entry in enumerate(entries):
+                    if stop.is_set():
+                        return
+                    basis_size = self.basis_sizes.get(index) if self.reuse else None
+                    unlogged = self.selection is not None and self.selection.source_path(entry.path) != entry.path
+
+                    def read_pages(entry=entry):
+                        started, handle = time.perf_counter(), self.reader.open(entry)
+                        try:
+                            return fastpath.lsn_scan(handle.read, entry.size, self.block, self.lsn_threshold)
+                        finally:
+                            handle.close()
+                            counts['files_scanned'] += 1
+                            counts['pages_scanned'] += entry.size // self.block
+                            counts['scan_seconds'] += time.perf_counter() - started
+
+                    pages, whole = fastpath.lsn_pages(entry.path, entry.size, basis_size, read_pages, self.block,
+                                                      whole=unlogged)
+                    work.put((index, entry, basis_size, pages, whole))
+                work.put(None)
+            except BaseException as exc:  # handed to the sending thread
+                work.put(exc)
+
+        thread = threading.Thread(target=scan, name='pgdelta-lsn-scan', daemon=True)
+        counts['sending_started_utc'] = time.time()
+        thread.start()
+        try:
+            while (item := work.get()) is not None:
+                if isinstance(item, BaseException):
+                    if isinstance(item, OSError):
+                        raise TransferError(f'cannot read a source file to choose its pages: {item}') from item
+                    raise item
+                index, entry, basis_size, pages, whole = item
+                if self.fill_gaps and not whole:
+                    filled = fastpath.fill_gaps(pages, self.fill_gaps)
+                    self.pages_filled += len(filled) - len(pages)
+                    pages = filled
+                self._send_fast_file(index, entry, basis_size, pages, whole)
+        finally:
+            stop.set()
+            while thread.is_alive():  # let a blocked put return
+                try:
+                    work.get(timeout=0.1)
+                except queue.Empty:
+                    pass
+            thread.join()
         counts['sending_ended_utc'] = time.time()
 
     def _select(self, plans):

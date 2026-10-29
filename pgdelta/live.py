@@ -579,6 +579,7 @@ class LiveSource:
         on them, which PostgreSQL grants to superusers only by default."""
         state = self.session.value(
             "SELECT json_build_object('summarize_wal', current_setting('summarize_wal') = 'on', "
+            "'wal_log_hints', current_setting('wal_log_hints') = 'on', "
             "'timeline', (SELECT timeline_id FROM pg_control_checkpoint()))")
         summarized, waited, deadline = None, 0.0, time.perf_counter() + wait_seconds
         started = time.perf_counter()
@@ -600,6 +601,7 @@ class LiveSource:
             except OSError:
                 pass
         return {'server_version': self.server['version'], 'summarize_wal': bool(state['summarize_wal']),
+                'wal_log_hints': bool(state['wal_log_hints']),
                 'timeline': int(state['timeline']), 'start_lsn': self.start_lsn,
                 'summarized_lsn': summarized, 'summarizer_wait_seconds': round(waited, 3), 'history': history,
                 'summaries': [(int(tli), parse_lsn(start), parse_lsn(end)) for tli, start, end in summaries]}

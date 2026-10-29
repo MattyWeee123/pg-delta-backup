@@ -295,6 +295,83 @@ class Pages(unittest.TestCase):
         self.assertIs(cli._diverged_basis(Namespace()), False)
 
 
+def page(lsn=None, flags=0, lower=40, upper=8000, special=8192, fill=b'x'):
+    """An 8 KiB page with a PostgreSQL page header (lsn None: a new page, all zeros)."""
+    if lsn is None:
+        return bytes(8192)
+    header = fastpath._PAGE_HEADER.pack(lsn >> 32, lsn & 0xFFFFFFFF, 0, flags, lower, upper, special)
+    return header + fill * (8192 - len(header))
+
+
+class PageLsn(unittest.TestCase):
+    """--fast-path page-lsn (research loop 3): pages chosen by their LSN on the server, without summaries."""
+
+    def test_a_page_goes_if_new_invalid_or_changed_at_or_past_the_threshold(self):
+        threshold = L('0/2000000')
+        for data, chosen in ((page(L('0/1FFFFFF')), False), (page(threshold), True), (page(L('1/0')), True),
+                             (page(None), True), (page(L('0/1000'), flags=0x0100), True),
+                             (page(L('0/1000'), lower=9000), True), (page(L('0/1000'), special=8190), True),
+                             (page(L('0/1000'), lower=10), True)):
+            self.assertEqual(fastpath.page_chosen(data, 0, threshold, 8192), chosen, data[:24])
+
+    def test_a_file_is_scanned_in_runs_and_its_pages_kept_in_order(self):
+        threshold = L('0/2000000')
+        data = b''.join((page(L('0/100')), page(L('0/3000000')), page(None), page(L('0/100')), page(L('0/2000000'))))
+        reads = []
+
+        def read(offset, length):
+            reads.append((offset, length))
+            return data[offset:offset + length]
+
+        self.assertEqual(fastpath.lsn_scan(read, len(data), 8192, threshold, chunk=2 * 8192), [1, 2, 4])
+        self.assertEqual(reads, [(0, 16384), (16384, 16384), (32768, 8192)])
+        self.assertEqual(fastpath.lsn_scan(read, len(data), 8192, threshold, chunk=1000), [1, 2, 4])  # at least a page
+
+    def test_only_main_forks_b_holds_are_scanned_and_pages_past_b_go_too(self):
+        scans = []
+
+        def scan():
+            scans.append(1)
+            return [3]
+
+        pages = lambda path, size, basis, **kw: fastpath.lsn_pages(path, size, basis, scan, 8192, **kw)
+        self.assertEqual(pages('base/5/16384.2', 10 * 8192, 10 * 8192), ([3], False))
+        self.assertEqual(pages('base/5/16384', 12 * 8192, 10 * 8192), ([3, 10, 11], False))
+        self.assertEqual(len(scans), 2)
+        for path, basis, kw in (('base/5/16384_vm', 8192, {}), ('base/5/16384_fsm', 8192, {}),
+                                ('base/5/16384_init', 8192, {}), ('pg_xact/0000', 8192, {}),
+                                ('base/5/16384', None, {}), ('base/5/16384', 8192, {'whole': True})):
+            self.assertEqual(pages(path, 8192, basis, **kw), ([0], True), path)
+        self.assertEqual(len(scans), 2)  # never read for a file that goes whole
+
+    def test_the_guard_without_summaries_keeps_every_lineage_condition(self):
+        no_summaries = source(summarize_wal=False, server_version=170010, summaries=[])
+        self.assertEqual(fastpath.guard(FACTS, no_summaries, summaries=False), (True, []))
+        self.assertFalse(fastpath.guard(FACTS, no_summaries)[0])
+        for facts in ({**FACTS, 'timeline': 2}, {**FACTS, 'end': '0/9000000'}, {**FACTS, 'system_identifier': '8'},
+                      {**FACTS, 'major': 16}):
+            ok, reasons = fastpath.guard(facts, no_summaries, summaries=False)
+            self.assertFalse(ok, facts)
+            self.assertTrue(reasons)
+
+    def test_without_checksums_page_lsn_needs_wal_log_hints_on_b_and_on_the_server(self):
+        no_checksums = {**FACTS, 'data_checksum_version': 0}
+        for b_hints, s_hints, ok in ((False, False, False), (True, False, False), (False, True, False),
+                                     (True, True, True)):
+            src = source(identity={**IDENTITY, 'data_checksum_version': 0}, summarize_wal=False, wal_log_hints=s_hints)
+            allowed, reasons = fastpath.guard({**no_checksums, 'wal_log_hints': b_hints}, src, summaries=False)
+            self.assertEqual(allowed, ok, (b_hints, s_hints))
+            self.assertEqual(any('all-visible' in r for r in reasons), not ok)
+
+    def test_page_lsn_takes_no_selector_or_written_plan(self):
+        fastpath.check_mode('page-lsn', 'live', False, 8, None, 2)
+        for args in ((0, 'plan.json'), (0, None, 0, False, object())):
+            with self.assertRaises(InvalidInput):
+                fastpath.check_mode('page-lsn', 'live', False, *args)
+        with self.assertRaises(InvalidInput):
+            fastpath.check_mode('page-lsn', 'datadir', False)
+
+
 class ReadAhead(unittest.TestCase):
     """EXP-64b's reader threads: runs come back in sending order, at most the window ahead, handles closed."""
 
@@ -584,6 +661,48 @@ class RealServer(unittest.TestCase):
                 (target / 'standby.signal').unlink(missing_ok=True)
                 self.check_copy(target)
 
+    def test_page_lsn_takes_a_cleanly_stopped_copy_and_chooses_no_page_the_summaries_would_not(self):
+        """Research loop 3: pages chosen by their LSN on the server, at or past B's redo point; B is never read. A page
+        whose LSN is past B's redo point was changed by WAL since it, so the summaries list it too: page-lsn's main-fork
+        pages are a subset of the summaries' choice in the same state (which lists visibility-map blocks as well)."""
+        _, summaries = self.refresh('lsn-summaries', 'stale', '--fill-gaps', '0')
+        target, stats = self.refresh('lsn', 'stale', '--fast-path', 'page-lsn', '--fill-gaps', '0')
+        fast, received = stats['fast_path'], stats['receiver']['fast_path']
+        self.assertTrue(fast['used'], fast['reasons'])
+        self.assertEqual(fast['requested'], 'page-lsn')
+        self.assertEqual(received['facts']['proof'], 'clean shutdown')
+        self.assertEqual(fast['lsn_threshold'], received['facts']['redo'])
+        self.assertGreater(fast['files_scanned'], 0)
+        self.assertEqual(fast['summaries'], 0)
+        self.assertGreater(fast['pages_chosen'], 0)
+        self.assertLessEqual(fast['pages_chosen'], summaries['fast_path']['pages_chosen'])
+        self.assertNotIn('BASIS_NODES', stats['receiver']['bytes_written']['by_message_type'])  # B never hashed
+        self.check_copy(target)
+
+    def test_page_lsn_takes_a_base_backup_and_a_killed_standby_from_their_redo_points(self):
+        """A base backup (proof: its manifest) and a killed standby (--crashed-standby) need not hold, untorn, a page
+        changed after their redo point: page-lsn sends every page changed since it, and both copies recover."""
+        backup, standby = self.root / 'lsn-backup', self.root / 'lsn-standby'
+        for path, extra in ((backup, ()), (standby, ('-R',))):
+            self.cmd([PG_BIN / 'pg_basebackup', '-h', self.sockets, '-p', 5432, '-U', 't', '-D', path, '-X', 'stream',
+                      '-c', 'fast', *extra])
+        self.ctl(standby, 'start', port=5434)
+        self.sql('UPDATE pgbench_accounts SET abalance = abalance + 3 WHERE aid % 503 = 11')
+        self.ctl(standby, 'stop', port=5434, mode='immediate')
+        self.sql('UPDATE pgbench_accounts SET abalance = abalance + 4 WHERE aid % 509 = 13')
+        self.sql('CHECKPOINT')
+        for name, basis, proof, extra in (('lsn-from-backup', backup, 'backup_manifest', ()),
+                                          ('lsn-from-standby', standby, 'crashed standby', ('--crashed-standby',))):
+            with self.subTest(basis=name):
+                shutil.copytree(basis, self.root / f'{name}-basis', symlinks=True)
+                target, stats = self.refresh(name, f'{name}-basis', '--fast-path', 'page-lsn', *extra)
+                fast, received = stats['fast_path'], stats['receiver']['fast_path']
+                self.assertTrue(fast['used'], fast['reasons'])
+                self.assertEqual(received['facts']['proof'], proof)
+                self.assertEqual(fast['lsn_threshold'], received['facts']['redo'])
+                (target / 'standby.signal').unlink(missing_ok=True)
+                self.check_copy(target)
+
     def test_a_crashed_copy_is_refused_and_refreshed_by_hashing(self):
         target, stats = self.refresh('refused', 'crashed')
         fast, received = stats['fast_path'], stats['receiver']['fast_path']
@@ -592,6 +711,67 @@ class RealServer(unittest.TestCase):
         self.assertIn('not stopped cleanly', fast['reasons'][0])
         self.assertEqual(stats['receiver']['fsync_mode'], 'main')  # auto: no lineage facts, so the main loop
         self.assertGreater(stats['receiver']['bytes_written']['by_message_type']['BASIS_NODES']['frames'], 0)
+        self.check_copy(target)
+
+
+@unittest.skipUnless(available() and (PG_BIN / 'pgbench').exists(), SKIP_REASON)
+class NoSummaries(unittest.TestCase):
+    """Research loop 3: a primary that never summarized WAL (summarize_wal off, the default), keeping its WAL
+    (wal_keep_size, as a replication slot would). The summaries' fast path is refused and hashes; page-lsn chooses
+    pages by their LSN; and once summarize_wal is turned on, the summarizer starts at the oldest WAL still on disk
+    (walsummarizer.c, GetOldestUnsummarizedLSN), so the summaries cover B's redo point and the fast path runs on B."""
+    cmd, ctl, sql = (classmethod(getattr(RealServer, name).__func__) for name in ('cmd', 'ctl', 'sql'))
+    refresh, check_copy, STATE = RealServer.refresh, RealServer.check_copy, RealServer.STATE
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temp.name)
+        cls.sockets = Path(tempfile.mkdtemp(prefix='pgn'))
+        cls.source = cls.root / 'S'
+        cls.env = dict(os.environ, LC_ALL='C', LANG='C')
+        cls.cmd([PG_BIN / 'initdb', '-D', cls.source, '-U', 't', '-A', 'trust', '--no-sync', '--data-checksums'])
+        with open(cls.source / 'postgresql.conf', 'a') as conf:
+            conf.write('wal_keep_size = 512MB\n')
+        cls.ctl(cls.source, 'start')
+        cls.cmd([PG_BIN / 'pgbench', '-i', '-q', '-s', 2, '-h', cls.sockets, '-p', 5432, '-U', 't', 'postgres'])
+        cls.sql('CREATE TABLE gone AS SELECT g, repeat(md5(g::text), 4) AS v FROM generate_series(1, 20000) g')
+        cls.ctl(cls.source, 'stop')
+        shutil.copytree(cls.source, cls.root / 'stale')
+        cls.ctl(cls.source, 'start')
+        cls.sql('UPDATE pgbench_accounts SET abalance = abalance + aid WHERE aid IN (SELECT g * 997 FROM generate_series(1, 150) g)')
+        cls.sql('DELETE FROM gone WHERE g > 1000')
+        cls.sql('VACUUM gone')  # truncated: the pages past its new end leave B, and no summary says so
+        cls.sql('CREATE TABLE fresh AS SELECT g FROM generate_series(1, 5000) g')
+        cls.sql('CHECKPOINT')
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.ctl(cls.source, 'stop', check=False, mode='immediate')
+        shutil.rmtree(cls.sockets, True)
+        cls.temp.cleanup()
+
+    def test_the_summaries_are_refused_page_lsn_runs_and_summaries_turned_on_cover_b(self):
+        self.assertEqual(self.sql('SHOW summarize_wal'), 'off')
+        self.assertEqual(self.sql('SELECT count(*) FROM pg_available_wal_summaries()'), '0')
+        for name, mode in (('nosum-summaries', 'summaries'), ('nosum-lsn', 'page-lsn')):
+            with self.subTest(mode=mode):
+                target, stats = self.refresh(name, 'stale', '--fast-path', mode)
+                fast = stats['fast_path']
+                if mode == 'page-lsn':
+                    self.assertTrue(fast['used'], fast['reasons'])
+                    self.assertLess(stats['pages']['sent'], stats['pages']['total'] / 2)
+                else:
+                    self.assertFalse(fast['used'])
+                    self.assertTrue(any('summarize_wal is off' in r for r in fast['reasons']), fast['reasons'])
+                self.check_copy(target)
+        # Summaries on demand: turned on now, they are built back from the oldest WAL on disk, before B's redo point.
+        self.sql('ALTER SYSTEM SET summarize_wal = on')
+        self.sql('SELECT pg_reload_conf()')
+        target, stats = self.refresh('nosum-backfilled', 'stale')
+        fast = stats['fast_path']
+        self.assertTrue(fast['used'], fast['reasons'])
+        self.assertGreater(fast['summaries'], 0)
         self.check_copy(target)
 
 

@@ -48,6 +48,26 @@ as pg_rewind reads it:
   B created or truncated after the fork need nothing more: a file the server lacks is removed, and every block past
   B's length is sent, as pg_rewind does.
 
+With --fast-path page-lsn (summaries off, or not covering B: research loop 3), the same guard runs without its
+summary conditions, and the pages are chosen by a scan of the server's copy instead, the way WAL-G's catch-up and
+pg_probackup's DELTA mode choose them:
+- of a relation's main fork that B holds, every page whose LSN is at or past B's redo point, every new page (an
+  extension not yet initialised, all zeros) and every page whose header is not a valid page's, plus every block past
+  B's length. B's redo point, not its end: a base backup or a crashed standby need not hold, untorn, a page changed
+  after its redo point, while every page changed before it was written out by the checkpoint or restart point there.
+  A page's LSN is that of the last WAL record that changed it (ARIES's pageLSN), so a page the server changed since
+  then carries a later one; hint bits change without it, which leaves B a valid page short of hints;
+- whole: the visibility map and the free-space map (a cleared visibility-map bit leaves its page's LSN as it was,
+  and the free-space map is not WAL-logged), and everything sent whole above;
+- only with data checksums, or wal_log_hints on in B's pg_control and on the server: otherwise a heap page marked
+  all-visible keeps its LSN (visibilitymap_set bumps it only where hint bits are logged), so it could stay unsent
+  while the visibility map, sent whole, says it is all-visible: pg_rewind's condition too. (wal_log_hints turned off
+  and on again in between, two restarts of the server, is not seen.) Residual, as for WAL-G and pg_probackup: a
+  database created with STRATEGY FILE_COPY keeps its template's page LSNs, so it is safe only at a path new to B;
+  the path of one B holds would need its OID reused;
+- every main-fork file is read whole on the server, so the refresh reads all of S but none of B. A scanner thread
+  runs a few files ahead of the sending thread, which reads the chosen pages again from the page cache.
+
 Pages left unsent are read on neither side, so they are not verified. Each file is checked by the pages written:
 the receiver re-reads them and compares their digest with that of what was sent. The copy is the source's at the
 backup's start except where pages differ only in bits PostgreSQL changes without WAL (hint bits); recovery from
@@ -67,7 +87,14 @@ from pgdelta.errors import InvalidInput, ProtocolError
 from pgdelta.identity import controldata_value, read_controldata
 
 MODE = 'summaries'
-MODES = (MODE,)
+PAGE_LSN = 'page-lsn'  # research loop 3: pages chosen by their LSN on the server, for a server without summaries
+MODES = (MODE, PAGE_LSN)
+LSN_FORKS = ('main',)  # with page-lsn, the forks whose pages are chosen by LSN; every other fork goes whole
+LSN_LOOKAHEAD = 2  # files the page-lsn scanner may run ahead of the sending thread
+LSN_SCAN_BYTES = 8 << 20  # its reads, each a run of whole pages
+PAGE_HEADER_SIZE = 24  # SizeOfPageHeaderData
+PD_VALID_FLAG_BITS = 0x0007
+_PAGE_HEADER = struct.Struct('<IIHHHHH')  # pd_lsn (xlogid, xrecoff), pd_checksum, pd_flags, pd_lower, pd_upper, pd_special
 # The CLI's --read-ahead with --fast-path: 8 reader threads reach the disk's operation rate, and 16 add nothing
 # (EXP-64b, EXP-68).
 DEFAULT_READ_AHEAD = 8
@@ -166,7 +193,8 @@ def basis_facts(basis, pg_controldata, marker, crashed_standby=False):
     last = last_wal_record(basis / 'pg_wal', waldump, timeline, identity.get('wal_segment_size') or 16 << 20)
     facts = {'timeline': timeline, 'redo': format_lsn(redo), 'end': format_lsn(max(end, last or 0, redo)),
              'proof': proof, 'last_wal_record': format_lsn(last) if last else None,
-             'major': _major(basis), **{key: identity.get(key) for key in IDENTITY_KEYS}}
+             'major': _major(basis), 'wal_log_hints': controldata_value(text, 'wal_log_hints setting') == 'on',
+             **{key: identity.get(key) for key in IDENTITY_KEYS}}
     return facts, None
 
 
@@ -347,19 +375,24 @@ def covered(summaries, timeline, lo, hi):
     return point >= hi
 
 
-def cluster_reasons(facts, source):
+def cluster_reasons(facts, source, summaries=True):
     """The guard's reasons that don't depend on where B lies in the server's history: B's identity and major version
-    against the server's, and the server's summaries."""
+    against the server's, and (unless `summaries` is false, for page-lsn) the server's summaries."""
     reasons = []
     identity = source.get('identity') or {}
     for key in IDENTITY_KEYS:
         if facts.get(key) is None or identity.get(key) is None or str(facts[key]) != str(identity[key]):
             reasons.append(f'B\'s {key.replace("_", " ")} ({facts.get(key)}) is not the server\'s ({identity.get(key)})')
     major, version = source['server_version'] // 10000, source['server_version']
-    if version < SUMMARY_FIXED.get(major, 1 << 31):
+    if summaries and version < SUMMARY_FIXED.get(major, 1 << 31):
         reasons.append(f'the server is version {version}; WAL summaries need 17.11, 18.6 or later')
-    if not source['summarize_wal']:
+    if summaries and not source['summarize_wal']:
         reasons.append('the server does not summarize WAL (summarize_wal is off)')
+    if not summaries and str(facts.get('data_checksum_version')) == '0' and not (
+            facts.get('wal_log_hints') and source.get('wal_log_hints')):
+        reasons.append('neither data checksums nor wal_log_hints (on B and on the server): a heap page marked '
+                       'all-visible keeps its LSN, so page-lsn could leave it unsent while the visibility map, sent '
+                       'whole, says it is all-visible')
     if facts.get('major') is not None and facts['major'] != major:
         reasons.append(f'B is PostgreSQL {facts["major"]}, the server {major}')
     return reasons
@@ -378,14 +411,15 @@ def diverged_fork(facts, source):
     return segment[2] if segment is not None and end > segment[2] < END else None
 
 
-def guard(facts, source, common=None):
-    """(ok, reasons): whether the summaries may stand in for reading B (guard v2, EXP-62).
+def guard(facts, source, common=None, summaries=True):
+    """(ok, reasons): whether the summaries may stand in for reading B (guard v2, EXP-62). With `summaries` false
+    (page-lsn), the same guard without the summaries' conditions: B's pages are then chosen by their LSN.
 
     `facts` is ACCEPT's "summary" from the receiver; `source` holds the server's identity (pg_controldata's), its
     version, its summarize_wal setting, the backup's start LSN and timeline, its timeline history and summaries.
     `common`, for a B that diverged (--diverged-basis), is the receiver's BASIS_WAL: the summaries are then read
     from the redo point of C, the checkpoint before the fork, and B's WAL stands in for B's own changes."""
-    reasons = cluster_reasons(facts, source)
+    reasons = cluster_reasons(facts, source, summaries)
     try:
         redo, end, b_tli = parse_lsn(facts['redo']), parse_lsn(facts['end']), int(facts['timeline'])
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
@@ -414,7 +448,7 @@ def guard(facts, source, common=None):
                            f'({format_lsn(switch) if switch < END else "the backup start " + format_lsn(start)})')
         if redo < begin:
             reasons.append(f'B\'s redo point is before timeline {b_tli} began on the server\'s history')
-    if not reasons:
+    if not reasons and summaries:
         gaps = [f'timeline {tli} {format_lsn(lo)}..{format_lsn(hi)}' for tli, lo, hi in ranges(path, redo, start)
                 if not covered(source['summaries'], tli, lo, hi)]
         if gaps:
@@ -485,6 +519,42 @@ def pages_to_send(path, size, basis_size, plan, block, blocks_per_segment, whole
     chosen = {b - first for b in blocks if first <= b < first + pages}
     if limit is not None and limit < first + pages:
         chosen.update(range(max(0, limit - first), pages))
+    chosen.update(range(min(basis_size // block, pages), pages))  # past B's length, or a partial last page of it
+    return sorted(chosen), False
+
+
+def page_chosen(data, offset, threshold, block):
+    """page-lsn: whether the page at `offset` in `data` goes: a new page (pd_upper 0), a page whose header is not a
+    valid page's (PageHeaderIsValid's test), or one whose LSN is at or past `threshold`."""
+    xlogid, xrecoff, _, flags, lower, upper, special = _PAGE_HEADER.unpack_from(data, offset)
+    if upper == 0:
+        return True
+    if flags & ~PD_VALID_FLAG_BITS or not PAGE_HEADER_SIZE <= lower <= upper <= special <= block or special % 8:
+        return True
+    return (xlogid << 32 | xrecoff) >= threshold
+
+
+def lsn_scan(read, size, block, threshold, chunk=LSN_SCAN_BYTES):
+    """page-lsn: the pages of a file of `size` bytes (whole pages) to send, read through `read(offset, length)` in
+    runs of `chunk` bytes."""
+    chunk = max(block, chunk - chunk % block)
+    pages = []
+    for offset in range(0, size, chunk):
+        data = read(offset, min(chunk, size - offset))
+        first = offset // block
+        pages += [first + i for i in range(len(data) // block) if page_chosen(data, i * block, threshold, block)]
+    return pages
+
+
+def lsn_pages(path, size, basis_size, scan, block, whole=False):
+    """page-lsn: the pages of the listed file `path` to send, in order, and whether the whole file goes. `scan()`
+    (lsn_scan on the server's copy) is called only for a main-fork file B holds."""
+    pages = -(-size // block)
+    match = _RELATION.match(path)
+    fork = (match.group(2) or '_main')[1:] if match else None
+    if whole or basis_size is None or match is None or fork not in LSN_FORKS or size % block:
+        return list(range(pages)), True
+    chosen = set(scan())
     chosen.update(range(min(basis_size // block, pages), pages))  # past B's length, or a partial last page of it
     return sorted(chosen), False
 
@@ -582,7 +652,12 @@ def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gap
     if mode not in MODES:
         raise InvalidInput(f'--fast-path must be one of {", ".join(MODES)}, not {mode!r}')
     if source_kind != 'live':
-        raise InvalidInput('--fast-path summaries reads the server\'s WAL summaries, so it needs --source-kind live')
+        raise InvalidInput(f'--fast-path {mode} reads the server\'s state in backup mode, so it needs --source-kind live')
+    if mode == PAGE_LSN and selector is not None:
+        raise InvalidInput('--selector predicts from a plan made before sending, and page-lsn plans each file as it '
+                           'reads it: use --fill-gaps')
+    if mode == PAGE_LSN and plan_out is not None:
+        raise InvalidInput('--plan-out writes a plan made before sending, and page-lsn plans each file as it reads it')
     if subpage:
         raise InvalidInput('--fast-path and --subpage do not combine: sub-page deltas need B\'s block digests, '
                            'and the fast path reads nothing of B')

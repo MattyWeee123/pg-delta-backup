@@ -195,7 +195,7 @@ def _compress_option(parser):
                              'measurement (EXP-54, EXP-55), but as built it was slower than zstd alone at 0.5 and '
                              '1 Gbit/s on 8-vCPU VMs, its block hashing costing more than the link time saved '
                              '(EXP-56). Leave it off')
-    parser.add_argument('--fast-path', choices=('summaries',), default=None,
+    parser.add_argument('--fast-path', choices=fastpath.MODES, default=None,
                         help='with --source-kind live and an in-place refresh: send only the blocks the server\'s '
                              'WAL summaries (summarize_wal = on, PostgreSQL 17.11, 18.6 or later) list since B\'s '
                              'redo point, reading no other page of either copy, where B\'s lineage is provable: '
@@ -203,7 +203,11 @@ def _compress_option(parser):
                              'history, no interrupted refresh, the summaries covering the gap (guard v2, EXP-61, '
                              'EXP-62). Otherwise the session hashes both copies as without it. Pages left unsent '
                              'are not verified; the pages written are. The session\'s role needs EXECUTE on '
-                             'pg_get_wal_summarizer_state, pg_available_wal_summaries and pg_wal_summary_contents')
+                             'pg_get_wal_summarizer_state, pg_available_wal_summaries and pg_wal_summary_contents. '
+                             '"page-lsn" (summaries off, or not covering B; research loop 3) runs the same guard '
+                             'without its summary conditions and chooses each main-fork page whose LSN is at or '
+                             'past B\'s redo point, as WAL-G\'s catch-up and pg_probackup DELTA do: it reads all '
+                             'of the server\'s copy and none of B; the visibility and free-space maps go whole')
     parser.add_argument('--read-ahead', type=_non_negative_int, default=None, metavar='THREADS',
                         help='with --fast-path: read the chosen pages on THREADS threads, in sending order and up to '
                              '64 MiB ahead of the sending thread, so the source\'s scattered reads overlap the '
