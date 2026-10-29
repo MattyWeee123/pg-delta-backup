@@ -4,6 +4,18 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-28 (00:03 UTC): EXP-80 done: crashed standbys correct through the fast path; crash recovery first wrong on S2e
+
+- **Every prediction held:**
+  - 100 of 100 randomized crashed standbys (45 immediate, 55 SIGKILL, mid-load with DDL and truncations) were refreshed by the fast path with `--crashed-standby` and came out correct: rows equal, `pg_amcheck --heapallindexed` clean. The failure rate is below 2.95% at 95%.
+  - 20 of 20 crashed primaries were refused and hashed correctly.
+  - In 3 of 3 fresh S2e builds, crash recovery first made a wrong copy, while as built each was refused and correct.
+- **The first experiment scored under rules 13–17:**
+  - **Rule 16:** its 12 scoring and tested files were unchanged since the registration commit.
+  - **Rule 17:** doesn't apply (correctness counts).
+  - **Rule 13:** this was the cascade's local stage. **Next: EXP-80b,** its VM stage, timing a crashed standby beyond memory against hashing and a re-clone.
+- **Crash recovery first on crashed standbys:** 0 wrong in 40, masked by summary granularity as registered. S2e is the evidence against it.
+
 ## 2026-10-28 (23:57 UTC): the five workflow changes adopted (K14, rules 13–17)
 
 - **The owner adopted all five changes** from the RSI review. Each now has a rule in DECISIONS.md and a file or script behind it.

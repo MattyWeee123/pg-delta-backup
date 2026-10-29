@@ -1,0 +1,98 @@
+[
+ {
+  "build": 0,
+  "state_built": {
+   "Database cluster state": "in production",
+   "Latest checkpoint location": "0/8D124F8"
+  },
+  "recovery_exit": 0,
+  "state_after_recovery": {
+   "Database cluster state": "shut down",
+   "Latest checkpoint location": "0/90000A0"
+  },
+  "as_built": {
+   "exit_code": 0,
+   "fast_used": false,
+   "logical_match": true,
+   "pages_sent": 5301,
+   "pages_total": 10653,
+   "receiver_refused": "B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",
+   "reasons": [
+    "B was not stopped cleanly (in production), so its end can't be proven without all of its WAL"
+   ]
+  },
+  "recovery_first": {
+   "exit_code": 0,
+   "fast_used": true,
+   "logical_match": false,
+   "pages_sent": 4236,
+   "pages_total": 10653,
+   "receiver_refused": null,
+   "reasons": []
+  }
+ },
+ {
+  "build": 1,
+  "state_built": {
+   "Database cluster state": "in production",
+   "Latest checkpoint location": "0/8D124C8"
+  },
+  "recovery_exit": 0,
+  "state_after_recovery": {
+   "Database cluster state": "shut down",
+   "Latest checkpoint location": "0/90000A0"
+  },
+  "as_built": {
+   "exit_code": 0,
+   "fast_used": false,
+   "logical_match": true,
+   "pages_sent": 5301,
+   "pages_total": 10653,
+   "receiver_refused": "B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",
+   "reasons": [
+    "B was not stopped cleanly (in production), so its end can't be proven without all of its WAL"
+   ]
+  },
+  "recovery_first": {
+   "exit_code": 0,
+   "fast_used": true,
+   "logical_match": false,
+   "pages_sent": 4236,
+   "pages_total": 10653,
+   "receiver_refused": null,
+   "reasons": []
+  }
+ },
+ {
+  "build": 2,
+  "state_built": {
+   "Database cluster state": "in production",
+   "Latest checkpoint location": "0/8D124A8"
+  },
+  "recovery_exit": 0,
+  "state_after_recovery": {
+   "Database cluster state": "shut down",
+   "Latest checkpoint location": "0/90000A0"
+  },
+  "as_built": {
+   "exit_code": 0,
+   "fast_used": false,
+   "logical_match": true,
+   "pages_sent": 5301,
+   "pages_total": 10653,
+   "receiver_refused": "B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",
+   "reasons": [
+    "B was not stopped cleanly (in production), so its end can't be proven without all of its WAL"
+   ]
+  },
+  "recovery_first": {
+   "exit_code": 0,
+   "fast_used": true,
+   "logical_match": false,
+   "pages_sent": 4236,
+   "pages_total": 10653,
+   "receiver_refused": null,
+   "reasons": []
+  }
+ }
+]

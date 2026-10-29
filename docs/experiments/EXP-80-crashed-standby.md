@@ -1,6 +1,6 @@
 # EXP-80: Can a crashed standby take the fast path soundly, and is crash recovery first unsound for it?
 
-Status: **pre-registered October 28, 2026, before the registered run** (pilots are listed below). Local, about an hour. It is research loop 2's pick: the "lineage unprovable" row, where pgdelta loses because it can only hash.
+Status: **done October 28, 2026: every prediction held.** 100 of 100 randomized crashed standbys were refreshed by the fast path with `--crashed-standby` and came out correct (failure rate below 2.95% at 95% confidence). 20 of 20 crashed primaries were still refused and hashed correctly. Crash recovery first turned EXP-62's lost-WAL old primary (S2e) into a wrong copy in 3 of 3 fresh builds. Pre-registered the same day, before the registered run (pilots are listed below); local, about an hour. The first experiment scored under rules 13–17. It is research loop 2's pick: the "lineage unprovable" row, where pgdelta loses because it can only hash.
 
 ## Question
 
@@ -64,3 +64,39 @@ Status: **pre-registered October 28, 2026, before the registered run** (pilots a
   - **The guard's documentation** records why crash recovery first stays out.
   - **The residual risk:** a crashed old primary that lost its WAL past the split and was then crash-recovered by anyone (an operator, or `pg_rewind`, whose divergence test is the same) fools guard v2, and `pg_rewind` too. A possible guard check: crash recovery's end-of-recovery checkpoint, found in B's own WAL.
 - **If 1 fails:** the minimum-recovery-point bound doesn't hold for a crashed standby as used here. The failing trials say where, and the option stays off.
+
+## Results
+
+**Setup:** PostgreSQL 17.11 on the Mac (`LC_ALL=C`), 160 trials in a shuffled order, then 3 fresh S2e builds. Data: `docs/experiments/data/exp80-trials.csv` and `exp80-s2e.json`.
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-80` reports 12 of 12 files unchanged since the registration commit (ca04163): the analysis, both harnesses, the scenario builder and fast-path check, and pgdelta's modules under test.
+
+![EXP-80: crashed copies and the fast path](../figures/exp80-crashed.svg)
+
+*How to read it:* per arm, the trials, how many took the fast path, and how many copies came out wrong. On the right, EXP-62's lost-WAL old primary (S2e), wrong as built (0 of 3) and after crash recovery first (3 of 3).
+
+| Arm | Trials | Fast path ran | Wrong copies | Notes |
+|---|---|---|---|---|
+| **Crashed standbys, `--crashed-standby`** (deciding) | 100 | 100 (proof "crashed standby") | **0** | 45 stopped with `pg_ctl -m immediate`, 55 killed with SIGKILL; every one "in archive recovery" |
+| Crashed primaries (control) | 20 | 0 (refused: "in production") | 0 | Hashed, each correct |
+| Crashed standbys, crash recovery first (control) | 40 | 40 (proof "clean shutdown") | 0 | Reported, not predicted |
+| S2e, as built | 3 builds | 0 (refused) | 0 | |
+| **S2e, after crash recovery first** | 3 builds | 3 (accepted as a clean shutdown) | **3** | Crash recovery exited 0 each time and left B "shut down" |
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | **Deciding:** all 100 crashed standbys refreshed by the fast path and correct | **Held:** 100 of 100 (exit 0, rows equal to the source's, `pg_amcheck --heapallindexed` clean). Failure rate below 2.95% at 95% |
+| 2 | All 20 crashed primaries refused and hashed correctly | **Held:** 20 of 20 |
+| 3 | All 3 S2e builds refused and correct as built; after crash recovery first, taken and wrong | **Held:** 3 of 3 each way |
+
+**Reported, not predicted:**
+- **Crash recovery first on crashed standbys:** 0 wrong copies in 40. As registered, its redo-point shift is masked whenever a summary file spans the gap, so these trials can't show its unsoundness. S2e does.
+- **The crashed standbys' refreshes:** a median 22.1% of the pages sent, in 0.51 s on a 60 MB model. Timing is the VMs' to measure (EXP-80b).
+- **Rule 17's noise bar** doesn't apply here: these are correctness counts, not timings.
+
+## What followed
+
+As registered for 1–3 holding:
+- **`--crashed-standby` stays opt-in until EXP-80b times it** beyond memory against hashing and a re-clone. After that, rule 15's held-out session comes before it becomes a default.
+- **Crash recovery first is rejected,** with S2e as the evidence. The guard's documentation (fastpath.py) says why.
+- **The residual risk is recorded in the idea archive:** a crash-recovered old primary that lost its WAL past the split fools guard v2 and `pg_rewind` alike.

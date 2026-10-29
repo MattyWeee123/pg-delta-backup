@@ -1,0 +1,161 @@
+trial,arm,kill,load_before_s,load_after_s,state_after_kill,recovery_exit,state_after_recovery,exit,seconds,fast_used,proof,refused,pages_sent,pages_total,rows_equal,amcheck_ok
+0,recovery-first,immediate,5.01,2.82,in archive recovery,0,shut down,0,0.514,True,clean shutdown,,2739,12881,True,True
+1,crashed-standby,immediate,2.0,2.74,in archive recovery,,,0,0.499,True,crashed standby,,3009,13164,True,True
+2,crashed-standby,sigkill,5.17,5.07,in archive recovery,,,0,0.591,True,crashed standby,,2894,13057,True,True
+3,recovery-first,sigkill,1.29,2.18,in archive recovery,0,shut down,0,0.388,True,clean shutdown,,2569,12746,True,True
+4,crashed-standby,sigkill,2.26,5.94,in archive recovery,,,0,0.476,True,crashed standby,,2666,12843,True,True
+5,recovery-first,immediate,1.44,5.69,in archive recovery,0,shut down,0,0.445,True,clean shutdown,,3270,13456,True,True
+6,crashed-standby,sigkill,5.31,3.46,in archive recovery,,,0,0.519,True,crashed standby,,2894,13061,True,True
+7,crashed-standby,immediate,1.96,1.02,in archive recovery,,,0,0.461,True,crashed standby,,3079,13268,True,True
+8,crashed-standby,sigkill,3.45,2.35,in archive recovery,,,0,0.496,True,crashed standby,,2681,12870,True,True
+9,crashed-standby,sigkill,2.31,5.65,in archive recovery,,,0,0.518,True,crashed standby,,3136,13294,True,True
+10,crashed-standby,sigkill,2.18,5.16,in archive recovery,,,0,0.418,True,crashed standby,,3183,13375,True,True
+11,crashed-standby,immediate,5.65,2.81,in archive recovery,,,0,0.571,True,crashed standby,,2700,12898,True,True
+12,crashed-standby,sigkill,3.12,2.58,in archive recovery,,,0,0.455,True,crashed standby,,2897,13101,True,True
+13,crashed-standby,sigkill,7.49,5.14,in archive recovery,,,0,0.425,True,crashed standby,,3016,13215,True,True
+14,recovery-first,sigkill,2.21,1.58,in archive recovery,0,shut down,0,0.408,True,clean shutdown,,2656,12843,True,True
+15,crashed-standby,immediate,2.31,4.4,in archive recovery,,,0,0.547,True,crashed standby,,2807,13021,True,True
+16,recovery-first,sigkill,8.0,5.2,in archive recovery,0,shut down,0,0.441,True,clean shutdown,,2767,12968,True,True
+17,crashed-standby,sigkill,4.07,2.64,in archive recovery,,,0,0.736,True,crashed standby,,2641,12780,True,True
+18,crashed-standby,immediate,4.17,2.35,in archive recovery,,,0,0.542,True,crashed standby,,2871,13070,True,True
+19,crashed-standby,sigkill,1.93,2.06,in archive recovery,,,0,0.615,True,crashed standby,,2839,13052,True,True
+20,recovery-first,sigkill,4.24,4.84,in archive recovery,0,shut down,0,0.475,True,clean shutdown,,2959,13168,True,True
+21,crashed-standby,sigkill,7.98,2.97,in archive recovery,,,0,0.423,True,crashed standby,,2847,13052,True,True
+22,crashed-primary,immediate,1.67,1.38,in production,,,0,0.561,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2483,13194,True,True
+23,crashed-primary,immediate,2.35,5.01,in production,,,0,0.511,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2573,13173,True,True
+24,crashed-standby,immediate,7.58,4.84,in archive recovery,,,0,0.507,True,crashed standby,,3141,13316,True,True
+25,recovery-first,immediate,1.9,5.34,in archive recovery,0,shut down,0,0.442,True,clean shutdown,,2931,13153,True,True
+26,crashed-primary,immediate,3.35,1.17,in production,,,0,0.506,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2218,13026,True,True
+27,recovery-first,sigkill,5.15,4.28,in archive recovery,0,shut down,0,0.425,True,clean shutdown,,2931,13157,True,True
+28,crashed-primary,immediate,1.97,1.8,in production,,,0,0.509,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2508,13132,True,True
+29,crashed-primary,immediate,7.08,5.13,in production,,,0,0.524,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2576,13179,True,True
+30,crashed-standby,sigkill,4.03,1.72,in archive recovery,,,0,0.495,True,crashed standby,,3151,13363,True,True
+31,crashed-standby,immediate,3.46,4.03,in archive recovery,,,0,0.571,True,crashed standby,,2958,13218,True,True
+32,recovery-first,immediate,1.42,4.3,in archive recovery,0,shut down,0,0.52,True,clean shutdown,,2917,13186,True,True
+33,crashed-standby,immediate,2.97,1.12,in archive recovery,,,0,0.587,True,crashed standby,,2908,13175,True,True
+34,crashed-standby,immediate,5.43,1.24,in archive recovery,,,0,0.61,True,crashed standby,,2950,13231,True,True
+35,crashed-standby,immediate,4.46,4.43,in archive recovery,,,0,0.456,True,crashed standby,,2994,13274,True,True
+36,crashed-primary,immediate,2.61,2.77,in production,,,0,0.485,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2494,13183,True,True
+37,crashed-standby,sigkill,1.08,2.05,in archive recovery,,,0,0.414,True,crashed standby,,2960,13258,True,True
+38,recovery-first,sigkill,1.48,3.16,in archive recovery,0,shut down,0,0.439,True,clean shutdown,,2950,13208,True,True
+39,recovery-first,sigkill,5.0,1.53,in archive recovery,0,shut down,0,0.451,True,clean shutdown,,2882,13193,True,True
+40,crashed-standby,sigkill,3.01,5.25,in archive recovery,,,0,0.478,True,crashed standby,,2982,13298,True,True
+41,crashed-standby,sigkill,6.58,3.16,in archive recovery,,,0,0.459,True,crashed standby,,3324,13642,True,True
+42,recovery-first,sigkill,7.08,1.67,in archive recovery,0,shut down,0,0.594,True,clean shutdown,,2604,12937,True,True
+43,crashed-standby,immediate,7.38,3.87,in archive recovery,,,0,0.417,True,crashed standby,,3319,13454,True,True
+44,recovery-first,sigkill,7.87,4.99,in archive recovery,0,shut down,0,0.502,True,clean shutdown,,2830,13127,True,True
+45,crashed-standby,immediate,7.36,4.44,in archive recovery,,,0,0.436,True,crashed standby,,2822,13130,True,True
+46,crashed-standby,immediate,3.65,2.68,in archive recovery,,,0,0.466,True,crashed standby,,3048,13368,True,True
+47,crashed-standby,immediate,7.28,5.44,in archive recovery,,,0,0.53,True,crashed standby,,2957,13170,True,True
+48,crashed-standby,sigkill,1.29,3.71,in archive recovery,,,0,0.42,True,crashed standby,,2741,13024,True,True
+49,crashed-standby,sigkill,1.98,1.78,in archive recovery,,,0,0.526,True,crashed standby,,2742,13037,True,True
+50,crashed-standby,sigkill,8.0,1.46,in archive recovery,,,0,0.467,True,crashed standby,,2788,13072,True,True
+51,crashed-standby,immediate,4.61,4.93,in archive recovery,,,0,0.517,True,crashed standby,,3153,13438,True,True
+52,crashed-standby,immediate,6.85,5.62,in archive recovery,,,0,0.463,True,crashed standby,,2851,13134,True,True
+53,crashed-primary,immediate,2.57,4.46,in production,,,0,0.487,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2203,12895,True,True
+54,recovery-first,immediate,2.49,5.9,in archive recovery,0,shut down,0,0.43,True,clean shutdown,,2887,13152,True,True
+55,crashed-standby,immediate,4.44,2.85,in archive recovery,,,0,0.513,True,crashed standby,,2928,13205,True,True
+56,crashed-standby,sigkill,2.39,4.09,in archive recovery,,,0,0.442,True,crashed standby,,3047,13346,True,True
+57,crashed-standby,sigkill,1.39,4.94,in archive recovery,,,0,0.57,True,crashed standby,,3045,13336,True,True
+58,recovery-first,immediate,3.2,3.27,in archive recovery,0,shut down,0,0.524,True,clean shutdown,,2977,13265,True,True
+59,crashed-standby,immediate,1.22,3.06,in archive recovery,,,0,0.572,True,crashed standby,,3080,13383,True,True
+60,recovery-first,immediate,2.41,2.99,in archive recovery,0,shut down,0,0.532,True,clean shutdown,,2871,13163,True,True
+61,crashed-standby,immediate,6.02,2.8,in archive recovery,,,0,0.464,True,crashed standby,,3038,13230,True,True
+62,crashed-primary,immediate,6.8,5.02,in production,,,0,0.472,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2900,13580,True,True
+63,crashed-standby,immediate,4.02,3.62,in archive recovery,,,0,0.476,True,crashed standby,,3247,13510,True,True
+64,crashed-standby,immediate,4.34,3.36,in archive recovery,,,0,0.549,True,crashed standby,,3106,13401,True,True
+65,recovery-first,sigkill,1.77,3.67,in archive recovery,0,shut down,0,0.397,True,clean shutdown,,2838,13142,True,True
+66,crashed-standby,immediate,4.44,5.23,in archive recovery,,,0,0.494,True,crashed standby,,2604,12892,True,True
+67,recovery-first,immediate,4.2,4.21,in archive recovery,0,shut down,0,0.494,True,clean shutdown,,3228,13520,True,True
+68,crashed-standby,sigkill,4.23,5.81,in archive recovery,,,0,0.459,True,crashed standby,,2954,13237,True,True
+69,recovery-first,immediate,7.96,2.88,in archive recovery,0,shut down,0,0.406,True,clean shutdown,,2981,13286,True,True
+70,crashed-primary,immediate,6.42,3.89,in production,,,0,0.532,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2605,13293,True,True
+71,crashed-standby,sigkill,6.2,4.88,in archive recovery,,,0,0.538,True,crashed standby,,3020,13291,True,True
+72,crashed-standby,sigkill,3.43,1.67,in archive recovery,,,0,0.485,True,crashed standby,,2991,13300,True,True
+73,crashed-standby,sigkill,5.05,1.34,in archive recovery,,,0,0.556,True,crashed standby,,2924,13221,True,True
+74,crashed-standby,sigkill,3.79,1.47,in archive recovery,,,0,0.503,True,crashed standby,,2731,13033,True,True
+75,crashed-standby,sigkill,3.02,1.89,in archive recovery,,,0,0.544,True,crashed standby,,2730,13044,True,True
+76,crashed-primary,immediate,3.92,5.53,in production,,,0,0.507,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2485,13176,True,True
+77,recovery-first,sigkill,3.25,3.36,in archive recovery,0,shut down,0,0.425,True,clean shutdown,,2824,13090,True,True
+78,crashed-standby,sigkill,6.38,3.01,in archive recovery,,,0,0.42,True,crashed standby,,3097,13402,True,True
+79,crashed-standby,immediate,1.04,4.1,in archive recovery,,,0,0.541,True,crashed standby,,3089,13395,True,True
+80,crashed-primary,immediate,3.48,3.25,in production,,,0,0.503,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2593,13302,True,True
+81,recovery-first,sigkill,3.61,2.98,in archive recovery,0,shut down,0,0.477,True,clean shutdown,,3081,13349,True,True
+82,crashed-standby,sigkill,1.59,5.38,in archive recovery,,,0,0.42,True,crashed standby,,2695,12988,True,True
+83,crashed-standby,immediate,7.18,2.92,in archive recovery,,,0,0.53,True,crashed standby,,2857,13165,True,True
+84,crashed-primary,immediate,2.55,3.73,in production,,,0,0.49,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2283,12993,True,True
+85,crashed-standby,sigkill,7.45,1.22,in archive recovery,,,0,0.421,True,crashed standby,,3019,13288,True,True
+86,crashed-standby,sigkill,6.64,4.83,in archive recovery,,,0,0.489,True,crashed standby,,2778,13085,True,True
+87,crashed-standby,immediate,6.0,3.54,in archive recovery,,,0,0.512,True,crashed standby,,2919,13216,True,True
+88,crashed-standby,immediate,7.56,5.3,in archive recovery,,,0,0.494,True,crashed standby,,2805,13119,True,True
+89,crashed-primary,immediate,6.1,3.8,in production,,,0,0.53,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2935,13657,True,True
+90,crashed-standby,immediate,2.52,4.5,in archive recovery,,,0,0.443,True,crashed standby,,2839,13114,True,True
+91,recovery-first,sigkill,2.82,5.2,in archive recovery,0,shut down,0,0.431,True,clean shutdown,,2840,13179,True,True
+92,crashed-standby,sigkill,1.65,1.33,in archive recovery,,,0,0.45,True,crashed standby,,3175,13520,True,True
+93,recovery-first,immediate,2.13,2.14,in archive recovery,0,shut down,0,0.441,True,clean shutdown,,2747,13098,True,True
+94,crashed-standby,immediate,3.33,3.5,in archive recovery,,,0,0.419,True,crashed standby,,2939,13297,True,True
+95,crashed-standby,sigkill,7.32,5.86,in archive recovery,,,0,0.531,True,crashed standby,,3075,13436,True,True
+96,recovery-first,sigkill,1.21,4.39,in archive recovery,0,shut down,0,0.408,True,clean shutdown,,2979,13146,True,True
+97,crashed-standby,immediate,6.96,4.57,in archive recovery,,,0,0.509,True,crashed standby,,2985,13314,True,True
+98,crashed-standby,sigkill,4.83,2.14,in archive recovery,,,0,0.556,True,crashed standby,,3033,13390,True,True
+99,recovery-first,sigkill,5.36,1.32,in archive recovery,0,shut down,0,0.56,True,clean shutdown,,2907,13259,True,True
+100,crashed-primary,immediate,3.48,1.21,in production,,,0,0.536,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2438,13249,True,True
+101,crashed-primary,immediate,2.23,5.5,in production,,,0,0.529,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2269,13029,True,True
+102,crashed-primary,immediate,5.34,3.88,in production,,,0,0.531,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2763,13512,True,True
+103,crashed-standby,immediate,1.65,4.73,in archive recovery,,,0,0.449,True,crashed standby,,2918,13210,True,True
+104,crashed-standby,immediate,2.55,4.47,in archive recovery,,,0,0.472,True,crashed standby,,2902,13259,True,True
+105,crashed-standby,sigkill,6.59,4.5,in archive recovery,,,0,0.513,True,crashed standby,,2624,12956,True,True
+106,crashed-standby,immediate,3.0,3.81,in archive recovery,,,0,0.538,True,crashed standby,,2727,13093,True,True
+107,crashed-standby,immediate,6.05,2.09,in archive recovery,,,0,0.563,True,crashed standby,,2808,13163,True,True
+108,crashed-standby,sigkill,4.03,2.24,in archive recovery,,,0,0.592,True,crashed standby,,2862,13221,True,True
+109,recovery-first,immediate,4.58,3.92,in archive recovery,0,shut down,0,0.458,True,clean shutdown,,3125,13358,True,True
+110,recovery-first,sigkill,2.9,4.11,in archive recovery,0,shut down,0,0.584,True,clean shutdown,,2757,13088,True,True
+111,crashed-standby,sigkill,3.35,4.45,in archive recovery,,,0,0.561,True,crashed standby,,2854,13196,True,True
+112,recovery-first,sigkill,6.54,5.35,in archive recovery,0,shut down,0,0.484,True,clean shutdown,,3030,13371,True,True
+113,crashed-standby,sigkill,2.63,5.53,in archive recovery,,,0,0.516,True,crashed standby,,2808,13154,True,True
+114,crashed-standby,sigkill,4.4,3.26,in archive recovery,,,0,0.527,True,crashed standby,,3436,13704,True,True
+115,crashed-standby,sigkill,6.81,5.8,in archive recovery,,,0,0.489,True,crashed standby,,3182,13509,True,True
+116,crashed-standby,sigkill,2.7,1.26,in archive recovery,,,0,0.489,True,crashed standby,,3079,13432,True,True
+117,recovery-first,sigkill,4.82,4.2,in archive recovery,0,shut down,0,0.563,True,clean shutdown,,2813,13153,True,True
+118,crashed-standby,sigkill,6.94,2.08,in archive recovery,,,0,0.509,True,crashed standby,,3174,13511,True,True
+119,crashed-standby,immediate,5.2,2.19,in archive recovery,,,0,0.391,True,crashed standby,,2865,13121,True,True
+120,crashed-standby,sigkill,4.68,1.83,in archive recovery,,,0,0.589,True,crashed standby,,2586,12922,True,True
+121,crashed-standby,immediate,5.49,4.64,in archive recovery,,,0,0.536,True,crashed standby,,3004,13348,True,True
+122,crashed-standby,sigkill,6.52,2.95,in archive recovery,,,0,0.513,True,crashed standby,,3007,13353,True,True
+123,crashed-standby,sigkill,2.61,3.54,in archive recovery,,,0,0.546,True,crashed standby,,2613,12960,True,True
+124,crashed-standby,immediate,3.88,3.31,in archive recovery,,,0,0.496,True,crashed standby,,2793,13056,True,True
+125,crashed-primary,immediate,6.35,2.1,in production,,,0,0.572,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2645,13371,True,True
+126,recovery-first,sigkill,4.54,3.8,in archive recovery,0,shut down,0,0.471,True,clean shutdown,,3059,13380,True,True
+127,crashed-standby,immediate,6.2,2.02,in archive recovery,,,0,0.47,True,crashed standby,,2945,13296,True,True
+128,crashed-standby,sigkill,7.89,4.44,in archive recovery,,,0,0.462,True,crashed standby,,2997,13336,True,True
+129,crashed-standby,sigkill,2.93,4.76,in archive recovery,,,0,0.453,True,crashed standby,,2759,13111,True,True
+130,crashed-standby,sigkill,2.83,1.44,in archive recovery,,,0,0.578,True,crashed standby,,2708,13069,True,True
+131,crashed-standby,immediate,5.52,5.84,in archive recovery,,,0,0.548,True,crashed standby,,2698,12953,True,True
+132,crashed-standby,sigkill,6.49,5.64,in archive recovery,,,0,0.532,True,crashed standby,,2957,13291,True,True
+133,crashed-standby,sigkill,7.65,5.75,in archive recovery,,,0,0.464,True,crashed standby,,2815,13165,True,True
+134,crashed-primary,immediate,3.76,3.34,in production,,,0,0.56,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2586,13346,True,True
+135,crashed-standby,immediate,7.02,4.02,in archive recovery,,,0,0.545,True,crashed standby,,2864,13180,True,True
+136,crashed-standby,sigkill,6.47,5.13,in archive recovery,,,0,0.482,True,crashed standby,,2747,13091,True,True
+137,crashed-standby,sigkill,5.74,5.76,in archive recovery,,,0,0.647,True,crashed standby,,2871,13214,True,True
+138,recovery-first,sigkill,4.63,5.4,in archive recovery,0,shut down,0,0.555,True,clean shutdown,,3209,13561,True,True
+139,crashed-standby,immediate,2.62,3.96,in archive recovery,,,0,0.593,True,crashed standby,,2714,13069,True,True
+140,crashed-standby,sigkill,6.46,2.6,in archive recovery,,,0,0.42,True,crashed standby,,3314,13562,True,True
+141,recovery-first,immediate,4.03,3.05,in archive recovery,0,shut down,0,0.555,True,clean shutdown,,2788,13149,True,True
+142,crashed-standby,immediate,3.96,4.31,in archive recovery,,,0,0.462,True,crashed standby,,2701,13056,True,True
+143,crashed-primary,immediate,6.77,1.81,in production,,,0,0.484,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2578,13330,True,True
+144,crashed-standby,sigkill,3.13,5.42,in archive recovery,,,0,0.498,True,crashed standby,,2874,13194,True,True
+145,recovery-first,immediate,3.29,5.39,in archive recovery,0,shut down,0,0.424,True,clean shutdown,,3160,13509,True,True
+146,crashed-standby,sigkill,6.25,5.16,in archive recovery,,,0,0.673,True,crashed standby,,2938,13282,True,True
+147,recovery-first,immediate,5.31,5.27,in archive recovery,0,shut down,0,0.531,True,clean shutdown,,2908,13264,True,True
+148,crashed-standby,immediate,1.44,1.74,in archive recovery,,,0,0.543,True,crashed standby,,3018,13385,True,True
+149,recovery-first,sigkill,3.13,5.48,in archive recovery,0,shut down,0,0.561,True,clean shutdown,,3005,13272,True,True
+150,crashed-standby,immediate,3.46,3.3,in archive recovery,,,0,0.541,True,crashed standby,,3166,13512,True,True
+151,recovery-first,sigkill,4.71,4.76,in archive recovery,0,shut down,0,0.391,True,clean shutdown,,3032,13390,True,True
+152,crashed-standby,sigkill,6.3,1.09,in archive recovery,,,0,0.494,True,crashed standby,,3233,13594,True,True
+153,crashed-standby,immediate,3.48,1.3,in archive recovery,,,0,0.619,True,crashed standby,,2568,12929,True,True
+154,recovery-first,sigkill,1.01,2.69,in archive recovery,0,shut down,0,0.626,True,clean shutdown,,2910,13263,True,True
+155,crashed-primary,immediate,5.12,2.76,in production,,,0,0.59,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2516,13274,True,True
+156,recovery-first,immediate,7.81,5.55,in archive recovery,0,shut down,0,0.587,True,clean shutdown,,3147,13461,True,True
+157,crashed-standby,immediate,5.85,3.15,in archive recovery,,,0,0.548,True,crashed standby,,2937,13300,True,True
+158,recovery-first,immediate,5.41,3.99,in archive recovery,0,shut down,0,0.622,True,clean shutdown,,2696,13066,True,True
+159,recovery-first,sigkill,1.04,1.73,in archive recovery,0,shut down,0,0.57,True,clean shutdown,,2723,13100,True,True
