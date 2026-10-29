@@ -4,6 +4,15 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (04:34 UTC): the research loop and the RSI rules in one place (WORKFLOW.md)
+
+- **The owner asked** that the RSI rules and their research workflow always be referenced together when a decision comes back to them, and kept in the same spot.
+- **[WORKFLOW.md](WORKFLOW.md) is now that spot:**
+  - the research loop (rule 12, K13), with the owner's words;
+  - the five RSI rules (13–17, K14), with their current values and the files behind each;
+  - the workflow check, one line per item, which every decision brought to the owner ends with.
+- **DECISIONS.md keeps rules 1–11** and points there for 12–17. The numbers are unchanged, so earlier references hold.
+
 ## 2026-10-29 (03:28 UTC): EXP-81 done: the fast path beats native incremental and WAL-G catch-up, each in its best mode
 
 - **Every prediction held** (the `ha` set, 18 GB on 8 GB VMs, dest on XFS with reflinks):
@@ -569,7 +578,7 @@ The owner, in their words, asked that this be remembered and applied recursively
 
 > All decisions should, at the end of the day, be evidence-driven. You should not simply guess that something is the bottleneck. You should perform experiments to justify it. All decisions must be justified, as in a scientific research setting. All your decisions should be reviewed as if they're being reviewed by a paper committee reviewing your findings.
 
-It is now rule 12 in DECISIONS.md (decision K13). The first pass of the loop started the same night: a competitor audit from primary sources, a paper survey for mechanisms to combine, and a measured ceiling for the hash path.
+It is now rule 12 in DECISIONS.md (decision K13); since October 29 it lives with rules 13–17 in WORKFLOW.md. The first pass of the loop started the same night: a competitor audit from primary sources, a paper survey for mechanisms to combine, and a measured ceiling for the hash path.
 
 ## 2026-10-27 (evening): EXP-58, what pgdelta's own TLS costs
 

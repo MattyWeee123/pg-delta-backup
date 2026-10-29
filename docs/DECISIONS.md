@@ -803,33 +803,10 @@ Ranked by how much each test could change the plan per unit of cost. Each test's
 9. **Close gates.** Plan gates such as the rsync gate get an owner and a date, and a gate that fires blocks the work that depends on it until it's answered.
 10. **Don't extrapolate.** Ratios measured at 2.1 GB are not projected to TB scale until T9 has run.
 11. **No guesswork; confidence matches the evidence** (the owner, October 24; clarified October 25). Every claim says what supports it (measured, inferred or assumed) and under which conditions, and is stated no more strongly than that. A decision that matters and rests on inference or a narrow margin gets the smallest experiment that would settle it: a small scale model whose scaling is measured at two or three sizes is preferred to a large run, and a second session is run only for a deciding result whose margin is inside the drift measured between sessions, and only for that cell. Until then the work follows the best-supported route, labelled provisional, without waiting. *October 25: the owner's clarification replaces the first wording ("only a firm decision picks a single route ... anything less ... keeps every route open as a branch"), which had grown wave 1 to 8- and 30-hour sessions.*
-12. **The research loop** (the owner, October 27, in their words in LOG.md and the decision K13). Before choosing the next work: (a) for each situation, name the industry standard and the strongest competitor, verified from primary sources, and say with a measurement whether pgdelta beats it; (b) where it doesn't, find the bottleneck by experiment, never by assumption; (c) bound it: could the best possible implementation of the current algorithm beat the competitor? Measured ceilings and lower-bound arithmetic decide whether it is a systems problem (optimise) or an algorithm problem (change the algorithm: hashing, page labelling, or another); (d) mine papers for mechanisms, taken from the papers themselves, and combine or rework them for these constraints; (e) every decision evidence-driven and written as for a paper committee. Tuning outside this loop is not progress.
-13. **A cascade, and a log of how well each proxy predicts** (the owner, October 28, K14).
-    - **Every change climbs three stages:**
-      - tests (seconds);
-      - a local scale model (minutes);
-      - the VMs (an hour).
-    - **Promotion to the VMs on local evidence alone** needs a local gain larger than the proxy's measured error. From the log so far (proxy-fidelity.csv), the VM ratio lay within 0.875–1.185 of the local one, so a local ratio of 0.80 or less.
-    - **Several candidates that pass** are batched as arms of one VM session.
-    - **Every local and VM pair** of the same ratio goes into [research/proxy-fidelity.csv](research/proxy-fidelity.csv), plotted by `analysis/proxy_fidelity.py`.
-14. **The idea archive** (K14). [research/idea-archive.md](research/idea-archive.md) holds every idea: its status, its evidence, where it won and lost, and a trigger to revisit it.
-    - Each research-loop pass reads it first.
-    - Each pass proposes at least one structurally different idea beside any tuning.
-    - An idea that loses is archived with its conditions, never deleted.
-15. **Held-out workloads** (K14). The settings in [research/held-out-workloads.md](research/held-out-workloads.md) are never used to tune or to decide.
-    - They run only at a milestone (before a default changes, or a claim leaves the project), in a pre-registered session predicted from the tuned results.
-    - A miss narrows the claim; it is never tuned away.
-16. **Scorer integrity** (K14).
-    - **At registration,** `analysis/integrity.py register` records the hash of every file that scores, runs or is under test, as of the registration commit.
-    - **When writing up,** `check` lists every file changed since. The write-up says why each change alters no score, or re-scores with the registered file.
-    - **Every performance change keeps a correctness gate:** the copy compared with the source, and no work dropped (pages re-read equal to pages sent; the guard's decisions reported).
-    - **Where a negative control can be built,** it is (EXP-80's S2e).
-17. **Noise as an explicit bar** (K14). From [research/noise-floor.csv](research/noise-floor.csv) (`analysis/noise_floor.py`, EXP-64 to EXP-79b, the ha set):
-    - **within a session,** two runs of a cell of 10 s or more differed by 2.27% at the 95th percentile (median 0.31%); cells under 10 s by 7.7%;
-    - **between sessions,** `pg_basebackup` in the same cell moved 0.28–0.31%.
-    - **So a deciding effect smaller than the cell's 95th-percentile spread** is within the noise. It gets a second session (rule 11), or is reported as a tie.
-    - **A cross-session comparison** also needs its control arm within 1% of the earlier session's.
-    - **A cell whose runs differ by more than that percentile** is checked for interference (the source disk's writes, as EXP-79 found) before it is scored.
+12. **Rules 12–17, the research workflow,** are kept in one place: [WORKFLOW.md](WORKFLOW.md). It holds, with their numbers:
+    - **rule 12, the owner's research loop** (October 27, in their words; K13);
+    - **rules 13–17, the five changes from the review of recursive self-improvement work** (October 28; K14): 13 a cascade with a proxy-fidelity log, 14 the idea archive, 15 held-out workloads, 16 scorer integrity, 17 noise as a bar.
+    - **The two are applied together,** and every decision brought to the owner ends with the page's workflow check (the owner, October 29).
 
     *October 24, 2026 (night): [FIRMNESS.md](FIRMNESS.md) audits the ledger under this rule. Of 107 items that steer work or close a route, 11 are firm; of the 55 that steer the next work, only the vCPU quota is. It lists the branches each provisional item keeps open, and proposes the tests and owner decisions that would firm them, a queue order, EXP-13's revisions before it runs, and three grade changes (D02, D85, D14). It changes no registered verdict, pre-registration or grade here.*
 
