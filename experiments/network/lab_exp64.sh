@@ -38,6 +38,18 @@
 # - "walg" (on B0s: "sb_walg"): WAL-G's catch-up, catchup-receive on dest and catchup-send on the source, then a
 #   sync of /data, since WAL-G's receiver syncs nothing; its copy is checked as the standby it stays, once it has
 #   replayed to the source's current LSN.
+# EXP-82b, summaries off (research loop 3): SUMMARIES=0 leaves the source's summarize_wal off, and WAL_KEEP (e.g. 32GB)
+# sets its wal_keep_size, so the WAL since each old copy stays on disk, as a replication slot would keep it. Arms:
+# - "hash": no fast path (pgdelta hashes both copies);
+# - "lsn": --fast-path page-lsn, with the fast path's other defaults (2-page gaps filled, the fsync worker);
+# - "od" (summaries on demand): summarize_wal turned on (ALTER SYSTEM, a reload) and the summarizer waited for until it
+#   has read the WAL up to the source's LSN at that moment, then the summaries' fast path with its defaults; timed from
+#   before the setting is turned on. Afterwards it is turned off again and its summaries removed, so each run starts
+#   from a server that never summarized.
+# SLOT=1: before each pattern's old copies are taken, a physical replication slot (exp82b) is reserved on the source,
+# so it keeps exactly the WAL since their redo points (a checkpoint recycles every older segment): the summarizer, which
+# starts at the oldest WAL on disk, then reads only that. wal_keep_size would keep older WAL too. Dropped at the end.
+# Every pgdelta arm's copy is checked (the hash arm's too, since EXP-82b).
 # Every copy of B0 or B0s is a real one (cp --reflink=never: on XFS cp would otherwise share blocks with B0), and each
 # run records dest's received network bytes (net_rx_bytes) and, for incr and walg, its phases' seconds.
 set -u
@@ -52,6 +64,9 @@ SERIES=${SERIES:-0}
 CRASHED=${CRASHED:-0}
 KILL_AFTER=${KILL_AFTER:-30}
 STANDBY_TOO=${STANDBY_TOO:-0}
+SUMMARIES=${SUMMARIES:-1}
+SLOT=${SLOT:-0}
+WAL_KEEP=${WAL_KEEP:-}
 WALG=${WALG:-/usr/local/bin/wal-g}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
@@ -89,9 +104,15 @@ echo "$(date -u +%T) set-up: scale $SCALE"
 on_src "mkdir -p $W && python3 experiments/network/source_cluster.py setup $WORKLOAD_ARGS --pattern hot \
   --listen-ip $SRC --client-ip $DEST > $W/setup.json" || { echo "set-up failed"; exit 1; }
 # Summaries from here on: on before any old copy is taken, so they cover each B0's start onwards.
-on_src "echo 'summarize_wal = on  # EXP-64' >> $ROOT/data/postgresql.conf && $PGBIN/pg_ctl -D $ROOT/data reload > /dev/null"
+if [ "$SUMMARIES" = 1 ]; then
+  on_src "echo 'summarize_wal = on  # EXP-64' >> $ROOT/data/postgresql.conf && $PGBIN/pg_ctl -D $ROOT/data reload > /dev/null"
+fi
+if [ -n "$WAL_KEEP" ]; then
+  psrc "ALTER SYSTEM SET wal_keep_size = '$WAL_KEEP'" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
+fi
 psrc "CHECKPOINT"
 for x in $(seq 120); do
+  [ "$SUMMARIES" = 1 ] || break
   [ "$(psrc "SELECT summarized_lsn > '0/0' FROM pg_get_wal_summarizer_state()")" = t ] && break; sleep 1
 done
 VERSION=$(psrc "SHOW server_version_num")
@@ -108,6 +129,11 @@ rm -f "$W/ddtest"
 
 i=0
 for pattern in $PATTERNS; do
+  if [ "$SLOT" = 1 ]; then
+    psrc "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'exp82b'" > /dev/null
+    psrc "SELECT pg_create_physical_replication_slot('exp82b', true)" > /dev/null || { echo "slot failed"; exit 1; }
+    echo "$(date -u +%T) $pattern: slot exp82b reserved at $(psrc "SELECT restart_lsn FROM pg_replication_slots WHERE slot_name = 'exp82b'")"
+  fi
   rm -rf "$B0"
   if [ "$CRASHED" = 1 ]; then
     echo "$(date -u +%T) $pattern: B0, a standby of the source, started before the change"
@@ -244,12 +270,25 @@ EOF
         [ "${BASH_REMATCH[5]}" = q ] && fsync="$fsync --verify sequential"
         [ "${BASH_REMATCH[6]}" = c ] && fsync="$fsync --crashed-standby"
       fi
+      case "$a" in
+        lsn) fast="--fast-path page-lsn --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
+        od) fast="--fast-path summaries --read-ahead 8 --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
+      esac
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
         --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 $fsync > "$d/receive.log" 2>&1 &
       rp=$!
       for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
       t0=$(date +%s.%N)
+      if [ "$a" = od ]; then
+        target=$(psrc "SELECT pg_current_wal_lsn()")
+        psrc "ALTER SYSTEM SET summarize_wal = on" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
+        for x in $(seq 7200); do
+          [ "$(psrc "SELECT coalesce(pending_lsn >= '$target', false) FROM pg_get_wal_summarizer_state()")" = t ] && break
+          sleep 0.25
+        done
+        ts=$(date +%s.%N)
+      fi
       on_src "python3 -m pgdelta send --source $ROOT/data --source-kind live --pg-conn '$CONN' --connect $DEST:7000 \
         --pg-controldata $PGBIN/pg_controldata --jobs 4 --hash blake3 $fast --stats-json /tmp/exp64-send.json" \
         > "$d/send.log" 2>&1
@@ -257,6 +296,14 @@ EOF
       wait "$rp"; rstatus=$?
       t1=$(date +%s.%N)
       on_src "cat /tmp/exp64-send.json" > "$d/send.json"
+      if [ "$a" = od ]; then
+        phases="{\"summarize_s\": $(python3 -c "print(round($ts - $t0, 3))"), \"refresh_s\": $(python3 -c "print(round($t1 - $ts, 3))"), \"wal_from\": \"$target\"}"
+        psrc "ALTER SYSTEM RESET summarize_wal" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
+        for x in $(seq 100); do
+          [ "$(psrc "SELECT summarizer_pid IS NULL FROM pg_get_wal_summarizer_state()")" = t ] && break; sleep 0.1
+        done
+        on_src "rm -f $ROOT/data/pg_wal/summaries/*.summary"
+      fi
     fi
     disks | sed 's/^/after /' >> "$d/diskstats.txt"
     rx1=$(netrx)
@@ -273,7 +320,7 @@ EOF
       [ -s "$R/plan-runs-$pattern-$arm.json.gz" ] || on_src "gzip -c /tmp/exp64-plan.json" > "$R/plan-runs-$pattern-$arm.json.gz"
     fi
     verify=null
-    if { [ "${a#fast}" != "$a" ] || [ "$a" = incr ] || [ "$a" = walg ]; } && [ "$status" = 0 ]; then
+    if [ "$a" != full ] && [ "$status" = 0 ]; then
       # The refreshed copy recovers from its backup_label; its pgbench_accounts must equal the source's. incr's copy
       # is its new directory. A fast copy of a standby is started as a server of its own (no standby.signal); walg's
       # stays a standby, as WAL-G's catch-up leaves it, and is read once it has replayed to the source's LSN.
@@ -295,4 +342,5 @@ EOF
   done < "$R/plan-$pattern.txt"
 done
 rm -rf "$B" "$FULL" "$B0" "$B0S" "$INC"
+[ "$SLOT" = 1 ] && psrc "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'exp82b'" > /dev/null
 echo "$(date -u +%T) done"

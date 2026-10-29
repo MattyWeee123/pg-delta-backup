@@ -4,6 +4,17 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (05:55 UTC): EXP-82b pre-registered: summaries off on the VMs
+
+- **What runs:** a source that never summarizes, with a replication slot keeping the WAL since each old copy, and an 18 GB standby stopped before the change. It is refreshed by hashing (today), page-lsn, summaries on demand (timed from turning the setting on), WAL-G's catch-up and `pg_basebackup`, in hot and uniform.
+- **Predictions, from research loop 3's bound:**
+  1. Deciding: page-lsn at most 0.70 of hashing's time in uniform (expected 0.49–0.56);
+  2. at most 1.05 in hot;
+  3. parity with WAL-G (at most 1.05 hot, 0.95 uniform);
+  4. on demand at most 0.20 of hashing's time in hot;
+  5. every copy correct.
+- **The lab's new modes:** `SUMMARIES=0`, `SLOT=1`, and the arms `hash` (now checked), `lsn` and `od`.
+
 ## 2026-10-29 (05:53 UTC): EXP-82 done: both summaries-off candidates correct; neither faster than hashing locally for scattered changes
 
 - **Correctness held:**
