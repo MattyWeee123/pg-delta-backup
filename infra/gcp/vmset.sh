@@ -145,7 +145,7 @@ pgd_print_set() {
     disk=$(pgd_role "$role" DATA_DISK)
     case $disk in
       local-nvme) disk="$disk, $(pgd_role "$role" LOCAL_SSDS) SSDs" ;;
-      pd-balanced) disk="$disk, $(pgd_role "$role" PD_SIZE_GB) GB" ;;
+      pd-balanced|pd-ssd) disk="$disk, $(pgd_role "$role" PD_SIZE_GB) GB" ;;
     esac
     printf '  %-7s %-22s %-16s %-16s %s\n' "$role" "$(pgd_role "$role" VM)" "$(pgd_role "$role" ZONE)" \
       "$(pgd_role "$role" MACHINE)" "$disk"
@@ -185,11 +185,11 @@ pgd_check_create() {
       local-nvme)
         [[ $ssds =~ ^[1-9][0-9]*$ ]] || problems="$problems
   $role: local-nvme needs LOCAL_SSDS of 1 or more, not '$ssds'" ;;
-      pd-balanced)
+      pd-balanced|pd-ssd)
         [[ $size =~ ^[1-9][0-9]*$ ]] || problems="$problems
-  $role: pd-balanced needs a size in GB (PD_SIZE_GB, or $(printf '%s' "$role" | tr '[:lower:]' '[:upper:]')_PD_SIZE_GB), not '$size'" ;;
+  $role: $disk needs a size in GB (PD_SIZE_GB, or $(printf '%s' "$role" | tr '[:lower:]' '[:upper:]')_PD_SIZE_GB), not '$size'" ;;
       *) problems="$problems
-  $role: DATA_DISK '$disk' is neither local-nvme nor pd-balanced" ;;
+  $role: DATA_DISK '$disk' is none of local-nvme, pd-balanced and pd-ssd" ;;
     esac
   done
   if [ -n "$problems" ]; then
@@ -237,8 +237,8 @@ N $region SSD_TOTAL_GB 50"
     case $(pgd_role "$role" DATA_DISK) in
       local-nvme) needs="$needs
 N $region LOCAL_SSD_TOTAL_GB $(( $(pgd_role "$role" LOCAL_SSDS) * 375 ))" ;;
-      pd-balanced) needs="$needs
-N $region SSD_TOTAL_GB $(pgd_role "$role" PD_SIZE_GB)" ;;
+      pd-balanced|pd-ssd) needs="$needs
+N $region SSD_TOTAL_GB $(pgd_role "$role" PD_SIZE_GB)" ;;  # both count toward SSD_TOTAL_GB
     esac
     [[ "$regions " == *" $region "* ]] || regions="$regions $region"
   done

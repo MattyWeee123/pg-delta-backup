@@ -1,6 +1,10 @@
 # EXP-84: The held-out session (rule 15): --crashed-standby, --selector and page-lsn on the sealed settings
 
-Status: **pre-registered October 29, 2026, before any run.** Two VM sets at once (32 vCPUs, the quota), about 3.5 hours. It is the first held-out session. [held-out-workloads.md](../research/held-out-workloads.md) says one is owed before `--crashed-standby`, `--selector` or page-lsn becomes a default.
+Status: **pre-registered October 29, 2026, before any run.** *Amended before any scored data:* the first launch stopped at set-up on two faults:
+- `infra/gcp/vmset.sh` still allowed only local-nvme and pd-balanced, so `hs` couldn't be created. It now takes pd-ssd, counted toward the same SSD quota.
+- The pipeline's helper called `timeout` on a shell function, so `ha` was created but never prepared.
+
+Both are fixed, `vmset.sh` is added to the recorded files, and the files are recorded again at the fixed commit. The `ha` VMs were kept and are prepared afresh. Two VM sets at once (32 vCPUs, the quota), about 3.5 hours. It is the first held-out session. [held-out-workloads.md](../research/held-out-workloads.md) says one is owed before `--crashed-standby`, `--selector` or page-lsn becomes a default.
 
 ## Question
 
