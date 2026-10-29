@@ -121,5 +121,14 @@
    "experiments/summarize_cost/summarizer_cpu.sh": "44b9000833e0c755d276879b2c99c06e2ce42b9fec8e12e5001158a56e285d19",
    "experiments/summarize_cost/vm.sh": "5b84abb952202e64c56de7038124127e9639bbdecda888764b4635c691968254"
   }
+ },
+ "EXP-83c": {
+  "commit": "0793d03fa063",
+  "files": {
+   "analysis/exp83.py": "027257d7f7f94263f1a52aa9dc78cf664bc98a2544692d625ad3b5942cf29287",
+   "experiments/summarize_cost/bench.py": "0035a08479b0918e7318ba1b9618b638f9122357c52b463a49803b82f8bf9de0",
+   "experiments/summarize_cost/summarizer_cpu.sh": "44b9000833e0c755d276879b2c99c06e2ce42b9fec8e12e5001158a56e285d19",
+   "experiments/summarize_cost/vm.sh": "01498cb696db6670d62ef52524ccca42546f8525a5cecc5d203d69f986ac0b2a"
+  }
  }
 }
