@@ -4,6 +4,21 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (17:02 UTC): EXP-83c done: summarize_wal costs nothing measurable in memory; beyond memory a p99 cost again
+
+- **In memory, every prediction held:**
+  - 32 clients: throughput 1.029, lower bound 0.9999;
+  - 90 clients: 1.010, lower bound 0.9991;
+  - p99 0.999 and 0.964.
+  - With EXP-83b, two sessions agree.
+- **The summarizer:** 0.84–0.88 ms of CPU per MB of WAL in every cell.
+- **The 90-client cell** reached only 44% CPU: TPC-B's 100 branch rows serialize the clients at scale 100. Claims are scoped to that.
+- **Beyond memory:**
+  - throughput 0.948 [0.887, 1.010] and p99 1.205 [1.030, 1.379] failed again;
+  - with settle runs the effect no longer follows a switch (post-hoc), so it may be the summarizer's steady-state WAL reads competing for a saturated disk;
+  - the cache was also still warming.
+- **The advice in RESULTS:** turn it on where the working set fits in memory; weigh it where it doesn't. EXP-83d (the summarizer's disk reads, long blocks, a CPU-bound cell) would settle the rest.
+
 ## 2026-10-29 (15:06 UTC): EXP-83c pre-registered: summarize_wal's cost, settled, with a saturated cell
 
 - **What changes from EXP-83b:**
