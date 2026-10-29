@@ -29,15 +29,17 @@ FULL_BAR = 0.8
 
 
 def receivers(results):
-    """{run: (the receiver's fast-path proof or None, its refusal or None)} from send.json."""
+    """{run: (the receiver's fast-path proof or None, its refusal or None, pages received, pages re-read)}."""
     out = {}
     for meta_path in sorted(Path(results).glob('run-*/meta.json')):
         meta = json.loads(meta_path.read_text())
         send = meta_path.parent / 'send.json'
         if meta['arm'] == 'full' or not send.exists() or not send.stat().st_size:
             continue
-        received = (json.loads(send.read_text()).get('receiver') or {}).get('fast_path') or {}
-        out[meta['run']] = ((received.get('facts') or {}).get('proof'), received.get('refused'))
+        receiver = json.loads(send.read_text()).get('receiver') or {}
+        received = receiver.get('fast_path') or {}
+        out[meta['run']] = ((received.get('facts') or {}).get('proof'), received.get('refused'),
+                            receiver.get('pages_received'), received.get('pages_reread'))
     return out
 
 
@@ -80,6 +82,10 @@ def main(argv=None):
                     for r in fast if r['arm'] == 'fast8wf2'))
     print(f"4. {'HELD' if four else 'FAILED'}: statuses {sorted({r['status'] for r in rows})}; copies matched "
           f"{all(r['match'] is True for r in fast)}; proofs {sorted({str(v[0]) for v in proofs.values()})}")
+    for r in fast:
+        proof, refused, received, reread = proofs.get(r['run'], (None, None, None, None))
+        print(f"reported: run {r['run']} {r['pattern']} {r['arm']}: pages received {received}, re-read {reread}"
+              + (f"; refused: {refused}" if refused else ''))
     exp76.write_csv(a.out, cells)
     figure(by, ratio, a.figure)
 

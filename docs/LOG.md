@@ -4,7 +4,23 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
-## 2026-10-28 (00:03 UTC): EXP-80 done: crashed standbys correct through the fast path; crash recovery first wrong on S2e
+## 2026-10-29 (00:07 UTC): EXP-80b pre-registered: a crashed standby beyond memory, on the VMs
+
+- **The question:** how much faster is a crashed standby refreshed with `--crashed-standby` than today's path for it (refused, so hashed), and than `pg_basebackup`? The case is a standby that stayed down until the source recycled the WAL it needs.
+- **The lab's new mode, `CRASHED=1`:** B0 is a standby started before the change and killed with `pg_ctl -m immediate` 30 s into it. Arms `fast8wf2c`, `fast8wf2` and `full`, in hot and uniform; 2 runs each, seed 800.
+- **Bars from the same set's clean-B0 cells** (EXP-64, -70, -79b):
+  - uniform at most 0.60 of hashing's time (deciding; expected about 0.25);
+  - hot at most 0.20 (expected about 0.02);
+  - both at most 0.80 of `pg_basebackup`.
+  - Correctness and the guard's decisions per run.
+- **Rules 13–17:**
+  - EXP-80 was the cascade's local stage;
+  - `integrity.py register EXP-80b` records the scorer, the lab and pgdelta's modules;
+  - the bars sit far outside rule 17's noise;
+  - a held-out session (rule 15) comes before the option becomes a default.
+- **Also:** the EXP-80 entry's heading carried the wrong UTC date (October 28); corrected to October 29.
+
+## 2026-10-29 (00:03 UTC): EXP-80 done: crashed standbys correct through the fast path; crash recovery first wrong on S2e
 
 - **Every prediction held:**
   - 100 of 100 randomized crashed standbys (45 immediate, 55 SIGKILL, mid-load with DDL and truncations) were refreshed by the fast path with `--crashed-standby` and came out correct: rows equal, `pg_amcheck --heapallindexed` clean. The failure rate is below 2.95% at 95%.

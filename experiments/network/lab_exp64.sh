@@ -26,6 +26,9 @@
 # samples both VMs' /data disk every 0.25 s around each run (disk_series.sh: series-dest.txt, series-source.txt).
 # A final "q" (EXP-77) has the receiver verify in its main loop (--verify sequential), where the fast path's written
 # pages are then re-read; without it they are re-read on the pipelined verifier (the default since EXP-77).
+# CRASHED=1 (EXP-80b): each pattern's B0 is a standby instead (pg_basebackup -R), started on dest before the change and
+# killed with pg_ctl -m immediate KILL_AFTER seconds (default 30) into it, while the change goes on to its end on the
+# source; and a final "c" on a fast arm passes the receiver --crashed-standby. Each copy's check removes standby.signal.
 set -u
 SRC=$1
 REPEATS=${2:-2}
@@ -35,6 +38,8 @@ PATTERNS=${PATTERNS:-hot uniform}
 ARMS=${ARMS:-hash fast full}
 PLAN=${PLAN:-0}
 SERIES=${SERIES:-0}
+CRASHED=${CRASHED:-0}
+KILL_AFTER=${KILL_AFTER:-30}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
 R=${OUT:-/data/exp04-results/exp64}
@@ -81,29 +86,51 @@ rm -f "$W/ddtest"
 
 i=0
 for pattern in $PATTERNS; do
-  echo "$(date -u +%T) $pattern: B0, a base backup before the change"
   rm -rf "$B0"
-  $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$B0" -X stream -c fast > "$R/B0-$pattern.log" 2>&1 \
-    || { echo "B0 failed"; exit 1; }
-  CHECK=$STATE
-  if [[ "$pattern" =~ ^scatter(all)?([0-9]+)$ ]]; then
-    n=${BASH_REMATCH[2]}
-    frac=$(python3 -c "print($n / 100)")
-    w0=$(date +%s.%N)
-    psrc "UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE abs(hashint4(aid + 74)) % 10000 < ${n}00" \
-      > /dev/null || { echo "workload failed"; exit 1; }
-    if [ -n "${BASH_REMATCH[1]}" ]; then
-      psrc "UPDATE events SET payload = upper(payload) WHERE abs(hashint8(id + 74)) % 10000 < ${n}00" \
-        > /dev/null || { echo "workload failed"; exit 1; }
-      CHECK="SELECT ($STATE) || ':' || (SELECT count(*) FROM events WHERE payload <> lower(payload))"
-    fi
-    w1=$(date +%s.%N)
-    echo "{\"pattern\": \"$pattern\", \"fraction\": $frac, \"seconds\": $(python3 -c "print(round($w1 - $w0, 1))")}" \
-      > "$R/workload-$pattern.json"
+  if [ "$CRASHED" = 1 ]; then
+    echo "$(date -u +%T) $pattern: B0, a standby of the source, started before the change"
+    $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$B0" -R -X stream -c fast > "$R/B0-$pattern.log" 2>&1 \
+      || { echo "B0 failed"; exit 1; }
+    $PGBIN/pg_ctl -D "$B0" -l "$R/standby-$pattern.log" -w -t 300 \
+      -o "-p 5434 -k /tmp -c listen_addresses='' -c summarize_wal=off" start > /dev/null 2>&1 || { echo "standby failed"; exit 1; }
   else
-    on_src "python3 experiments/network/source_cluster.py workload $WORKLOAD_ARGS --pattern $pattern \
-      > $W/workload-$pattern.json" || { echo "workload failed"; exit 1; }
-    on_src "cat $W/workload-$pattern.json" > "$R/workload-$pattern.json"
+    echo "$(date -u +%T) $pattern: B0, a base backup before the change"
+    $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$B0" -X stream -c fast > "$R/B0-$pattern.log" 2>&1 \
+      || { echo "B0 failed"; exit 1; }
+  fi
+  CHECK=$STATE
+  [[ "$pattern" =~ ^scatterall[0-9]+$ ]] && \
+    CHECK="SELECT ($STATE) || ':' || (SELECT count(*) FROM events WHERE payload <> lower(payload))"
+  change() {
+    if [[ "$pattern" =~ ^scatter(all)?([0-9]+)$ ]]; then
+      n=${BASH_REMATCH[2]}
+      frac=$(python3 -c "print($n / 100)")
+      w0=$(date +%s.%N)
+      psrc "UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE abs(hashint4(aid + 74)) % 10000 < ${n}00" \
+        > /dev/null || { echo "workload failed"; return 1; }
+      if [ -n "${BASH_REMATCH[1]}" ]; then
+        psrc "UPDATE events SET payload = upper(payload) WHERE abs(hashint8(id + 74)) % 10000 < ${n}00" \
+          > /dev/null || { echo "workload failed"; return 1; }
+      fi
+      w1=$(date +%s.%N)
+      echo "{\"pattern\": \"$pattern\", \"fraction\": $frac, \"seconds\": $(python3 -c "print(round($w1 - $w0, 1))")}" \
+        > "$R/workload-$pattern.json"
+    else
+      on_src "python3 experiments/network/source_cluster.py workload $WORKLOAD_ARGS --pattern $pattern \
+        > $W/workload-$pattern.json" || { echo "workload failed"; return 1; }
+      on_src "cat $W/workload-$pattern.json" > "$R/workload-$pattern.json"
+    fi
+  }
+  if [ "$CRASHED" = 1 ]; then
+    change & cp_pid=$!
+    sleep "$KILL_AFTER"
+    $PGBIN/pg_ctl -D "$B0" -w -m immediate stop > /dev/null 2>&1
+    rm -f "$B0/postmaster.pid"  # stale after an immediate stop, if left: no process is left on it
+    echo "$(date -u +%T) $pattern: the standby killed $KILL_AFTER s into the change: $($PGBIN/pg_controldata "$B0" | \
+      grep -E 'cluster state' | sed 's/.*: *//')"
+    wait "$cp_pid" || { echo "workload failed"; exit 1; }
+  else
+    change || exit 1
   fi
   SOURCE_STATE=$(psrc "$CHECK")
   echo "$(date -u +%T) $pattern: workload done; source state $SOURCE_STATE"
@@ -146,13 +173,14 @@ EOF
       # since EXP-70 made 2 pages the default; none takes an old primary from its own WAL (EXP-71's default).
       # A final "s" has --selector choose the fill, or a full copy, instead (EXP-75).
       fast= fsync='--fsync main'
-      if [[ "$arm" =~ ^fast([0-9]*)([wb]?)(f([0-9]+)|s)?(q?)$ ]]; then
+      if [[ "$arm" =~ ^fast([0-9]*)([wb]?)(f([0-9]+)|s)?(q?)(c?)$ ]]; then
         fill="--fill-gaps ${BASH_REMATCH[4]:-0}"
         [ "${BASH_REMATCH[3]}" = s ] && fill=--selector
         fast="--fast-path summaries --read-ahead ${BASH_REMATCH[1]:-0} $fill --no-diverged-basis"
         [ "${BASH_REMATCH[2]}" = w ] && fsync='--fsync worker'
         [ "${BASH_REMATCH[2]}" = b ] && fsync='--fsync worker-writeback'
         [ "${BASH_REMATCH[5]}" = q ] && fsync="$fsync --verify sequential"
+        [ "${BASH_REMATCH[6]}" = c ] && fsync="$fsync --crashed-standby"
       fi
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
@@ -184,6 +212,7 @@ EOF
     verify=null
     if [ "${arm#fast}" != "$arm" ] && [ "$status" = 0 ]; then
       # The refreshed copy recovers from its backup_label; its pgbench_accounts must equal the source's.
+      rm -f "$B/standby.signal"  # CRASHED: B0 was a standby; the copy is started as a server of its own
       $PGBIN/pg_ctl -D "$B" -l "$d/copy.log" -w -t 1800 \
         -o "-p 5433 -k /tmp -c listen_addresses='' -c summarize_wal=off" start > /dev/null 2>&1
       COPY_STATE=$($PGBIN/psql -h /tmp -p 5433 -U study -d postgres -qAtX -c "$CHECK" 2>&1)
