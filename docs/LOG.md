@@ -4,6 +4,14 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (14:08 UTC): EXP-83 done (the summarizer about 0.6 ms of CPU per MB of WAL; throughput noise-bound on the Mac); EXP-83b pre-registered
+
+- **EXP-83 (local):**
+  - the summarizer took 2.1% of one core at 33.5 MB/s of WAL (615 µs per MB);
+  - p99 latency was 0.95x.
+  - The deciding throughput bound failed on noise: the Mac's throughput swung 2.9x from run to run whatever the setting, and the interval was [0.85, 1.48]. The VMs decide (rule 2).
+- **EXP-83b:** the client on dest, 32 clients, scale 100 and 600, 8 pairs of 60 s each. Deciding: throughput cost at most 3% at 95% in both cells.
+
 ## 2026-10-29 (13:56 UTC): EXP-83 pre-registered: what summarize_wal costs a busy server (local)
 
 - **Why:** pgdelta's fastest routes need WAL summaries, and PostgreSQL ships them off. If they cost little, the advice is to leave them on.

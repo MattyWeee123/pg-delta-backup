@@ -1,6 +1,11 @@
 # EXP-83: What does summarize_wal cost a busy server? (the local stage)
 
-Status: **pre-registered October 29, 2026, before the registered run** (the harness's smoke is listed below). Local, about 25 minutes. EXP-83b repeats it on the VMs, which decide (rule 2).
+Status: **done October 29, 2026: 2 and 3 held, 1 failed, on noise, not cost.**
+- **The summarizer's CPU:** 2.1% of one core at this load's 33.5 MB/s of WAL, or 615 µs per MB. p99 latency was 0.95x with it on.
+- **The throughput ratio's interval** came out [0.85, 1.48], centred above 1.0. The Mac's throughput swung 2.9x from run to run whatever the setting, so this stage can't bound the cost.
+- **EXP-83b on the VMs decides** (rule 2), as registered.
+
+Pre-registered before the registered run (the harness's smoke is listed below); local, about 25 minutes.
 
 ## Question
 
@@ -82,3 +87,37 @@ Status: **pre-registered October 29, 2026, before the registered run** (the harn
 | 15 | Held-out workloads | Not owed |
 | 16 | Scorer integrity | Recorded at registration |
 | 17 | The noise bar | Handled by the pairs and the interval |
+
+## Results
+
+**Setup:** as registered: 20 scored runs after a warm-up. Data `docs/experiments/data/exp83-runs.csv`.
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-83` reports 3 of 3 files unchanged since the registration commit (b32008b).
+
+![EXP-83: what summarize_wal costs, the local stage](../figures/exp83-cost.svg)
+
+*How to read it:*
+- **Left:** each pair's ratio, on over off, of throughput (blue) and p99 latency (orange), with their means and 95% intervals (squares). The dotted line is the throughput bar.
+- **Right:** the summarizer's CPU as a share of one core, with the WAL rate and its cost per MB.
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | **Deciding:** the throughput ratio's lower 95% bound at least 0.97 | **Failed: 0.854** (mean 1.169, interval [0.854, 1.483]) |
+| 2 | Mean p99 latency ratio at most 1.10 | **Held: 0.953** (interval [0.823, 1.082]) |
+| 3 | The summarizer at most 5% of one core | **Held: 2.1%** (33.5 MB/s of WAL; 615 µs of CPU per MB) |
+
+**Why 1 failed:**
+- **Throughput varied 2.9x from run to run** (11,028 to 31,831 tps), in on and off runs alike. The first and last pairs were fastest, about 31,000 tps, against about 12,000 in the middle.
+- **The pairs' ratios ran from 0.74 to 1.96.** Their mean, 1.17, has summaries on faster, which no mechanism explains.
+- **This is the Mac's own variation,** most likely macOS moving the load between its 5 performance and 10 efficiency cores, and its power management. It is noise, not the setting's cost. The interval is too wide to bound that cost either way.
+- **So rule 2 applies:** throughput is decided on the Linux VMs.
+
+**What this stage did establish:**
+- **The summarizer's CPU is in proportion to the WAL,** about 0.6 ms per MB here, at the rate a busy TPC-B-like load writes. A server's cost is therefore about that times its WAL rate, against its cores.
+- **p99 latency didn't move** beyond its noise.
+
+## What followed
+
+- **EXP-83b measures the cost on the VMs:** 8 vCPUs, the client on another VM, the database in memory and beyond memory, with the source's CPU busy fraction recorded.
+- **Its bars** use this stage's cost per MB, scaled for slower cores.
+- **The proxy pair** (this stage's throughput ratio against EXP-83b's) goes into the proxy-fidelity log, marked as noise-bound.
