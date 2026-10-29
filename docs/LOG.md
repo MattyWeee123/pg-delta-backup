@@ -4,6 +4,24 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (01:17 UTC): EXP-80b done: a crashed standby beyond memory, 0.023–0.233 of hashing's time
+
+- **Every prediction held** (the `ha` set, us-west1-b and -c, 18 GB on 8 GB VMs; each standby killed 30 s into its change):
+
+  | Cell | `--crashed-standby` | Hashing (today's path) | `pg_basebackup` | Over hashing | Over `pg_basebackup` |
+  |---|---|---|---|---|---|
+  | uniform | 42.0 s | 180.1 s | 91.0 s | 0.233 (deciding; bar 0.60) | 0.46 |
+  | hot | 2.0 s | 87.9 s | 90.8 s | 0.023 | 0.02 |
+
+  - Every copy was correct.
+  - Every `--crashed-standby` run was proven "crashed standby", and every run without it was refused.
+- **Each ratio landed on what the clean cells implied:**
+  - the plans were the clean B0's exactly, since no restart point happened before the kill;
+  - the guard cost the same.
+- **Rules 16 and 17:** the scorer was unchanged (13 of 13 files). Every margin was over 10 times the noise. This session's runs, added to the noise floor, move its 95th percentile to 2.08% (10 s or more) and 7.54% (under 10 s).
+- **Research loop 2's scorecard:** the "lineage unprovable" row splits. A crashed standby is now a measured win; a crashed primary and summaries off are still hashed.
+- **Next, as research loop 2 planned:** the VM session against native incremental with `pg_combinebackup` and against WAL-G catch-up.
+
 ## 2026-10-29 (00:07 UTC): EXP-80b pre-registered: a crashed standby beyond memory, on the VMs
 
 - **The question:** how much faster is a crashed standby refreshed with `--crashed-standby` than today's path for it (refused, so hashed), and than `pg_basebackup`? The case is a standby that stayed down until the source recycled the WAL it needs.

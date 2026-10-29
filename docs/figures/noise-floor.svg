@@ -109,6 +109,12 @@ z
      <use xlink:href="#m42fb7df55c" x="444.701917" y="229.368341" style="fill: #0072b2; stroke: #0072b2"/>
      <use xlink:href="#m42fb7df55c" x="440.101919" y="238.249125" style="fill: #0072b2; stroke: #0072b2"/>
      <use xlink:href="#m42fb7df55c" x="358.778888" y="225.813567" style="fill: #0072b2; stroke: #0072b2"/>
+     <use xlink:href="#m42fb7df55c" x="427.065898" y="237.366067" style="fill: #0072b2; stroke: #0072b2"/>
+     <use xlink:href="#m42fb7df55c" x="76.730856" y="232.243456" style="fill: #0072b2; stroke: #0072b2"/>
+     <use xlink:href="#m42fb7df55c" x="430.128618" y="230.139521" style="fill: #0072b2; stroke: #0072b2"/>
+     <use xlink:href="#m42fb7df55c" x="493.806597" y="199.75498" style="fill: #0072b2; stroke: #0072b2"/>
+     <use xlink:href="#m42fb7df55c" x="358.450811" y="238.265294" style="fill: #0072b2; stroke: #0072b2"/>
+     <use xlink:href="#m42fb7df55c" x="430.358711" y="235.473356" style="fill: #0072b2; stroke: #0072b2"/>
     </g>
    </g>
    <g id="matplotlib.axis_1">
@@ -395,13 +401,13 @@ L 517.591161 232.005102
 " clip-path="url(#p3432570f32)" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #e69f00"/>
    </g>
    <g id="line2d_35">
-    <path d="M 42.06207 232.502222 
-L 517.591161 232.502222 
+    <path d="M 42.06207 232.504326 
+L 517.591161 232.504326 
 " clip-path="url(#p3432570f32)" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #e69f00"/>
    </g>
    <g id="line2d_36">
-    <path d="M 42.06207 189.24272 
-L 517.591161 189.24272 
+    <path d="M 42.06207 193.323184 
+L 517.591161 193.323184 
 " clip-path="url(#p3432570f32)" style="fill: none; stroke-dasharray: 1,1.65; stroke-dashoffset: 0; stroke: #888888"/>
    </g>
    <g id="patch_3">
@@ -431,7 +437,7 @@ L 460.062042 25.834111
     <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; fill: #d55e00" transform="translate(330.263017 90.798437)">background writes on the source</text>
    </g>
    <g id="text_13">
-    <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #888888" x="476.787296" y="187.063903" transform="rotate(-0 476.787296 187.063903)">95th percentile, runs of 10 s or more</text>
+    <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #888888" x="476.787296" y="191.144367" transform="rotate(-0 476.787296 191.144367)">95th percentile, runs of 10 s or more</text>
    </g>
    <g id="text_14">
     <text style="font-size: 10px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="279.826616" y="14.798437" transform="rotate(-0 279.826616 14.798437)">Rule 17's noise floor: the ha set beyond memory, EXP-64 to EXP-79b</text>

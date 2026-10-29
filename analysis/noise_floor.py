@@ -1,5 +1,5 @@
 """Rule 17's noise floor: how far two runs of one cell differ within a session, and how far an unchanged arm moves
-between sessions, on the ha set beyond memory (EXP-64 to EXP-79b). No new data.
+between sessions, on the ha set beyond memory (EXP-64 to EXP-80b). No new data.
 
     .venv/bin/python analysis/noise_floor.py
 
@@ -20,10 +20,10 @@ from plotting import COLORS, plt
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS = ('exp64', 'exp64b', 'exp65', 'exp67', 'exp68', 'exp70', 'exp71', 'exp74', 'exp75', 'exp76', 'exp77', 'exp79',
-            'exp79b')
+            'exp79b', 'exp80b')
 # pg_basebackup cells built the same way in several sessions: (pattern, the sessions that ran it so).
 FULL_SAME_CELL = {'scatterall12': ('exp75', 'exp76', 'exp77', 'exp79b'),
-                  'uniform': ('exp64', 'exp64b', 'exp68', 'exp70')}
+                  'uniform': ('exp64', 'exp64b', 'exp68', 'exp70', 'exp80b')}
 
 
 def quantile(values, q):

@@ -86,3 +86,15 @@ The constants are EXP-48's, EXP-68's and EXP-70's, on a 150 GiB balanced persist
 - **The cloud-clone line:** where the fast path stops beating an 18 GB disk clone plus recovery, in the same zone.
 
 **Not chosen:** more fixed-cost tuning past 91% of pages changed. It chases a tie that a full copy wins on principle (section 3), which is the drift the loop warns against.
+
+## 5. Update, October 29: what the pick came to (EXP-80, EXP-80b)
+
+- **Crash recovery first was dropped before registration.** Its pilot reopened EXP-62's blind spot: a crashed old primary that lost its WAL was accepted after crash recovery, and its copy was wrong. EXP-80 confirmed it on 3 of 3 fresh builds.
+- **Built instead:** `--crashed-standby`. A standby left in recovery by a crash is proven by its minimum recovery point. 100 of 100 randomized crashed standbys came out correct (EXP-80).
+- **Section 4's timing prediction held:** 0.2 or less of hashing's time for local changes. Beyond memory it took 0.023 of hashing's time for hot rows and 0.233 for uniform ones, and 0.02 and 0.46 of a re-clone (EXP-80b).
+- **So the "lineage unprovable" row splits:**
+  - **a crashed standby:** a win against the standard tool, measured;
+  - **a crashed primary:** still hashed (taking it is unsound);
+  - **summaries off:** still hashed (WAL-scan labels unbuilt).
+- **The scorecard figure above carries the split.**
+- **Next, as section 4 planned:** the VM session against native incremental with `pg_combinebackup` and against WAL-G catch-up.
