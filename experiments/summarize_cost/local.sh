@@ -16,4 +16,4 @@ $BIN/pgbench -i -q -s "$SCALE" -h $SOCK -p $PORT -U t postgres > /dev/null 2>&1
 cd "$(dirname "$0")/../.."
 python3 experiments/summarize_cost/bench.py --conn "host=$SOCK port=$PORT user=t dbname=postgres" --bin $BIN \
   --clients "$CLIENTS" --threads "$THREADS" --seconds "$SECONDS_" --pairs "$PAIRS" --warmup "$WARMUP" --seed "$SEED" \
-  --ps "ps -axo time,command" --cell "local-s$SCALE-c$CLIENTS" --out "$OUT"
+  --settle "${SETTLE:-0}" --ps "ps -axo time,command" --cell "local-s$SCALE-c$CLIENTS" --out "$OUT"

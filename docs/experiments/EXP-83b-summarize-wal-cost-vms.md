@@ -1,6 +1,12 @@
 # EXP-83b: What does summarize_wal cost a busy server? (the VMs)
 
-Status: **pre-registered October 29, 2026, before any run.** One `ha` VM pair, about an hour. It is EXP-83's VM stage, and it decides (rule 2): on the Mac, throughput varied 2.9x from run to run and couldn't bound the cost.
+Status: **done October 29, 2026: 1 failed in both cells, 2 held in memory and failed beyond it, 3 held in both.**
+- **In memory:** no measurable cost. Throughput was 0.996 of its value with summaries off (interval [0.964, 1.029]), missing the bar of 0.97 by 0.006, a rule 11 case. p99 was 0.999.
+- **Beyond memory:** throughput 0.951 [0.871, 1.030] and p99 1.41x. A post-hoc look puts the p99 rise in the "on" runs that followed an "off" run: turning summaries on made the summarizer first read the previous run's WAL from disk, which likely also evicted cached pages before the run. That is a design confound, not the steady state.
+- **The summarizer itself took 2–3% of one core,** 0.78–0.85 ms per MB of WAL.
+- **The source was only 19–34% busy,** its clients bound by round trips across zones.
+
+EXP-83c re-runs it with the confound removed and a saturated cell added. Pre-registered before any run; one `ha` VM pair, about an hour.
 
 ## Question
 
@@ -80,3 +86,57 @@ Status: **pre-registered October 29, 2026, before any run.** One `ha` VM pair, a
 | 15 | Held-out workloads | Not owed |
 | 16 | Scorer integrity | Recorded at registration |
 | 17 | The noise bar | The paired design and its interval |
+
+## Results
+
+**The session:**
+- **Where:** the `ha` set in us-west1-b and -c.
+- **The smoke** passed: the client connected, the setting toggled, and the CPU readings arrived.
+- **The cells** ran 14:12–15:02 UTC, and the VMs were then deleted.
+- **Data:** `docs/experiments/data/exp83b-runs.csv`; raw `results/exp83b/` (not in git).
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-83b` reports 4 of 4 files unchanged since the registration commit (a2a36bc).
+
+![EXP-83b: what summarize_wal costs on the VMs](../figures/exp83b-cost.svg)
+
+*How to read it:*
+- **Left:** each pair's ratio, summaries on over off, of throughput (blue) and p99 latency (orange), with the mean and 95% interval (squares).
+- **Right:** the summarizer's CPU, as a share of one core.
+
+| Cell | Throughput, off and on | Throughput ratio (95%) | p99 ratio (95%) | Mean latency ratio | Summarizer | WAL | Source CPU busy |
+|---|---|---|---|---|---|---|---|
+| `mem` (scale 100, 2.8 GB) | 4,976 and 4,957 tps | 0.996 [0.964, 1.029] | 0.999 [0.997, 1.000] | 1.005 | 3.1% of a core, 847 µs/MB | 36.6 MB/s | 34% |
+| `disk` (scale 600, 17 GB) | 2,518 and 2,369 tps | 0.951 [0.871, 1.030] | **1.408** [1.195, 1.621] | 1.061 | 2.0% of a core, 783 µs/MB | 25.6 MB/s | 19% |
+
+| # | Prediction | `mem` | `disk` |
+|---|---|---|---|
+| 1 | **Deciding:** the throughput ratio's lower 95% bound at least 0.97 | **Failed: 0.964**, within 0.01 of the bar (rule 11: a second session) | **Failed: 0.871** |
+| 2 | Mean p99 latency ratio at most 1.10 | **Held: 0.999** | **Failed: 1.408** |
+| 3 | The summarizer at most 5% of one core | **Held: 3.1%** | **Held: 2.0%** |
+
+**A post-hoc look at `disk`** (not registered; it changes no verdict):
+- **The confound:** each pair's order was random, so an "on" run sometimes followed an "off" run. Then, before it started, the summarizer had first to read the "off" run's 1.4–1.8 GB of WAL, from disk when it had been evicted. Beyond memory, that likely also pushed cached data pages out.
+- **The split:**
+
+  | "On" runs | n | p99 ratio | Throughput ratio |
+  |---|---|---|---|
+  | After an "off" run | 6 | 1.20–1.80 | 0.86–1.13 |
+  | After an "on" run | 2 | 1.04 and 1.16 | 0.85 and 0.98 |
+
+- **A second confound:** `disk`'s throughput rose through the session as its 17 GB warmed into memory (the "off" runs went from 1,869 to 2,802 tps). The 60 s warm-up didn't settle it, and the drift widens the interval.
+- **In `mem`** no such pattern appears: the WAL to catch up on was cached, and nothing was evicted.
+
+**What the session shows, firmly:**
+- **The summarizer's CPU is in proportion to the WAL:** 0.78–0.85 ms per MB here, against 0.62 on the Mac's faster cores. At these loads that is 2–3% of one core, 0.25–0.4% of the source's 8 vCPUs.
+- **In memory, throughput and p99 didn't move** beyond 0.4% and 0.1% (point estimates).
+- **Both cells' source was far from busy** (19–34% CPU). 32 clients across zones are bound by round trips, so this session says nothing yet about a saturated server.
+
+## What followed
+
+**EXP-83c** re-runs it with the design fixed:
+- **a settle run** (unscored, in the same mode) after every switch, so a scored run never pays for the catch-up or the cache it disturbs;
+- **a five-minute warm-up** before the beyond-memory cell;
+- **a third cell with 90 clients,** to load the source's CPU;
+- **the summarizer's cost bar** stated per MB of WAL (it scales with the rate), from this session's 0.78–0.85 ms.
+
+The proxy pair (EXP-83's throughput ratio, noise-bound) is not logged: the local stage couldn't measure a ratio.

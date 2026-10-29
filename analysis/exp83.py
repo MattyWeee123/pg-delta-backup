@@ -50,6 +50,8 @@ def main(argv=None):
     ap.add_argument('--tps-bar', type=float, default=0.97)
     ap.add_argument('--p99-bar', type=float, default=1.10)
     ap.add_argument('--cpu-bar', type=float, default=0.05)
+    ap.add_argument('--us-bar', type=float, default=None,
+                    help='EXP-83c: score 3 on the summarizer\'s CPU per MB of WAL (microseconds) instead of its share')
     a = ap.parse_args(argv)
     rows = [r for r in csv.DictReader(open(a.runs)) if r['label'] == 'scored']
     cells = defaultdict(dict)
@@ -78,8 +80,12 @@ def main(argv=None):
               f"throughput ratio's lower 95% bound {tps[1] if tps[1] is None else round(tps[1], 4)} (bar {a.tps_bar})")
         print(f"2 {cell}. {'HELD' if p99[0] <= a.p99_bar else 'FAILED'}: mean p99 latency ratio {p99[0]:.4f} "
               f"(bar {a.p99_bar})")
-        print(f"3 {cell}. {'HELD' if cpu_share <= a.cpu_bar else 'FAILED'}: the summarizer's CPU {cpu_share:.4f} of "
-              f"one core (bar {a.cpu_bar})")
+        if a.us_bar is None:
+            print(f"3 {cell}. {'HELD' if cpu_share <= a.cpu_bar else 'FAILED'}: the summarizer's CPU {cpu_share:.4f} of "
+                  f"one core (bar {a.cpu_bar})")
+        else:
+            print(f"3 {cell}. {'HELD' if us_per_mb <= a.us_bar else 'FAILED'}: the summarizer's CPU {us_per_mb:.0f} us "
+                  f"per MB of WAL (bar {a.us_bar:.0f})")
         print(f"reported {cell}: throughput {results[cell]['tps_off']:.0f} tps off, {results[cell]['tps_on']:.0f} on; "
               f"WAL {wal_rate:.1f} MB/s; summarizer {us_per_mb:.0f} us of CPU per MB of WAL; server busy "
               f"{results[cell]['busy']}")

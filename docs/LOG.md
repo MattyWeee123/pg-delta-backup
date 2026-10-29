@@ -4,6 +4,30 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (15:06 UTC): EXP-83c pre-registered: summarize_wal's cost, settled, with a saturated cell
+
+- **What changes from EXP-83b:**
+  - a settle run in the same mode after every switch;
+  - a five-minute warm-up beyond memory;
+  - a 90-client cell on the in-memory source to load its CPU.
+- **Predictions, per cell:**
+  1. Deciding: throughput cost at most 3% at 95%;
+  2. p99 at most 1.10x;
+  3. the summarizer at most 1.0 ms of CPU per MB of WAL.
+
+## 2026-10-29 (15:04 UTC): EXP-83b done: no measurable cost in memory; a confounded p99 rise beyond it
+
+- **In memory (scale 100):**
+  - throughput 0.996 [0.964, 1.029] with summaries on; the bar of 0.97 missed by 0.006, a rule 11 case;
+  - p99 0.999.
+- **Beyond memory (scale 600):**
+  - throughput 0.951 [0.871, 1.030] and p99 1.41x, both registered as failed;
+  - post-hoc, the p99 rise sits in "on" runs that followed "off" runs (1.20–1.80, n=6, against 1.04 and 1.16, n=2): the summarizer first read the previous run's WAL from disk, likely evicting cached pages;
+  - throughput also drifted up through the session as the cache warmed.
+- **The summarizer:** 0.78–0.85 ms of CPU per MB of WAL, 2–3% of one core.
+- **The source was only 19–34% busy** (32 clients across zones are round-trip bound).
+- **Next:** EXP-83c, with a settle run after every switch, a five-minute warm-up beyond memory, and a 90-client cell to load the CPU.
+
 ## 2026-10-29 (14:08 UTC): EXP-83 done (the summarizer about 0.6 ms of CPU per MB of WAL; throughput noise-bound on the Mac); EXP-83b pre-registered
 
 - **EXP-83 (local):**

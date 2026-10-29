@@ -13,6 +13,9 @@ Each run records pgbench's throughput, every transaction's latency (pgbench -l: 
 percentiles), the WAL it generated, the summarizer's CPU time over the run (--ps: a command listing processes with
 their cumulative CPU time; the summarizer's line holds "walsummarizer"), and where --stat gives /proc/stat, the
 server's CPU busy fraction. A warm-up run (off) comes first and is not scored. The setting is left off at the end.
+--settle SECONDS (EXP-83c): before each scored run, an unscored run of SECONDS in the same mode, after the switch and
+the summarizer's catch-up, so a scored run never pays for the catch-up's reads or the cache they disturb (EXP-83b's
+confound beyond memory). Settle runs are written with the label "settle".
 """
 import argparse
 import csv
@@ -139,6 +142,7 @@ def main():
     ap.add_argument('--seconds', type=int, default=60)
     ap.add_argument('--pairs', type=int, default=6)
     ap.add_argument('--warmup', type=int, default=30)
+    ap.add_argument('--settle', type=int, default=0)
     ap.add_argument('--seed', type=int, default=830)
     ap.add_argument('--ps', default=None)
     ap.add_argument('--stat', default=None)
@@ -160,6 +164,11 @@ def main():
         for pair in range(a.pairs):
             order = ['on', 'off'] if rng.random() < 0.5 else ['off', 'on']
             for position, mode in enumerate(order):
+                if a.settle:
+                    settle = argparse.Namespace(**{**vars(a), 'seconds': a.settle})
+                    row = run(server, settle, mode, 'settle')
+                    row.update({'cell': a.cell, 'pair': pair, 'position': position})
+                    rows.append(row)
                 row = run(server, a, mode, 'scored')
                 row.update({'cell': a.cell, 'pair': pair, 'position': position})
                 rows.append(row)
