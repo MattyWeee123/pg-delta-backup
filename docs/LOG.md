@@ -4,6 +4,15 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (08:25 UTC): EXP-82c pre-registered: summaries on demand on the VMs, the source as one that never summarized
+
+- **What runs:** the on-demand arm again, with page-lsn and hashing (a second session for page-lsn). The lab's set-up now turns summaries off, restarts the source, clears its summaries and checks the summarizer never ran.
+- **Predictions:**
+  1. Deciding: on demand at most 0.20 of hashing's time in hot (expected 0.03–0.09);
+  2. at most 0.90 in uniform (expected 0.48–0.85);
+  3. page-lsn again at most 0.70 (uniform) and 1.05 (hot);
+  4. the condition checked and every copy correct.
+
 ## 2026-10-29 (08:24 UTC): EXP-82b done: page-lsn beats hashing and WAL-G for scattered changes; the on-demand runs void
 
 - **page-lsn held 1–3** (18 GB beyond memory):
