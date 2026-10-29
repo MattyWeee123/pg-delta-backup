@@ -4,6 +4,14 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (13:56 UTC): EXP-83 pre-registered: what summarize_wal costs a busy server (local)
+
+- **Why:** pgdelta's fastest routes need WAL summaries, and PostgreSQL ships them off. If they cost little, the advice is to leave them on.
+- **Prior art:** the documentation says nothing on cost, and no published benchmark was found.
+- **Design:** pgbench TPC-B-like, 16 clients, scale 50, 10 pairs of 30 s runs, on and off in random order, each after a checkpoint, with the summarizer caught up before every "on" run.
+- **Predictions:** throughput cost at most 3% at 95% (deciding); p99 at most 1.10x; the summarizer at most 5% of a core.
+- **New harness:** `experiments/summarize_cost/`, with `analysis/exp83.py`.
+
 ## 2026-10-29 (09:46 UTC): EXP-82c done: summaries on demand 0.045 of hashing's time for local changes
 
 - **Every prediction held,** on a source that never summarized (checked at set-up: "summarizer at 0/0"), with a slot keeping the WAL since the old copy:
