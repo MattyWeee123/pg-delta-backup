@@ -952,6 +952,21 @@ class ReportNativeTests(unittest.TestCase):
         self.assertIn('| pg_basebackup_full | quiescent | 1 | 1.000 | 2.000 | 1.000 | unavailable |',
                       report)
 
+    def test_historical_active_pass_is_not_upgraded_to_exact_cutoff_pass(self):
+        bundle = self.bundle('pg_basebackup_full')
+        bundle['trials'][0].update(mode='active', self_contained_restore={
+            'logical_match': 'not_checked'}, pitr_restore={'logical_match': 'pass'})
+        report = report_native.render(bundle)
+        self.assertIn('| pass | not_checked | not checked | pass |', report)
+        self.assertIn('Historical active PASS records', report)
+
+    def test_exact_cutoff_verdict_is_reported_separately_from_later_pitr(self):
+        bundle = self.bundle('pg_basebackup_full')
+        bundle['trials'][0].update(mode='active', self_contained_restore={
+            'logical_match': 'pass'}, active_package_exact_cutoff_oracle='pass')
+        report = report_native.render(bundle)
+        self.assertIn('| pass | pass | pass | not applicable |', report)
+
 
 if __name__ == '__main__':
     unittest.main()
