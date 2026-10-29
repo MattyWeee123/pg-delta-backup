@@ -1,6 +1,11 @@
 # EXP-82: Summaries off, the local stage: are page-lsn and summaries on demand correct, and do they beat hashing?
 
-Status: **pre-registered October 29, 2026, before the registered runs** (a smoke and the harness's pilots are listed below). Local, about an hour. It is [research loop 3](../research/2026-10-29-research-loop-3.md)'s local stage under rule 13 ([WORKFLOW.md](../WORKFLOW.md)), with EXP-82b on the VMs to follow if it passes.
+Status: **done October 29, 2026: predictions 1–3 held, 4 failed for both candidates.**
+- **Correct:** on a server that never summarized WAL, 120 of 120 page-lsn refreshes (failure rate below 2.47% at 95%) and 20 of 20 refreshes with summaries turned on at refresh time.
+- **The negative control:** 10 of 10 copies with the threshold at B's end came out wrong.
+- **Locally, in memory:** page-lsn took 0.49 of hashing's time for hot changes but 0.96 for scattered ones, and on demand took 0.82 and 1.55. So neither is promoted on local evidence. As registered, both go to the VMs on research loop 3's bound.
+
+Pre-registered before the registered runs (a smoke and the harness's pilots are listed below). Local, about an hour. It is [research loop 3](../research/2026-10-29-research-loop-3.md)'s local stage under rule 13 ([WORKFLOW.md](../WORKFLOW.md)), with EXP-82b on the VMs to follow if it passes.
 
 ## Question
 
@@ -98,3 +103,41 @@ Status: **pre-registered October 29, 2026, before the registered runs** (a smoke
 | 15 | Held-out workloads | Not owed |
 | 16 | Scorer integrity | Recorded at registration; the negative control |
 | 17 | The noise bar | 7.11% under 10 s |
+
+## Results
+
+**Setup:** PostgreSQL 17.11 on the Mac. 130 correctness trials in a shuffled order, then the timings at scale 100 (1,576 MB). Data: `docs/experiments/data/exp82-trials.csv` and `exp82-timing.csv`.
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-82` reports 11 of 11 files unchanged since the registration commit (4d4ac41).
+
+![EXP-82: correctness on a server that never summarized WAL, and the local timings](../figures/exp82-local.svg)
+
+*How to read it:* on the left, per arm, the trials whose copy came out correct (blue) and wrong (red). The control is meant to be wrong. On the right, each arm's median time in the two local cells, in memory.
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | **Deciding:** all 120 page-lsn trials refreshed by page-lsn with the expected proof, and correct | **Held:** 40 of 40 stopped standbys ("clean shutdown in recovery"), 40 of 40 base backups taken under load ("backup_manifest"), 40 of 40 killed standbys ("crashed standby"); failure rate below 2.47% at 95% |
+| 2 | All 20 on-demand trials take the summaries' fast path and are correct | **Held:** 20 of 20, from stopped standbys and from base backups |
+| 3 | At least 8 of the 10 negative controls wrong | **Held:** 10 of 10 wrong (rows unequal in all 10; `pg_amcheck` failing in 7) |
+| 4 | page-lsn, and on demand, each at most 0.80 of hashing's local time in both cells | **Failed for both:** page-lsn 0.492 (hot), 0.964 (scatter); on demand 0.816 (hot), 1.55 (scatter) |
+
+**The local timings** (medians of 2, seconds; every copy correct):
+
+| Cell | WAL since B0 | Hashing | page-lsn | On demand |
+|---|---|---|---|---|
+| hot | 63 MB | 1.34 (1.44, 1.25) | **0.66** (0.67, 0.65) | 1.10 (1.10, 1.09) |
+| scatter | 552 MB | 2.97 (2.13, 3.81) | 2.87 (3.04, 2.69) | 4.61 (4.57, 4.64) |
+
+**Reported:**
+- **Why 4 failed:** in memory, hashing's cost is CPU on 4 processes, not the disk reads of B that the VMs' bound turns on.
+  - **page-lsn's own costs here:** reading S and re-reading its chosen pages from the cache, then sending them. That nearly equals hashing's for scattered changes. page-lsn sent 94,603 pages to hashing's 69,010: it sends every page changed since B's redo point, while hashing sends only those that differ, and pages carry hint-bit full-page images too.
+  - **On demand pays for the summarizer** reading the WAL since B0 (552 MB for scatter) before the fast path starts.
+  - **Hashing's two scatter runs differed by 56%** (2.13 and 3.81 s), far beyond rule 17's bar, so that cell's ratios are loose either way.
+- **The page-lsn refreshes in the correctness campaign** took a median 0.63 s, at scale 4.
+
+## What followed
+
+As registered for 1–3 holding and 4 failing:
+- **Both candidates are correct** across stopped standbys, base backups taken under load and killed standbys, under a load with DDL and created databases. The threshold must be B's redo point: the negative control shows B's end gives wrong copies.
+- **Neither is promoted on local evidence.** Both go to the VMs on research loop 3's bound, from the VMs' measured disk rates: there hashing is bound by reading B on the disk that takes the writes (EXP-80b), which the Mac in memory doesn't show. EXP-82b times them on the ha set beyond memory, against hashing and WAL-G's catch-up.
+- **The local/VM pairs** go into `proxy-fidelity.csv` after EXP-82b. This is the first case where the proxy is expected to mislead: in memory, it has no disk.

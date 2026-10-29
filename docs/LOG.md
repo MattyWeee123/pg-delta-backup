@@ -4,6 +4,16 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (05:53 UTC): EXP-82 done: both summaries-off candidates correct; neither faster than hashing locally for scattered changes
+
+- **Correctness held:**
+  - 120 of 120 page-lsn copies (stopped standbys, base backups under load, killed standbys; failure rate below 2.47% at 95%);
+  - 20 of 20 copies with summaries turned on at refresh time;
+  - 10 of 10 negative controls wrong (the threshold at B's end), so the redo point is required and the check sees a wrong copy.
+  - The scorer was unchanged (11 of 11 files).
+- **Rule 13's local promotion failed for both.** In memory, page-lsn took 0.49 of hashing's time (hot) and 0.96 (scatter), and on demand 0.82 and 1.55. On the Mac hashing costs CPU, not the disk reads of B that the VMs' bound turns on. As registered, both go to the VMs on that bound (EXP-82b), and the local/VM pairs will be logged.
+- **EXP-82b's design:** a replication slot reserved just before each old copy is taken keeps exactly the WAL since its redo point. With `wal_keep_size` instead, the summarizer would read every older segment too (it starts at the oldest on disk). Archived: B's own WAL could cover the gap when a slot keeps less.
+
 ## 2026-10-29 (05:22 UTC): EXP-82 pre-registered: summaries off, the local stage
 
 - **What runs:**
