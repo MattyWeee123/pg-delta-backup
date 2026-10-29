@@ -74,7 +74,7 @@ L 807.1512 184.400399
 L 807.1512 139.022941 
 L 549.4488 139.022941 
 z
-" clip-path="url(#pd65b3ba6d4)" style="fill: #d9d9d9; opacity: 0.55"/>
+" clip-path="url(#pd65b3ba6d4)" style="fill: #009e73; opacity: 0.55"/>
    </g>
    <g id="patch_8">
     <path d="M 281.0088 235.965692 
@@ -106,7 +106,7 @@ L 807.1512 287.530985
 L 807.1512 242.153527 
 L 549.4488 242.153527 
 z
-" clip-path="url(#pd65b3ba6d4)" style="fill: #d9d9d9; opacity: 0.55"/>
+" clip-path="url(#pd65b3ba6d4)" style="fill: #d55e00; opacity: 0.55"/>
    </g>
    <g id="patch_12">
     <path d="M 281.0088 339.096278 
@@ -114,7 +114,7 @@ L 538.7112 339.096278
 L 538.7112 293.71882 
 L 281.0088 293.71882 
 z
-" clip-path="url(#pd65b3ba6d4)" style="fill: #d9d9d9; opacity: 0.55"/>
+" clip-path="url(#pd65b3ba6d4)" style="fill: #009e73; opacity: 0.55"/>
    </g>
    <g id="patch_13">
     <path d="M 549.4488 339.096278 
@@ -205,11 +205,11 @@ z
    </g>
    <g id="text_14">
     <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(642.515625 150.738567)">WAL-G catch-up</text>
-    <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(617.39 160.340754)">(in place, page LSN): OPEN</text>
+    <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(620.555 160.340754)">(in place, page LSN): WIN</text>
    </g>
    <g id="text_15">
-    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(629.203875 169.574338)">never timed; it reads every</text>
-    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(635.96175 178.216307)">changed file in full on S</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(617.6715 169.574338)">0.019 hot, 0.39 uniform (EXP-81);</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(651.3675 178.216307)">it reads all of S</text>
    </g>
    <g id="text_16">
     <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(12.5688 210.384141)">A crashed standby, summaries on</text>
@@ -226,8 +226,8 @@ z
     <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="678.3" y="207.104954" transform="rotate(-0 678.3 207.104954)">WAL-G catch-up: OPEN</text>
    </g>
    <g id="text_20">
-    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(656.414813 221.139631)">never timed</text>
-    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(615.86475 229.7816)">(page LSN, no summaries needed)</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(624.208313 221.139631)">inferred a win: it reads all of S</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(621.662438 229.7816)">as for a clean standby (EXP-81)</text>
    </g>
    <g id="text_21">
     <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(12.5688 261.949434)">Lineage unprovable</text>
@@ -241,11 +241,11 @@ z
     <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(343.656562 281.346893)">local, 2.1x slower scattered (EXP-31)</text>
    </g>
    <g id="text_24">
-    <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="678.3" y="258.670246" transform="rotate(-0 678.3 258.670246)">WAL-G catch-up: OPEN</text>
+    <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="678.3" y="258.670246" transform="rotate(-0 678.3 258.670246)">WAL-G catch-up: LOSE</text>
    </g>
    <g id="text_25">
-    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(656.414813 272.704924)">never timed</text>
-    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(615.86475 281.346893)">(page LSN, no summaries needed)</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(624.212813 272.704924)">across sessions: tie hot, 180 s</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(614.153625 281.346893)">against 109 s uniform (EXP-80b/81)</text>
    </g>
    <g id="text_26">
     <text style="font-size: 8.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(12.5688 313.514727)">An earlier backup with its manifest,</text>
@@ -253,11 +253,11 @@ z
    </g>
    <g id="text_27">
     <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(367.33 305.434446)">native incremental</text>
-    <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(346.598125 315.036633)">+ pg_combinebackup: OPEN</text>
+    <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(349.763125 315.036633)">+ pg_combinebackup: WIN</text>
    </g>
    <g id="text_28">
-    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(350.1585 324.270217)">beat hashing 42 of 42 (EXP-04b);</text>
-    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(370.1025 332.912186)">never vs the fast path</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(353.8935 324.270217)">0.29 hot, 0.47 uniform, its best</text>
+    <text style="font-size: 7.2px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(369.453375 332.912186)">mode on XFS (EXP-81)</text>
    </g>
    <g id="text_29">
     <text style="font-weight: 700; font-size: 8px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif" transform="translate(638.7575 305.434446)">pgBackRest delta</text>

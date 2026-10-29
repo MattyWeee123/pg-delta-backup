@@ -35,7 +35,8 @@ Every idea tried or proposed, with where it won, where it lost, and what should 
 | A crashed standby proven by its minimum recovery point (`--crashed-standby`) | algorithm | opt-in | EXP-80 (local), EXP-80b (VMs) | 100 of 100 randomized crashed standbys correct; beyond memory 0.023–0.233 of hashing's time, 0.02–0.46 of a re-clone / crashed primaries still refused | The held-out session (rule 15), then default with the fast path |
 | Crash recovery first (`pg_rewind`'s step) | algorithm | rejected | EXP-80, S2e | — / reopens EXP-62's blind spot: S2e accepted and wrong in 3 of 3 builds | — |
 | Detecting a crash-recovered old primary (its end-of-recovery checkpoint in its own WAL) | algorithm | unbuilt | EXP-80's registration (residual risk) | Would close a blind spot guard v2 and `pg_rewind` share | A cheap, reliable WAL signature is found |
-| Labels from a scan of S's WAL (summaries off, or PostgreSQL before 17) | algorithm | unbuilt | Research loop 2 | Would move "lineage unprovable" copies to the fast path / needs S's WAL since B's redo point | Next after EXP-80: the scorecard's remaining loss |
+| Labels from a scan of S's WAL (summaries off, or PostgreSQL before 17) | algorithm | unbuilt | Research loop 2 | Would move "lineage unprovable" copies to the fast path / needs S's WAL since B's redo point | Against page-LSN selection (below), for the summaries-off row |
+| Page-LSN selection on the source (summaries off; WAL-G's and `pg_probackup` DELTA's way) | algorithm | unbuilt | EXP-81 (WAL-G), EXP-80b (hashing) | Would read all of S once and none of B: WAL-G's 109.0 s against hashing's 180.1 s for uniform, across sessions / needs B's end proven, as the guard does, and reads all of S even for a few pages | The next summaries-off attack: build it beside the WAL scan, decide between them by a local scale model (rule 13) |
 | An offline evolutionary search over saved plans (OpenEvolve-style) | measure | unbuilt | RSI review | Cheap evaluator (the time model over saved plans) / the model only ranks; VMs decide | A small policy with a numerical objective is the bottleneck |
 
 ## Hashing, transport and verification
@@ -57,7 +58,7 @@ Every idea tried or proposed, with where it won, where it lost, and what should 
 
 | Comparison | Status | Prediction (inferred) | Plan |
 |---|---|---|---|
-| The fast path against native incremental + `pg_combinebackup` (backup chains) | open | The fast path wins: `pg_combinebackup` rewrites every changed file into a new directory | One VM session, the competitor's best mode (XFS, `--clone` or `--link`) |
-| The fast path against WAL-G catch-up | open | The fast path wins: WAL-G reads every changed file in full | The same session |
+| The fast path against native incremental + `pg_combinebackup` (backup chains) | **done (EXP-81)** | Held: 0.29 (hot), 0.47 (uniform) against `--copy-file-range` on XFS, its best mode (a synced capture; `--clone` 4x slower in a pilot) | — |
+| The fast path against WAL-G catch-up | **done (EXP-81)** | Held: 0.019 (hot), 0.385 (uniform); WAL-G reads every file in full on the source | — |
 | The fast path at DR round trips | open | Wider wins than hashing's | With the next DR session |
 | A cloud disk clone plus recovery, same zone | open | The clone wins for large changes, the fast path for small lag | When the cloud HA story matters to the sponsor |

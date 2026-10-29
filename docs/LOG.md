@@ -4,6 +4,27 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (03:28 UTC): EXP-81 done: the fast path beats native incremental and WAL-G catch-up, each in its best mode
+
+- **Every prediction held** (the `ha` set, 18 GB on 8 GB VMs, dest on XFS with reflinks):
+
+  | Situation | Cell | Fast path | Competitor | Ratio |
+  |---|---|---|---|---|
+  | A backup chain | hot | 1.66 s | native incremental 5.73 s | **0.29** (deciding; bar 0.80) |
+  | A backup chain | uniform | 41.89 s | native incremental 88.90 s | **0.47** |
+  | A stopped standby | hot | 1.63 s | WAL-G catch-up 87.75 s | 0.019 |
+  | A stopped standby | uniform | 41.92 s | WAL-G catch-up 109.00 s | 0.385 |
+
+  - All 16 copies were correct.
+  - The scorer was unchanged except one figure-layout line, disclosed.
+- **Where the competitors' time went:**
+  - **Native incremental's capture took 71 of its 89 s in uniform:** one request at a time, with the kernel's readahead merging its block reads, which my inference missed (it said 250–450 s).
+  - **Its combine took 18 s;** at 27% of the pages it is barely faster than a full copy (0.98).
+  - **WAL-G read all of the source in both cells** (17.8 GB) and was slower than a full copy in uniform (1.20).
+- **A loss it shows, across sessions:** with summaries off, WAL-G's catch-up beats pgdelta's hashing for scattered changes (109 s against 180 s). Page-LSN selection on the source joins the idea archive for that row.
+- **The scorecard:** research loop 2's two open rows are now wins.
+- **Also:** two pipeline launches stopped at its own filesystem check, before any run (`xfs_info` needs root's PATH).
+
 ## 2026-10-29 (01:57 UTC): EXP-81 pre-registered: the fast path against native incremental and WAL-G catch-up
 
 - **Each competitor's mechanism, from its source:**

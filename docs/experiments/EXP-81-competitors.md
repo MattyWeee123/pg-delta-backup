@@ -1,6 +1,11 @@
 # EXP-81: The fast path against native incremental and WAL-G catch-up, each in its best mode, beyond memory
 
-Status: **pre-registered October 28, 2026, before the registered run** (pilots are listed below). One `ha` VM pair, about 1.5 hours. It is research loop 2's next step: the scorecard's open rows against the strongest competitors.
+Status: **done October 28, 2026: every prediction held.** Beyond memory, on XFS:
+- **Against native incremental in its best mode:** the fast path took 0.29 of its time for hot rows (1.7 s against 5.7 s) and 0.47 for uniform ones (41.9 s against 88.9 s).
+- **Against WAL-G's catch-up:** 0.019 (1.6 s against 87.8 s) and 0.385 (41.9 s against 109.0 s).
+- **Correctness:** all 16 copies were correct.
+
+Pre-registered before the registered run (pilots are listed below); one `ha` VM pair, about 1.5 hours. It is research loop 2's next step: the scorecard's open rows against the strongest competitors.
 
 ## Question
 
@@ -113,3 +118,74 @@ Each run that changes its old copy starts from a real copy of it (`cp --reflink=
 - **If 1 fails in a cell:** native incremental is the faster refresh of a backup chain there. The claim narrows to copies without one, and the phases show which of its steps won.
 - **If 2 fails:** the same for WAL-G and stopped standbys.
 - **If 3 fails:** the failing arm's result is not scored until its run is understood. If it is pgdelta's, the fast path's claim is withdrawn.
+
+## Results
+
+**The session:** the pilots' VMs (`ha` set, us-west1-b and -c), dest's `/data` on XFS with reflinks.
+- **Two launches stopped before any run,** at the pipeline's own check that dest was XFS with reflinks. `xfs_info` needs root's PATH. The disk was as reformatted (`reflink=1`).
+- **The smoke** at scale 20 passed: 10 runs, every copy matched, both fast arms used the fast path, the series recorded.
+- **The registered runs** took 02:24–03:25 UTC October 29, and the VMs were then deleted.
+- **Data:** `docs/experiments/data/exp81-cells.csv`; raw `results/exp04/exp81/` (not in git).
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-81` reports 12 of 13 files unchanged since the registration commit (7a2f9c9). The one change is to `analysis/exp81.py`: one line raising the figure's axis to clear its legend, after the data. It changes no score.
+
+![EXP-81: the fast path against native incremental and WAL-G catch-up](../figures/exp81-competitors.svg)
+
+*How to read it:* the seconds to a refreshed, synced 18 GB copy (median of 2), per cell. On the left, a backup chain: the fast path, native incremental (dark: its capture; light: its combine) and `pg_basebackup`. On the right, a standby stopped cleanly: the fast path, WAL-G's catch-up (dark: send; light: sync, too thin to see) and `pg_basebackup`.
+
+**A backup chain (B0, a base backup with its manifest):**
+
+| Cell | Arm | Seconds (median) | The runs | Phases | Network in (MB) | Source read (GB) | Dest written (GB) |
+|---|---|---|---|---|---|---|---|
+| hot | **fast path** | **1.66** | 1.67, 1.65 | | 121 | 0.10 | 0.12 |
+| hot | native incremental | 5.73 | 5.69, 5.77 | capture 1.17 s, combine 4.56 s; 121 MB incremental | 106 | 0.10 | 0.12 |
+| hot | `pg_basebackup` | 90.59 | 90.61, 90.58 | | 17,861 | 17.8 | 17.8 |
+| uniform | **fast path** | **41.89** | 41.90, 41.89 | | 7,047 | 7.36 | 7.05 |
+| uniform | native incremental | 88.90 | 90.00, 87.80 | capture 70.92 s, combine 17.98 s; 5.13 GB incremental | 5,133 | 8.43 | 5.14 |
+| uniform | `pg_basebackup` | 90.96 | 91.04, 90.88 | | 17,923 | 17.9 | 17.9 |
+
+**A standby behind (B0s, stopped cleanly before the change):**
+
+| Cell | Arm | Seconds (median) | The runs | Phases | Network in (MB) | Source read (GB) | Dest written (GB) |
+|---|---|---|---|---|---|---|---|
+| hot | **fast path** | **1.63** | 1.67, 1.59 | | 121 | 0.10 | 0.12 |
+| hot | WAL-G catch-up | 87.75 | 87.73, 87.78 | send 87.74 s, sync 0.01 s | 17 | 17.8 | 0.11 |
+| uniform | **fast path** | **41.92** | 41.93, 41.91 | | 7,047 | 7.36 | 7.05 |
+| uniform | WAL-G catch-up | 109.00 | 109.13, 108.88 | send 108.99 s, sync 0.02 s | 750 | 17.9 | 5.06 |
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | **Deciding:** the fast path at most 0.80 of native incremental's time in both cells | **Held: 0.290 (hot), 0.471 (uniform)** |
+| 2 | At most 0.80 of WAL-G catch-up's time in both cells | **Held: 0.019 (hot), 0.385 (uniform)** |
+| 3 | Every run exits 0; every copy matches (the fast path's, native incremental's, WAL-G's); `fast8wf2` proven by B0's manifest, `sb_fast8wf2` by "clean shutdown in recovery" | **Held:** 20 of 20 exited 0; 16 of 16 copies matched; 4 of 4 proofs each |
+
+**Where each competitor's time goes (reported):**
+- **Native incremental, uniform:**
+  - **The capture took 71 s of its 89 s.** It read 8.4 GB from the source's disk in about 150,000 requests, one at a time, for 5.1 GB of changed blocks. The kernel's readahead merged its 8 KiB reads within each file, so it issued far fewer requests than blocks; my inference had assumed it would not, and put the capture at 250–450 s. The fast path read 7.4 GB in 88,000 requests, on 8 reader threads, in 35 s of source-disk time.
+  - **The combine took 18 s,** sharing about 9 GB of rebuilt files block by block on XFS.
+  - **In all, 0.977 of `pg_basebackup`'s time.** Beyond memory, at 27% of the pages, native incremental in its best mode is barely faster than a full copy.
+- **Native incremental, hot:** a 1.2 s capture and a 4.6 s combine, against the fast path's 1.7 s in all. The combine rebuilt each changed 1 GiB segment in a new directory, even for a few changed pages.
+- **WAL-G catch-up:**
+  - **It read all of the source** (17.8–17.9 GB, 85 s of disk time) in both cells, since a standby's file times never match the source's.
+  - **In hot it sent 17 MB,** Brotli-compressed, in 87.8 s; in uniform, 750 MB in 109.0 s.
+  - **Its sync took 0.01–0.02 s:** the kernel had already written its 5 GB back during the send.
+  - **Against `pg_basebackup`:** 0.97 (hot) and 1.20 (uniform). In uniform WAL-G is slower than a full copy.
+- **The inferred ratios against the measured:**
+  - **Native incremental:** hot 0.15–0.3 against 0.29; uniform 0.1–0.17 against 0.47. The capture's readahead was the miss.
+  - **WAL-G:** about 0.02 against 0.019; 0.2–0.33 against 0.385, since its uniform run took 109 s against the 130–200 s inferred.
+- **The fast path on XFS** took 1.66 s and 41.89 s, against 2.03 s (EXP-80b) and 42.02 s on ext4. `pg_basebackup` took the same on both filesystems (90.6–91.0 s here; 90.8–91.0 s in EXP-80b).
+- **Rule 17's noise:** within the session, two runs of a cell differed by at most 2.5% (native incremental's uniform: 90.0 and 87.8 s), and by under 0.6% everywhere else on runs of 10 s or more. Every margin here is many times that.
+
+**The bytes:** native incremental moved the fewest uncompressed bytes in uniform (5.1 GB against the fast path's 7.0 GB, whose gap filling sends more pages for fewer requests). WAL-G moved the fewest bytes of all (0.75 GB, compressed), at the cost of reading the whole source. On these links bytes didn't decide it; on slow ones they would.
+
+## What followed
+
+- **Research loop 2's two open rows are measured wins,** each against the competitor's best mode:
+  - **a backup chain:** 0.29 and 0.47 of native incremental's time;
+  - **a stopped standby:** 0.019 and 0.385 of WAL-G's.
+  - RESULTS, the README and the scorecard say so.
+- **No second session is owed** (rule 11): the deciding ratios are 0.33 and 0.51 below the bar.
+- **A loss this session shows, across sessions: copies without WAL summaries.**
+  - WAL-G's catch-up needs no summaries. It took 109.0 s for uniform here, where pgdelta's hashing took 180.1 s for the same cell in EXP-80b (ext4; a crashed standby, but hashing doesn't depend on that). In hot both read everything: 87.8 s against 87.9 s.
+  - So for `summarize_wal` off, the competitor to beat is page-LSN selection on the source. It reads all of S once, and none of B.
+  - The idea archive gains that as a structurally different idea for the summaries-off row (rule 14), with its prerequisites: B's end proven, as the guard already does.

@@ -126,6 +126,7 @@ def figure(by, ratios, name):
         ax.set_xticks([i * (len(arms) + 1) + 1 for i in range(len(CELLS))],
                       [f"{p}\n(fast path / theirs: {ratios.get(n, {}).get(p)})" for p in CELLS], fontsize=9)
         ax.set_title(title, fontsize=9.5)
+        ax.set_ylim(0, ax.get_ylim()[1] * 1.3)  # room for the legend above the bars
         ax.legend(fontsize=7.5, loc='upper left')
     axes[0].set_ylabel('seconds to a refreshed, synced 18 GB copy\n(median of 2; lighter: second phase)')
     fig.suptitle('EXP-81: the fast path against the strongest competitors, each in its best mode (dest on XFS)',

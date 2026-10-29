@@ -98,3 +98,8 @@ The constants are EXP-48's, EXP-68's and EXP-70's, on a 150 GiB balanced persist
   - **summaries off:** still hashed (WAL-scan labels unbuilt).
 - **The scorecard figure above carries the split.**
 - **Next, as section 4 planned:** the VM session against native incremental with `pg_combinebackup` and against WAL-G catch-up.
+
+**Then EXP-81** (the same night) measured the two open rows, each competitor in its best mode, on XFS:
+- **a backup chain:** the fast path took 0.29 (hot) and 0.47 (uniform) of native incremental's time;
+- **a stopped standby:** 0.019 and 0.385 of WAL-G's catch-up's;
+- **the scorecard's remaining loss** is copies without summaries: WAL-G's catch-up beats hashing there for scattered changes (109 s against 180 s, across sessions). The next attack is page-LSN selection on the source, or labels from S's WAL.
