@@ -4,7 +4,9 @@
 # source over the network, with the summarizer's CPU (summarizer_cpu.sh) and the source's /proc/stat read over ssh.
 #     [SETTLE=S] [SKIP_SETUP=1] bash experiments/summarize_cost/vm.sh SOURCE_IP SCALE CLIENTS THREADS SECONDS PAIRS WARMUP \
 #         SEED CELL OUT.csv
-# SETTLE (EXP-83c) passes bench.py --settle; SKIP_SETUP=1 keeps the source the previous cell built.
+# SETTLE (EXP-83c) passes bench.py --settle; SKIP_SETUP=1 keeps the source the previous cell built. EXP-83d: DESIGN
+# (pairs or blocks), BLOCKS, BLOCK_RUNS, BLOCK_SETTLE and EXTRA (pgbench flags, e.g. -N) pass through, and the source's
+# data disk is read (data_disk.sh) as well as the summarizer's I/O (summarizer_cpu.sh).
 set -eu
 SRC=$1 SCALE=$2 CLIENTS=$3 THREADS=$4 SECONDS_=$5 PAIRS=$6 WARMUP=$7 SEED=$8 CELL=$9 OUT=${10}
 cd ~/pgd
@@ -23,6 +25,9 @@ fi
 echo "$(date -u +%T) $CELL: database $($SSRC "$PGBIN/psql -h $ROOT/s -U study -d postgres -qAtX -c \"SELECT pg_size_pretty(pg_database_size('postgres'))\"")"
 python3 experiments/summarize_cost/bench.py --conn "host=$SRC port=5432 user=study dbname=postgres" --bin $PGBIN \
   --clients "$CLIENTS" --threads "$THREADS" --seconds "$SECONDS_" --pairs "$PAIRS" --warmup "$WARMUP" --seed "$SEED" \
-  --settle "${SETTLE:-0}" --ps "$SSRC bash ~/pgd/experiments/summarize_cost/summarizer_cpu.sh" --stat "$SSRC cat /proc/stat" \
+  --settle "${SETTLE:-0}" --design "${DESIGN:-pairs}" --blocks "${BLOCKS:-8}" --block-runs "${BLOCK_RUNS:-4}" \
+  --block-settle "${BLOCK_SETTLE:-300}" --extra="${EXTRA:-}" \
+  --diskstats "$SSRC bash ~/pgd/experiments/summarize_cost/data_disk.sh" \
+  --ps "$SSRC bash ~/pgd/experiments/summarize_cost/summarizer_cpu.sh" --stat "$SSRC cat /proc/stat" \
   --cell "$CELL" --out "$OUT"
 echo "$(date -u +%T) $CELL: done"

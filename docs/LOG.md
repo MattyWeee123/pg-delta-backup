@@ -4,6 +4,20 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (17:18 UTC): EXP-83d pre-registered: the mechanism of summarize_wal's cost beyond memory
+
+- **Two hypotheses:**
+  - **H1:** the earlier cost was the switches' (the catch-up's reads evicting cache, and a cache still warming);
+  - **H2:** a steady-state cost from the summarizer reading its WAL from storage.
+- **Measured directly:** the summarizer's reads from storage (`/proc/<pid>/io`) and the data disk's busy fraction.
+- **Design:** 12 long blocks (ABBA BAAB ABBA) with no switch in the data, after 15 minutes of warm-up; and a CPU-bound cell (`-N`, 90 clients).
+- **Predictions:**
+  1. Deciding: the summarizer reads at most 10% of its WAL from storage;
+  2. no cost beyond memory in long blocks;
+  3. no cost on a CPU-bound source (busy at least 80%);
+  4. at most 1.0 ms of CPU per MB of WAL.
+- **The decision rule** (H1, H2 or unresolved) is in the registration.
+
 ## 2026-10-29 (17:02 UTC): EXP-83c done: summarize_wal costs nothing measurable in memory; beyond memory a p99 cost again
 
 - **In memory, every prediction held:**

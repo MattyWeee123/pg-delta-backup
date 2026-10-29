@@ -16,6 +16,12 @@ server's CPU busy fraction. A warm-up run (off) comes first and is not scored. T
 --settle SECONDS (EXP-83c): before each scored run, an unscored run of SECONDS in the same mode, after the switch and
 the summarizer's catch-up, so a scored run never pays for the catch-up's reads or the cache they disturb (EXP-83b's
 confound beyond memory). Settle runs are written with the label "settle".
+EXP-83d: --design blocks holds the setting for whole blocks (--blocks, ABBA BAAB from a first mode drawn by the seed):
+each block is the switch and the summarizer's catch-up, one unscored run of --block-settle seconds, then
+--block-runs scored runs back to back in that mode, so no scored run follows a switch. --extra passes pgbench flags
+(-N, without the branch and teller updates). Where --ps prints "<cpu s> <read_bytes> <rchar> walsummarizer"
+(summarizer_cpu.sh), the summarizer's reads from storage and from any source are recorded over each run; --diskstats
+gives the source data disk's /proc/diskstats line, for its reads, writes and busy fraction.
 """
 import argparse
 import csv
@@ -51,9 +57,6 @@ def cpu_seconds(text):
 
 
 class Server:
-    def __init__(self, conn, bin_dir, ps, stat):
-        self.conn, self.bin, self.ps, self.stat = conn, bin_dir, ps, stat
-
     def sql(self, statement):
         result = subprocess.run([os.path.join(self.bin, 'psql'), self.conn, '-qAtX', '-v', 'ON_ERROR_STOP=1', '-c',
                                  statement], capture_output=True, text=True, timeout=600)
@@ -75,14 +78,28 @@ class Server:
             time.sleep(0.2)
         raise RuntimeError(f"the summarizer did not {'catch up' if on else 'stop'} within {timeout} s")
 
-    def summarizer_cpu(self):
+    def __init__(self, conn, bin_dir, ps, stat, diskstats=None):
+        self.conn, self.bin, self.ps, self.stat, self.diskstats = conn, bin_dir, ps, stat, diskstats
+
+    def summarizer(self):
+        """(cpu seconds, storage read bytes or None, read bytes or None) of the summarizer, (0, 0, 0) if none runs,
+        or None without --ps."""
         if not self.ps:
             return None
         out = subprocess.run(self.ps, shell=True, capture_output=True, text=True, timeout=60).stdout
         for line in out.splitlines():
             if 'walsummarizer' in line and 'grep' not in line:
-                return cpu_seconds(line.split()[0])
-        return 0.0  # no summarizer running
+                fields = line.split()
+                io = [int(x) for x in fields[1:3]] if len(fields) >= 4 and fields[3] == 'walsummarizer' else [None, None]
+                return cpu_seconds(fields[0]), io[0], io[1]
+        return 0.0, 0, 0  # no summarizer running
+
+    def disk(self):
+        """(sectors read, sectors written, ms busy) of the source's data disk, or None."""
+        if not self.diskstats:
+            return None
+        fields = subprocess.run(self.diskstats, shell=True, capture_output=True, text=True, timeout=60).stdout.split()
+        return int(fields[5]), int(fields[9]), int(fields[12])
 
     def cpu_ticks(self):
         """(busy, total) jiffies from /proc/stat's cpu line, or None."""
@@ -97,7 +114,7 @@ class Server:
 def pgbench(server, args, log_dir):
     command = [os.path.join(server.bin, 'pgbench'), '-n', '-M', 'prepared', '-c', str(args.clients), '-j',
                str(args.threads), '-T', str(args.seconds), '-l', '--log-prefix', os.path.join(log_dir, 'pgb')]
-    command += shlex.split(args.pgbench_conn)
+    command += shlex.split(args.extra) + shlex.split(args.pgbench_conn)
     result = subprocess.run(command, capture_output=True, text=True, timeout=args.seconds + 600)
     if result.returncode:
         raise RuntimeError(f'pgbench failed: {result.stderr.strip()[-800:]}')
@@ -118,17 +135,25 @@ def run(server, args, mode, label):
     server.sql('CHECKPOINT')
     log_dir = tempfile.mkdtemp(prefix='exp83-')
     try:
-        wal0, cpu0, ticks0 = server.sql('SELECT pg_current_wal_lsn()'), server.summarizer_cpu(), server.cpu_ticks()
+        wal0, s0, ticks0, disk0 = (server.sql('SELECT pg_current_wal_lsn()'), server.summarizer(), server.cpu_ticks(),
+                                   server.disk())
         started = time.perf_counter()
         row = pgbench(server, args, log_dir)
         seconds = time.perf_counter() - started
-        wal1, cpu1, ticks1 = server.sql('SELECT pg_current_wal_lsn()'), server.summarizer_cpu(), server.cpu_ticks()
+        wal1, s1, ticks1, disk1 = (server.sql('SELECT pg_current_wal_lsn()'), server.summarizer(), server.cpu_ticks(),
+                                   server.disk())
     finally:
         shutil.rmtree(log_dir, ignore_errors=True)
     wal = lsn_bytes(wal1) - lsn_bytes(wal0)
+    delta = lambda k: (None if s0 is None or s1 is None or s0[k] is None or s1[k] is None else max(0, s1[k] - s0[k]))
     row.update({'mode': mode, 'label': label, 'seconds': round(seconds, 2), 'wal_mb': round(wal / 1e6, 1),
-                'summarizer_cpu_s': None if cpu0 is None or cpu1 is None else round(max(0.0, cpu1 - cpu0), 2),
-                'server_busy': None if ticks0 is None else round((ticks1[0] - ticks0[0]) / max(1, ticks1[1] - ticks0[1]), 4)})
+                'summarizer_cpu_s': None if delta(0) is None else round(delta(0), 2),
+                'summarizer_read_mb': None if delta(1) is None else round(delta(1) / 1e6, 1),
+                'summarizer_rchar_mb': None if delta(2) is None else round(delta(2) / 1e6, 1),
+                'server_busy': None if ticks0 is None else round((ticks1[0] - ticks0[0]) / max(1, ticks1[1] - ticks0[1]), 4),
+                'disk_read_mb': None if disk0 is None else round((disk1[0] - disk0[0]) * 512 / 1e6, 1),
+                'disk_write_mb': None if disk0 is None else round((disk1[1] - disk0[1]) * 512 / 1e6, 1),
+                'disk_busy': None if disk0 is None else round((disk1[2] - disk0[2]) / 1000 / seconds, 4)})
     return row
 
 
@@ -143,6 +168,12 @@ def main():
     ap.add_argument('--pairs', type=int, default=6)
     ap.add_argument('--warmup', type=int, default=30)
     ap.add_argument('--settle', type=int, default=0)
+    ap.add_argument('--design', choices=('pairs', 'blocks'), default='pairs')
+    ap.add_argument('--blocks', type=int, default=8)
+    ap.add_argument('--block-runs', type=int, default=4)
+    ap.add_argument('--block-settle', type=int, default=300)
+    ap.add_argument('--extra', default='', help='more pgbench flags, e.g. -N')
+    ap.add_argument('--diskstats', default=None)
     ap.add_argument('--seed', type=int, default=830)
     ap.add_argument('--ps', default=None)
     ap.add_argument('--stat', default=None)
@@ -153,7 +184,7 @@ def main():
         opts = dict(kv.split('=', 1) for kv in a.conn.split())
         a.pgbench_conn = ' '.join(f'-{flag} {opts[key]}' for flag, key in (('h', 'host'), ('p', 'port'), ('U', 'user'))
                                   if key in opts) + f" {opts.get('dbname', 'postgres')}"
-    server = Server(a.conn, a.bin, a.ps, a.stat)
+    server = Server(a.conn, a.bin, a.ps, a.stat, a.diskstats)
     rng = random.Random(a.seed)
     rows = []
     try:
@@ -161,7 +192,26 @@ def main():
             warm = argparse.Namespace(**{**vars(a), 'seconds': a.warmup})
             row = run(server, warm, 'off', 'warmup')
             print(f"warm-up: {row['tps']} tps", flush=True)
-        for pair in range(a.pairs):
+        if a.design == 'blocks':
+            first = 'on' if rng.random() < 0.5 else 'off'
+            other = 'off' if first == 'on' else 'on'
+            pattern = [first, other, other, first, other, first, first, other]  # ABBA BAAB
+            for block in range(a.blocks):
+                mode = pattern[block % len(pattern)]
+                settle = argparse.Namespace(**{**vars(a), 'seconds': a.block_settle})
+                row = run(server, settle, mode, 'settle')
+                row.update({'cell': a.cell, 'pair': block // 2, 'position': block, 'block': block})
+                rows.append(row)
+                print(f"block {block} {mode:3s} settle: {row['tps']:9.1f} tps", flush=True)
+                for k in range(a.block_runs):
+                    row = run(server, a, mode, 'scored')
+                    row.update({'cell': a.cell, 'pair': block // 2, 'position': k, 'block': block})
+                    rows.append(row)
+                    print(f"block {block} {mode:3s} run {k}: {row['tps']:9.1f} tps, p99 {row['lat_p99_ms']} ms, WAL "
+                          f"{row['wal_mb']} MB, summarizer {row['summarizer_cpu_s']} s, reads {row['summarizer_read_mb']} "
+                          f"of {row['summarizer_rchar_mb']} MB from disk, disk busy {row['disk_busy']}, cpu "
+                          f"{row['server_busy']}", flush=True)
+        for pair in range(a.pairs if a.design == 'pairs' else 0):
             order = ['on', 'off'] if rng.random() < 0.5 else ['off', 'on']
             for position, mode in enumerate(order):
                 if a.settle:
@@ -181,7 +231,8 @@ def main():
         except Exception as exc:  # left for the caller to see
             print(f'could not turn summarize_wal off: {exc}', flush=True)
     keys = ['cell', 'pair', 'position', 'mode', 'tps', 'transactions', 'lat_mean_ms', 'lat_p50_ms', 'lat_p95_ms',
-            'lat_p99_ms', 'wal_mb', 'summarizer_cpu_s', 'server_busy', 'seconds', 'label']
+            'lat_p99_ms', 'wal_mb', 'summarizer_cpu_s', 'server_busy', 'seconds', 'label', 'block', 'summarizer_read_mb',
+            'summarizer_rchar_mb', 'disk_read_mb', 'disk_write_mb', 'disk_busy']
     write_header = not os.path.exists(a.out)
     with open(a.out, 'a', newline='') as f:
         w = csv.DictWriter(f, fieldnames=keys, extrasaction='ignore')
