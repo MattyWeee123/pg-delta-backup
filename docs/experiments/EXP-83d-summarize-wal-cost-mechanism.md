@@ -1,6 +1,6 @@
 # EXP-83d: Why did summarize_wal cost beyond memory, and what does it cost a CPU-bound server?
 
-Status: **pre-registered October 29, 2026, before any run.** One `ha` VM pair, about 2.6 hours (the stated reason: long blocks with no switch in the data, as the owner asked). It follows EXP-83b and EXP-83c.
+Status: **pre-registered October 29, 2026, before any run.** *Amended before any scored data:* the first launch stopped at the CPU cell's first settle run. `summarizer_cpu.sh` had printed the summarizer's large read counter in `awk`'s scientific notation (2.52364e+09), which `bench.py` couldn't parse. The script now passes the counters through as text, and its files are recorded again at the fixed commit. The VMs were kept, and the sessions run from the set-up again. One `ha` VM pair, about 2.6 hours (the stated reason: long blocks with no switch in the data, as the owner asked). It follows EXP-83b and EXP-83c.
 
 ## Question
 
