@@ -4,6 +4,17 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (20:30 UTC): EXP-83d done: the summarizer reads no WAL from storage, yet a disk-bound server's p99 rises 22%
+
+- **1 (deciding) held:** beyond memory the summarizer read 0.0% of its WAL from storage (100.1% of it, all from the page cache).
+- **2 failed:** with 12 long blocks and no switch in the data, p99 was 1.22x [1.10, 1.35] and throughput 0.971 [0.925, 1.018]. The registered decision is unresolved: H1 (the switches) and H2 (its storage reads) are both refuted.
+- **Post-hoc:** with summaries on, the data disk wrote 24% more besides WAL (33.9 against 27.4 MB/s; write rate 1.109 [1.036, 1.183] by block pair) and read about 3.5% more. That points to cached data pages displaced by the summarizer's second read of each WAL page, or by its memory.
+- **3 failed on its condition:** `-N` with 90 clients reached only 35% CPU. The in-memory cells are bound by commit fsyncs on the persistent disk.
+- **4 held:** 0.78–0.96 ms per MB of WAL.
+- **The amendment:** the first launch stopped on the probe printing a counter in scientific notation, before any scored data; fixed and re-recorded.
+- **Teardown:** the pipeline's teardown failed on a gcloud error after the fetch; the dest VM was deleted by hand at once.
+- **The advice in RESULTS:** on, where the working set fits in memory; beyond it, a tail-latency price of about 20%.
+
 ## 2026-10-29 (17:18 UTC): EXP-83d pre-registered: the mechanism of summarize_wal's cost beyond memory
 
 - **Two hypotheses:**
