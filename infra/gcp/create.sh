@@ -87,9 +87,10 @@ for role in ${missing[@]+"${missing[@]}"}; do
   case $disk in
     local-nvme)
       for _ in $(seq "$(pgd_role "$role" LOCAL_SSDS)"); do disk_flags+=(--local-ssd=interface=NVME); done ;;
-    pd-balanced)
+    pd-balanced|pd-ssd)
       # Attached as pgd-data (startup.sh finds it at /dev/disk/by-id/google-pgd-data), deleted with the VM.
-      disk_flags+=("--create-disk=name=$vm-data,size=$(pgd_role "$role" PD_SIZE_GB)GB,type=pd-balanced,device-name=pgd-data,auto-delete=yes,labels=$(pgd_labels "$role" | tr , :)") ;;
+      # pd-ssd (EXP-84, the held-out setting H3) is the same but for the disk type.
+      disk_flags+=("--create-disk=name=$vm-data,size=$(pgd_role "$role" PD_SIZE_GB)GB,type=$disk,device-name=pgd-data,auto-delete=yes,labels=$(pgd_labels "$role" | tr , :)") ;;
   esac
   # No service account: the VMs need no Google API access, only the metadata
   # server, which works without one. The metadata's pgd-* keys say which set and

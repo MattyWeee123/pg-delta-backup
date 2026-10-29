@@ -15,8 +15,8 @@ RRSI and ADRS both found gains tuned that way shrink or vanish on settings the s
 |---|---|---|---|
 | **H1** | The workloads the fast path was never tuned on: `clustered`, `tpcb`, `append` and `retention` (source_cluster.py's patterns), at scale 600 on the ha set | The change patterns: clustered ranges, TPC-B's mix of four tables, appends to `events`, deletes of old `events` | Yes (the lab's patterns) |
 | **H2** | Scale 1,200 (about 36 GB, 4.5x the VMs' memory), uniform and hot | The size | Yes (`SCALE=1200`) |
-| **H3** | A `pd-ssd` data disk instead of balanced, uniform and hot at scale 600 | The disk's operation and byte limits | Needs `DATA_DISK=pd-ssd` in infra/gcp (one flag), added at first use |
-| **H4** | PostgreSQL 18, uniform and hot at scale 600 | The server version (WAL-summary and visibility-map behaviour) | Needs the lab's server version as a setting, added at first use |
+| **H3** | A `pd-ssd` data disk instead of balanced, uniform and hot at scale 600 | The disk's operation and byte limits | Yes, since EXP-84: `create.sh` takes `DATA_DISK=pd-ssd`; the `hs` set |
+| **H4** | PostgreSQL 18, uniform and hot at scale 600 | The server version (WAL-summary and visibility-map behaviour) | Yes, since EXP-84: the lab's `PG_MAJOR=18`, installed beside 17 |
 
 **What a held-out session reports for each cell:**
 - the fast path (current defaults) against `pg_basebackup`;

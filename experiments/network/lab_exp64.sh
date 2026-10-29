@@ -53,6 +53,9 @@
 # so it keeps exactly the WAL since their redo points (a checkpoint recycles every older segment): the summarizer, which
 # starts at the oldest WAL on disk, then reads only that. wal_keep_size would keep older WAL too. Dropped at the end.
 # Every pgdelta arm's copy is checked (the hash arm's too, since EXP-82b).
+# EXP-84 (the held-out session): PG_MAJOR picks the PostgreSQL major the lab runs (installed beside 17), and
+# FULL_CHECK=1 has each copy's check compare, beyond pgbench_accounts, the events table (count and the sum of its ids)
+# and pgbench's branches, tellers and history, since the held-out patterns tpcb, append and retention change them.
 # Every copy of B0 or B0s is a real one (cp --reflink=never: on XFS cp would otherwise share blocks with B0), and each
 # run records dest's received network bytes (net_rx_bytes) and, for incr and walg, its phases' seconds.
 set -u
@@ -80,7 +83,7 @@ KEY=$HOME/.ssh/exp04_ed25519
 # -n: inside the plan loop ssh must not read the plan from stdin. The source on the control port (outside wan.sh).
 SSRC=(ssh -n -i "$KEY" -p 2222 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$SRC")
 export PATH="$PATH:/usr/sbin:/sbin"
-PGBIN=/usr/lib/postgresql/17/bin
+PGBIN=/usr/lib/postgresql/${PG_MAJOR:-17}/bin  # PG_MAJOR (EXP-84, held-out H4): another installed major
 ROOT=/data/exp64/src
 B0=$W/B0 B=$W/B FULL=$W/full B0S=$W/B0s INC=$W/inc
 NETIF=$(ip route show default | awk '{print $5; exit}')
@@ -174,6 +177,10 @@ for pattern in $PATTERNS; do
   CHECK=$STATE
   [[ "$pattern" =~ ^scatterall[0-9]+$ ]] && \
     CHECK="SELECT ($STATE) || ':' || (SELECT count(*) FROM events WHERE payload <> lower(payload))"
+  [ "${FULL_CHECK:-0}" = 1 ] && \
+    CHECK="SELECT ($STATE) || ':' || (SELECT count(*) || ':' || coalesce(sum(id), 0) FROM events) || ':' || \
+(SELECT sum(bbalance) FROM pgbench_branches) || ':' || (SELECT sum(tbalance) FROM pgbench_tellers) || ':' || \
+(SELECT count(*) FROM pgbench_history)"
   change() {
     if [[ "$pattern" =~ ^scatter(all)?([0-9]+)$ ]]; then
       n=${BASH_REMATCH[2]}

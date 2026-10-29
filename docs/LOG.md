@@ -4,6 +4,19 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (21:33 UTC): EXP-84 pre-registered: the held-out session for --crashed-standby, --selector and page-lsn
+
+- **The settings:** sealed since October 28: H1 (clustered, tpcb, append, retention), H2 (scale 1,200), H3 (pd-ssd), H4 (PostgreSQL 18.6). H3 and H4 were built at first use: `create.sh` takes pd-ssd, and the lab takes `PG_MAJOR`.
+- **The arms, one run each per cell:** a crashed standby with `--crashed-standby`; a clean standby by the fast path's defaults, by `--selector` and by page-lsn; and `pg_basebackup`.
+- **Two VM sets at once** (32 vCPUs): `ha` runs H1 then H2; `hs` runs H3; then `hc` runs H4.
+- **Predictions, per cell, from the tuned results:**
+  - crashed at most 1.10x the clean standby's time, and correct;
+  - the selector within 15% (an expected overestimate on pd-ssd), with its full-copy call right;
+  - page-lsn at most 1.05x `pg_basebackup`;
+  - the fast path faster than `pg_basebackup` exactly below 91% of the pages;
+  - every copy correct.
+- **A miss narrows the claim** (rule 15).
+
 ## 2026-10-29 (20:30 UTC): EXP-83d done: the summarizer reads no WAL from storage, yet a disk-bound server's p99 rises 22%
 
 - **1 (deciding) held:** beyond memory the summarizer read 0.0% of its WAL from storage (100.1% of it, all from the page cache).
