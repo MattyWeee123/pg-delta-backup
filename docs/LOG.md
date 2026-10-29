@@ -4,6 +4,26 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (01:57 UTC): EXP-81 pre-registered: the fast path against native incremental and WAL-G catch-up
+
+- **Each competitor's mechanism, from its source:**
+  - **Native incremental's capture** reads each changed block with its own 8 KiB read, one at a time. Its combine rebuilds every changed relation file in a new directory.
+  - **`--copy-file-range` shares each block on XFS:** a correction to research loop 2, which said the copy options apply only to whole unchanged files.
+  - **WAL-G's catch-up** reads every file in full on the source, because a standby's file times never match the source's. It sends pages at or after the standby's checkpoint, compressed with Brotli, and syncs nothing on the receiver.
+- **The lab's new arms:**
+  - `incr`: the capture synced, then `pg_combinebackup --copy-file-range --sync-method=syncfs`;
+  - `walg`: `catchup-receive` and `catchup-send`, then `sync -f`;
+  - `STANDBY_TOO=1`: a cleanly stopped standby, B0s, with its `sb_` arms.
+  - dest's `/data` is on XFS with reflinks.
+- **The pilots at scale 20:**
+  - every arm ran and every copy matched;
+  - native incremental's best mode: from an unsynced capture the combine took 8.6 s, from a synced one 0.75 s, since XFS writes each block out before sharing it.
+- **Predictions:**
+  - 1 (deciding): the fast path at most 0.80 of native incremental's time in hot and uniform;
+  - 2: at most 0.80 of WAL-G's;
+  - 3: every copy correct.
+  - Inferred from the code: about 0.15–0.3 and 0.1–0.17 against native incremental, and about 0.02 and 0.2–0.33 against WAL-G.
+
 ## 2026-10-29 (01:17 UTC): EXP-80b done: a crashed standby beyond memory, 0.023–0.233 of hashing's time
 
 - **Every prediction held** (the `ha` set, us-west1-b and -c, 18 GB on 8 GB VMs; each standby killed 30 s into its change):

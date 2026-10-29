@@ -31,8 +31,8 @@
 # source; and a final "c" on a fast arm passes the receiver --crashed-standby. Each copy's check removes standby.signal.
 # EXP-81, the competitors in their best modes, with dest's /data on XFS with reflinks (reformat_dest_xfs.sh):
 # - "incr": native incremental, pg_basebackup --incremental against B0's manifest (B0 itself, never started: a
-#   backup chain), then pg_combinebackup --copy-file-range (each reused block shared, not copied, on XFS) into a new
-#   directory, synced by syncfs; its output is the copy checked.
+#   backup chain; the capture synced, as by default), then pg_combinebackup --copy-file-range (each reused block
+#   shared, not copied, on XFS) into a new directory, synced by syncfs; its output is the copy checked.
 # - STANDBY_TOO=1: each pattern also gets B0s, a standby (pg_basebackup -R) started, caught up and stopped cleanly
 #   before the change; an arm "sb_X" runs arm X on a copy of B0s instead of B0.
 # - "walg" (on B0s: "sb_walg"): WAL-G's catch-up, catchup-receive on dest and catchup-send on the source, then a
@@ -198,8 +198,10 @@ EOF
     rx0=$(netrx)
     if [ "$a" = incr ]; then
       t0=$(date +%s.%N)
+      # Synced, as by default: from an unsynced capture, XFS writes each changed block out before it can share it,
+      # one block at a time, and the combine took 8.6 s instead of 0.75 s (EXP-81's pilot, scale 20).
       $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$INC" --incremental="$B0/backup_manifest" -X stream -c fast \
-        --no-sync > "$d/incr.log" 2>&1
+        > "$d/incr.log" 2>&1
       status=$?
       ti=$(date +%s.%N)
       [ "$status" = 0 ] && { $PGBIN/pg_combinebackup "$B0" "$INC" -o "$FULL" --copy-file-range --manifest-checksums=NONE \
