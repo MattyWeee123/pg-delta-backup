@@ -1,6 +1,38 @@
 # Proposed correctness and recovery contract
 
-Status: team proposal based on sponsor chat, not an implemented or validated guarantee.
+Status: proposed product-wide guarantee based on sponsor chat. The native runner
+implements the single-timeline fixture check described below; that does not
+certify this guarantee for arbitrary schemas or deployments.
+
+## Implemented native active-cutoff check (October 29, 2026)
+
+`benchmarks.native_baseline` now validates a self-contained active backup at its
+verified manifest's `WAL-Ranges[0].End-LSN`, with the manifest system identifier
+and timeline. PostgreSQL defines End-LSN as the earliest point at which replay
+may end, and `recovery_target=immediate` as recovery to the end of an online
+backup ([manifest](https://www.postgresql.org/docs/17/backup-manifest-wal-ranges.html),
+[recovery targets](https://www.postgresql.org/docs/17/runtime-config-wal.html#RUNTIME-CONFIG-WAL-RECOVERY-TARGET)).
+
+The candidate pauses there using bundled WAL only (`restore_command=false`,
+streaming disabled). The reference restores the independently verified older
+B0 using the source's separate WAL archive, stopping exclusively before the
+first record at or after End-LSN. Both replay positions must equal End-LSN;
+the checker does not accept a later consistent state. Ordered logical exports
+and supported schema must match, then candidate recovery must finish.
+
+The workload's per-client operation IDs are reconciled with external successful
+pgbench observations. Recovered streams must be acknowledged contiguous
+prefixes. Repeated rollback inserts, a transaction held open across capture,
+and a post-capture committed marker must all be absent at the cutoff. Global
+commit order comes from independent reference replay, not sequence allocation
+or client log timestamps. PostgreSQL recovery is trusted on both sides; this
+does not independently verify PostgreSQL's recovery implementation.
+
+New bundles record `active_package_exact_cutoff_oracle: pass`. Historical
+bundles without that verdict retain their original weaker scope. The later
+PITR-assisted comparison remains separately reported. Candidate recovery never
+receives that supplementary WAL. See [the runbook](../benchmarks/NATIVE.md) for
+scope, commands and regression fault injections.
 
 ## What the sponsor clarified
 
