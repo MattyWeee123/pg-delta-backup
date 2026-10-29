@@ -167,9 +167,10 @@ for pattern in $PATTERNS; do
     rm -rf "$B0S"
     $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$B0S" -R -X stream -c fast > "$R/B0s-$pattern.log" 2>&1 \
       || { echo "B0s failed"; exit 1; }
+    # Port 5435: with CRASHED=1, B0's standby is still running on 5434 (EXP-84 found the two modes never combined).
     $PGBIN/pg_ctl -D "$B0S" -l "$R/standby-$pattern.log" -w -t 300 \
-      -o "-p 5434 -k /tmp -c listen_addresses='' -c summarize_wal=off" start > /dev/null 2>&1 || { echo "B0s failed"; exit 1; }
-    caught_up 5434 || { echo "B0s did not catch up"; exit 1; }
+      -o "-p 5435 -k /tmp -c listen_addresses='' -c summarize_wal=off" start > /dev/null 2>&1 || { echo "B0s failed"; exit 1; }
+    caught_up 5435 || { echo "B0s did not catch up"; exit 1; }
     $PGBIN/pg_ctl -D "$B0S" -m fast -w stop > /dev/null 2>&1
     echo "$(date -u +%T) $pattern: B0s, a standby caught up and stopped before the change: $($PGBIN/pg_controldata "$B0S" | \
       grep -E 'cluster state' | sed 's/.*: *//')"

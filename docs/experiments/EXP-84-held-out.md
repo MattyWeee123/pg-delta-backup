@@ -4,7 +4,7 @@ Status: **pre-registered October 29, 2026, before any run.** *Amended before any
 - `infra/gcp/vmset.sh` still allowed only local-nvme and pd-balanced, so `hs` couldn't be created. It now takes pd-ssd, counted toward the same SSD quota.
 - The pipeline's helper called `timeout` on a shell function, so `ha` was created but never prepared.
 
-Both are fixed, `vmset.sh` is added to the recorded files, and the files are recorded again at the fixed commit. The `ha` VMs were kept and are prepared afresh. Two VM sets at once (32 vCPUs, the quota), about 3.5 hours. It is the first held-out session. [held-out-workloads.md](../research/held-out-workloads.md) says one is owed before `--crashed-standby`, `--selector` or page-lsn becomes a default.
+Then a second stop, also before any scored data: set `ha`'s smoke found that the lab's `CRASHED=1` and `STANDBY_TOO=1`, never combined before, started both standbys on port 5434. B0s now starts on 5435. Set `hs` met a stockout or a full regional quota in its first four zone pairs (set `ha` holds us-west1's 16 N2D CPUs), so it tries more regions. All of this is fixed, `vmset.sh` is added to the recorded files, and the files are recorded again at the fixed commit. The `ha` VMs were kept and are prepared afresh. Two VM sets at once (32 vCPUs, the quota), about 3.5 hours. It is the first held-out session. [held-out-workloads.md](../research/held-out-workloads.md) says one is owed before `--crashed-standby`, `--selector` or page-lsn becomes a default.
 
 ## Question
 
