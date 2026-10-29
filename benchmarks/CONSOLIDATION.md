@@ -11,9 +11,23 @@ Sam's `benchmark-harness-v0.1` commit `ff8b85e` is preserved as a parent of the 
 
 Both paths default to plain format, streamed WAL, SHA256 manifests, a fast checkpoint and normal PostgreSQL synchronization. The CLI permits an explicit checksum/checkpoint choice, recorded with the run; comparisons must match those choices. Disabling file checksums (`NONE`) is rejected, and every listed basis file must have a checksum. PostgreSQL can otherwise accept a manifest without file checksums, which cannot detect same-size data corruption. `--format tar` is now rejected because this PG17 verification path expects an unpacked plain backup. The harness has no transfer engine of its own: the staged methods call rsync or the separately developed pgdelta tool.
 
-Methods are registered in [`methods.py`](methods.py); `run_backup` looks them up by name, and the CLI, the native suite and the HammerDB driver take their `--method` choices from the registry. Four are registered: `pg_basebackup_full`, `pg_basebackup_incremental`, and the staged transfers `rsync_staged` and `pg_delta_staged` described below. Incremental requires a complete immutable B0, verifies it as preparation, captures I1, verifies I1, combines B0+I1 with `--copy`, then verifies the resulting full package. A failing phase stops the pipeline. The native suite passes the actual B0 verification result obtained before workload launch; the standalone CLI performs that prerequisite itself. Chained incremental bases are outside this CLI's initial contract.
+Methods are registered in [`methods.py`](methods.py); `run_backup` looks them up by name, and the CLI, the native suite and the HammerDB driver take their `--method` choices from the registry. The original four are `pg_basebackup_full`, `pg_basebackup_incremental`, and the staged transfers `rsync_staged` and `pg_delta_staged` described below; the two live methods are documented immediately afterward. Incremental requires a complete immutable B0, verifies it as preparation, captures I1, verifies I1, combines B0+I1 with `--copy`, then verifies the resulting full package. A failing phase stops the pipeline. The native suite passes the actual B0 verification result obtained before workload launch; the standalone CLI performs that prerequisite itself. Chained incremental bases are outside this CLI's initial contract.
 
-The CLI's result is `PASS_MANIFEST_ONLY`, with `restore_tested: false`. That statement remains true even when a surrounding integration test subsequently restores the output: the restore verdict is recorded separately. A native trial's outer `pass` means its documented recovery checks passed; it does not certify unimplemented active-cutoff guarantees.
+October 29 extension: two more methods, `pg_delta_live` and
+`pg_delta_live_summaries`, refresh a prepared copy of B0 directly from live
+PGDATA, with no staged full source capture. All three frontends accept them.
+They require source-local file access and PostgreSQL tools on the execution
+host. Their explicit `PASS_ENGINE_ONLY` verdict validates the engine receipt,
+output identity and packaged WAL; it does not claim manifest verification or
+restore. The native suite adds the exact-cutoff reference comparison. See
+[LIVE.md](LIVE.md) for local, GCP and Docker/HammerDB commands and limits.
+
+The CLI's result is `PASS_MANIFEST_ONLY` for native/staged methods or
+`PASS_ENGINE_ONLY` for live methods, with `restore_tested: false`. That remains
+true when a surrounding integration test subsequently restores the output:
+the restore verdict is recorded separately. The native trial's outer `pass`
+includes its documented logical recovery checks. Historical results without
+an exact-cutoff verdict retain their original correctness scope.
 
 ## Shared result schema v3
 
@@ -62,6 +76,16 @@ The two staged methods are therefore not timed on the same terms. `rsync_staged`
 ## Adding a method
 
 Write a function in `methods.py` that takes the `Context` and runs its phases through `ctx.execute(stage, argv)`. It returns a dict with any of `backup`, `increment_verification`, `combination` and `transfer` (phase records), `transfer_stats` (a dict), `failure` (a status and exit code, or None) and `verify_manifest`. Then `register()` a `Method` naming it, whether it needs a basis, its capture directory (`increment`, `staging` or none), the tools it needs and any untimed `prepare` step. Set `output_matches_capture` when O must be an exact, independent copy of the capture, as for the staged methods; it requires the `python` tool. `run_backup` handles basis verification for methods that trust the basis, preparation, the timer, the final verification, the output check and the v3 record, so the three frontends need no edits. Only a new tool flag (as `--rsync` was) touches a frontend. Add stub-backed tests like `tests/test_methods.py`.
+
+For a method without a PostgreSQL manifest, a `Method.verify(ctx, phases)`
+callback replaces final `pg_verifybackup` and must use the explicit
+`success_status='PASS_ENGINE_ONLY'`. This extends schema v3's status vocabulary
+without changing its structural key set. Verification records identify
+`kind`; live records carry `report.recovery_endpoint` for the native oracle.
+`source_local=True` requires `Context.source_pgdata`; optional per-run worker
+settings live in `Context.options`. Authentic engine evidence cannot be
+reported as a manifest or restore pass. `source_provenance.code_sha256`
+identifies actual Python sources, including exported uncommitted code.
 
 ## HammerDB and pgbench have different jobs
 

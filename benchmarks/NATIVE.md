@@ -24,6 +24,9 @@ Active runs use two pgbench clients making atomic account transfers, with ordere
 
 ## Run on an existing Linux machine
 
+For live hashing and WAL-summary methods in the same recovery matrix, see
+[LIVE.md](LIVE.md). The default full/incremental matrix stays unchanged.
+
 Install matching PostgreSQL 17 server and client binaries, including pg_combinebackup, pg_verifybackup, pgbench and pg_waldump, plus Python 3.10+. Run as a non-root user. The script only starts clusters it creates in a new temporary directory. It never accepts an existing PGDATA directory or source connection.
 
 ```sh
@@ -45,6 +48,12 @@ For Docker, resolve `public.ecr.aws/docker/library/postgres:17` (the Docker Offi
 In quiescent trials, an independent source export defines expected data. Ordered CSV encodes NULLs distinctly and hashes all supported table rows; schema columns and constraints are compared separately. The output alone must restore and match that state.
 
 In active trials, the cutoff is the verified output manifest's single WAL range **End-LSN**, together with its timeline and system identifier. It is the [earliest consistent endpoint](https://www.postgresql.org/docs/17/backup-manifest-wal-ranges.html), not the command's wall-clock finish and not necessarily the last record bundled in the final WAL segment. Multi-timeline manifests and mismatched identities are rejected by this fixture's oracle.
+
+For opt-in live pgdelta methods there is no manifest: the adapter validates
+the engine receipt, backup label, output identity and packaged WAL, and
+supplies `pgdelta.live.stop_lsn` to the same exact-cutoff oracle. Their
+adapter verdict is `PASS_ENGINE_ONLY`, distinct from the native trial's
+logical restore verdict. Summary guard fallback is retained and reported.
 
 The independent reference is the immutable B0 plus the source's separately archived WAL. It recovers to `recovery_target_lsn=End-LSN` with `recovery_target_inclusive=off`: End-LSN points just past the backup-end record, so including the next record could include another transaction. The candidate uses `recovery_target=immediate`, `recovery_target_action=pause`, and `restore_command=false`, with upstream streaming disabled. It can use only its own bundled WAL. Both restores must report `pg_last_wal_replay_lsn()` exactly equal to End-LSN before ordered CSV digests, row counts, supported schema and total balance are compared. The candidate is then resumed to prove recovery completes. This implements the active package exact-cutoff oracle; it does not change the generic CLI's `PASS_MANIFEST_ONLY` contract.
 

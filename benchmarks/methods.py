@@ -3,8 +3,8 @@
 A method runs its phases through the caller's execute(stage, argv), so each
 frontend keeps its own logs and timers, and returns the phase records the
 shared v3 result needs. benchmarks.backup.run_backup owns basis verification,
-the untimed preparation, the timer and the final pg_verifybackup, so every
-method is timed and verified the same way.
+the untimed preparation, the timer and final verification. Native/staged
+methods use pg_verifybackup; live methods explicitly use engine/WAL evidence.
 
 To add a method, write a run function and register() a Method in this module.
 The CLI, the native suite and the HammerDB driver take their choices from
@@ -43,6 +43,8 @@ class Context:
     checkpoint: str
     progress: bool
     prepared: dict | None = None
+    source_pgdata: object = None
+    options: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,10 @@ class Method:
     before the timer and returns phase records keyed by stage. tools must
     all be supplied; optional_tools are passed on only when a frontend has
     them.
+
+    source_local requires source_pgdata beside the executing process. verify,
+    when set, replaces final pg_verifybackup and requires the explicit
+    PASS_ENGINE_ONLY success status. It never supplies a restore verdict.
     """
 
     name: str
@@ -78,6 +84,9 @@ class Method:
     optional_tools: tuple = ()
     needs_logs: bool = False
     description: str = ''
+    source_local: bool = False
+    verify: Callable | None = None
+    success_status: str = 'PASS_MANIFEST_ONLY'
 
 
 _REGISTRY: dict[str, Method] = {}
@@ -97,6 +106,10 @@ def register(method):
                                           or 'python' not in method.tools):
         raise ValueError(f'{method.name} needs a capture directory and the python tool '
                          'for its output check')
+    if method.success_status not in ('PASS_MANIFEST_ONLY', 'PASS_ENGINE_ONLY'):
+        raise ValueError('Unknown method success status')
+    if (method.verify is None) != (method.success_status == 'PASS_MANIFEST_ONLY'):
+        raise ValueError('A custom verifier requires its own engine-only success status')
     _REGISTRY[method.name] = method
     return method
 
@@ -127,6 +140,11 @@ def context(spec, *, capture, basis, tools, read_log, **fields):
         raise ValueError(f'{spec.name} requires tools: {", ".join(missing)}')
     if spec.needs_logs and read_log is None:
         raise ValueError(f'{spec.name} parses command output; pass read_log')
+    if spec.source_local and not fields.get('source_pgdata'):
+        raise ValueError(f'{spec.name} requires source_pgdata on the execution host')
+    jobs = (fields.get('options') or {}).get('jobs')
+    if jobs is not None and (type(jobs) is not int or jobs < 1):
+        raise ValueError('pgdelta jobs must be a positive integer')
     return Context(capture=capture, basis=basis, tools=tools, read_log=read_log, **fields)
 
 
@@ -356,6 +374,79 @@ def run_pg_delta_staged(ctx):
                         lambda: parse_pgdelta_stats(ctx.read_file(stats_path)))
 
 
+def libpq_conninfo(*, host, port, user):
+    # Conninfo uses its own escaping rules, not shell escaping. Authentication
+    # stays in libpq's environment/.pgpass, never in the recorded argv.
+    def quote(value):
+        return "'" + str(value).replace('\\', '\\\\').replace("'", "\\'") + "'"
+    return ' '.join(f'{key}={quote(value)}' for key, value in
+                    (('host', host), ('port', port), ('user', user), ('dbname', 'postgres')))
+
+
+def prepare_pg_delta_live(ctx):
+    return {'output_preparation': ctx.execute(
+        'output_preparation', copy_command(ctx.tools['python'], ctx.basis, ctx.output))}
+
+
+def run_pg_delta_live(ctx, *, summaries=False):
+    prefix = pgdelta_command(ctx.tools)
+    stats_path = pgdelta_stats_path(ctx.output)
+    argv = [*prefix, 'local', '--source', str(ctx.source_pgdata), '--source-kind', 'live',
+            '--pg-conn', libpq_conninfo(host=ctx.host, port=ctx.port, user=ctx.user),
+            '--basis', str(ctx.output), '--in-place', '--checkpoint', ctx.checkpoint,
+            '--pg-controldata', str(ctx.tools['pg_controldata']),
+            '--psql', str(ctx.tools['psql']), '--stats-json', str(stats_path)]
+    jobs = (ctx.options or {}).get('jobs')
+    if jobs is not None:
+        argv += ['--jobs', str(jobs)]
+    if summaries:
+        argv += ['--fast-path', 'summaries']
+    backup = ctx.execute('backup', argv)
+    phases = {'backup': backup, 'failure': _failed(backup, 'FAIL_BACKUP', EXIT_IO_FAILURE)}
+    if not successful(backup):
+        return phases
+    try:
+        stats = parse_pgdelta_stats(ctx.read_file(stats_path))
+    except (OSError, ValueError) as exc:
+        return {**phases, 'failure': ('FAIL_TRANSFER', EXIT_IO_FAILURE),
+                'transfer_stats': {'error': f'unusable live statistics: {exc}'}}
+    return {**phases, 'transfer_stats': {
+        **stats, 'tool': 'pgdelta', 'command': prefix, 'stats_file': str(stats_path),
+        'byte_count_scope': PGDELTA_SCOPE, 'fast_path_requested': summaries}}
+
+
+def run_pg_delta_live_summaries(ctx):
+    return run_pg_delta_live(ctx, summaries=True)
+
+
+def verify_pg_delta_live(ctx, phases):
+    from benchmarks import live_verify
+    # Run where the method runs, including inside a Docker tools container.
+    source = Path(live_verify.__file__).read_text(encoding='utf-8')
+    phase = ctx.execute('verification', [str(ctx.tools['python']), '-I', '-c', source,
+        '--output', str(ctx.output), '--stats', str(pgdelta_stats_path(ctx.output)),
+        '--pg-waldump', str(ctx.tools['pg_waldump']),
+        '--pg-controldata', str(ctx.tools['pg_controldata'])])
+    if not successful(phase):
+        return {**phase, 'kind': 'pgdelta_receipt_and_wal'}
+    try:
+        # CLI/container logs include the command header (and stderr); the
+        # native executor keeps stdout separate. In either case the verifier
+        # emits exactly one final JSON line.
+        lines = ctx.read_log('verification').splitlines()
+        report = json.loads(next(line for line in reversed(lines) if line.startswith('{')))
+        endpoint = report.get('recovery_endpoint') or {}
+        if (report.get('status') != 'pass' or report.get('kind') != 'pgdelta_receipt_and_wal'
+                or endpoint.get('source') != 'pgdelta.live.stop_lsn'
+                or not endpoint.get('lsn') or not endpoint.get('system_identifier')
+                or type(endpoint.get('timeline')) is not int):
+            raise ValueError('Live verifier did not report pass')
+        return {**phase, 'kind': 'pgdelta_receipt_and_wal', 'report': report}
+    except (OSError, ValueError, AttributeError, StopIteration) as exc:
+        return {**phase, 'kind': 'pgdelta_receipt_and_wal',
+                'error': str(exc) or 'Live verifier emitted no JSON report'}
+
+
 register(Method(
     'pg_basebackup_full', needs_basis=False, run=run_full,
     description='plain pg_basebackup with streamed WAL'))
@@ -375,3 +466,13 @@ register(Method(
     tools=('pg_basebackup', 'pg_verifybackup', 'python'),
     optional_tools=('pgdelta', 'pg_controldata'),
     description='full capture S, then python -m pgdelta local from S and the basis'))
+
+for name, run in (('pg_delta_live', run_pg_delta_live),
+                  ('pg_delta_live_summaries', run_pg_delta_live_summaries)):
+    register(Method(
+        name, needs_basis=True, run=run, trusts_basis=True, source_local=True,
+        prepare=prepare_pg_delta_live, verify=verify_pg_delta_live,
+        success_status='PASS_ENGINE_ONLY', needs_logs=True,
+        tools=('pg_verifybackup', 'python', 'pg_controldata', 'psql', 'pg_waldump'),
+        optional_tools=('pgdelta',),
+        description='live pgdelta in place on a prepared copy of B; engine receipt and WAL verification'))

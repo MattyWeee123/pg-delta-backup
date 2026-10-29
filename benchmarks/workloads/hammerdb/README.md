@@ -181,6 +181,13 @@ window analysis and an exact recovery checker for the HammerDB schema remain to 
 
 ## Automated matched-pair driver
 
+The driver also accepts `pg_delta_live` and `pg_delta_live_summaries`; see
+[the live runbook](../../LIVE.md) for source-local access, the read-only Docker
+volume overlay and complete commands. These return `PASS_ENGINE_ONLY`, not a
+manifest or TPROC-C recovery verdict. Failed or missing backup verification
+now rejects a performance pair even when its timing window is valid. Failed
+pairs retain evidence and cannot contribute throughput/latency loss figures.
+
 `benchmarks/hammerdb_experiment.py` replaces the manual procedure above. One command runs a
 control trial and a backup trial, aligns their windows and writes a schema v2 record. It is the
 automation that this document previously listed as remaining work.

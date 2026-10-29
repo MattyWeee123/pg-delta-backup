@@ -87,6 +87,11 @@ Work items are GitHub issues #4 to #13. Older planning docs are in [docs/archive
 
 ## Run the tests and the benchmark runner
 
+The shared harness now supports the current live pgdelta engine, including
+its guarded WAL-summary path, with exact-cutoff recovery checks in the native
+suite. See [the live benchmark runbook](benchmarks/LIVE.md) for local and GCP
+execution, Docker/HammerDB integration, and uncommitted-source provenance.
+
 Python 3.10+:
 
 ```sh

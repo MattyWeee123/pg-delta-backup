@@ -47,7 +47,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from benchmarks import methods
-from benchmarks.backup import (NO_TRANSPORT_OBSERVER, SELF_REPORTED_BYTES, atomic_json,
+from benchmarks.provenance import source_provenance
+from benchmarks.backup import (NO_TRANSPORT_OBSERVER, SELF_REPORTED_BYTES, SUCCESS_STATUSES, atomic_json,
                                prepare_backup, run_backup, run_command, successful,
                                verify_basis)
 
@@ -389,7 +390,11 @@ def build_pair_record(*, pair_id, repetition, order, control, treatment,
     treatment_whole = treatment['whole']
     control_whole = control['whole']
     rejection = None
-    if not treatment_whole.contains(analysis):
+    if not backup_result or backup_result.get('status') not in SUCCESS_STATUSES:
+        rejection = 'backup did not pass verification: ' + str((backup_result or {}).get('status'))
+    elif backup_result.get('integrity_verified') is False:
+        rejection = 'backup integrity verification failed'
+    if rejection is None and not treatment_whole.contains(analysis):
         rejection = (
             'backup did not run entirely inside the measurement window; '
             f'backup {analysis.as_dict()} vs window {treatment_whole.as_dict()}')
@@ -678,6 +683,9 @@ def run_trial(treatment, *, options, directory, sleep=time.sleep):
             capture_path=f'{destination}-{spec.capture_dir}' if spec.capture_dir else None,
             read_log=lambda phase: (phase_logs / f'{phase}.log').read_text(encoding='utf-8'),
             read_file=container_reader(options.runner_container, docker_bin=options.docker))
+        if spec.source_local:
+            adapter.update(source_pgdata=options.source_pgdata,
+                           method_options={'jobs': options.pgdelta_jobs})
     try:
         if treatment == BACKUP and spec.trusts_basis:
             # pg_verifybackup reads all of B: like preparation, it runs before
@@ -792,6 +800,8 @@ def parse_args(argv=None):
     parser.add_argument('--basis', default=None,
                         help='old copy inside the runner container, for methods '
                              'that need one')
+    parser.add_argument('--source-pgdata', help='Source PGDATA at its original absolute path inside the runner')
+    parser.add_argument('--pgdelta-jobs', type=int, help='Explicit live pgdelta worker count')
     parser.add_argument('--rsync', default='rsync',
                         help='rsync inside the runner container')
     parser.add_argument('--python', default='python3',
@@ -800,6 +810,8 @@ def parse_args(argv=None):
                         help='pgdelta command prefix; default: PYTHON -m pgdelta')
     parser.add_argument('--pg-controldata', default=None,
                         help='passed to pgdelta as --pg-controldata when given')
+    parser.add_argument('--psql', default='psql')
+    parser.add_argument('--pg-waldump', default='pg_waldump')
     parser.add_argument('--checksum', default='SHA256')
     parser.add_argument('--checkpoint', default='fast', choices=('fast', 'spread'))
     parser.add_argument('--pg-host', default='postgres')
@@ -835,6 +847,8 @@ def main(argv=None):
         'python': options.python,
         'pgdelta': options.pgdelta,
         'pg_controldata': options.pg_controldata,
+        'psql': options.psql,
+        'pg_waldump': options.pg_waldump,
     }
     if options.scripts_dir is None:
         options.scripts_dir = str(
@@ -850,6 +864,10 @@ def main(argv=None):
         if options.repeats < 1:
             raise ValueError('--repeats must be at least 1')
         spec = methods.get(options.method)
+        if spec.source_local and (not options.source_pgdata or not options.pg_controldata):
+            raise ValueError('Live pgdelta requires --source-pgdata and --pg-controldata inside the runner')
+        if options.pgdelta_jobs is not None and options.pgdelta_jobs < 1:
+            raise ValueError('--pgdelta-jobs must be positive')
         if spec.needs_basis and not options.basis:
             raise ValueError(
                 f'{options.method} refreshes an old copy; pass --basis with its '
@@ -864,6 +882,7 @@ def main(argv=None):
     seed = options.seed if options.seed is not None else random.randrange(2 ** 32)
     chooser = random.Random(seed)
     atomic_json(options.output / 'provenance.json', {
+        'source_provenance': source_provenance(),
         'started_at': datetime.now(timezone.utc).isoformat(),
         'seed': seed,
         'settings': {
@@ -871,7 +890,7 @@ def main(argv=None):
             for key in ('repeats', 'vu', 'rampup', 'duration', 'warehouses',
                         'backup_offset', 'method', 'basis', 'checksum',
                         'checkpoint', 'network', 'compose_project',
-                        'hammerdb_image')
+                        'hammerdb_image', 'source_pgdata', 'pgdelta_jobs')
         },
         'note': 'single-host smoke measurement; not a baseline',
     })
@@ -914,7 +933,9 @@ def main(argv=None):
     print(json.dumps({key: results[key] for key in (
         'seed', 'accepted_pairs', 'median_throughput_loss',
         'throughput_loss_range')}, indent=2))
-    if failures or not accepted:
+    failed_backups = any((pair.get('backup_result') or {}).get('status') not in SUCCESS_STATUSES
+                         for pair in pairs)
+    if failures or failed_backups or not accepted:
         return EXIT_TRIAL_FAILED
     return EXIT_OK
 
