@@ -4,6 +4,20 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (05:22 UTC): EXP-82 pre-registered: summaries off, the local stage
+
+- **What runs:**
+  - **The correctness campaign:** on a server that never summarized WAL, 120 randomized page-lsn refreshes (40 stopped standbys, 40 base backups taken under load, 40 killed standbys) and 20 refreshes with summaries turned on at refresh time.
+  - **The load:** pgbench with DDL, and databases created with FILE_COPY or WAL_LOG.
+  - **A negative control** (10): base backups with the threshold moved to their end.
+  - **Local timings** at scale 100 against hashing, for rule 13's promotion.
+- **Predictions:**
+  1. Deciding: every page-lsn copy correct;
+  2. every on-demand copy correct, by the summaries' fast path;
+  3. at least 8 of 10 control copies wrong;
+  4. each candidate at most 0.80 of hashing's local time in both cells.
+- **The smoke** (7 trials) was correct, with both control copies wrong.
+
 ## 2026-10-29 (05:11 UTC): research loop 3: copies without WAL summaries; two candidates built and tested
 
 - **The pass:** [research loop 3](research/2026-10-29-research-loop-3.md), with its [prior-art report](research/2026-10-29-summaries-off-prior-art.md) (WAL-G, `pg_probackup`, PTRACK, pg_rewind and PostgreSQL's incremental backup from source; ARIES's pageLSN; Percona, Oracle, SQL Server and VMware).
