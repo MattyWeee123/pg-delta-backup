@@ -357,6 +357,25 @@ z
     </g>
    </g>
    <g id="line2d_36">
+    <defs>
+     <path id="m02bc6c9b67" d="M 0 3.5 
+C 0.928211 3.5 1.81853 3.131218 2.474874 2.474874 
+C 3.131218 1.81853 3.5 0.928211 3.5 0 
+C 3.5 -0.928211 3.131218 -1.81853 2.474874 -2.474874 
+C 1.81853 -3.131218 0.928211 -3.5 0 -3.5 
+C -0.928211 -3.5 -1.81853 -3.131218 -2.474874 -2.474874 
+C -3.131218 -1.81853 -3.5 -0.928211 -3.5 0 
+C -3.5 0.928211 -3.131218 1.81853 -2.474874 2.474874 
+C -1.81853 3.131218 -0.928211 3.5 0 3.5 
+z
+" style="stroke: #cc79a7"/>
+    </defs>
+    <g clip-path="url(#pd49cfd9b85)">
+     <use xlink:href="#m02bc6c9b67" x="147.864731" y="40.635557" style="fill: #cc79a7; stroke: #cc79a7"/>
+     <use xlink:href="#m02bc6c9b67" x="399.759402" y="246.39705" style="fill: #cc79a7; stroke: #cc79a7"/>
+    </g>
+   </g>
+   <g id="line2d_37">
     <path d="M 45.399102 312.520781 
 L 445.655465 20.798438 
 " clip-path="url(#pd49cfd9b85)" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #888888"/>
@@ -375,7 +394,7 @@ L 445.655465 312.520781
     <text style="font-size: 10px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="245.527283" y="14.798438" transform="rotate(-0 245.527283 14.798438)">Rule 13: how well the local proxy predicts the VMs</text>
    </g>
    <g id="legend_1">
-    <g id="line2d_37">
+    <g id="line2d_38">
      <g>
       <use xlink:href="#mf7fe964efd" x="59.649102" y="30.622266" style="fill: #0072b2; stroke: #0072b2"/>
      </g>
@@ -383,7 +402,7 @@ L 445.655465 312.520781
     <g id="text_20">
      <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="73.149102" y="33.247266" transform="rotate(-0 73.149102 33.247266)">guard: grouped summary reading (B over A)</text>
     </g>
-    <g id="line2d_38">
+    <g id="line2d_39">
      <g>
       <use xlink:href="#m79946a4009" x="59.649102" y="41.872852" style="fill: #e69f00; stroke: #e69f00"/>
      </g>
@@ -391,7 +410,7 @@ L 445.655465 312.520781
     <g id="text_21">
      <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="73.149102" y="44.497852" transform="rotate(-0 73.149102 44.497852)">guard: unsorted reading (D over B)</text>
     </g>
-    <g id="line2d_39">
+    <g id="line2d_40">
      <g>
       <use xlink:href="#m2e82415621" x="59.649102" y="53.123438" style="fill: #009e73; stroke: #009e73"/>
      </g>
@@ -399,14 +418,22 @@ L 445.655465 312.520781
     <g id="text_22">
      <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="73.149102" y="55.748438" transform="rotate(-0 73.149102 55.748438)">written-page check on the verifier over the main loop</text>
     </g>
-    <g id="line2d_40">
-     <path d="M 52.149102 64.374023 
-L 59.649102 64.374023 
-L 67.149102 64.374023 
-" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #888888"/>
+    <g id="line2d_41">
+     <g>
+      <use xlink:href="#m02bc6c9b67" x="59.649102" y="64.374023" style="fill: #cc79a7; stroke: #cc79a7"/>
+     </g>
     </g>
     <g id="text_23">
-     <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="73.149102" y="66.999023" transform="rotate(-0 73.149102 66.999023)">VM = proxy</text>
+     <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="73.149102" y="66.999023" transform="rotate(-0 73.149102 66.999023)">page-lsn over hashing (summaries off)</text>
+    </g>
+    <g id="line2d_42">
+     <path d="M 52.149102 75.624609 
+L 59.649102 75.624609 
+L 67.149102 75.624609 
+" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #888888"/>
+    </g>
+    <g id="text_24">
+     <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="73.149102" y="78.249609" transform="rotate(-0 73.149102 78.249609)">VM = proxy</text>
     </g>
    </g>
   </g>

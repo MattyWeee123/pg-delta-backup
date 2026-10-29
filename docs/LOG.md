@@ -4,6 +4,25 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-29 (08:24 UTC): EXP-82b done: page-lsn beats hashing and WAL-G for scattered changes; the on-demand runs void
+
+- **page-lsn held 1–3** (18 GB beyond memory):
+  - 0.470 of hashing's time in uniform (88.6 s against 188.6 s) and 0.999 in hot;
+  - 0.81 of WAL-G's catch-up in uniform (109.3 s) and 0.998 in hot;
+  - 0.97–0.98 of `pg_basebackup` (both read all of S: the algorithm's limit).
+  - Dest's disk was busy 1.2 s and 34 s, against hashing's 87 s and 160 s: B never read.
+  - Every copy was correct, and the scorer unchanged.
+- **4–5 failed, from a harness defect found after the run:**
+  - `run_study.py`'s base configuration sets `summarize_wal = on` for every VM source since EXP-64, so `SUMMARIES=0` didn't turn it off, and the source summarized throughout.
+  - The first on-demand run per cell was the ordinary summaries' fast path.
+  - The cleanup's RESET fell back to on, and deleting the summaries made the second run refuse and hash.
+  - page-lsn, hashing and WAL-G read no summaries, so they stand.
+  - Local probes confirm on demand works on a source that never summarized.
+- **The lab is fixed:** off by `ALTER SYSTEM`, a restart, the summaries cleared, a check that the summarizer never ran, and SET off, not RESET.
+- **EXP-82c** re-runs on demand.
+- **The scorecard:** summaries off, WAL gone, is now a win against WAL-G (scattered) and parity (local), and a tie against a re-clone. A crashed primary stays a loss.
+- **Proxy fidelity:** page-lsn's local ratios (0.49 hot, 0.96 scatter) against the VMs' (1.00, 0.47) are logged. An in-memory model can't show a disk-bound effect.
+
 ## 2026-10-29 (05:55 UTC): EXP-82b pre-registered: summaries off on the VMs
 
 - **What runs:** a source that never summarizes, with a replication slot keeping the WAL since each old copy, and an 18 GB standby stopped before the change. It is refreshed by hashing (today), page-lsn, summaries on demand (timed from turning the setting on), WAL-G's catch-up and `pg_basebackup`, in hot and uniform.

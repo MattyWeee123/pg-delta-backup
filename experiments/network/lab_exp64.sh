@@ -38,14 +38,17 @@
 # - "walg" (on B0s: "sb_walg"): WAL-G's catch-up, catchup-receive on dest and catchup-send on the source, then a
 #   sync of /data, since WAL-G's receiver syncs nothing; its copy is checked as the standby it stays, once it has
 #   replayed to the source's current LSN.
-# EXP-82b, summaries off (research loop 3): SUMMARIES=0 leaves the source's summarize_wal off, and WAL_KEEP (e.g. 32GB)
+# EXP-82b, summaries off (research loop 3): SUMMARIES=0 turns the source's summarize_wal off (ALTER SYSTEM, which
+# overrides run_study.py's base postgresql.conf, where it is on for every VM source since EXP-64: EXP-82b's source
+# summarized throughout, found after its run), and checks the summarizer has never run; WAL_KEEP (e.g. 32GB)
 # sets its wal_keep_size, so the WAL since each old copy stays on disk, as a replication slot would keep it. Arms:
 # - "hash": no fast path (pgdelta hashes both copies);
 # - "lsn": --fast-path page-lsn, with the fast path's other defaults (2-page gaps filled, the fsync worker);
 # - "od" (summaries on demand): summarize_wal turned on (ALTER SYSTEM, a reload) and the summarizer waited for until it
 #   has read the WAL up to the source's LSN at that moment, then the summaries' fast path with its defaults; timed from
 #   before the setting is turned on. Afterwards it is turned off again and its summaries removed, so each run starts
-#   from a server that never summarized.
+#   from a server that never summarized (the setting is set off, not reset, since a reset falls back to the base
+#   postgresql.conf's on).
 # SLOT=1: before each pattern's old copies are taken, a physical replication slot (exp82b) is reserved on the source,
 # so it keeps exactly the WAL since their redo points (a checkpoint recycles every older segment): the summarizer, which
 # starts at the oldest WAL on disk, then reads only that. wal_keep_size would keep older WAL too. Dropped at the end.
@@ -106,6 +109,17 @@ on_src "mkdir -p $W && python3 experiments/network/source_cluster.py setup $WORK
 # Summaries from here on: on before any old copy is taken, so they cover each B0's start onwards.
 if [ "$SUMMARIES" = 1 ]; then
   on_src "echo 'summarize_wal = on  # EXP-64' >> $ROOT/data/postgresql.conf && $PGBIN/pg_ctl -D $ROOT/data reload > /dev/null"
+fi
+if [ "$SUMMARIES" = 0 ]; then
+  # The base postgresql.conf had it on through the load: off now, a restart (its shared state cleared), and the
+  # summaries made so far removed, so the source is as one that never summarized.
+  psrc "ALTER SYSTEM SET summarize_wal = off" > /dev/null
+  on_src "$PGBIN/pg_ctl -D $ROOT/data -m fast -w -t 600 restart > /dev/null && rm -f $ROOT/data/pg_wal/summaries/*.summary" \
+    || { echo "source restart failed"; exit 1; }
+  [ "$(psrc "SHOW summarize_wal")" = off ] || { echo "summarize_wal is still on: failed"; exit 1; }
+  [ "$(psrc "SELECT summarized_lsn = '0/0' AND summarizer_pid IS NULL FROM pg_get_wal_summarizer_state()")" = t ] || \
+    { echo "the source has already summarized WAL: failed"; exit 1; }
+  [ -z "$(on_src "ls $ROOT/data/pg_wal/summaries")" ] || { echo "the source holds WAL summaries: failed"; exit 1; }
 fi
 if [ -n "$WAL_KEEP" ]; then
   psrc "ALTER SYSTEM SET wal_keep_size = '$WAL_KEEP'" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
@@ -298,7 +312,7 @@ EOF
       on_src "cat /tmp/exp64-send.json" > "$d/send.json"
       if [ "$a" = od ]; then
         phases="{\"summarize_s\": $(python3 -c "print(round($ts - $t0, 3))"), \"refresh_s\": $(python3 -c "print(round($t1 - $ts, 3))"), \"wal_from\": \"$target\"}"
-        psrc "ALTER SYSTEM RESET summarize_wal" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
+        psrc "ALTER SYSTEM SET summarize_wal = off" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
         for x in $(seq 100); do
           [ "$(psrc "SELECT summarizer_pid IS NULL FROM pg_get_wal_summarizer_state()")" = t ] && break; sleep 0.1
         done

@@ -12,3 +12,5 @@ the fast path's time (model over measured),time model (analysis/fastpath_model.p
 the fast path's time (model over measured),time model (analysis/fastpath_model.py),EXP-75,1.000,EXP-75,uniform fill 2,1.015,
 the fast path's time (model over measured),time model (analysis/fastpath_model.py),EXP-75,1.000,EXP-75,scatterall12 fill 0,0.940,the overhead per MB grows less than linearly (EXP-75's post-hoc)
 the fast path's time (model over measured),time model (analysis/fastpath_model.py),EXP-70 (in-sample),1.000,EXP-70,hot,1.468,the model leaves out the destination's fixed write overhead at 15,000 pages (EXP-74's registration)
+page-lsn over hashing (summaries off),"local scale model, in memory (scale 100)",EXP-82,0.492,EXP-82b,hot,0.999,"an in-memory model of a disk-bound effect (hashing reads B from disk on the VMs, from memory locally): outside the band; EXP-82 registered it would not promote on this"
+page-lsn over hashing (summaries off),"local scale model, in memory (scale 100)",EXP-82 (scatter),0.964,EXP-82b,uniform,0.470,"as above"

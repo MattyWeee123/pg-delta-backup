@@ -57,7 +57,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 
 | Question | Answer |
 |---|---|
-| Copies without WAL summaries (`summarize_wal` off)? | **Hashing loses to WAL-G's catch-up for scattered changes, across sessions:** 180.1 s (EXP-80b) against 109.0 s (EXP-81) in uniform, a tie in hot (87.9 s against 87.8 s). Page-LSN selection on the source reads all of S once and none of B; it is the next idea for this row |
+| Copies without WAL summaries (`summarize_wal` off)? | **With `--fast-path page-lsn` (opt-in), parity or better against WAL-G's catch-up, and twice as fast as hashing for scattered changes** (EXP-82b, 18 GB beyond memory): 88.6 s against WAL-G's 109.3 s and hashing's 188.6 s in uniform, and 87.6 s against 87.8 and 87.7 s in hot. It reads all of S and none of B, so it ties a re-clone (0.97–0.98), which is the algorithm's limit without a record of what changed. Every copy correct, 120 of 120 locally (EXP-82). Summaries switched on at refresh time, where the WAL since B is kept, are next (EXP-82c) |
 | Reuse after `VACUUM FULL` / `CLUSTER`? | **None, by any strategy:** cross-file page matching and content-defined chunking found nothing (EXP-37). Positional pages lose nothing |
 | Fewer bytes on slow links? | **zstd is built** (`--compress zstd`, opt-in): 2.8× fewer bytes. Scattered changes took 0.52 of v1's time at 0.5 Gbit/s (6.8 s against 13.1; `pg_basebackup` 36.9), 0.75 at 1 Gbit/s and, with batched pool tasks, 0.86 at 2. **Break-even about 4 Gbit/s** (EXP-45 to -47, -52, -53). **Sub-page deltas are built but off** (`--subpage`): 3.5× fewer bytes again, but slower as built, since their block hashing outweighed the link time saved (EXP-54 to -56) |
 
