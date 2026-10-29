@@ -104,5 +104,13 @@
    "pgdelta/transport.py": "a20f36fccb1e5396bd3110383e8b79aac7f2c80ca111962864b75066fb9d5c3f",
    "pgdelta/tree.py": "1d3aa5672923890636d4bd8759e3379ded75bd2430a14aefdf1408da8dbb62f3"
   }
+ },
+ "EXP-83": {
+  "commit": "b32008b1a705",
+  "files": {
+   "analysis/exp83.py": "68d309bfed163839125e5967a620cf6a3155e751dc8ccb627e0a961af7879670",
+   "experiments/summarize_cost/bench.py": "5cc84d09f349c03771952716861eda6332b9ed5e72b7ee7d4adbe3769e8a56a9",
+   "experiments/summarize_cost/local.sh": "54567b92aa950c2d7bf8735fc78aab7e2b3cde09d48d58c8f032ad75622a43cf"
+  }
  }
 }
