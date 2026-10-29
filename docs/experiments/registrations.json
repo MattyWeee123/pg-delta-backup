@@ -130,5 +130,16 @@
    "experiments/summarize_cost/summarizer_cpu.sh": "44b9000833e0c755d276879b2c99c06e2ce42b9fec8e12e5001158a56e285d19",
    "experiments/summarize_cost/vm.sh": "01498cb696db6670d62ef52524ccca42546f8525a5cecc5d203d69f986ac0b2a"
   }
+ },
+ "EXP-83d": {
+  "commit": "63d9458041ff",
+  "files": {
+   "analysis/exp83.py": "027257d7f7f94263f1a52aa9dc78cf664bc98a2544692d625ad3b5942cf29287",
+   "analysis/exp83d.py": "108b87bbc70a92ec351bebf69f1e9229414e8b020b42a3d48075f684cabe0b72",
+   "experiments/summarize_cost/bench.py": "7617f3226b40e8f3e00c5059e738f24528544ada9813f2deb943a103981e0615",
+   "experiments/summarize_cost/data_disk.sh": "b2297618efc9111c1a808516182221341f8ac6728a84e6db2d414ff749f4102e",
+   "experiments/summarize_cost/summarizer_cpu.sh": "3712fe41afa0d56970f7ff12efc331e89c9fc931d9ee40d24657405c1d9a9481",
+   "experiments/summarize_cost/vm.sh": "4d0201ed600eefa9cf011a5e85defc6492ef0d4c7226651f7977967f25a91992"
+  }
  }
 }
