@@ -143,7 +143,7 @@
   }
  },
  "EXP-84": {
-  "commit": "bfb78e9e0863",
+  "commit": "a2f7056dfbbf",
   "files": {
    "analysis/exp68.py": "bddb9253f0149001eb9fba0ba9b3da280976d91d320e4841c55e1aa03bd70133",
    "analysis/exp76.py": "496f92ca5c8957d026760013d4b97658b74bf48c7bf142319908cf6fc4770d90",
@@ -151,6 +151,7 @@
    "experiments/network/disk_series.sh": "6d8bf8ff468f545281a317f58566b29d0da07f1d71be0cdf8701a219011bece8",
    "experiments/network/lab_exp64.sh": "f5ba980284f35e846cf80b86bfe45b8c1e4ee7433a73eae76c16cd9526c37a57",
    "infra/gcp/create.sh": "18f5871eba9c691b93f05f4b240759dad3ec87ed4cab7056af2bdf478288eafd",
+   "infra/gcp/vmset.sh": "99c52f333c7028445a359a4374e7d473cf80b84f9522c916ec06d26085b5c107",
    "pgdelta/cli.py": "7e67bd76fe24f3249fe49c9715d7b3c21b34b4138056b6f6050844f60716e6c7",
    "pgdelta/fastpath.py": "98313eac7efeaf130d8562fd8d39af3295fcd11ce4167559bf3786c9352ab063",
    "pgdelta/flush.py": "f7e9ce53062204e1350de12440db87b1c3a36401ff9f9c188ee307093f8a5727",
