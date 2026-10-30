@@ -421,6 +421,24 @@ O4, the shipped configuration with BLAKE3 meets it too.
 **What this does not license:** quoting these absolute latencies as the shipped product's. They are the
 BLAKE2b configuration's, and the write-up must say so wherever a number is given.
 
+### 4. The scorer was re-registered after the smoke run, and why
+
+Rule 16 first recorded the scorer at `d132fda`. The smoke run (stage 1, 5 runs at L60, **not counted data**)
+then showed `analysis/exp88.py` reporting "the fast path did not activate (the guard refused)" for the `v1` and
+`v1_j4` arms — which never pass `--fast-path`, so no guard was ever consulted. Two causes: the note did not
+separate "refused" from "never requested", and `fast_path_reasons` was never carried from `run.json` into the
+run row, so the distinction could not be made. Both fixed at `c663e68`, and rule 16 re-registered there:
+**16 of 16 files unchanged**.
+
+This is legitimate precisely because it happened **before any counted run existed**. A smoke run is not scored
+data — the project's convention throughout (EXP-28's smoke is recorded "not counted"), and the whole purpose of
+rule 16 is that the scorer is fixed before the results it scores. The same change made after the grid would
+have had to be declared as a post-hoc change to the scorer, with every number re-read.
+
+Worth recording for its own sake: **the synthetic fixture could not have caught this.** It never wrote a run
+that asked for the fast path and was refused, so the two cases were indistinguishable in the tests while being
+distinguishable in life. The test that asserted the old wording was itself encoding the bug.
+
 ## Rules this experiment is run under
 
 | Rule | What it requires here |
