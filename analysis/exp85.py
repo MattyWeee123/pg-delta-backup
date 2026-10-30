@@ -187,7 +187,8 @@ def figure(cells, results, name):
     left.set_xticks([i * 4 + 1 for i in range(len(cells))], list(cells), fontsize=9)
     left.set_ylabel("time over pg_basebackup's (bars: mean; dots: runs)")
     left.set_title('Scale 1,200 (4.5x memory): page-lsn with one read and two', fontsize=9.5)
-    left.legend(fontsize=7.5, loc='lower right')
+    left.set_ylim(0, 1.45)
+    left.legend(fontsize=7.5, loc='upper left', ncol=2)  # layout only, after the scoring
     for arm in ARMS:
         run = next((r for r in cells.get('uniform', {}).get('runs', []) if r['arm'] == arm), None)
         path = Path(run['folder']) / 'series-source.txt' if run and run['folder'] else None

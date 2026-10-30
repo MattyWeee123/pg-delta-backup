@@ -20,7 +20,7 @@ from plotting import COLORS, plt
 
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS = ('exp64', 'exp64b', 'exp65', 'exp67', 'exp68', 'exp70', 'exp71', 'exp74', 'exp75', 'exp76', 'exp77', 'exp79',
-            'exp79b', 'exp80b', 'exp81')
+            'exp79b', 'exp80b', 'exp81', 'exp85-h2')
 # pg_basebackup cells built the same way in several sessions: (pattern, the sessions that ran it so).
 FULL_SAME_CELL = {'scatterall12': ('exp75', 'exp76', 'exp77', 'exp79b'),
                   'uniform': ('exp64', 'exp64b', 'exp68', 'exp70', 'exp80b')}

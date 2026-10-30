@@ -72,6 +72,12 @@ within,exp81,uniform,full,2,90.96,0.0018
 within,exp81,uniform,incr,2,88.9,0.0248
 within,exp81,uniform,sb_fast8wf2,2,41.92,0.0006
 within,exp81,uniform,sb_walg,2,109.0,0.0023
+within,exp85-h2,hot,full,2,177.13,0.001
+within,exp85-h2,hot,sb_lsn,2,174.18,0.0002
+within,exp85-h2,hot,sb_lsn1,2,174.13,0.0002
+within,exp85-h2,uniform,full,2,177.62,0.0
+within,exp85-h2,uniform,sb_lsn,2,198.78,0.0003
+within,exp85-h2,uniform,sb_lsn1,2,174.7,0.0002
 between,exp75,scatterall12,full,,100.94,0.0031
 between,exp76,scatterall12,full,,100.95,0.0031
 between,exp77,scatterall12,full,,101.25,0.0031

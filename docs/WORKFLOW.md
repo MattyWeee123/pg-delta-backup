@@ -62,7 +62,7 @@ These rules guard against all three at this project's cost of about an hour a VM
 - **A negative control** is built wherever one can be (EXP-80's S2e).
 
 **17. Noise as an explicit bar.** [research/noise-floor.csv](research/noise-floor.csv), refreshed with every VM session by `analysis/noise_floor.py`.
-- **Within a session, as of EXP-81:** two runs of a cell differ by up to 2.40% at the 95th percentile for runs of 10 s or more, and 7.11% under 10 s.
+- **Within a session, as of EXP-85:** two runs of a cell differ by up to 2.23% at the 95th percentile for runs of 10 s or more, and 7.11% under 10 s.
 - **Between sessions,** `pg_basebackup` in the same cell moves about 0.3%.
 - **A deciding effect inside that spread** gets a second session (rule 11), or is reported as a tie.
 - **A cross-session comparison** needs its control arm within 1% of the earlier session's.

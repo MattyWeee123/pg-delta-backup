@@ -4,6 +4,18 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (07:28 UTC): EXP-85 done: single-read page-lsn ties a re-clone at 4.5x memory
+
+- **Every VM prediction held** (the ha set, scale 1,200, two runs per arm):
+  - uniform: single read **0.984x** `pg_basebackup` (174.7 s against 177.6 s); two reads 1.119x (198.8 s, EXP-84's miss reproduced); single read over two reads 0.879x;
+  - the source disk: single read read S exactly once (1.000x `pg_basebackup`'s bytes, against 1.102x);
+  - hot: no cost (1.000x two reads, 0.983x `pg_basebackup`);
+  - 8 of 8 copies correct; at most 16 MiB held.
+- **Rule 13:** the local scale model called single read 1.116x slower in scatter, and the VMs found it 0.879x. All six summaries-off pairs lie outside the band, so for mechanisms beyond memory the local stage gates correctness only.
+- **Rule 17:** the noise floor's 95th percentile for runs of 10 s or more is now 2.23%. `pg_basebackup` moved 0.03% from EXP-84.
+- **Rule 16:** the analysis's figure legend was moved after the scoring (layout only; the scores are unchanged).
+- **Next:** `--lsn-single-read` stays opt-in until a held-out session on H5–H8.
+
 ## 2026-10-30 (04:33 UTC): EXP-85b held: single read doesn't change the negative control's rate
 
 - **Result:**

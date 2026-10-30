@@ -39,7 +39,7 @@ def main():
     ax.set_xlim(0, top)
     ax.set_ylim(0, top)
     ax.set_xlabel('the change\'s time ratio on the local scale model')
-    ax.set_ylabel('the same ratio on the VMs (18-20 GB, balanced PD)')
+    ax.set_ylabel('the same ratio on the VMs (18-36 GB, balanced PD)')
     ax.set_title('Rule 13: how well the local proxy predicts the VMs', fontsize=10)
     ax.legend(fontsize=7, loc='upper left')
     print(plotting.save(fig, 'proxy-fidelity'))

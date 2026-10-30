@@ -1,6 +1,6 @@
 # EXP-85: Single-read page-lsn: does sending each chosen page from the scan's own read restore the tie with a re-clone at 4.5x memory?
 
-Status: **stage 1 done October 30, 2026: L1 held (120 of 120 single-read trials correct, nothing read again); L2 failed as registered (9 of 10 negative controls wrong, against "all 10").** By the registered rule, stage 2 (the VMs) does not run; whether it runs anyway is the owner's decision (below). Pre-registered October 30, before any scored run.
+Status: **done October 30, 2026. Every VM prediction held: at scale 1,200, uniform, single read took 0.984x `pg_basebackup`'s time against two reads' 1.119x, and read S exactly once.** Stage 1: L1 held (120 of 120), L2 failed as registered (9 of 10 controls wrong). The VM stage ran on the owner's decision after [EXP-85b](EXP-85b-control-retest.md) showed single read doesn't change the control's rate. Pre-registered October 30, before any scored run.
 
 ## Question
 
@@ -161,3 +161,65 @@ Times are each arm's mean over its runs.
 **The owner chose the second (October 30): [EXP-85b](EXP-85b-control-retest.md) held.** 28 of 30 single-read controls were wrong and 25 of 30 two-read ones (Fisher p = 0.42). So single read doesn't change the control's rate, about 88% wrong, and trial 6 was the control's own randomness. L2 stays failed as registered, and stage 2 runs as registered.
 
 **Separately, a structural fix for the CPU cost in memory:** add each run of contiguous chosen pages to its run as one slice, not page by page. It would be a new build, timed in its own registration, not a change to this one.
+
+## Results, stage 2 (the VMs)
+
+**The session:**
+- **Where:** the `ha` set in us-west1-b and -c, the zones of EXP-84's H2 cells.
+- **The smoke** passed at scale 20.
+- **The cells** ran 04:57 to 06:56 UTC: the database at 35.6 GB, then hot, then uniform, two runs per arm.
+- **Every run** exited 0. The set was torn down after the fetch, and no VM or disk of it is left.
+- **Data:** `docs/experiments/data/exp85-runs.csv`; the raw runs in `results/exp04/exp85-h2` (not in git).
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-85` lists one file changed since registration, `analysis/exp85.py`. After the scoring, its figure's legend was moved off the bars (`loc` and `ylim`), and nothing else changed. Its printed scores were identical before and after.
+
+![EXP-85: single read against two reads and pg_basebackup at scale 1,200, and the source disk's reads](../figures/exp85-single-read.svg)
+
+*How to read it:*
+- **Left:** each arm's time over `pg_basebackup`'s in each cell. The bars are means, the dots the two runs. Bars below the dashed line meet the bar of 1.05.
+- **Right:** the GB read from the source's data disk during the first uniform run of each arm, from the 0.25 s disk counters. Two reads go on past S's 35.7 GB; single read stops with `pg_basebackup`.
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | **Deciding:** uniform, single read at most 1.05x `pg_basebackup` | **Held: 0.984x** (174.70 s against 177.62 s) |
+| 2 | Uniform, if two reads miss again: single read at most 0.95x of them | **Held: 0.879x.** Two reads missed again, at 1.119x `pg_basebackup` (198.78 s) |
+| 3 | Single read's source-disk reads at most 1.01x `pg_basebackup`'s, each cell | **Held:** 1.000 (uniform) and 1.0007 (hot). Two reads read 1.102x in uniform |
+| 4 | Hot: single read at most 1.024x two reads, and at most 1.05x `pg_basebackup` | **Held:** 1.000x (174.13 s against 174.18 s), and 0.983x |
+| 5 | Every copy correct; single read held at most `LSN_HELD_BYTES` plus two chunks | **Held:** 8 of 8 pgdelta copies matched. It held at most 16 MiB, against the 272 MiB bound |
+
+| Cell | Arm | Runs (s) | Scan (s) | After the scan (s) | Read again | Source disk read |
+|---|---|---|---|---|---|---|
+| uniform | two reads | 198.81, 198.76 | 179.0, 179.3 | 19.8, 19.5 | 13.99 GB | 39.2, 39.5 GB |
+| uniform | single read | 174.68, 174.72 | 173.8, 173.8 | 0.86, 0.88 | 0 | 35.7 GB |
+| uniform | `pg_basebackup` | 177.62, 177.63 | | | | 35.7 GB |
+| hot | two reads | 174.16, 174.20 | 173.2, 173.2 | 0.93, 0.95 | 0.19 GB | 35.6 GB |
+| hot | single read | 174.15, 174.11 | 173.3, 173.2 | 0.85, 0.87 | 0 | 35.6 GB |
+| hot | `pg_basebackup` | 177.21, 177.04 | | | | 35.5–35.6 GB |
+
+**Reported, not predicted:**
+- **EXP-84's miss reproduced:** two reads took 198.78 s against EXP-84's 199.35 s, and read 1.102x S against 1.108x.
+  - `pg_basebackup` moved 0.03% (uniform) and 0.09% (hot) between the two sessions, inside rule 17's 1% for a control arm.
+  - Of two reads' 13.99 GB read again, about 3.6 GB came from the disk. At the disk's cap (about 205 MB/s) that is about 18 s of the 24 s two reads lost against single read: 5.3 s more scanning, and 18.8 s more after the scan. The rest is not accounted for by these counters.
+- **Single read's scan ran at the disk's cap and ended 0.9 s before the refresh did.** It held at most 16 MiB ahead of sending: the sending thread kept up, so the 256 MiB bound was never near.
+- **The in-memory CPU cost** stage 1 found (1.116x in scatter) did not show here: the scan waits on the disk.
+- **The noise:** each arm's two runs differed by at most 0.1%. With this session, rule 17's 95th percentile for runs of 10 s or more is 2.23% (it was 2.40%).
+
+**Rule 13's proxy log** (`docs/research/proxy-fidelity.csv`, figure `proxy-fidelity`):
+
+| Cell (local; VM) | Local ratio, in memory | VM ratio, scale 1,200 | VM over local |
+|---|---|---|---|
+| hot; hot | 0.863 | 1.000 | 1.159 |
+| scatter; uniform | **1.116** | **0.879** | 0.788 |
+
+- **In the second pair the sign flipped:** the local scale model called single read slower, and the VMs found it 12% faster.
+- **The pattern across the summaries-off work:** all six local/VM pairs of EXP-82 and EXP-85 lie outside rule 13's band (0.875–1.185 of the local ratio). Those mechanisms turn on reads beyond memory, which a scale model held in memory can't show. So, for them, the local stage is a correctness gate and not a timing proxy, and the VMs decide.
+
+## What followed
+
+- **Single read restores page-lsn's tie with a re-clone at 4.5x memory:** 0.984x `pg_basebackup`, against two reads' 1.119x. It reads each page of S once, as `pg_basebackup` does.
+  - It cost nothing measurable where few pages changed.
+  - It was correct in 120 of 120 local trials and 8 of 8 VM copies.
+- **It stays opt-in (`--lsn-single-read`) for now.** Making it page-lsn's default is a default change, so rule 15 needs a held-out session on H5–H8 first.
+- **The claim in RESULTS:** with single read, page-lsn ties or beats a re-clone on every setting measured: 0.86–0.98x in EXP-84's nine cells, and 0.98x in both H2 cells here. That claim still has to pass H5–H8.
+- **Rule 13, for mechanisms that turn on reads beyond memory:** local timings don't predict the VMs, so the local stage gates correctness only.
+- **Still open:** single read's CPU cost in memory (1.116x in scatter), which a faster run builder could remove (one slice per run of contiguous pages). It doesn't show on the VMs measured.

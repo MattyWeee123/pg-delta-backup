@@ -338,7 +338,7 @@ L 443.507933 25.727694
      </g>
     </g>
     <g id="text_20">
-     <text style="font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="15.178359" y="166.659609" transform="rotate(-90 15.178359 166.659609)">the same ratio on the VMs (18-20 GB, balanced PD)</text>
+     <text style="font-size: 10.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="15.178359" y="166.659609" transform="rotate(-90 15.178359 166.659609)">the same ratio on the VMs (18-36 GB, balanced PD)</text>
     </g>
    </g>
    <g id="line2d_37">
@@ -440,6 +440,25 @@ z
     </g>
    </g>
    <g id="line2d_42">
+    <defs>
+     <path id="m5375e2df3f" d="M 0 3.5 
+C 0.928211 3.5 1.81853 3.131218 2.474874 2.474874 
+C 3.131218 1.81853 3.5 0.928211 3.5 0 
+C 3.5 -0.928211 3.131218 -1.81853 2.474874 -2.474874 
+C 1.81853 -3.131218 0.928211 -3.5 0 -3.5 
+C -0.928211 -3.5 -1.81853 -3.131218 -2.474874 -2.474874 
+C -3.131218 -1.81853 -3.5 -0.928211 -3.5 0 
+C -3.5 0.928211 -3.131218 1.81853 -2.474874 2.474874 
+C -1.81853 3.131218 -0.928211 3.5 0 3.5 
+z
+" style="stroke: #56b4e9"/>
+    </defs>
+    <g clip-path="url(#pb5b0d407c0)">
+     <use xlink:href="#m5375e2df3f" x="256.500743" y="133.275102" style="fill: #56b4e9; stroke: #56b4e9"/>
+     <use xlink:href="#m5375e2df3f" x="318.388014" y="154.963829" style="fill: #56b4e9; stroke: #56b4e9"/>
+    </g>
+   </g>
+   <g id="line2d_43">
     <path d="M 45.399102 312.520781 
 L 443.507933 20.798438 
 " clip-path="url(#pb5b0d407c0)" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #888888"/>
@@ -458,7 +477,7 @@ L 443.507933 312.520781
     <text style="font-size: 10px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: middle" x="244.453517" y="14.798438" transform="rotate(-0 244.453517 14.798438)">Rule 13: how well the local proxy predicts the VMs</text>
    </g>
    <g id="legend_1">
-    <g id="line2d_43">
+    <g id="line2d_44">
      <g>
       <use xlink:href="#mf7fe964efd" x="58.699102" y="29.967344" style="fill: #0072b2; stroke: #0072b2"/>
      </g>
@@ -466,7 +485,7 @@ L 443.507933 312.520781
     <g id="text_22">
      <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="32.417344" transform="rotate(-0 71.299102 32.417344)">guard: grouped summary reading (B over A)</text>
     </g>
-    <g id="line2d_44">
+    <g id="line2d_45">
      <g>
       <use xlink:href="#m79946a4009" x="58.699102" y="40.467891" style="fill: #e69f00; stroke: #e69f00"/>
      </g>
@@ -474,7 +493,7 @@ L 443.507933 312.520781
     <g id="text_23">
      <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="42.917891" transform="rotate(-0 71.299102 42.917891)">guard: unsorted reading (D over B)</text>
     </g>
-    <g id="line2d_45">
+    <g id="line2d_46">
      <g>
       <use xlink:href="#m2e82415621" x="58.699102" y="50.968438" style="fill: #009e73; stroke: #009e73"/>
      </g>
@@ -482,7 +501,7 @@ L 443.507933 312.520781
     <g id="text_24">
      <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="53.418438" transform="rotate(-0 71.299102 53.418438)">written-page check on the verifier over the main loop</text>
     </g>
-    <g id="line2d_46">
+    <g id="line2d_47">
      <g>
       <use xlink:href="#m02bc6c9b67" x="58.699102" y="61.468984" style="fill: #cc79a7; stroke: #cc79a7"/>
      </g>
@@ -490,7 +509,7 @@ L 443.507933 312.520781
     <g id="text_25">
      <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="63.918984" transform="rotate(-0 71.299102 63.918984)">page-lsn over hashing (summaries off)</text>
     </g>
-    <g id="line2d_47">
+    <g id="line2d_48">
      <g>
       <use xlink:href="#m799dd01a3c" x="58.699102" y="71.969531" style="fill: #d55e00; stroke: #d55e00"/>
      </g>
@@ -498,25 +517,33 @@ L 443.507933 312.520781
     <g id="text_26">
      <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="74.419531" transform="rotate(-0 71.299102 74.419531)">summaries on demand over hashing (summaries off)</text>
     </g>
-    <g id="line2d_48">
-     <path d="M 51.699102 82.470078 
-L 58.699102 82.470078 
-L 65.699102 82.470078 
-" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #888888"/>
+    <g id="line2d_49">
+     <g>
+      <use xlink:href="#m5375e2df3f" x="58.699102" y="82.470078" style="fill: #56b4e9; stroke: #56b4e9"/>
+     </g>
     </g>
     <g id="text_27">
-     <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="84.920078" transform="rotate(-0 71.299102 84.920078)">VM = proxy</text>
+     <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="84.920078" transform="rotate(-0 71.299102 84.920078)">page-lsn single read over two reads</text>
+    </g>
+    <g id="line2d_50">
+     <path d="M 51.699102 92.970625 
+L 58.699102 92.970625 
+L 65.699102 92.970625 
+" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #888888"/>
+    </g>
+    <g id="text_28">
+     <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="95.420625" transform="rotate(-0 71.299102 95.420625)">VM = proxy</text>
     </g>
     <g id="patch_5">
-     <path d="M 51.699102 95.420625 
-L 65.699102 95.420625 
-L 65.699102 90.520625 
-L 51.699102 90.520625 
+     <path d="M 51.699102 105.921172 
+L 65.699102 105.921172 
+L 65.699102 101.021172 
+L 51.699102 101.021172 
 z
 " style="fill: #888888; fill-opacity: 0.12; stroke: #888888; stroke-opacity: 0.12; stroke-linejoin: miter"/>
     </g>
-    <g id="text_28">
-     <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="95.420625" transform="rotate(-0 71.299102 95.420625)">rule 13's band (0.875-1.185)</text>
+    <g id="text_29">
+     <text style="font-size: 7px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: start" x="71.299102" y="105.921172" transform="rotate(-0 71.299102 105.921172)">rule 13's band (0.875-1.185)</text>
     </g>
    </g>
   </g>
