@@ -91,7 +91,7 @@ class Lab(base.Lab):
         result = run(sys.executable, '-m', 'pgdelta', 'local', '--source', self.S, '--source-kind', 'live',
                      '--pg-controldata', PG_BIN / 'pg_controldata', '--pg-conn',
                      f'host={self.sockets} port={PORT_S} user=t dbname=postgres', '--basis', basis, '--in-place',
-                     *fast, '--stats-json', stats_path, *flags, check=False, cwd=ROOT, timeout=900)
+                     *fast, '--stats-json', stats_path, *flags, *self.extra, check=False, cwd=ROOT, timeout=900)
         seconds = time.perf_counter() - started
         stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
         return result, stats, seconds
@@ -160,7 +160,8 @@ def trial(lab, root, number, arm, rng):
                 'proof': (received.get('facts') or {}).get('proof'), 'reasons': '; '.join(fast.get('reasons') or [])[:160],
                 'summaries': fast.get('summaries'), 'threshold': fast.get('lsn_threshold'),
                 'pages_sent': (stats.get('pages') or {}).get('sent'), 'pages_total': (stats.get('pages') or {}).get('total'),
-                'single_read': fast.get('lsn_single_read'), 'reread_bytes': fast.get('reread_bytes')})
+                'single_read': fast.get('lsn_single_read'), 'reread_bytes': fast.get('reread_bytes'),
+                'fsync_mode': (stats.get('receiver') or {}).get('fsync_mode')})
     if result.returncode == 0:
         equal, amcheck, source, copied = lab.verify(path)
         row.update({'rows_equal': equal, 'amcheck_ok': amcheck})

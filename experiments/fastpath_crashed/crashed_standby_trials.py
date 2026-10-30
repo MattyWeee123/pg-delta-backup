@@ -57,6 +57,8 @@ def run(*args, check=True, timeout=600, **kwargs):
 
 
 class Lab:
+    extra = ()  # flags added to every refresh (EXP-86 sets the receiver's --fsync per trial)
+
     def __init__(self, root, scale, rng):
         self.root, self.rng = root, rng
         self.sockets = Path(tempfile.mkdtemp(prefix='pg80'))
@@ -129,8 +131,8 @@ class Lab:
         result = run(sys.executable, '-m', 'pgdelta', 'local', '--source', self.S, '--source-kind', 'live',
                      '--pg-controldata', PG_BIN / 'pg_controldata', '--pg-conn',
                      f'host={self.sockets} port={PORT_S} user=t dbname=postgres', '--basis', basis, '--in-place',
-                     '--fast-path', 'summaries', '--stats-json', stats_path, *flags, check=False, cwd=ROOT,
-                     timeout=900)
+                     '--fast-path', 'summaries', '--stats-json', stats_path, *flags, *self.extra, check=False,
+                     cwd=ROOT, timeout=900)
         seconds = time.perf_counter() - started
         stats = json.loads(stats_path.read_text()) if stats_path.exists() else {}
         return result, stats, seconds
@@ -206,7 +208,8 @@ def trial(lab, root, number, arm, rng):
     fast = stats.get('fast_path') or {}
     row.update({'exit': result.returncode, 'seconds': round(seconds, 3), 'fast_used': fast.get('used'),
                 'proof': (received.get('facts') or {}).get('proof'), 'refused': (received.get('refused') or '')[:120],
-                'pages_sent': (stats.get('pages') or {}).get('sent'), 'pages_total': (stats.get('pages') or {}).get('total')})
+                'pages_sent': (stats.get('pages') or {}).get('sent'), 'pages_total': (stats.get('pages') or {}).get('total'),
+                'fsync_mode': (stats.get('receiver') or {}).get('fsync_mode')})
     if result.returncode == 0:
         equal, amcheck, source, copied = lab.verify(path)
         row.update({'rows_equal': equal, 'amcheck_ok': amcheck})

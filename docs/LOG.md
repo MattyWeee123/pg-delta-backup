@@ -4,6 +4,15 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (12:39 UTC): EXP-86 pre-registered: randomized correctness on Linux VMs, ext4 and XFS
+
+- **Why:** the randomized correctness campaigns ran on the Mac. On the VMs, only the timed copies were checked.
+- **Design:** the ha set. The source VM's `/data` stays ext4, and the destination's is reformatted XFS. Each runs, on its own disk:
+  - EXP-80's campaign: 60 crashed standbys and 10 crashed primaries;
+  - EXP-82's campaign: 90 page-lsn trials (half with single read), 10 on demand and 10 negative controls.
+- **Each receiver** syncs by `auto` or `worker-writeback`, Linux's `sync_file_range` path, half each.
+- **Deciding:** every deciding trial correct by the fast path on each filesystem: 130 per filesystem, a bound below 2.3% each and 1.2% over both.
+
 ## 2026-10-30 (07:28 UTC): EXP-85 done: single-read page-lsn ties a re-clone at 4.5x memory
 
 - **Every VM prediction held** (the ha set, scale 1,200, two runs per arm):
