@@ -262,12 +262,12 @@
   }
  },
  "EXP-89b": {
-  "commit": "4a551806d1bc",
+  "commit": "86e8fa499b10",
   "files": {
    "analysis/exp89b.py": "b74aa261c195b9d35baf2334ecd83f65bc8ea154ed108902d99b04677c8f85b3",
    "analysis/plotting.py": "e632c22f7edcba13e1434416442b78821b3813e365cb3ede4ffdbdc7e16f0017",
    "experiments/change_patterns/run_study.py": "b9efd66f20cd724777e3c8791a2277cf2e9ea64f758948f2212ab08541e7ff46",
-   "experiments/network/lab_exp67.sh": "649f358018b704bb990ff0483fde55e693207332873b459441d71faff9938236",
+   "experiments/network/lab_exp67.sh": "230d64675af36660369c1347c787fa07f2e34a141261a89aef8b6d4b74e7498e",
    "experiments/network/source_cluster.py": "e8f12011c6ca9fb24fc67c47f7e9ad6282749cc691c37e4ba7cafb5bc8a8e59a",
    "infra/gcp/config.sh": "2b4373a5a9a8ead8d72a0294839e94de9aadd3010650a35ac8ddac8c3bf34639",
    "infra/gcp/create.sh": "18f5871eba9c691b93f05f4b240759dad3ec87ed4cab7056af2bdf478288eafd",
