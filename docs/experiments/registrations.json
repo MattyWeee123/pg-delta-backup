@@ -244,5 +244,21 @@
    "pgdelta/receiver.py": "8f4ac65d16d316c4a5b013b8ae190ea4943c3f70d19b23500308d60e9dcaa9fa",
    "pgdelta/sender.py": "9ff803fe7bc4e7a1ec2a0a4888862853323d07bacdd3556c086085122c5921a4"
   }
+ },
+ "EXP-89": {
+  "commit": "91beef713363",
+  "files": {
+   "analysis/exp89.py": "74176dfc6c081bfe393451da6bbf4d8fd1f4f6704d05ffa24eb78514c4334bb4",
+   "analysis/plotting.py": "e632c22f7edcba13e1434416442b78821b3813e365cb3ede4ffdbdc7e16f0017",
+   "experiments/crashed_primary/trials.py": "3cecaf9025397b0b7152b12611303c60b09137a719fd23fe266a0f4d90e89956",
+   "experiments/fastpath_crashed/crashed_standby_trials.py": "65939992b57c36ff6f2da8442c16aea56c66447bee6e5f97e9cac567a55dde5b",
+   "pgdelta/cli.py": "7d2e2812066a9fc2a54b053e31fbdb892748d2692a2b4cd40118555a8c1a9cc8",
+   "pgdelta/fastpath.py": "fe2f966c3318e97100118c41f6218503cddb7c9a15b66b44b0477b823b50a4ae",
+   "pgdelta/inplace.py": "4a25d21b4c1d7f0772f98781abc6a620def2d0251e44951612d73ae203b69fe2",
+   "pgdelta/live.py": "42f94aa72c5ab80252f819638909d9386629e9172ea3ee50c0bdcc4f05e07419",
+   "pgdelta/receiver.py": "9ecf7d01f65c0b992d9edcffc25d1ef4de7618a6e5f432a02bdd09a9fe76bee9",
+   "pgdelta/sender.py": "9ff803fe7bc4e7a1ec2a0a4888862853323d07bacdd3556c086085122c5921a4",
+   "pgdelta/transport.py": "7a852b019d22684ff79f027c887d688d4750760c46c971e36d82c2ab60f0bb6c"
+  }
  }
 }
