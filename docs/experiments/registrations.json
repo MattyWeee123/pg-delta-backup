@@ -197,5 +197,24 @@
    "pgdelta/receiver.py": "8f4ac65d16d316c4a5b013b8ae190ea4943c3f70d19b23500308d60e9dcaa9fa",
    "pgdelta/sender.py": "9ff803fe7bc4e7a1ec2a0a4888862853323d07bacdd3556c086085122c5921a4"
   }
+ },
+ "EXP-86": {
+  "commit": "fd7edc8bda28",
+  "files": {
+   "analysis/exp86.py": "287ec3b389998abf81d6337a4bab18b9369044445eef1871eeb18cea2cc7509a",
+   "analysis/plotting.py": "e632c22f7edcba13e1434416442b78821b3813e365cb3ede4ffdbdc7e16f0017",
+   "experiments/fastpath_crashed/crashed_standby_trials.py": "65939992b57c36ff6f2da8442c16aea56c66447bee6e5f97e9cac567a55dde5b",
+   "experiments/linux_campaign/campaign.py": "7768f62687bf82fc04e52d769fc1922fb40a52d0cd05ac4e025a4cacaa205b68",
+   "experiments/summaries_off/trials.py": "a184e6aa43ce7db974a85e6422699320c34da9b636c3d77451b6390f2d0ca7ef",
+   "infra/gcp/reformat_dest_xfs.sh": "b78cb1b62ea51e1c26a3a17adffe85006b4cb255b7c7d0b99b00bb04d534ad72",
+   "pgdelta/cli.py": "f364d8665af06245f7ef9e3a94e301d1f636cafab4939b1c0d9f45447220683a",
+   "pgdelta/fastpath.py": "2688d833cfe132e1fce4ab53c91f345e7ac86a9525803fbc947aa88f771bb73f",
+   "pgdelta/flush.py": "f7e9ce53062204e1350de12440db87b1c3a36401ff9f9c188ee307093f8a5727",
+   "pgdelta/inplace.py": "4a25d21b4c1d7f0772f98781abc6a620def2d0251e44951612d73ae203b69fe2",
+   "pgdelta/live.py": "42f94aa72c5ab80252f819638909d9386629e9172ea3ee50c0bdcc4f05e07419",
+   "pgdelta/matching.py": "db6da7593d98cc1168d70a0f8afca72abfb59ca3df1bb2dde742f857f5890fa8",
+   "pgdelta/receiver.py": "8f4ac65d16d316c4a5b013b8ae190ea4943c3f70d19b23500308d60e9dcaa9fa",
+   "pgdelta/sender.py": "9ff803fe7bc4e7a1ec2a0a4888862853323d07bacdd3556c086085122c5921a4"
+  }
  }
 }
