@@ -75,7 +75,7 @@ Status: **done October 30, 2026: held.** 28 of 30 single-read controls wrong (93
 
 **What it means:**
 - **Single read doesn't make the control's copies right.** EXP-85's correct control (trial 6) was the control's own randomness: two reads came out right 5 times in 30 here.
-- **The control's measured rate is about 88% wrong** (53 of 60). EXP-82's 10 of 10 was the likelier outcome at that rate (about 0.28), not a sign of a certain one. EXP-85's registration of "all 10" asked for more than the control gives.
-  - A correct control copy is a copy the change happened not to break: the check compares every pgbench table and runs `pg_amcheck`. It is not a wrong copy the check missed.
+- **The control's measured rate is about 88% wrong** (53 of 60). At that rate, EXP-82's 10 of 10 had about a 28% chance (0.88^10), and 9 of 10 is the likeliest count; so EXP-82's result was not a sign that the control is always wrong. EXP-85's registration of "all 10" asked for more than the control gives.
+  - A correct control copy is most likely one the moved threshold happened not to break: the check compares every pgbench table by md5 and runs `pg_amcheck --heapallindexed`. A wrong copy the check missed can't be ruled out from these data alone.
   - Future registrations use EXP-82's bar for this control, or this measured rate.
 - **EXP-85's L2 stays recorded as failed,** as registered. Its VM stage runs on the owner's decision of October 30, with this result as the reason.
