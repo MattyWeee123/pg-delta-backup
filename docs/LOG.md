@@ -4,6 +4,12 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (04:20 UTC): EXP-85b pre-registered: the negative control, with one read and with two
+
+- **The owner's decision on EXP-85's L2 miss:** measure whether single read changes the control's rate, then run the VM stage if it doesn't.
+- **Design:** 30 controls with single read and 30 with two reads, shuffled in one local session (seed 852).
+- **Deciding:** at least 80% wrong in each mode (EXP-82's bar). Reported: Fisher's exact test of the two shares.
+
 ## 2026-10-30 (03:42 UTC): EXP-85 stage 1: single read correct in 120 of 120 trials; one control came out correct
 
 - **L1 held:** all 120 single-read page-lsn trials were correct (40 stopped standbys, 40 base backups under load, 40 killed standbys), and nothing was read again.
