@@ -106,6 +106,8 @@ DISK='awk -v d="$(basename "$(findmnt -no SOURCE /data)")" '"'"'$3 == d'"'"' /pr
 disks() { echo "dest $(eval "$DISK")"; echo "source $(on_src "$DISK")"; }
 STATE="SELECT count(*) || ':' || sum(abalance) FROM pgbench_accounts"
 WORKLOAD_ARGS="--root $ROOT --bin-dir $PGBIN --log-dir $W/logs --scale $SCALE --fraction 0.01 --seed 20261022 --hot-percent 1.0 --batch-size 100"
+# EXP-87's H8: CHECKSUMS=0 initdbs the source without data checksums; WAL_LOG_HINTS=1 turns wal_log_hints on (a restart).
+[ "${CHECKSUMS:-1}" = 0 ] && WORKLOAD_ARGS="$WORKLOAD_ARGS --no-checksums"
 
 echo "$(date -u +%T) set-up: scale $SCALE"
 # setup stops a cluster left at ROOT (the smoke's) before it clears ROOT.
@@ -126,6 +128,13 @@ if [ "$SUMMARIES" = 0 ]; then
     { echo "the source has already summarized WAL: failed"; exit 1; }
   [ -z "$(on_src "ls $ROOT/data/pg_wal/summaries")" ] || { echo "the source holds WAL summaries: failed"; exit 1; }
 fi
+if [ "${WAL_LOG_HINTS:-0}" = 1 ]; then
+  psrc "ALTER SYSTEM SET wal_log_hints = on" > /dev/null
+  on_src "$PGBIN/pg_ctl -D $ROOT/data -m fast -w -t 600 restart > /dev/null" || { echo "source restart failed"; exit 1; }
+  [ "$(psrc "SHOW wal_log_hints")" = on ] || { echo "wal_log_hints is still off: failed"; exit 1; }
+fi
+echo "$(date -u +%T) data_checksums $(psrc "SHOW data_checksums"), wal_log_hints $(psrc "SHOW wal_log_hints")"
+if [ "${CHECKSUMS:-1}" = 0 ] && [ "$(psrc "SHOW data_checksums")" != off ]; then echo "checksums are on: failed"; exit 1; fi
 if [ -n "$WAL_KEEP" ]; then
   psrc "ALTER SYSTEM SET wal_keep_size = '$WAL_KEEP'" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
 fi
@@ -152,6 +161,12 @@ for pattern in $PATTERNS; do
     psrc "SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = 'exp82b'" > /dev/null
     psrc "SELECT pg_create_physical_replication_slot('exp82b', true)" > /dev/null || { echo "slot failed"; exit 1; }
     echo "$(date -u +%T) $pattern: slot exp82b reserved at $(psrc "SELECT restart_lsn FROM pg_replication_slots WHERE slot_name = 'exp82b'")"
+  fi
+  if [ "$pattern" = gaussidx ]; then
+    # EXP-87's H5: a secondary index on abalance, made before B0, so every update of a balance is not HOT.
+    psrc "CREATE INDEX IF NOT EXISTS accounts_abalance ON pgbench_accounts (abalance)" > /dev/null \
+      || { echo "the index failed"; exit 1; }
+    psrc "CHECKPOINT" > /dev/null
   fi
   rm -rf "$B0"
   if [ "$CRASHED" = 1 ]; then
@@ -184,8 +199,21 @@ for pattern in $PATTERNS; do
     CHECK="SELECT ($STATE) || ':' || (SELECT count(*) || ':' || coalesce(sum(id), 0) FROM events) || ':' || \
 (SELECT sum(bbalance) FROM pgbench_branches) || ':' || (SELECT sum(tbalance) FROM pgbench_tellers) || ':' || \
 (SELECT count(*) FROM pgbench_history)"
+  [ "$pattern" = gaussidx ] && \
+    CHECK="SET enable_seqscan = off; SELECT ($CHECK) || ':' || (SELECT count(*) || ':' || coalesce(sum(abalance), 0) \
+FROM pgbench_accounts WHERE abalance >= -2147483648)"  # read through the abalance index too
   change() {
-    if [[ "$pattern" =~ ^scatter(all)?([0-9]+)$ ]]; then
+    if [ "$pattern" = gaussidx ]; then
+      # 1% of the rows' worth of single-row updates (scale x 1,000), each row drawn from a Gaussian over aid (5.0).
+      n=$((SCALE * 1000)) w0=$(date +%s.%N)
+      on_src "printf '%s\n' '\\set aid random_gaussian(1, :naccounts, 5.0)' '\\set delta random(-5000, 5000)' \
+'UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;' > $W/gaussidx.sql && \
+$PGBIN/pgbench -n -h $ROOT/s -p 5432 -U study -c 8 -j 8 -t $((n / 8)) -D naccounts=$((SCALE * 100000)) \
+-f $W/gaussidx.sql postgres > $W/gaussidx.log 2>&1" || { echo "workload failed"; return 1; }
+      w1=$(date +%s.%N)
+      echo "{\"pattern\": \"gaussidx\", \"transactions\": $n, \"seconds\": $(python3 -c "print(round($w1 - $w0, 1))")}" \
+        > "$R/workload-$pattern.json"
+    elif [[ "$pattern" =~ ^scatter(all)?([0-9]+)$ ]]; then
       n=${BASH_REMATCH[2]}
       frac=$(python3 -c "print($n / 100)")
       w0=$(date +%s.%N)

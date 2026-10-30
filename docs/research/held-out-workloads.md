@@ -19,10 +19,10 @@ RRSI and ADRS both found gains tuned that way shrink or vanish on settings the s
 | **H2** | Scale 1,200 (about 36 GB, 4.5x the VMs' memory), uniform and hot | The size | **Spent** by EXP-84 (built with `SCALE=1200`) |
 | **H3** | A `pd-ssd` data disk instead of balanced, uniform and hot at scale 600 | The disk's operation and byte limits | **Spent** by EXP-84 (built for EXP-84: `create.sh` takes `DATA_DISK=pd-ssd`; the `hs` set) |
 | **H4** | PostgreSQL 18, uniform and hot at scale 600 | The server version (WAL-summary and visibility-map behaviour) | **Spent** by EXP-84 (built for EXP-84: the lab's `PG_MAJOR=18`, installed beside 17) |
-| **H5** | Skewed updates with index upkeep: pgbench's update on `pgbench_accounts` with `random_gaussian` (parameter 5) for its row, and a secondary index on `abalance`, so no update is HOT; scale 600 on pd-balanced | The change pattern: a skewed hot set, new tuple versions on other pages, and scattered index pages | Sealed; built at first use (a lab pattern) |
-| **H6** | A source and destination with 32 GB of memory (n2d-standard-8), scale 600, hot and uniform | The database fits in memory: the page cache holds S and B | Sealed; built at first use (a set's machine type) |
-| **H7** | Local NVMe SSD data disks (`vmset.sh`'s local-nvme), scale 600, hot and uniform | The disk: limits far above persistent disks', and no network storage | Sealed; built at first use (the set exists in `vmset.sh`) |
-| **H8** | PostgreSQL 17.11 with data checksums off and `wal_log_hints = on`, scale 600, hot and uniform | The cluster's configuration: page-lsn's other requirement, and hint bits WAL-logged without checksums | Sealed; built at first use (the lab's initdb options) |
+| **H5** | Skewed updates with index upkeep: pgbench's update on `pgbench_accounts` with `random_gaussian` (parameter 5) for its row, and a secondary index on `abalance`, so no update is HOT; scale 600 on pd-balanced | The change pattern: a skewed hot set, new tuple versions on other pages, and scattered index pages | Sealed; built for EXP-87: the lab's pattern `gaussidx` |
+| **H6** | A source and destination with 32 GB of memory (n2d-standard-8), scale 600, hot and uniform | The database fits in memory: the page cache holds S and B | Sealed; built for EXP-87: `infra/gcp/sets/hm.sh` |
+| **H7** | Local NVMe SSD data disks (`vmset.sh`'s local-nvme), scale 600, hot and uniform | The disk: limits far above persistent disks', and no network storage | Sealed; built for EXP-87: `infra/gcp/sets/hn.sh` (two local NVMe SSDs, striped) |
+| **H8** | PostgreSQL 17.11 with data checksums off and `wal_log_hints = on`, scale 600, hot and uniform | The cluster's configuration: page-lsn's other requirement, and hint bits WAL-logged without checksums | Sealed; built for EXP-87: the lab's `CHECKSUMS=0` and `WAL_LOG_HINTS=1` |
 
 **What a held-out session reports for each cell:**
 - the fast path (current defaults) against `pg_basebackup`;

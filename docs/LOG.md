@@ -4,6 +4,17 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (13:31 UTC): EXP-87 pre-registered: the second held-out session, on H5–H8
+
+- **The settings,** sealed October 30 before EXP-85's tuning:
+  - H5: Gaussian-skewed updates with an index on `abalance`, so none is HOT;
+  - H6: 32 GB of memory;
+  - H7: local NVMe;
+  - H8: checksums off, with `wal_log_hints`.
+- **Built at first use:** the lab's `gaussidx` pattern, its `CHECKSUMS=0` and `WAL_LOG_HINTS=1` options, and the hm and hn sets.
+- **Arms, one run per cell:** the crashed standby, the clean standby (defaults), single read, two reads and `pg_basebackup`.
+- **Single read is eligible for page-lsn's default** if, in every cell, it is at most 1.05x `pg_basebackup` and at most 1.024x two reads.
+
 ## 2026-10-30 (13:30 UTC): EXP-86 done: 320 of 320 randomized refreshes correct on Linux, ext4 and XFS
 
 - **1 held:** 160 of 160 deciding trials correct on each filesystem:

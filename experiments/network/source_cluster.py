@@ -133,6 +133,8 @@ def trial_spec(args) -> dict:
         argv += ['--events-rows', str(args.events_rows)]
     if getattr(args, 'hex_filler', False):
         argv += ['--hex-filler']
+    if getattr(args, 'no_checksums', False):
+        argv += ['--no-checksums']  # EXP-87's H8
     study_args, _ = run_study.parse_args(argv)
     [spec] = run_study.trial_specs(study_args)
     return spec
@@ -744,6 +746,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument('--events-rows', type=int)
         sub.add_argument('--batch-size', type=int, default=100)
         sub.add_argument('--hex-filler', action='store_true')
+        sub.add_argument('--no-checksums', action='store_true', help='initdb without data checksums (EXP-87)')
 
     sub = commands.add_parser('setup')
     trial_options(sub)
