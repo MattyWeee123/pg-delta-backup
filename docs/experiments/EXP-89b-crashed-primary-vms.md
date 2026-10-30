@@ -1,6 +1,6 @@
 # EXP-89b: An 18 GB primary that crashed after a failover, on the VMs: --crashed-primary against pg_rewind, hashing and a re-clone
 
-Status: **pre-registered October 30, 2026, before any scored run.** It follows [EXP-89](EXP-89-crashed-primary.md), the local correctness campaign.
+Status: **pre-registered October 30, 2026, before any scored run.** *Amended before any scored data:* the smoke's `crashed` runs exited 3. The lab passed the receiver a `--stats-json` it doesn't take; the receiver's statistics come back in the sender's. The option is removed, the files are recorded again at the fixed commit, and the smoke runs again on the same VMs. It follows [EXP-89](EXP-89-crashed-primary.md), the local correctness campaign.
 
 ## Question
 

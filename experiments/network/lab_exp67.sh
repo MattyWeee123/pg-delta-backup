@@ -201,7 +201,7 @@ EOF
         tr=null
         python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
           --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 --fsync worker --crashed-primary \
-          --stats-json "$d/receive.json" > "$d/receive.log" 2>&1 &
+          > "$d/receive.log" 2>&1 &
         rp=$!
         for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
         on_src "python3 -m pgdelta send --source $ROOT/data --source-kind live --pg-conn '$CONN' --connect $DEST:7000 \
