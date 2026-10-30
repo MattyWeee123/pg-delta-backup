@@ -1,6 +1,6 @@
 # EXP-85: Single-read page-lsn: does sending each chosen page from the scan's own read restore the tie with a re-clone at 4.5x memory?
 
-Status: **pre-registered October 30, 2026, before any scored run.** The local stage runs first; the VM stage runs only if L1 and L2 hold.
+Status: **stage 1 done October 30, 2026: L1 held (120 of 120 single-read trials correct, nothing read again); L2 failed as registered (9 of 10 negative controls wrong, against "all 10").** By the registered rule, stage 2 (the VMs) does not run; whether it runs anyway is the owner's decision (below). Pre-registered October 30, before any scored run.
 
 ## Question
 
@@ -120,3 +120,42 @@ Times are each arm's mean over its runs.
 | 15 | Held-out workloads | H2 is spent; a default needs H5–H8 |
 | 16 | Scorer integrity | Recorded at registration; correctness gate on every copy; the control kept |
 | 17 | The noise bar | 2.40% spread; deciding bar 1.05x against a 12.3% effect |
+
+## Results, stage 1 (local)
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-85` reports 15 of 15 files unchanged since the registration commit (e86ddce).
+
+**The correctness campaign** (130 trials, seed 850, PostgreSQL 17.11 on the Mac; `docs/experiments/data/exp85-trials.csv`):
+
+| # | Prediction | Result |
+|---|---|---|
+| L1 | All 120 single-read page-lsn trials correct, with the expected proof, nothing read again | **Held: 120 of 120.** Each kind of old copy (stopped standby, base backup under load, killed standby) 40 of 40; `reread_bytes` 0 in all |
+| L2 | The negative control wrong in all 10 trials | **Failed: 9 of 10 wrong** (rows unequal in all 9; `pg_amcheck` failing in 8). Trial 6 came out correct |
+
+**About trial 6 (looked at after the scoring; decides nothing):**
+- **The control is random by design.** It moves a base backup's start to its end, so a page changed during the backup and stale in B stays unsent. Whether any page of the tables compared is both changed during the backup and stale in B depends on the timing of the copy and the load.
+- **EXP-82 registered this control as "at least 8 of 10 wrong"** for that reason. There, 3 of its 10 wrong copies differed only in a few rows of `pgbench_history`. This registration asked for all 10, which was stricter than that precedent. The result stands as registered: **L2 failed**.
+- **Single read can't change a control's outcome.** No load runs after the control's backup, so the source is idle during the refresh. Single read then chooses the same pages as two reads, and sends the same bytes: the property test checks that on any file at rest. That is an argument from the code, not a measurement.
+- **What the control is for still shows:** the check found 9 wrong copies of 10.
+
+**The scale model** (scale 100, 1.6 GB, in the Mac's memory; 3 runs each; `docs/experiments/data/exp85-timing.csv`; reported, not predicted):
+
+| Cell | Two reads, mean | Single read, mean | Ratio | Bytes read again (two reads; single read) | Held at most (single read) |
+|---|---|---|---|---|---|
+| hot | 0.643 s | 0.555 s | **0.863** | 31 MB; 0 | 8 MB |
+| scatter (about half the pages) | 2.656 s | 2.965 s | **1.116** | 754 MB; 0 | 216 MB |
+
+- **In memory, the second reads cost little,** since they come from the page cache. Single read's own cost then shows: in scatter it was 12% slower (median 1.09x).
+  - That cost is most likely the scanner copying each chosen page into its run in Python (`lsn_held_runs` adds one page at a time). It is post-hoc and untested; a profile would decide it.
+  - On the VMs the scanner waits on the disk, which may hide that cost or not: stage 2 would show it.
+- **Rule 13's proxy:** these local ratios go into `proxy-fidelity.csv` beside the VM ratios, if stage 2 runs.
+- **The held bytes** stayed within the bound: 216 MB at most, against 272 MiB.
+
+## What follows stage 1
+
+**By the registered rule, stage 2 does not run.** The owner decides between:
+- **running stage 2 as registered,** with L2 recorded as failed and the reason above;
+- **first measuring whether single read changes the control's rate:** a new pre-registered local run of controls with one read and with two, at EXP-82's bar (at least 80% wrong in each), then stage 2;
+- **or stopping here.**
+
+**Separately, a structural fix for the CPU cost in memory:** add each run of contiguous chosen pages to its run as one slice, not page by page. It would be a new build, timed in its own registration, not a change to this one.

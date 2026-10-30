@@ -4,6 +4,15 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (03:42 UTC): EXP-85 stage 1: single read correct in 120 of 120 trials; one control came out correct
+
+- **L1 held:** all 120 single-read page-lsn trials were correct (40 stopped standbys, 40 base backups under load, 40 killed standbys), and nothing was read again.
+- **L2 failed as registered:** 9 of 10 negative controls were wrong, against the "all 10" registered.
+  - EXP-82 had registered "at least 8 of 10" for the same random control. This registration was stricter.
+  - Single read can't change a control's outcome on an idle source (same pages, same bytes), though that is argued from the code, not measured.
+- **Scale model, in memory:** single read took 0.863x two reads' time in hot and 1.116x in scatter. The scanner's per-page copying in Python is the likely cost (post-hoc).
+- **By the registered rule, the VM stage doesn't run.** Running it anyway is the owner's decision.
+
 ## 2026-10-30 (03:10 UTC): EXP-85 pre-registered: single-read page-lsn
 
 - **Why:** EXP-84's one page-lsn miss (1.123x `pg_basebackup` at scale 1,200, uniform) came with 11% extra source-disk reads. Post-hoc, these were the second reads of chosen pages that had left the page cache.
