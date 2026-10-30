@@ -25,7 +25,7 @@ RRSI and ADRS both found gains tuned that way shrink or vanish on settings the s
 | **H8** | PostgreSQL 17.11 with data checksums off and `wal_log_hints = on`, scale 600, hot and uniform | The cluster's configuration: page-lsn's other requirement, and hint bits WAL-logged without checksums | **Spent** by EXP-87 (built for EXP-87: the lab's `CHECKSUMS=0` and `WAL_LOG_HINTS=1`) |
 | **H9** | Many relations: 2,000 small tables beside pgbench at scale 300, the change spread over all of them | The relation count: the guard's work per relation, and the files opened and synced | Sealed; built at first use |
 | **H10** | PostgreSQL 18 with asynchronous I/O by `io_method = io_uring`, scale 600, hot and uniform | The server's read path (and `pg_basebackup`'s) | Sealed; built at first use |
-| **H11** | Smaller VMs: n2d-highcpu-4 (4 vCPUs, 4 GB of memory), scale 600, hot and uniform | Fewer CPUs, and the database 9x memory | Sealed; built at first use (a set's machine type) |
+| **H11** | Smaller VMs: n2d-highcpu-4 (4 vCPUs, 4 GB of memory), scale 600, hot and uniform | Fewer CPUs, and the database 4.5x memory (18 GB on 4 GB) | Sealed; built at first use (a set's machine type) |
 | **H12** | Source and destination in different regions (us-west1 and us-east1), scale 600, hot and uniform | A cross-region link (about 60 ms round trips) on the fast path | Sealed; built at first use (a set's zones) |
 
 **What a held-out session reports for each cell:**
