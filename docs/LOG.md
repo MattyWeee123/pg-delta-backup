@@ -4,6 +4,15 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (23:18 UTC): EXP-89 done: 80 of 80 crashed primaries correct by their own WAL; lost or damaged WAL refused
+
+- **1 held:** 80 of 80 crashed primaries were taken by the fast path and came out correct: 40 on the server's timeline, 40 after a failover. Wrong copies below 3.7% per refresh at 95%.
+- **2 held:** 40 of 40 failovers found the old primary's own blocks past the fork (median 1,244), including pages no summary lists.
+- **3 held:** 30 of 30 controls (WAL lost, damaged, lost after a failover) were refused and hashed correctly.
+- **The blind spot,** as stated: an older pg_wal swapped in passed 5 of 5 and gave 5 wrong copies.
+- **Amended before any scored data:** the first launch stopped on a blind-spot copy too broken to query. The harness now records such a copy as wrong.
+- **Next:** EXP-89b on the VMs at 18 GB, against `pg_rewind`, hashing and a re-clone.
+
 ## 2026-10-30 (22:45 UTC): research loop 4 and EXP-89 pre-registered: the crashed primary, by its own WAL
 
 - **The last loss:** a primary that crashed was refused and hashed, at best a tie. The obstacle is proving where its history ends; crash recovery first is unsound (EXP-80's S2e).

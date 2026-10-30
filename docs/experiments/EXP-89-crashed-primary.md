@@ -1,6 +1,6 @@
 # EXP-89: A primary that crashed, refreshed by the fast path with its end proven by its own WAL
 
-Status: **pre-registered October 30, 2026, before any scored run.** *Amended before any scored data:* the first launch stopped at trial 11, a blind-spot (`stale-wal`) copy so broken that the check's own query failed on it. A system catalog index file was a block short, and that raised an error instead of a result. No data file was written. Its 11 printed trials all went as predicted:
+Status: **done October 30, 2026: every prediction held.** 80 of 80 crashed primaries were refreshed by the fast path and came out correct: 40 on the server's timeline, 40 after a failover, each failover finding its own blocks. All 30 controls with lost or damaged WAL were refused and hashed correctly. The blind spot (an older pg_wal swapped in) passed in 5 of 5 and gave 5 wrong copies, as stated. **pre-registered October 30, 2026, before any scored run.** *Amended before any scored data:* the first launch stopped at trial 11, a blind-spot (`stale-wal`) copy so broken that the check's own query failed on it. A system catalog index file was a block short, and that raised an error instead of a result. No data file was written. Its 11 printed trials all went as predicted:
 - 3 `same` and 2 `failover` taken and correct;
 - 3 `lost`, 1 `damaged` and 1 `lost-failover` refused and hashed correctly.
 
@@ -104,3 +104,39 @@ No arm, check or prediction changed. The files are recorded again at the fixed c
 | 15 | Held-out workloads | Not used |
 | 16 | Scorer integrity | Recorded at registration |
 | 17 | The noise bar | Counts, not timings |
+
+## Results
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-89` reports 11 of 11 files unchanged since the amended registration commit (ed3c04b).
+
+**The session:** PostgreSQL 17.11 on the Mac, 115 trials (seed 890), about 40 minutes. Every refresh exited 0. Data: `docs/experiments/data/exp89-trials.csv`.
+
+![EXP-89: crashed primaries by the end of their own WAL; lost or damaged WAL refused](../figures/exp89-crashed-primary.svg)
+
+*How to read it:* each bar is one arm's trials.
+- **Blue:** taken by the fast path, and the copy came out correct.
+- **Grey:** refused, hashed, and correct.
+- **Red:** a wrong copy.
+
+The controls are meant to be grey, and the blind spot is the stated limit.
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | **Deciding:** all 80 `same` and `failover` trials taken with the proof "crashed primary", and correct | **Held: 80 of 80** (40 and 40). Wrong copies below 3.7% per refresh at 95% |
+| 2 | All 40 `failover` trials find B's own blocks past the fork | **Held: 40 of 40,** a median of 1,244 blocks, including the cold table's pages, which no summary of the source lists |
+| 3 | All 30 controls refused as unproven, their hashed copies correct | **Held: 30 of 30:**<br>- every `lost` and `lost-failover` copy: "B's WAL from its redo point runs into a segment B lacks";<br>- every `damaged` copy: "B's pg_wal holds WAL written past where reading stops" |
+
+**Reported:**
+- **The blind spot:** all 5 `stale-wal` copies (B's pg_wal swapped for a copy taken before the fork) passed the proof, and all 5 came out wrong, as research loop 4 states. In the first launch, one was so broken that a system catalog index read failed (the amendment above).
+- **Time per refresh at this small scale:** the proof adds no visible time (median 0.48 s on the same timeline, 0.58 s after a failover). The `lost` refusals take 5.6 s: `pg_waldump` retries a missing file ten times before giving up.
+- **Kills:** half `pg_ctl -m immediate` and half SIGKILL of the postmaster. Before each kill, the dirty buffers were written out in every failover trial and in half of the others.
+
+**What this campaign can't see:**
+- **Torn WAL tails:** a process kill leaves the operating system's cache intact, so the WAL on disk ends cleanly. Real power loss tears the last WAL page, and EXP-89b's follow-up on the VMs needs hard resets for it.
+- **Timing at scale:** EXP-89b.
+
+## What followed
+
+- **The proof is correct on every crashed primary tried, and refuses every kind of lost or damaged WAL tried.** That covers 80 randomized crashes, a third of them with the old primary's writes past the fork on pages only its own WAL names.
+- **Its stated blind spot is real,** and the same holds for crash recovery and `pg_rewind`: a pg_wal replaced by an older copy of itself passes. RESULTS states it beside the claim.
+- **Next:** [EXP-89b](EXP-89b-crashed-primary-vms.md) times it at 18 GB against `pg_rewind`, hashing and a re-clone. Then come real power loss (hard resets) for torn WAL tails, and a held-out session before any default.
