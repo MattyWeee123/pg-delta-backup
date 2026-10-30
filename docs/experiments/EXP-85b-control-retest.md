@@ -1,6 +1,6 @@
 # EXP-85b: Does single read change how often EXP-82's negative control comes out wrong?
 
-Status: **pre-registered October 30, 2026, before any scored run.**
+Status: **done October 30, 2026: held.** 28 of 30 single-read controls wrong (93%), 25 of 30 two-read ones (83%); Fisher's exact test p = 0.42. EXP-85's VM stage runs as registered. Pre-registered October 30, before any scored run.
 
 ## Why
 
@@ -59,3 +59,23 @@ Status: **pre-registered October 30, 2026, before any scored run.**
 | 15 | Held-out workloads | Not used |
 | 16 | Scorer integrity | Recorded at registration |
 | 17 | The noise bar | A count against a registered bar, not a timing |
+
+## Results
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-85b` reports 10 of 10 files unchanged since the registration commit (a218464).
+
+**The session:** PostgreSQL 17.11 on the Mac, 60 controls in a shuffled order (seed 852). Every refresh exited 0. Data: `docs/experiments/data/exp85b-controls.csv`.
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | At least 80% of the controls wrong in each mode (24 of 30) | **Held:** single read **28 of 30** (93%; 95% 0.79–0.98), two reads **25 of 30** (83%; 0.66–0.93) |
+| 2 | Every trial ran as its mode says | **Held:** all 60 took the fast path with proof "backup_manifest" and the mode's `lsn_single_read`; single read re-read nothing |
+
+**Reported:** Fisher's exact test of the two shares gives p = 0.42. Two reads came out right more often than single read, not less.
+
+**What it means:**
+- **Single read doesn't make the control's copies right.** EXP-85's correct control (trial 6) was the control's own randomness: two reads came out right 5 times in 30 here.
+- **The control's measured rate is about 88% wrong** (53 of 60). EXP-82's 10 of 10 was the likelier outcome at that rate (about 0.28), not a sign of a certain one. EXP-85's registration of "all 10" asked for more than the control gives.
+  - A correct control copy is a copy the change happened not to break: the check compares every pgbench table and runs `pg_amcheck`. It is not a wrong copy the check missed.
+  - Future registrations use EXP-82's bar for this control, or this measured rate.
+- **EXP-85's L2 stays recorded as failed,** as registered. Its VM stage runs on the owner's decision of October 30, with this result as the reason.

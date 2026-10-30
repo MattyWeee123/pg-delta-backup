@@ -158,4 +158,6 @@ Times are each arm's mean over its runs.
 - **first measuring whether single read changes the control's rate:** a new pre-registered local run of controls with one read and with two, at EXP-82's bar (at least 80% wrong in each), then stage 2;
 - **or stopping here.**
 
+**The owner chose the second (October 30): [EXP-85b](EXP-85b-control-retest.md) held.** 28 of 30 single-read controls were wrong and 25 of 30 two-read ones (Fisher p = 0.42). So single read doesn't change the control's rate, about 88% wrong, and trial 6 was the control's own randomness. L2 stays failed as registered, and stage 2 runs as registered.
+
 **Separately, a structural fix for the CPU cost in memory:** add each run of contiguous chosen pages to its run as one slice, not page by page. It would be a new build, timed in its own registration, not a change to this one.
