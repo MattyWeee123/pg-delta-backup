@@ -380,21 +380,40 @@ class Flags(unittest.TestCase):
         self.assertIn('no chrony offsets', row['notes'])
         self.assertAlmostEqual(row['W'], 0.20, places=9)   # the sound run's own value, the flagged ones left out
 
-    def test_a_fast_path_run_whose_guard_refused_is_reported_as_not_having_activated(self):
+    def test_a_guard_that_refused_is_told_apart_from_an_arm_that_never_asked(self):
+        """Both record fast_path_used false, and they mean opposite things.
+
+        A refusal carries the sender's reasons and makes the cell no evidence about the fast path's cost. A run
+        with no reasons simply never passed --fast-path, which is what the smoke run's v1 and v1_j4 arms were:
+        reporting those as refusals would invent a finding about a guard that was never consulted.
+        """
         spec = [{'arm': 'none', 'level': 'L60'},
                 {'arm': 'full', 'level': 'L60', 'late': {3: 20}},
-                {'arm': 'v1_fast', 'level': 'L60', 'late': {3: 20}, 'fast_path_used': False},
+                {'arm': 'v1_fast', 'level': 'L60', 'late': {3: 20}, 'fast_path_used': False,
+                 'fast_path_reasons': ["B's end is unknown"]},
+                {'arm': 'v1', 'level': 'L60', 'late': {3: 20}, 'fast_path_used': False},
                 {'arm': 'v1_fast', 'level': 'L80', 'late': {3: 20}, 'fast_path_used': True},
                 {'arm': 'none', 'level': 'L80'},
+                {'arm': 'full', 'level': 'L80', 'late': {3: 20}},
                 {'arm': 'v1', 'level': 'L80', 'late': {3: 20}, 'fast_path_used': None}]
         with tempfile.TemporaryDirectory() as tmp:
             rows = rows_of(tmp, spec)
-        refused_cell = rows[('v1_fast', 'L60')]
-        self.assertEqual(refused_cell['fast_path_used'], 'false')
-        self.assertIn('did not activate in 1 of 1', refused_cell['fast_path_note'])
-        self.assertIn('not evidence about the fast path', refused_cell['fast_path_note'])
-        self.assertEqual(rows[('v1_fast', 'L80')]['fast_path_used'], 'true')
-        self.assertIsNone(rows[('v1_fast', 'L80')].get('fast_path_note'))
+
+        refused = rows[('v1_fast', 'L60')]
+        self.assertEqual(refused['fast_path_used'], 'false')
+        self.assertIn('the guard refused', refused['fast_path_note'])
+        self.assertIn("B's end is unknown", refused['fast_path_note'])
+        self.assertIn('not evidence about the fast path', refused['fast_path_note'])
+
+        not_asked = rows[('v1', 'L60')]
+        self.assertEqual(not_asked['fast_path_used'], 'false')
+        self.assertEqual(not_asked['fast_path_note'], 'the fast path was not requested in this arm')
+        self.assertNotIn('refused', not_asked['fast_path_note'])
+
+        used = rows[('v1_fast', 'L80')]
+        self.assertEqual(used['fast_path_used'], 'true')
+        self.assertIsNone(used.get('fast_path_note'))
+
         self.assertEqual(rows[('v1', 'L80')]['fast_path_used'], '')
 
     def test_a_window_too_short_to_judge_is_reported_as_too_fast_to_measure(self):

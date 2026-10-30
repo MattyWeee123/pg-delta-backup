@@ -41,7 +41,7 @@ percentiles sit beside the verdict and never instead of it.
 offsets are missing is **flagged and left out, never analysed** on the wrong clock.
 
 **Guards and windows are data, not assumptions.** A `v1_fast` run that records `fast_path_used: false` is
-reported as "the fast path did not activate": a cell where the guard refused is not evidence about the fast
+reported apart: a cell where the *guard refused* is not evidence about the fast
 path's cost. A cell whose window is under 2 s is reported as "too fast to measure" and its W and D are not
 judged (prediction 6): fewer than two 1-second buckets cannot support either number.
 
@@ -382,6 +382,8 @@ def runs_of(root):
                'summarize_wal': meta.get('summarize_wal'), 'rate_r': rate, 'share': meta.get('share'),
                'capacity_c': meta.get('capacity_c', (rates or {}).get('capacity_c')),
                'exit_code': meta.get('exit_code'), 'fast_path_used': meta.get('fast_path_used'),
+               # carried so a refusal (reasons present) can be told from an arm that never asked
+               'fast_path_reasons': meta.get('fast_path_reasons'),
                'seconds': meta.get('seconds'), 'clock_shift_s': offset,
                'rate_expected': (rates or {}).get('levels', {}).get(meta.get('level')),
                'source_cpu_s': (cpu_seconds(meta['cpu0'], meta['cpu1']) if meta.get('cpu0') and meta.get('cpu1')
@@ -507,11 +509,21 @@ def cells(runs):
             row['fast_path_used'] = ('' if all(u is None for u in used) else
                                      'true' if all(u is True for u in used) else
                                      'false' if all(u is False for u in used) else 'mixed')
-            refused = sum(1 for u in used if u is False)
+            # "Did not activate" has two causes that must not be run together. An arm that never passed
+            # --fast-path has nothing for a guard to refuse, and calling that a refusal would invent a
+            # finding: the smoke run's v1 and v1_j4 arms both recorded false with no reasons, simply
+            # because the fast path was never asked for. It is a refusal only when the sender said why.
+            refused = [r for r in counted
+                       if r['fast_path_used'] is False and r.get('fast_path_reasons')]
+            not_asked = [r for r in counted
+                         if r['fast_path_used'] is False and not r.get('fast_path_reasons')]
             if refused:
-                row['fast_path_note'] = (f'the fast path did not activate in {refused} of {len(used)} counted '
-                                         f'runs (the guard refused), so this cell is not evidence about the '
-                                         f'fast path\'s cost')
+                why = sorted({str(r['fast_path_reasons']) for r in refused})[0][:120]
+                row['fast_path_note'] = (
+                    f'the guard refused the fast path in {len(refused)} of {len(used)} counted runs '
+                    f'({why}), so this cell is not evidence about the fast path\'s cost')
+            elif not_asked and len(not_asked) == len(used):
+                row['fast_path_note'] = 'the fast path was not requested in this arm'
             if row['txns_failed'] or row['txns_skipped']:
                 notes.append(f'{row["txns_failed"]:g} failed and {row["txns_skipped"]:g} skipped transactions '
                              f'(median per run): W and D count the successful ones, so they understate the loss '
