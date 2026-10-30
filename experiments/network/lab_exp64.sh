@@ -324,7 +324,8 @@ EOF
         [ "${BASH_REMATCH[6]}" = c ] && crashed=--crashed-standby
       fi
       case "$a" in
-        lsn) fast="--fast-path page-lsn --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
+        # "lsn" reads each chosen page twice, as registered before K16 made single read page-lsn's default.
+        lsn) fast="--fast-path page-lsn --no-lsn-single-read --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
         lsn1) fast="--fast-path page-lsn --lsn-single-read --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
         od) fast="--fast-path summaries --read-ahead 8 --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
       esac

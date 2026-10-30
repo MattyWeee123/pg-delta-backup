@@ -4,6 +4,17 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (19:29 UTC): K16: single read is page-lsn's default
+
+- **The owner's decision**, after EXP-87: `--lsn-single-read` is on by default with `--fast-path page-lsn`, and `--no-lsn-single-read` gives the two reads. It applies to page-lsn only: off with any other mode, and refused there if asked for.
+- **The evidence:**
+  - EXP-85: 0.984x `pg_basebackup` at 4.5x memory, against 1.119x;
+  - EXP-86: correct on Linux, ext4 and XFS;
+  - EXP-87: 7 of 7 held-out cells, 0.41–0.97x `pg_basebackup` and 0.95–1.007x two reads.
+- **Code:** `fastpath.DEFAULT_LSN_SINGLE_READ`; the CLI's `_lsn_single_read` resolves it only with page-lsn.
+- **Tests:** the real-server tests now run page-lsn by default (single read) and with `--no-lsn-single-read`, and a unit test covers the resolver.
+- **Harnesses:** EXP-82's trials and timing, EXP-85b's controls, EXP-86's campaign and the lab's `lsn` arm now pass `--no-lsn-single-read` wherever they meant two reads.
+
 ## 2026-10-30 (18:30 UTC): EXP-87 done: the second held-out session held in all 7 cells
 
 - **Single read (`--lsn-single-read`):** 0.85–0.97x `pg_basebackup` on H5 (skewed non-HOT updates), H6 (32 GB) and H8 (checksums off); 0.41–0.50x on H7 (local NVMe), where a re-clone is bound by writing a whole copy. Against two reads, 0.95–1.007x. **Eligible to become page-lsn's default** (the owner's decision).

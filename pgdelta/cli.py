@@ -226,11 +226,13 @@ def _compress_option(parser):
                              'and these go with the summaries\' blocks since that checkpoint. B must have been '
                              'stopped cleanly, keep that WAL, and have data checksums or wal_log_hints (idea 1, '
                              'EXP-69, EXP-69b, EXP-71) (default: on with --fast-path)')
-    parser.add_argument('--lsn-single-read', action='store_true',
+    parser.add_argument('--lsn-single-read', action=argparse.BooleanOptionalAction, default=None,
                         help='with --fast-path page-lsn: send each chosen page from the scan\'s own read of it, '
                              'never reading it again. The scanner holds at most about 256 MiB of chosen pages ahead '
-                             'of sending. Without it, at 4.5x memory the second reads missed the page cache and page-'
-                             'lsn took 1.12x pg_basebackup (EXP-84). Opt-in until EXP-85')
+                             'of sending. With --no-lsn-single-read each chosen page is read again after the scan; at '
+                             '4.5x memory those second reads missed the page cache and page-lsn took 1.12x '
+                             'pg_basebackup (EXP-84), against 0.98x with one read (EXP-85, EXP-87) '
+                             f'(default: {"on" if fastpath.DEFAULT_LSN_SINGLE_READ else "off"} with --fast-path page-lsn)')
     parser.add_argument('--selector', action='store_true',
                         help='with --fast-path, where the guard lets it run: predict its time from its plan at each '
                              'fill (0, 1, 2 and 4 pages), from the disks\' limits below, and take the fastest fill '
@@ -634,7 +636,7 @@ def _sender_kwargs(args, identity):
             'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
             'read_ahead': _read_ahead(args), 'plan_out': getattr(args, 'plan_out', None),
             'fill_gaps': _fill_gaps(args), 'diverged_basis': _diverged_basis(args), 'selector': _selector(args),
-            'lsn_single_read': getattr(args, 'lsn_single_read', False)}
+            'lsn_single_read': _lsn_single_read(args)}
 
 
 def _read_ahead(args):
@@ -660,6 +662,15 @@ def _selector(args):
     if getattr(args, 'fill_gaps', None) is not None:
         raise InvalidInput('--selector chooses the fill itself, so it does not take --fill-gaps')
     return selector.Disks(args.selector_read_ops, args.selector_write_ops, args.selector_mb_per_second * 1e6)
+
+
+def _lsn_single_read(args):
+    """--lsn-single-read or --no-lsn-single-read as given, else fastpath.DEFAULT_LSN_SINGLE_READ with --fast-path
+    page-lsn and off otherwise (it is page-lsn's own option: check_mode refuses it elsewhere)."""
+    on = getattr(args, 'lsn_single_read', None)
+    if on is None:
+        return fastpath.DEFAULT_LSN_SINGLE_READ and getattr(args, 'fast_path', None) == fastpath.PAGE_LSN
+    return on
 
 
 def _diverged_basis(args):

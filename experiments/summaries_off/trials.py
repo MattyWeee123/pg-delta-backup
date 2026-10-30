@@ -153,7 +153,8 @@ def trial(lab, root, number, arm, rng):
         lab.summaries(False)
     else:
         crashed = '--crashed-standby' if kind == 'lsn-crashed' else '--no-crashed-standby'  # explicit since K15
-        result, stats, seconds = lab.refresh(path, 'page-lsn', crashed, *lab.single_read)
+        # Two reads explicit since K16 made single read page-lsn's default (October 30).
+        result, stats, seconds = lab.refresh(path, 'page-lsn', crashed, *(lab.single_read or ('--no-lsn-single-read',)))
     received = (stats.get('receiver') or {}).get('fast_path') or {}
     fast = stats.get('fast_path') or {}
     row.update({'exit': result.returncode, 'seconds': round(seconds, 3), 'fast_used': fast.get('used'),

@@ -95,6 +95,10 @@ LSN_SCAN_BYTES = 8 << 20  # its reads, each a run of whole pages
 # --lsn-single-read (EXP-85): the chosen pages' bytes the scanner may hold ahead of the sending thread, which sends
 # them as read. EXP-84 found the two-read scanner's second reads, past the page cache, behind its loss at 4.5x memory.
 LSN_HELD_BYTES = 256 << 20
+# The CLI's --lsn-single-read with --fast-path page-lsn: 0.984x pg_basebackup at 4.5x memory against two reads' 1.119x
+# (EXP-85), and 0.41-0.97x pg_basebackup, 0.95-1.007x two reads, in all 7 held-out cells (EXP-87). On by default since
+# the owner's decision K16 (October 30, 2026).
+DEFAULT_LSN_SINGLE_READ = True
 PAGE_HEADER_SIZE = 24  # SizeOfPageHeaderData
 PD_VALID_FLAG_BITS = 0x0007
 _PAGE_HEADER = struct.Struct('<IIHHHHH')  # pd_lsn (xlogid, xrecoff), pd_checksum, pd_flags, pd_lower, pd_upper, pd_special

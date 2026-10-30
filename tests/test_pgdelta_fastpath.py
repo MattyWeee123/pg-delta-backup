@@ -449,6 +449,25 @@ class PageLsn(unittest.TestCase):
         with self.assertRaises(InvalidInput):
             fastpath.check_mode('page-lsn', 'datadir', False)
 
+    def test_the_cli_reads_each_page_once_with_page_lsn_unless_told_not_to(self):
+        """K16: --lsn-single-read is on by default with --fast-path page-lsn only; --no-lsn-single-read turns it off."""
+        from argparse import Namespace
+
+        from pgdelta import cli
+        self.assertIs(fastpath.DEFAULT_LSN_SINGLE_READ, True)
+        self.assertIs(cli._lsn_single_read(Namespace(fast_path='page-lsn', lsn_single_read=None)), True)
+        self.assertIs(cli._lsn_single_read(Namespace(fast_path='page-lsn', lsn_single_read=False)), False)
+        self.assertIs(cli._lsn_single_read(Namespace(fast_path='summaries', lsn_single_read=None)), False)
+        self.assertIs(cli._lsn_single_read(Namespace(fast_path=None, lsn_single_read=None)), False)
+        self.assertIs(cli._lsn_single_read(Namespace(fast_path=None, lsn_single_read=True)), True)  # check_mode refuses
+        self.assertIs(cli._lsn_single_read(Namespace()), False)
+        parser = cli.build_parser()
+        for argv, expected in ((['--fast-path', 'page-lsn'], True), (['--fast-path', 'page-lsn', '--no-lsn-single-read'],
+                               False), (['--fast-path', 'summaries'], False), ([], False)):
+            with self.subTest(argv=argv):
+                args = parser.parse_args(['local', '--source', 'S', '--basis', 'B', '--in-place', *argv])
+                self.assertIs(cli._lsn_single_read(args), expected)
+
     def test_single_read_is_page_lsn_s_only(self):
         fastpath.check_mode('page-lsn', 'live', False, fill_gaps=2, lsn_single_read=True)
         for mode in (None, 'summaries'):
@@ -766,10 +785,11 @@ class RealServer(unittest.TestCase):
         self.check_copy(target)
 
     def test_page_lsn_single_read_sends_from_the_scan_and_reads_nothing_again(self):
-        """EXP-85: --lsn-single-read chooses page-lsn's pages and fills, sends them from the scan's reads (no byte read
-        again, against every sent byte read again without it), and the copy recovers to S."""
-        _, twice = self.refresh('lsn-twice', 'stale', '--fast-path', 'page-lsn')
-        target, once = self.refresh('lsn-once', 'stale', '--fast-path', 'page-lsn', '--lsn-single-read')
+        """EXP-85, K16: page-lsn by default (single read) chooses its pages and fills, sends them from the scan's
+        reads (no byte read again, against every sent byte read again with --no-lsn-single-read), and the copy
+        recovers to S."""
+        _, twice = self.refresh('lsn-twice', 'stale', '--fast-path', 'page-lsn', '--no-lsn-single-read')
+        target, once = self.refresh('lsn-once', 'stale', '--fast-path', 'page-lsn')
         for stats, single in ((twice, False), (once, True)):
             fast = stats['fast_path']
             self.assertTrue(fast['used'], fast['reasons'])
@@ -796,15 +816,17 @@ class RealServer(unittest.TestCase):
         self.ctl(standby, 'stop', port=5434, mode='immediate')
         self.sql('UPDATE pgbench_accounts SET abalance = abalance + 4 WHERE aid % 509 = 13')
         self.sql('CHECKPOINT')
-        for name, basis, proof, extra in (('lsn-from-backup', backup, 'backup_manifest', ()),
-                                          ('lsn-from-standby', standby, 'crashed standby', ('--crashed-standby',)),
-                                          ('lsn1-from-backup', backup, 'backup_manifest', ('--lsn-single-read',)),
-                                          ('lsn1-from-standby', standby, 'crashed standby', ('--lsn-single-read',))):
+        two = '--no-lsn-single-read'  # page-lsn's two reads; its default is single read since K16
+        for name, basis, proof, extra in (('lsn-from-backup', backup, 'backup_manifest', (two,)),
+                                          ('lsn-from-standby', standby, 'crashed standby', ('--crashed-standby', two)),
+                                          ('lsn1-from-backup', backup, 'backup_manifest', ()),
+                                          ('lsn1-from-standby', standby, 'crashed standby', ())):
             with self.subTest(basis=name):
                 shutil.copytree(basis, self.root / f'{name}-basis', symlinks=True)
                 target, stats = self.refresh(name, f'{name}-basis', '--fast-path', 'page-lsn', *extra)
                 fast, received = stats['fast_path'], stats['receiver']['fast_path']
                 self.assertTrue(fast['used'], fast['reasons'])
+                self.assertIs(fast['lsn_single_read'], two not in extra)
                 self.assertEqual(received['facts']['proof'], proof)
                 self.assertEqual(fast['lsn_threshold'], received['facts']['redo'])
                 (target / 'standby.signal').unlink(missing_ok=True)

@@ -140,7 +140,7 @@ Per cell, from the tuned results. **A miss narrows that candidate's claim to the
 
 ## What followed
 
-- **Single read held in every held-out cell, so by this registration it is eligible to become page-lsn's default.** The change is the owner's decision. RESULTS and its README row say it is eligible.
+- **Single read held in every held-out cell, so by this registration it was eligible to become page-lsn's default.** **The owner made it one** (K16, October 30): `--lsn-single-read` is on with `--fast-path page-lsn`, and `--no-lsn-single-read` gives the two reads.
 - **K15's default stands:** `--crashed-standby` held on every held-out setting so far (17 cells over EXP-84 and EXP-87).
 - **The fast path's defaults held** on a skewed, index-heavy workload, with 32 GB of memory, on local NVMe, and without checksums.
 - **H5–H8 are spent** (rule 15) and may be used to tune. [held-out-workloads.md](../research/held-out-workloads.md) seals **H9–H12** in their place, before any of that work starts.
