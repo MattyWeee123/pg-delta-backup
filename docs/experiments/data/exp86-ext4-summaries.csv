@@ -1,0 +1,71 @@
+fs,campaign,fsync_asked,single_asked,trial,arm,kill,load_before_s,load_after_s,state_after_kill,exit,seconds,fast_used,proof,refused,pages_sent,pages_total,fsync_mode,rows_equal,amcheck_ok
+ext4,summaries,worker-writeback,False,0,crashed-standby,sigkill,7.49,3.16,in archive recovery,0,0.716,True,crashed standby,,2637,12720,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,1,crashed-standby,sigkill,3.45,2.72,in archive recovery,0,0.697,True,crashed standby,,2955,13060,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,2,crashed-standby,sigkill,5.91,5.37,in archive recovery,0,0.789,True,crashed standby,,3115,13229,worker-writeback,True,True
+ext4,summaries,auto,False,3,crashed-primary,immediate,5.06,2.03,in production,0,1.728,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2456,12957,main,True,True
+ext4,summaries,worker-writeback,False,4,crashed-standby,sigkill,5.95,4.01,in archive recovery,0,0.811,True,crashed standby,,3090,13186,worker-writeback,True,True
+ext4,summaries,auto,False,5,crashed-standby,immediate,1.11,2.83,in archive recovery,0,0.631,True,crashed standby,,2856,13001,worker,True,True
+ext4,summaries,auto,False,6,crashed-standby,sigkill,4.35,3.39,in archive recovery,0,0.78,True,crashed standby,,2955,13100,worker,True,True
+ext4,summaries,auto,False,7,crashed-standby,sigkill,1.81,2.42,in archive recovery,0,0.759,True,crashed standby,,3152,13303,worker,True,True
+ext4,summaries,auto,False,8,crashed-standby,immediate,5.33,1.25,in archive recovery,0,0.748,True,crashed standby,,2785,12950,worker,True,True
+ext4,summaries,worker-writeback,False,9,crashed-standby,sigkill,3.89,5.16,in archive recovery,0,0.697,True,crashed standby,,2712,12874,worker-writeback,True,True
+ext4,summaries,auto,False,10,crashed-standby,sigkill,7.09,3.08,in archive recovery,0,0.769,True,crashed standby,,3135,13187,worker,True,True
+ext4,summaries,auto,False,11,crashed-standby,sigkill,4.41,1.9,in archive recovery,0,0.669,True,crashed standby,,2843,13010,worker,True,True
+ext4,summaries,worker-writeback,False,12,crashed-standby,sigkill,4.89,2.4,in archive recovery,0,0.739,True,crashed standby,,3058,13220,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,13,crashed-standby,sigkill,6.59,2.76,in archive recovery,0,0.778,True,crashed standby,,2681,12847,worker-writeback,True,True
+ext4,summaries,auto,False,14,crashed-standby,immediate,5.98,3.2,in archive recovery,0,0.755,True,crashed standby,,2749,12910,worker,True,True
+ext4,summaries,worker-writeback,False,15,crashed-standby,immediate,5.92,4.99,in archive recovery,0,0.808,True,crashed standby,,2674,12835,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,16,crashed-standby,immediate,7.51,4.91,in archive recovery,0,0.782,True,crashed standby,,2871,13034,worker-writeback,True,True
+ext4,summaries,auto,False,17,crashed-standby,sigkill,2.93,5.06,in archive recovery,0,0.668,True,crashed standby,,2700,12870,worker,True,True
+ext4,summaries,auto,False,18,crashed-standby,immediate,7.15,2.46,in archive recovery,0,0.824,True,crashed standby,,3004,13163,worker,True,True
+ext4,summaries,worker-writeback,False,19,crashed-standby,sigkill,2.88,4.42,in archive recovery,0,0.66,True,crashed standby,,2850,12944,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,20,crashed-primary,immediate,3.91,5.26,in production,0,1.923,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2405,12964,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,21,crashed-standby,immediate,2.09,4.49,in archive recovery,0,0.681,True,crashed standby,,2801,12939,worker-writeback,True,True
+ext4,summaries,auto,False,22,crashed-primary,immediate,7.17,5.43,in production,0,0.919,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2713,13266,main,True,True
+ext4,summaries,worker-writeback,False,23,crashed-standby,sigkill,6.99,4.54,in archive recovery,0,0.717,True,crashed standby,,3088,13216,worker-writeback,True,True
+ext4,summaries,auto,False,24,crashed-standby,sigkill,1.59,5.8,in archive recovery,0,0.689,True,crashed standby,,3053,13227,worker,True,True
+ext4,summaries,worker-writeback,False,25,crashed-standby,immediate,6.13,3.76,in archive recovery,0,0.685,True,crashed standby,,3015,13175,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,26,crashed-standby,sigkill,3.74,2.42,in archive recovery,0,0.681,True,crashed standby,,2833,13017,worker-writeback,True,True
+ext4,summaries,auto,False,27,crashed-standby,sigkill,5.03,2.72,in archive recovery,0,0.762,True,crashed standby,,2559,12733,worker,True,True
+ext4,summaries,auto,False,28,crashed-standby,immediate,2.06,2.76,in archive recovery,0,0.749,True,crashed standby,,2932,13013,worker,True,True
+ext4,summaries,auto,False,29,crashed-standby,sigkill,5.8,2.73,in archive recovery,0,0.729,True,crashed standby,,3030,13189,worker,True,True
+ext4,summaries,auto,False,30,crashed-standby,immediate,6.67,5.57,in archive recovery,0,0.739,True,crashed standby,,3015,13183,worker,True,True
+ext4,summaries,worker-writeback,False,31,crashed-standby,sigkill,2.41,1.94,in archive recovery,0,0.675,True,crashed standby,,2949,13128,worker-writeback,True,True
+ext4,summaries,auto,False,32,crashed-primary,immediate,3.13,2.25,in production,0,1.031,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2416,12982,main,True,True
+ext4,summaries,worker-writeback,False,33,crashed-standby,sigkill,4.46,1.24,in archive recovery,0,0.667,True,crashed standby,,2718,12940,worker-writeback,True,True
+ext4,summaries,auto,False,34,crashed-standby,sigkill,5.15,4.53,in archive recovery,0,0.626,True,crashed standby,,2928,13066,worker,True,True
+ext4,summaries,worker-writeback,False,35,crashed-standby,immediate,7.94,2.61,in archive recovery,0,0.824,True,crashed standby,,2897,13063,worker-writeback,True,True
+ext4,summaries,auto,False,36,crashed-standby,sigkill,7.43,5.61,in archive recovery,0,0.731,True,crashed standby,,2971,13148,worker,True,True
+ext4,summaries,worker-writeback,False,37,crashed-standby,immediate,2.17,4.9,in archive recovery,0,0.665,True,crashed standby,,2802,12993,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,38,crashed-standby,immediate,4.81,4.44,in archive recovery,0,0.72,True,crashed standby,,2873,12966,worker-writeback,True,True
+ext4,summaries,auto,False,39,crashed-standby,immediate,3.79,3.89,in archive recovery,0,0.799,True,crashed standby,,2812,12997,worker,True,True
+ext4,summaries,auto,False,40,crashed-standby,sigkill,7.39,5.52,in archive recovery,0,0.652,True,crashed standby,,2755,12945,worker,True,True
+ext4,summaries,auto,False,41,crashed-standby,immediate,3.62,1.57,in archive recovery,0,0.728,True,crashed standby,,2768,12951,worker,True,True
+ext4,summaries,worker-writeback,False,42,crashed-standby,immediate,7.86,2.03,in archive recovery,0,0.75,True,crashed standby,,3035,13223,worker-writeback,True,True
+ext4,summaries,auto,False,43,crashed-primary,immediate,1.55,1.36,in production,0,1.214,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2166,12766,main,True,True
+ext4,summaries,worker-writeback,False,44,crashed-standby,sigkill,1.54,3.09,in archive recovery,0,0.666,True,crashed standby,,2973,13132,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,45,crashed-standby,sigkill,7.78,4.72,in archive recovery,0,0.828,True,crashed standby,,2791,12981,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,46,crashed-standby,immediate,6.14,4.14,in archive recovery,0,0.866,True,crashed standby,,2856,13054,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,47,crashed-standby,immediate,1.35,2.62,in archive recovery,0,0.618,True,crashed standby,,2853,13054,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,48,crashed-standby,sigkill,7.92,5.09,in archive recovery,0,0.875,True,crashed standby,,2736,12923,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,49,crashed-standby,sigkill,5.34,1.46,in archive recovery,0,0.822,True,crashed standby,,3085,13223,worker-writeback,True,True
+ext4,summaries,auto,False,50,crashed-standby,immediate,5.65,1.01,in archive recovery,0,0.88,True,crashed standby,,3110,13312,worker,True,True
+ext4,summaries,auto,False,51,crashed-standby,immediate,4.24,4.88,in archive recovery,0,0.691,True,crashed standby,,2819,13019,worker,True,True
+ext4,summaries,worker-writeback,False,52,crashed-standby,sigkill,4.22,4.15,in archive recovery,0,0.703,True,crashed standby,,2708,12917,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,53,crashed-primary,immediate,6.94,4.54,in production,0,3.412,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2539,13126,worker-writeback,True,True
+ext4,summaries,auto,False,54,crashed-standby,sigkill,7.86,4.64,in archive recovery,0,0.71,True,crashed standby,,2905,13069,worker,True,True
+ext4,summaries,auto,False,55,crashed-primary,immediate,4.78,2.56,in production,0,1.08,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2134,12740,main,True,True
+ext4,summaries,worker-writeback,False,56,crashed-standby,immediate,6.2,1.24,in archive recovery,0,0.7,True,crashed standby,,2621,12802,worker-writeback,True,True
+ext4,summaries,auto,False,57,crashed-standby,sigkill,5.06,4.27,in archive recovery,0,0.832,True,crashed standby,,2872,13084,worker,True,True
+ext4,summaries,auto,False,58,crashed-primary,immediate,3.1,4.95,in production,0,2.323,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2336,12950,main,True,True
+ext4,summaries,auto,False,59,crashed-standby,immediate,4.91,3.28,in archive recovery,0,0.684,True,crashed standby,,2899,13093,worker,True,True
+ext4,summaries,auto,False,60,crashed-standby,immediate,7.76,1.03,in archive recovery,0,0.684,True,crashed standby,,2684,12902,worker,True,True
+ext4,summaries,worker-writeback,False,61,crashed-standby,sigkill,2.6,5.14,in archive recovery,0,0.679,True,crashed standby,,2581,12812,worker-writeback,True,True
+ext4,summaries,auto,False,62,crashed-standby,sigkill,6.63,1.8,in archive recovery,0,0.84,True,crashed standby,,2680,12926,worker,True,True
+ext4,summaries,auto,False,63,crashed-primary,immediate,7.19,4.49,in production,0,2.212,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2359,12990,main,True,True
+ext4,summaries,auto,False,64,crashed-standby,immediate,2.42,3.39,in archive recovery,0,0.788,True,crashed standby,,2897,13117,worker,True,True
+ext4,summaries,auto,False,65,crashed-standby,sigkill,1.11,2.04,in archive recovery,0,0.678,True,crashed standby,,2536,12798,worker,True,True
+ext4,summaries,worker-writeback,False,66,crashed-standby,immediate,2.43,5.43,in archive recovery,0,0.642,True,crashed standby,,2887,13148,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,67,crashed-standby,immediate,7.27,1.6,in archive recovery,0,0.691,True,crashed standby,,3189,13465,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,68,crashed-primary,immediate,1.6,5.77,in production,0,1.816,False,,"B was not stopped cleanly (in production), so its end can't be proven without all of its WAL",2636,13311,worker-writeback,True,True
+ext4,summaries,worker-writeback,False,69,crashed-standby,immediate,2.94,4.24,in archive recovery,0,0.756,True,crashed standby,,2660,12905,worker-writeback,True,True

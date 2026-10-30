@@ -4,6 +4,18 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (13:30 UTC): EXP-86 done: 320 of 320 randomized refreshes correct on Linux, ext4 and XFS
+
+- **1 held:** 160 of 160 deciding trials correct on each filesystem:
+  - crashed standbys 60;
+  - page-lsn's stopped standbys, base backups under load and killed standbys, 30 each, half single read;
+  - on demand 10.
+
+  Wrong copies below 0.93% per refresh at 95% over both.
+- **2 to 4 held:** every crashed primary refused and hashed correctly, every negative control wrong, and every trial run as asked. Linux's `worker-writeback` (`sync_file_range`) was in effect where asked.
+- **A text correction:** the registration said 130 deciding trials per filesystem; its design gives 160, and 160 ran.
+- **Next:** the H5–H8 held-out session (EXP-87).
+
 ## 2026-10-30 (12:39 UTC): EXP-86 pre-registered: randomized correctness on Linux VMs, ext4 and XFS
 
 - **Why:** the randomized correctness campaigns ran on the Mac. On the VMs, only the timed copies were checked.

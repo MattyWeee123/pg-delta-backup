@@ -1,6 +1,6 @@
 # EXP-86: Randomized correctness on Linux VMs, on ext4 and XFS
 
-Status: **pre-registered October 30, 2026, before any scored run.**
+Status: **done October 30, 2026: every prediction held.** 320 of 320 deciding trials correct by the fast path (160 on ext4, 160 on XFS): wrong copies below 0.93% per refresh at 95%. All 20 crashed primaries refused and hashed correctly, all 20 negative controls wrong, all 360 trials run as asked (Linux's `sync_file_range` path among them). Pre-registered October 30, before any scored run.
 
 ## Question
 
@@ -84,3 +84,42 @@ Per filesystem:
 | 15 | Held-out workloads | Not used |
 | 16 | Scorer integrity | Recorded at registration; the controls kept |
 | 17 | The noise bar | Not a timing |
+
+## Results
+
+**The session:**
+- **Where:** the `ha` set in us-west1-b and -c.
+  - The destination's `/data` was reformatted XFS (reflink=1); the source's stayed ext4.
+  - Both ran PostgreSQL 17.11 (PGDG, Debian 12).
+- **The smoke** passed on both filesystems, scored by the registered analysis. It showed `worker-writeback` in effect on Linux.
+- **The campaigns** ran 12:51–13:28 UTC: 180 trials on each VM at once.
+- **Teardown:** the set was torn down after the fetch, and no VM or disk of it is left.
+- **Data:** `docs/experiments/data/exp86-{ext4,xfs}-{summaries,page-lsn}.csv`.
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-86` reports 14 of 14 files unchanged since the registration commit (fd7edc8).
+
+**A correction to the registration's text, not its design:** it said 130 deciding trials per filesystem, with bounds of 2.3% and 1.2%. Its own design adds up to 160 (60 + 3 x 30 + 10), and those 160 ran. The analysis counts what ran, and the bounds below are for 160 and 320.
+
+![EXP-86: randomized correctness on Linux VMs, ext4 and XFS](../figures/exp86-linux.svg)
+
+*How to read it:* for each arm and filesystem, the bar is the trials that came out as expected, out of the number run (the label). In blue, the copies came out correct. In red, the negative control's copies came out wrong, as they should.
+
+| # | Prediction | ext4 | XFS |
+|---|---|---|---|
+| 1 | **Deciding:** every deciding trial by the fast path, with its proof, correct | **Held: 160 of 160** (crashed standby 60, page-lsn's stopped standby 30, base backup 30 and killed standby 30, on demand 10) | **Held: 160 of 160**, the same |
+| 2 | Every crashed primary refused and hashed, correct | **Held: 10 of 10** | **Held: 10 of 10** |
+| 3 | At least 80% of the negative controls wrong | **Held: 10 of 10** | **Held: 10 of 10** |
+| 4 | Every trial as asked: its sync path, one read or two | **Held: 180 of 180** | **Held: 180 of 180** |
+
+**The bounds:** with no wrong copy, wrong copies stay below **1.85% per refresh at 95% on each filesystem, and 0.93% over both** (320 deciding trials).
+
+**What ran, per filesystem:**
+- **Read modes:** 45 deciding page-lsn trials with single read, and 45 with two reads.
+- **Sync paths:** the receivers used the sync worker ("worker") or the main loop for hashed refreshes ("main") under `auto`, and "worker-writeback" (`sync_file_range`) when asked, about half each.
+- **Kills:** every crashed standby was killed mid-load by `pg_ctl -m immediate` or SIGKILL.
+
+## What followed
+
+- **The correctness claims now hold on the platform where every timing is measured,** on both filesystems. They cover the summaries' fast path with crashed standbys (K15's default), page-lsn with one read or two, summaries on demand, and both of Linux's sync paths. RESULTS says so, beside the Mac's campaigns.
+- **The controls behaved:** every crashed primary was refused, and every moved-start control came out wrong. So the check could see a wrong copy on Linux too.
+- **Next, by the owner's order:** the H5–H8 held-out session ([EXP-87](EXP-87-held-out-h5-h8.md)).
