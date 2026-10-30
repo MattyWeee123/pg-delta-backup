@@ -393,7 +393,7 @@ class DryRun(unittest.TestCase):
 
     def test_create_refuses_bad_settings_before_any_command(self):
         cases = (({'DATA_DISK': 'pd-balanced'}, 'pd-balanced needs a size in GB'),
-                 ({'DATA_DISK': 'ssd'}, "DATA_DISK 'ssd' is neither"),
+                 ({'DATA_DISK': 'ssd'}, "DATA_DISK 'ssd' is none of local-nvme, pd-balanced and pd-ssd"),
                  ({'LABELS': 'owner=me'}, 'lacks purpose=pg-delta-benchmark'),
                  ({'LOCAL_SSDS': '0'}, 'LOCAL_SSDS of 1 or more'),
                  ({'DEST_ZONE': 'nowhere'}, "bad zone 'nowhere'"),
