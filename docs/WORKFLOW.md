@@ -51,7 +51,7 @@ These rules guard against all three at this project's cost of about an hour a VM
 - Each pass proposes at least one structurally different idea beside any tuning.
 - An idea that loses is archived with its conditions, never deleted.
 
-**15. Held-out workloads.** The settings in [research/held-out-workloads.md](research/held-out-workloads.md) (H1–H4) are sealed: never used to tune or to decide.
+**15. Held-out workloads.** The settings in [research/held-out-workloads.md](research/held-out-workloads.md) not yet spent (H5–H8 since EXP-84 spent H1–H4) are sealed: never used to tune or to decide. A setting a held-out session has used is spent, may then be used to tune, and is replaced.
 - They run only at a milestone (before a default changes, or before a claim leaves the project), in a pre-registered session predicted from the tuned results.
 - A miss narrows the claim; it is never tuned away.
 

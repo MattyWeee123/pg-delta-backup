@@ -1,0 +1,11 @@
+setting,pattern,crashed_s,crashed_match,crashed_status,clean_s,clean_match,clean_status,selector_s,selector_match,selector_status,lsn_s,lsn_match,lsn_status,full_s,full_match,full_status,crashed_proof,crashed_used,lsn_proof,lsn_used,selector_choice,selector_predicted_s,selector_full_predicted_s,selector_full_faster,pages_chosen_share
+h1,clustered,2.398,True,0,2.104,True,0,2.156,True,0,88.084,True,0,90.822,,0,crashed standby,True,clean shutdown in recovery,True,fill0,1.68,90.87,False,0.0098
+h1,tpcb,42.333,True,0,41.973,True,0,42.245,True,0,89.098,True,0,91.286,,0,crashed standby,True,clean shutdown in recovery,True,fill2,42.06,91.31,False,0.2829
+h1,append,1.989,True,0,1.668,True,0,1.707,True,0,88.963,True,0,91.716,,0,crashed standby,True,clean shutdown in recovery,True,fill0,1.15,91.7,False,0.0046
+h1,retention,2.239,True,0,2.01,True,0,2.036,True,0,89.395,True,0,92.07,,0,crashed standby,True,clean shutdown in recovery,True,fill0,1.56,92.1,False,0.0085
+h2,hot,2.879,True,0,2.573,True,0,2.512,True,0,174.197,True,0,176.974,,0,crashed standby,True,clean shutdown in recovery,True,fill0,1.82,175.17,False,0.0054
+h2,uniform,79.968,True,0,79.96,True,0,80.324,True,0,199.348,True,0,177.555,,0,crashed standby,True,clean shutdown in recovery,True,fill2,82.99,175.74,False,0.2826
+h3,hot,1.531,True,0,1.609,True,0,1.48,True,0,55.569,True,0,60.452,,0,crashed standby,True,clean shutdown in recovery,True,fill0,1.22,90.49,False,0.0054
+h3,uniform,27.443,True,0,27.39,True,0,27.598,True,0,56.546,True,0,65.773,,0,crashed standby,True,clean shutdown in recovery,True,fill2,41.89,90.78,False,0.2824
+h4,hot,2.012,True,0,1.718,True,0,1.706,True,0,87.622,True,0,90.412,,0,crashed standby,True,clean shutdown in recovery,True,fill0,1.21,90.49,False,0.0054
+h4,uniform,41.927,True,0,41.925,True,0,42.293,True,0,88.552,True,0,90.713,,0,crashed standby,True,clean shutdown in recovery,True,fill2,41.88,90.78,False,0.2823

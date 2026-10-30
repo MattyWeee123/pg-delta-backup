@@ -4,6 +4,19 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (02:40 UTC): EXP-84 done: the first held-out session narrows two claims
+
+- **`--crashed-standby` held in 10 of 10 cells** on H1–H4 (new workloads, scale 1,200, pd-ssd, PostgreSQL 18.6): proven, correct, within +0.36 s or 0.9% of a clean standby. It is eligible to become a default; that is the owner's decision.
+- **`--selector` failed in 6 of 10:**
+  - every refresh of 1.5–2.5 s was under-predicted by 18–33% (0.26–0.69 s): its fixed cost was fit only on long refreshes;
+  - the long cells held, and pd-ssd was over-predicted 1.52x, as predicted;
+  - its call on `pg_basebackup` was right in 10 of 10, and its predictions of `pg_basebackup` were within 1% on pd-balanced.
+- **page-lsn failed in 1 of 10:** 1.123x `pg_basebackup` at scale 1,200, uniform; 0.86–0.98x elsewhere. Post-hoc: it read 1.108x S there (3.9 GB more, about 19 s at the disk's cap), re-reading chosen pages that had left the cache. Single-read page-lsn is added to the archive.
+- **The fast path's defaults held** (0.015–0.46 of `pg_basebackup`), and 40 of 40 copies matched.
+- **The session:** three VM sets, 21:44 to 02:10 UTC. The gcloud sign-in expired while `hc` was being prepared, before its smoke; the owner signed in and it resumed. Every set is torn down.
+- **Rule 15:** H1–H4 are spent and may now be used to tune. H5–H8 are sealed: skewed non-HOT updates, 32 GB of memory, local NVMe, and checksums off with `wal_log_hints`.
+- **Post-hoc figure:** `exp84-misses` (`analysis/exp84_posthoc.py`).
+
 ## 2026-10-29 (21:33 UTC): EXP-84 pre-registered: the held-out session for --crashed-standby, --selector and page-lsn
 
 - **The settings:** sealed since October 28: H1 (clustered, tpcb, append, retention), H2 (scale 1,200), H3 (pd-ssd), H4 (PostgreSQL 18.6). H3 and H4 were built at first use: `create.sh` takes pd-ssd, and the lab takes `PG_MAJOR`.
