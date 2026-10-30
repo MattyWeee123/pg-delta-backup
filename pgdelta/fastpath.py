@@ -213,7 +213,7 @@ def basis_facts(basis, pg_controldata, marker, crashed_standby=False, crashed_pr
                                       identity.get('wal_segment_size') or 16 << 20)
         if end is None:
             return None, f'B is a primary that crashed, and its end can\'t be proven: {detail}'
-        proof = 'crashed primary'
+        proof, crashed_wal = 'crashed primary', detail
     else:
         hint = (' (a standby that crashed in recovery is taken unless --no-crashed-standby is given)'
                 if state == 'in archive recovery' else
@@ -229,6 +229,8 @@ def basis_facts(basis, pg_controldata, marker, crashed_standby=False, crashed_pr
              'proof': proof, 'last_wal_record': format_lsn(last) if last else None,
              'major': _major(basis), 'wal_log_hints': controldata_value(text, 'wal_log_hints setting') == 'on',
              **{key: identity.get(key) for key in IDENTITY_KEYS}}
+    if proof == 'crashed primary':
+        facts['crashed_wal'] = crashed_wal  # how its end was proven: the stop, pages checked, seconds
     return facts, None
 
 
@@ -313,6 +315,7 @@ def crashed_wal_end(pg_wal, waldump, timeline, redo, segment_size, timeout=3600)
       header's address its own and the magic B's): WAL written past the stop means damage, not an end. After a crash
       the space past the end holds zeros or a recycled segment's older pages.
     What this can't see: a pg_wal replaced by an older copy of itself, or storage that lost WAL it reported flushed."""
+    started = time.perf_counter()
     try:
         stop = subprocess.run([str(waldump), '--quiet', '--path', str(pg_wal), '--timeline', str(timeline),
                                '--start', format_lsn(redo)], capture_output=True, text=True, timeout=timeout)
@@ -382,7 +385,7 @@ def crashed_wal_end(pg_wal, waldump, timeline, redo, segment_size, timeout=3600)
         except OSError as exc:
             return None, f'B\'s WAL segment {path.name} could not be read: {exc}'
     return end, {'end': format_lsn(end), 'last_record': format_lsn(last), 'stop': message[:200],
-                 'pages_checked': pages}
+                 'pages_checked': pages, 'seconds': round(time.perf_counter() - started, 3)}
 
 
 def wal_log_hints(basis, pg_controldata):

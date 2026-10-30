@@ -183,8 +183,14 @@ def trial(lab, root, number, arm, rng):
                 'diverged_blocks': (fast.get('diverged_basis') or {}).get('blocks'),
                 'pages_sent': (stats.get('pages') or {}).get('sent'), 'pages_total': (stats.get('pages') or {}).get('total')})
     if result.returncode == 0:
-        equal, amcheck, source, copied = lab.verify(path)
-        row.update({'rows_equal': equal, 'amcheck_ok': amcheck})
+        try:
+            equal, amcheck, source, copied = lab.verify(path)
+        except RuntimeError as exc:  # a copy too broken for the check's own query is a wrong copy
+            lab.ctl(path, base.PORT_COPY, 'stop', check=False)
+            row.update({'rows_equal': False, 'amcheck_ok': False, 'diff': f'the check failed: {str(exc)[-200:]}'})
+            equal, source = True, None
+        else:
+            row.update({'rows_equal': equal, 'amcheck_ok': amcheck})
         if not equal:
             row['diff'] = json.dumps({k: (json.loads(source)[k], json.loads(copied)[k]) for k in json.loads(source)
                                       if json.loads(source)[k] != json.loads(copied)[k]})[:300]

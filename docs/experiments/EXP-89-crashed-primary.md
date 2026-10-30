@@ -1,6 +1,14 @@
 # EXP-89: A primary that crashed, refreshed by the fast path with its end proven by its own WAL
 
-Status: **pre-registered October 30, 2026, before any scored run.** (Numbered 89 because a VM set named `exp88`, not from this work, is running in the project.)
+Status: **pre-registered October 30, 2026, before any scored run.** *Amended before any scored data:* the first launch stopped at trial 11, a blind-spot (`stale-wal`) copy so broken that the check's own query failed on it. A system catalog index file was a block short, and that raised an error instead of a result. No data file was written. Its 11 printed trials all went as predicted:
+- 3 `same` and 2 `failover` taken and correct;
+- 3 `lost`, 1 `damaged` and 1 `lost-failover` refused and hashed correctly.
+
+Two changes were made:
+- the harness now records a copy too broken to query as a wrong copy;
+- the proof's details and seconds are added to the receiver's facts (`crashed_wal`), for reporting.
+
+No arm, check or prediction changed. The files are recorded again at the fixed commit, and the campaign restarts from its first trial, seed 890. (Numbered 89 because a VM set named `exp88`, not from this work, is running in the project.)
 
 ## Question
 
