@@ -13,3 +13,6 @@ target/
 .claude/
 results/hammerdb*/
 /results/
+docs/notes/
+docs/superpowers/
+infra/observability/out/

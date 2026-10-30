@@ -1,0 +1,12 @@
+# The dashboards are committed JSON, provisioned read-only: a dashboard edited in the browser and not committed
+# would make a figure nobody can reproduce, which is the whole objection to dashboards as evidence.
+apiVersion: 1
+providers:
+  - name: pgdelta
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

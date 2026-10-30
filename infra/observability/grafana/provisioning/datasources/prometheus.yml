@@ -1,0 +1,14 @@
+# Provisioned so a fresh Grafana comes up already pointed at Prometheus: nothing to click.
+# The uid is fixed, because the committed dashboards reference it by uid; letting Grafana generate one would
+# break them on every fresh volume.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: pgdelta-prom
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 1s
+      httpMethod: POST

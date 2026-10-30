@@ -1,0 +1,346 @@
+{
+  "uid": "pgdelta-evidence",
+  "title": "pgdelta: measured latency evidence (EXP-12, -28, -57)",
+  "description": "The committed results of the slowdown experiments, backfilled from docs/experiments/data/*.csv by infra/observability/backfill.py. These are session aggregates, not live samples: the metric names are prefixed pgdelta_evidence_ to keep them apart, and each series is a flat line across the wall-clock window its session actually ran in. The write-ups are the authority; this is a reading aid. Set the dashboard's time range to 'October 2026' to see all three sessions.",
+  "tags": ["pgdelta", "latency", "evidence", "backfilled"],
+  "timezone": "utc",
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "",
+  "time": { "from": "2026-10-24T18:00:00.000Z", "to": "2026-10-27T14:00:00.000Z" },
+  "panels": [
+    {
+      "id": 10,
+      "type": "text",
+      "title": "How to read this",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**O4's bar is `pg_basebackup` under the same load**, not zero. An arm meets it when its work lost is within max(0.05 s, 0.15 x full's) and its worst drop within 0.03 of `pg_basebackup`'s.\n\n- **EXP-28** (Oct 25): v1 reading a live busy primary, by source worker count. The cliff between `v1_j2` and `v1_j4` is why live mode now defaults to at most 2 workers on 8 vCPUs.\n- **EXP-12** (Oct 24): T10a, with v1 measured only by proxy; carries p50 as well, and the only committed `moderate` load block.\n- **EXP-57** (Oct 27): the start checkpoint on ~5 GB of dirty buffers. **Its two O4 numbers disagree** - `fast` has the worse drop, `spread` the larger total loss - and which one governs is still open."
+      }
+    },
+    {
+      "id": 1,
+      "type": "bargauge",
+      "title": "EXP-28: p95 latency by arm (unthrottled) - the worker-count cliff",
+      "description": "load only 5.3 ms, pg_basebackup 6.4 ms, v1 at 1-2 workers 6.6-7.4 ms, v1 at 4 workers 74.3 ms.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 15 },
+              { "color": "red", "value": 50 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_evidence_latency_ms{experiment=\"EXP-28\",quantile=\"0.95\",speed=\"unthrottled\"}",
+          "legendFormat": "{{arm}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "bargauge",
+      "title": "EXP-28: p99 latency by arm (unthrottled)",
+      "description": "The tail the p95 panel understates: v1 at 4 workers reached 114.6 ms against pg_basebackup's 9.3 ms.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 20 },
+              { "color": "red", "value": 60 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_evidence_latency_ms{experiment=\"EXP-28\",quantile=\"0.99\",speed=\"unthrottled\"}",
+          "legendFormat": "{{arm}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "bargauge",
+      "title": "EXP-28: O4 work lost, net (s)",
+      "description": "The bar is pg_basebackup's 0.000 plus a tolerance of 0.05 s. v1 at 4 workers spent 0.073 s unthrottled: a miss.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 14 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 3,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_evidence_work_lost_seconds{experiment=\"EXP-28\",speed=\"unthrottled\"}",
+          "legendFormat": "{{arm}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "bargauge",
+      "title": "EXP-28: O4 worst drop, net",
+      "description": "Tolerance 0.03 over pg_basebackup's 0.000. v1 at 4 workers reached 0.047 unthrottled.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 14 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 0.03 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_evidence_worst_drop_ratio{experiment=\"EXP-28\",speed=\"unthrottled\"}",
+          "legendFormat": "{{arm}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "bargauge",
+      "title": "EXP-28: refresh time (s)",
+      "description": "The trade the cliff buys: 4 workers finish in 3.9 s against 2 workers' 5.2 s. Read this panel beside the two O4 panels - speed alone is not the verdict.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 14 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "decimals": 2, "min": 0, "color": { "mode": "fixed", "fixedColor": "blue" } },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "basic",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_evidence_refresh_seconds{experiment=\"EXP-28\",speed=\"unthrottled\"}",
+          "legendFormat": "{{arm}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "bargauge",
+      "title": "EXP-57: the open conflict - worst drop favours `spread`",
+      "description": "fast 0.937-0.947 (a near-total stall for ~30 s) against spread 0.450-0.462. By this number, spread wins.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 22 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 3,
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 0.4 },
+              { "color": "red", "value": 0.9 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_evidence_worst_drop_ratio{experiment=\"EXP-57\"}",
+          "legendFormat": "{{arm}} #{{repeat}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "bargauge",
+      "title": "EXP-57: ...but work lost favours `fast`",
+      "description": "fast 26.1-29.0 s against spread 50.7-52.9 s. The two numbers point opposite ways: this is the decision that is still open.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 22 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 20 },
+              { "color": "red", "value": 45 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_evidence_work_lost_seconds{experiment=\"EXP-57\"}",
+          "legendFormat": "{{arm}} #{{repeat}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "bargauge",
+      "title": "EXP-57: p99 latency (seconds, not ms)",
+      "description": "The scale that makes the checkpoint the dominant latency event in the whole project: p99 of 26-29 s for fast and ~50 s for spread, against a 6-11 ms baseline.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 22 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "decimals": 0,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1000 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_evidence_latency_ms{experiment=\"EXP-57\",quantile=\"0.99\"}",
+          "legendFormat": "{{arm}} #{{repeat}}",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "EXP-12: latency by load block and tier (the `main` view)",
+      "description": "T10a's cells, including the `moderate` load block that EXP-28 did not run for v1 live. p50 is only committed here.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 30 },
+      "fieldConfig": {
+        "defaults": { "unit": "ms", "decimals": 3, "custom": { "align": "auto", "filterable": true } },
+        "overrides": []
+      },
+      "options": { "showHeader": true, "footer": { "show": false } },
+      "transformations": [
+        { "id": "labelsToFields", "options": { "mode": "columns" } },
+        { "id": "organize", "options": { "excludeByName": { "Time": true, "experiment": true, "view": true } } }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_evidence_latency_ms{experiment=\"EXP-12\",view=\"main\"}",
+          "legendFormat": "",
+          "format": "table",
+          "instant": true
+        }
+      ]
+    }
+  ]
+}

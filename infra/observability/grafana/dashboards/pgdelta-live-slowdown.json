@@ -1,0 +1,224 @@
+{
+  "uid": "pgdelta-live",
+  "title": "pgdelta: the load during a backup (live)",
+  "description": "What the source's load feels while a backup runs, read from pgbench's per-transaction logs on the client VM by infra/observability/pgbench_exporter.py. The shaded region and the 'backup window' row are the timed arm the lab driver recorded, not a guess from the latency curve. O4's bar is pg_basebackup's own effect under the same load, so the comparison that matters is this dashboard during a v1 arm against the same dashboard during a `full` arm.",
+  "tags": ["pgdelta", "latency", "live"],
+  "timezone": "utc",
+  "editable": false,
+  "schemaVersion": 39,
+  "refresh": "1s",
+  "time": { "from": "now-5m", "to": "now" },
+  "annotations": {
+    "list": [
+      {
+        "name": "Backup window",
+        "enable": true,
+        "iconColor": "red",
+        "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+        "expr": "pgdelta_backup_active > 0",
+        "titleFormat": "backup running",
+        "step": "1s"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Transaction latency (p50 / p95 / p99)",
+      "description": "Exact quantiles over the exporter's sliding window of completed transactions. p95 is the metric O4's discussion turns on; p99 is where a start checkpoint shows up (EXP-57 measured p99 of 26-52 s on a large dirty set).",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 10, "w": 18, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 5,
+            "showPoints": "never",
+            "spanNulls": false
+          }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "p99" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "p95" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "orange" } }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "p50" },
+            "properties": [{ "id": "color", "value": { "mode": "fixed", "fixedColor": "green" } }]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "table", "placement": "right", "calcs": ["mean", "max"] },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_txn_latency_ms{quantile=\"0.5\"}",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_txn_latency_ms{quantile=\"0.95\"}",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_txn_latency_ms{quantile=\"0.99\"}",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Failed or skipped transactions",
+      "description": "pgbench logs a transaction whose latency field is not a number as failed or skipped. Any non-zero value during a run is a correctness question, not a performance one.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_txn_failed_total",
+          "legendFormat": "failed"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Backup running",
+      "description": "1 while now lies inside the t0..t1 the lab driver wrote to its window file.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 5 },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "idle", "color": "green", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "BACKUP", "color": "orange", "index": 1 } } }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_backup_active",
+          "legendFormat": "active"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "state-timeline",
+      "title": "Backup window",
+      "description": "The timed arm, on the same time axis as the latency above: this is the interval O4's two numbers are computed over.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 10 },
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "fillOpacity": 90, "lineWidth": 0 },
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "load only", "color": "green", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "backup running", "color": "orange", "index": 1 } } }
+          ]
+        },
+        "overrides": []
+      },
+      "options": { "mergeValues": true, "showValue": "never", "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_backup_active",
+          "legendFormat": "backup"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Throughput (completed transactions per second)",
+      "description": "The other half of O4: a backup can leave latency alone and still cost the load work by completing fewer transactions. W is this curve's shortfall against the scheduled rate, integrated over the window.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 14 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "single" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_txn_rate_per_second",
+          "legendFormat": "completed/s"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Schedule lag (open-loop queueing)",
+      "description": "Under -R, pgbench records how long each transaction waited past its scheduled start. Lag rising while latency stays flat means the source stopped keeping up with the offered rate, which is the shape a stalled checkpoint makes.",
+      "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 14 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 5, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom" }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_txn_schedule_lag_ms{quantile=\"0.95\"}",
+          "legendFormat": "lag p95"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "pgdelta-prom" },
+          "expr": "pgdelta_txn_schedule_lag_ms{quantile=\"0.99\"}",
+          "legendFormat": "lag p99"
+        }
+      ]
+    }
+  ]
+}

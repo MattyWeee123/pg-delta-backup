@@ -1,0 +1,6 @@
+[
+  {
+    "targets": ["host.docker.internal:9187"],
+    "labels": {"role": "client", "comment": "replace with CLIENT_IP:9187 for a VM session"}
+  }
+]

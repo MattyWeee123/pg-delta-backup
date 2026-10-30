@@ -1,0 +1,37 @@
+# Prometheus for the latency experiments (infra/observability/README.md).
+#
+# Scrape targets come from a file, not from this config, so pointing the stack at a session's client VM is a
+# one-line edit to targets/pgbench.json with no container rebuild and no templating.
+#
+# The scrape interval is 1s to match the 1-second buckets O4's two numbers are computed over (EXP-12's change 3).
+# That is far faster than Prometheus's usual 15s, and it is only safe because the exporter it scrapes reads a log
+# the client already writes: nothing here touches the source. Do not add a source-side exporter to this file
+# without an arm that measures what the exporter itself costs the load - O4's bar is 0.05 s of work lost and a
+# worst drop of 0.03, which an incautious agent can spend on its own.
+global:
+  scrape_interval: 1s
+  scrape_timeout: 900ms
+  evaluation_interval: 15s
+  external_labels:
+    stack: pgdelta-latency
+
+scrape_configs:
+  # The load's latency, from pgbench's per-transaction logs on the client VM.
+  - job_name: pgbench
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/pgbench.json']
+        refresh_interval: 10s
+
+  # Prometheus's own health, so a gap in the data can be told from a gap in the scraping.
+  - job_name: prometheus
+    scrape_interval: 15s
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Host metrics for the DEST and CLIENT VMs only. The source is deliberately absent: see the note above.
+  # Leave the file empty ([]) when no node_exporter is running.
+  - job_name: node
+    scrape_interval: 5s
+    file_sd_configs:
+      - files: ['/etc/prometheus/targets/node.json']
+        refresh_interval: 10s

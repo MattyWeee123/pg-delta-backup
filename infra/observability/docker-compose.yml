@@ -1,0 +1,95 @@
+# The latency observability stack: Prometheus + Grafana, with committed, read-only dashboards.
+#
+#   cd infra/observability && docker compose up -d
+#   Grafana    http://127.0.0.1:3000   (anonymous read-only; admin login for changes)
+#   Prometheus http://127.0.0.1:9090
+#
+# Both ports bind to **loopback only**. This stack is meant to run either on a laptop or on a session's client
+# VM, and those VMs have external IPs: published on 0.0.0.0 it would be a world-readable dashboard with an
+# unauthenticated Prometheus beside it. Reach a VM's stack over the SSH connection the harness already uses:
+#
+#   ssh -i ~/.ssh/exp04_ed25519 -L 3000:127.0.0.1:3000 -L 9090:127.0.0.1:9090 CLIENT_IP
+#
+# To expose it deliberately on a trusted network, set BIND_ADDR=0.0.0.0 and set GF_ADMIN_PASSWORD; do not do
+# that on a VM with an external IP unless a firewall rule restricts the source range.
+#
+# Two ways to get data in:
+#   live     point prometheus/targets/pgbench.json at the session's client VM (CLIENT_IP:9187), where
+#            pgbench_exporter.py runs. See README.md.
+#   backfill `python backfill.py` turns the committed CSVs in docs/experiments/data/ into Prometheus blocks, so
+#            the dashboards show real measured evidence with no VM and no gcloud. Run the `backfill` service
+#            below, then `docker compose restart prometheus`.
+#
+# Image tags are pinned: a dashboard that renders differently next month is not evidence.
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: pgdelta-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Backfilled blocks carry the timestamps of the sessions they came from (October 2026), so the retention
+      # window must be long enough to keep them.
+      - --storage.tsdb.retention.time=3y
+      # Deliberately absent: --web.enable-admin-api (its delete_series/clean_tombstones endpoints need no
+      # credentials and would let any reader destroy the backfilled evidence) and --web.enable-lifecycle
+      # (`docker compose restart prometheus` reloads the config just as well, which README.md uses).
+    ports:
+      - '${BIND_ADDR:-127.0.0.1}:9090:9090'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/targets:/etc/prometheus/targets:ro
+      - prometheus-data:/prometheus
+    extra_hosts:
+      # So a locally-run exporter is reachable as host.docker.internal on Linux too, not just Docker Desktop.
+      - 'host.docker.internal:host-gateway'
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: pgdelta-grafana
+    depends_on: [prometheus]
+    ports:
+      - '${BIND_ADDR:-127.0.0.1}:3000:3000'
+    environment:
+      # Anonymous access is read-only: enough to open a dashboard during a demo without a login, and nothing
+      # more. The dashboards are provisioned read-only anyway, so Admin bought nothing.
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Kept on, so there is still a way in to administer. Set GF_ADMIN_PASSWORD before exposing the port.
+      GF_AUTH_BASIC_ENABLED: 'true'
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_USERS_DEFAULT_THEME: light
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: '1s'
+      # Embedding stays off: it exists to let another origin frame the dashboard, which a throwaway analysis
+      # stack has no use for.
+      GF_SECURITY_ALLOW_EMBEDDING: 'false'
+      GF_SECURITY_COOKIE_SAMESITE: strict
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+
+  # One-shot: import backfilled OpenMetrics into the Prometheus data volume. Writes blocks, then exits.
+  # Run `python backfill.py` first to produce out/backfill.openmetrics.
+  backfill:
+    image: prom/prometheus:v2.53.0
+    container_name: pgdelta-backfill
+    entrypoint:
+      - promtool
+      - tsdb
+      - create-blocks-from
+      - openmetrics
+      - /backfill/backfill.openmetrics
+      - /prometheus
+    volumes:
+      - ./out:/backfill:ro
+      - prometheus-data:/prometheus
+    profiles: ['backfill']
+
+volumes:
+  prometheus-data:
+  grafana-data:
