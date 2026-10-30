@@ -92,6 +92,9 @@ MODES = (MODE, PAGE_LSN)
 LSN_FORKS = ('main',)  # with page-lsn, the forks whose pages are chosen by LSN; every other fork goes whole
 LSN_LOOKAHEAD = 2  # files the page-lsn scanner may run ahead of the sending thread
 LSN_SCAN_BYTES = 8 << 20  # its reads, each a run of whole pages
+# --lsn-single-read (EXP-85): the chosen pages' bytes the scanner may hold ahead of the sending thread, which sends
+# them as read. EXP-84 found the two-read scanner's second reads, past the page cache, behind its loss at 4.5x memory.
+LSN_HELD_BYTES = 256 << 20
 PAGE_HEADER_SIZE = 24  # SizeOfPageHeaderData
 PD_VALID_FLAG_BITS = 0x0007
 _PAGE_HEADER = struct.Struct('<IIHHHHH')  # pd_lsn (xlogid, xrecoff), pd_checksum, pd_flags, pd_lower, pd_upper, pd_special
@@ -550,17 +553,83 @@ def lsn_scan(read, size, block, threshold, chunk=LSN_SCAN_BYTES):
     return pages
 
 
+def lsn_scanned(path, size, basis_size, block, whole=False):
+    """page-lsn: whether the listed file `path` has its pages chosen by a scan (a main-fork file B holds, in whole
+    pages), rather than going whole."""
+    match = _RELATION.match(path)
+    fork = (match.group(2) or '_main')[1:] if match else None
+    return not (whole or basis_size is None or match is None or fork not in LSN_FORKS or size % block)
+
+
 def lsn_pages(path, size, basis_size, scan, block, whole=False):
     """page-lsn: the pages of the listed file `path` to send, in order, and whether the whole file goes. `scan()`
     (lsn_scan on the server's copy) is called only for a main-fork file B holds."""
     pages = -(-size // block)
-    match = _RELATION.match(path)
-    fork = (match.group(2) or '_main')[1:] if match else None
-    if whole or basis_size is None or match is None or fork not in LSN_FORKS or size % block:
+    if not lsn_scanned(path, size, basis_size, block, whole):
         return list(range(pages)), True
     chosen = set(scan())
     chosen.update(range(min(basis_size // block, pages), pages))  # past B's length, or a partial last page of it
     return sorted(chosen), False
+
+
+def lsn_held_runs(read, size, block, threshold, basis_pages, gap, max_pages, counts, chunk=LSN_SCAN_BYTES):
+    """--lsn-single-read (EXP-85): one read of a file of `size` bytes (whole pages) through `read(offset, length)`
+    in runs of `chunk` bytes, yielding after each a list of the runs to send, as (first page, bytes): the pages
+    lsn_scan chooses, every page at or past `basis_pages` (B's length), and each clean gap of at most `gap` pages
+    between two of them (fill_gaps), cut into runs of at most `max_pages` as matching.runs cuts them. So the runs are
+    those page-lsn sends after lsn_pages and fill_gaps, with the bytes the scan read: no page is read twice. A run is
+    held until no later page can join it; a fill may take the pages read last in the previous chunk.
+    counts['chosen'] and counts['filled'] are added to."""
+    chunk = max(block, chunk - chunk % block)
+    run_first, run, out = None, bytearray(), []
+    last = None  # the last chosen page
+    tail_first, tail = None, b''  # the pages read after `last` in the previous chunk (at most `gap`), for a fill
+
+    def add(page, data):
+        nonlocal run_first, run
+        if run_first is not None and run_first + len(run) // block == page and len(run) // block < max_pages:
+            run += data
+            return
+        if run_first is not None:
+            out.append((run_first, bytes(run)))
+        run_first, run = page, bytearray(data)
+
+    for offset in range(0, size, chunk):
+        data = read(offset, min(chunk, size - offset))
+        first, count = offset // block, len(data) // block
+        for i in range(count):
+            page = first + i
+            if page < basis_pages and not page_chosen(data, i * block, threshold, block):
+                continue
+            counts['chosen'] += 1
+            if last is not None and 0 < page - last - 1 <= gap:
+                for filled in range(last + 1, page):
+                    counts['filled'] += 1
+                    if filled < first:
+                        start = (filled - tail_first) * block
+                        add(filled, tail[start:start + block])
+                    else:
+                        add(filled, data[(filled - first) * block:(filled - first + 1) * block])
+            add(page, data[i * block:(i + 1) * block])
+            last = page
+        end = first + count
+        if last is not None and end - last - 1 <= gap:
+            # A fill may yet take the pages after `last`: keep them, and the run they would extend.
+            if last + 1 < first:  # the gap began in an earlier chunk, whose pages after `last` are in `tail`
+                tail += bytes(data[:count * block])
+            else:
+                tail = bytes(data[(last + 1 - first) * block:count * block])
+            tail_first = last + 1
+        elif run_first is not None:
+            out.append((run_first, bytes(run)))
+            run_first, run = None, bytearray()
+        if out:
+            yield out
+            out = []
+        if count * block < min(chunk, size - offset):
+            break  # a short read: the file ended early
+    if run_first is not None:
+        yield [(run_first, bytes(run))]
 
 
 def fill_gaps(pages, gap):
@@ -636,11 +705,14 @@ def check_basis_wal(value):
 
 
 def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False,
-               selector=None):
+               selector=None, lsn_single_read=False):
     if type(read_ahead) is not int or read_ahead < 0:
         raise InvalidInput(f'read-ahead must be a whole number of threads, not {read_ahead!r}')
     if type(fill_gaps) is not int or fill_gaps < 0:
         raise InvalidInput(f'fill-gaps must be a whole number of pages, not {fill_gaps!r}')
+    if lsn_single_read and mode != PAGE_LSN:
+        raise InvalidInput('--lsn-single-read sends page-lsn\'s chosen pages as its scan read them, so it needs '
+                           '--fast-path page-lsn')
     if mode is None:
         if read_ahead:
             raise InvalidInput('--read-ahead reads the fast path\'s chosen pages, so it needs --fast-path')

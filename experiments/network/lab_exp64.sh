@@ -45,6 +45,7 @@
 # sets its wal_keep_size, so the WAL since each old copy stays on disk, as a replication slot would keep it. Arms:
 # - "hash": no fast path (pgdelta hashes both copies);
 # - "lsn": --fast-path page-lsn, with the fast path's other defaults (2-page gaps filled, the fsync worker);
+# - "lsn1" (EXP-85): "lsn" with --lsn-single-read, sending the chosen pages from the scan's reads;
 # - "od" (summaries on demand): summarize_wal turned on (ALTER SYSTEM, a reload) and the summarizer waited for until it
 #   has read the WAL up to the source's LSN at that moment, then the summaries' fast path with its defaults; timed from
 #   before the setting is turned on. Afterwards it is turned off again and its summaries removed, so each run starts
@@ -296,6 +297,7 @@ EOF
       fi
       case "$a" in
         lsn) fast="--fast-path page-lsn --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
+        lsn1) fast="--fast-path page-lsn --lsn-single-read --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
         od) fast="--fast-path summaries --read-ahead 8 --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
       esac
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"

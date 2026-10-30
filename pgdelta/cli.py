@@ -226,6 +226,11 @@ def _compress_option(parser):
                              'and these go with the summaries\' blocks since that checkpoint. B must have been '
                              'stopped cleanly, keep that WAL, and have data checksums or wal_log_hints (idea 1, '
                              'EXP-69, EXP-69b, EXP-71) (default: on with --fast-path)')
+    parser.add_argument('--lsn-single-read', action='store_true',
+                        help='with --fast-path page-lsn: send each chosen page from the scan\'s own read of it, '
+                             'never reading it again. The scanner holds at most about 256 MiB of chosen pages ahead '
+                             'of sending. Without it, at 4.5x memory the second reads missed the page cache and page-'
+                             'lsn took 1.12x pg_basebackup (EXP-84). Opt-in until EXP-85')
     parser.add_argument('--selector', action='store_true',
                         help='with --fast-path, where the guard lets it run: predict its time from its plan at each '
                              'fill (0, 1, 2 and 4 pages), from the disks\' limits below, and take the fastest fill '
@@ -628,7 +633,8 @@ def _sender_kwargs(args, identity):
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
             'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
             'read_ahead': _read_ahead(args), 'plan_out': getattr(args, 'plan_out', None),
-            'fill_gaps': _fill_gaps(args), 'diverged_basis': _diverged_basis(args), 'selector': _selector(args)}
+            'fill_gaps': _fill_gaps(args), 'diverged_basis': _diverged_basis(args), 'selector': _selector(args),
+            'lsn_single_read': getattr(args, 'lsn_single_read', False)}
 
 
 def _read_ahead(args):

@@ -356,6 +356,55 @@ class PageLsn(unittest.TestCase):
         self.assertEqual(reads, [(0, 16384), (16384, 16384), (32768, 8192)])
         self.assertEqual(fastpath.lsn_scan(read, len(data), 8192, threshold, chunk=1000), [1, 2, 4])  # at least a page
 
+    def test_single_read_sends_the_runs_and_bytes_two_reads_send(self):
+        """EXP-85: lsn_held_runs, from one read of each page, gives the runs page-lsn sends after lsn_pages, fill_gaps
+        and matching.runs, with the same bytes, for random files, chunks that cut fills, gaps and run lengths."""
+        import random
+
+        from pgdelta import matching
+        threshold, rng = L('0/2000000'), random.Random(85)
+        kinds = [lambda i: page(L('0/100'), fill=bytes([i % 251])), lambda i: page(L('0/3000000'), fill=bytes([i % 7])),
+                 lambda i: page(None), lambda i: page(L('0/100'), flags=0x0100)]
+        for trial in range(400):
+            pages = rng.randrange(0, 40)
+            weights = rng.choice(((8, 1, 0, 0), (1, 1, 1, 1), (20, 1, 1, 0), (0, 1, 0, 0), (1, 0, 0, 0)))
+            data = b''.join(rng.choices(kinds, weights)[0](i) for i in range(pages))
+            basis_pages, gap = rng.randrange(0, pages + 2), rng.randrange(0, 5)
+            max_pages, chunk = rng.randrange(1, 6), rng.randrange(1, 9) * 8192
+            reads = []
+
+            def read(offset, length):
+                reads.append((offset, length))
+                return data[offset:offset + length]
+
+            chosen = sorted(set(fastpath.lsn_scan(read, len(data), 8192, threshold))
+                            | set(range(min(basis_pages, pages), pages)))
+            filled = fastpath.fill_gaps(chosen, gap)
+            expected = [(first, data[first * 8192:(first + count) * 8192])
+                        for first, count in matching.runs(filled, max_pages)]
+            reads.clear()
+            counts = {'chosen': 0, 'filled': 0}
+            got = [run for runs in fastpath.lsn_held_runs(read, len(data), 8192, threshold, basis_pages, gap,
+                                                         max_pages, counts, chunk=chunk) for run in runs]
+            with self.subTest(trial=trial, pages=pages, basis_pages=basis_pages, gap=gap, max_pages=max_pages,
+                              chunk=chunk):
+                self.assertEqual([first for first, _ in got], [first for first, _ in expected])
+                self.assertEqual(got, expected)
+                self.assertEqual((counts['chosen'], counts['filled']), (len(chosen), len(filled) - len(chosen)))
+                self.assertEqual(sum(length for _, length in reads), len(data))  # each page read once
+                self.assertTrue(all(len(run) <= max_pages * 8192 for _, run in got))
+
+    def test_single_read_holds_a_run_only_while_a_later_page_can_join_it(self):
+        """EXP-85: a run is yielded with the chunk after which no page can join it, so the scanner holds at most a
+        chunk's runs, plus one open run and a fill's pages."""
+        threshold = L('0/2000000')
+        new, old = page(L('0/3000000')), page(L('0/100'))
+        data = b''.join((new, old, old, old, old, new, old, new))  # pages 0, 5 and 7 chosen
+        batches = list(fastpath.lsn_held_runs(lambda o, n: data[o:o + n], len(data), 8192, threshold, 8, 1, 128,
+                                              {'chosen': 0, 'filled': 0}, chunk=2 * 8192))
+        self.assertEqual([[first for first, _ in runs] for runs in batches], [[0], [5]])
+        self.assertEqual([len(run) // 8192 for runs in batches for _, run in runs], [1, 3])  # 5, its fill 6, then 7
+
     def test_only_main_forks_b_holds_are_scanned_and_pages_past_b_go_too(self):
         scans = []
 
@@ -399,6 +448,12 @@ class PageLsn(unittest.TestCase):
                 fastpath.check_mode('page-lsn', 'live', False, *args)
         with self.assertRaises(InvalidInput):
             fastpath.check_mode('page-lsn', 'datadir', False)
+
+    def test_single_read_is_page_lsn_s_only(self):
+        fastpath.check_mode('page-lsn', 'live', False, fill_gaps=2, lsn_single_read=True)
+        for mode in (None, 'summaries'):
+            with self.subTest(mode=mode), self.assertRaisesRegex(InvalidInput, 'lsn-single-read'):
+                fastpath.check_mode(mode, 'live', False, lsn_single_read=True)
 
 
 class ReadAhead(unittest.TestCase):
@@ -710,6 +765,25 @@ class RealServer(unittest.TestCase):
         self.assertNotIn('BASIS_NODES', stats['receiver']['bytes_written']['by_message_type'])  # B never hashed
         self.check_copy(target)
 
+    def test_page_lsn_single_read_sends_from_the_scan_and_reads_nothing_again(self):
+        """EXP-85: --lsn-single-read chooses page-lsn's pages and fills, sends them from the scan's reads (no byte read
+        again, against every sent byte read again without it), and the copy recovers to S."""
+        _, twice = self.refresh('lsn-twice', 'stale', '--fast-path', 'page-lsn')
+        target, once = self.refresh('lsn-once', 'stale', '--fast-path', 'page-lsn', '--lsn-single-read')
+        for stats, single in ((twice, False), (once, True)):
+            fast = stats['fast_path']
+            self.assertTrue(fast['used'], fast['reasons'])
+            self.assertIs(fast['lsn_single_read'], single)
+            self.assertGreater(fast['pages_chosen'], 0)
+            self.assertEqual(fast['files_scanned'], twice['fast_path']['files_scanned'])
+        self.assertGreater(twice['fast_path']['reread_bytes'], 0)
+        self.assertLessEqual(twice['fast_path']['reread_bytes'], twice['pages']['sent_bytes'])
+        self.assertEqual(once['fast_path']['reread_bytes'], 0)
+        self.assertGreater(once['fast_path']['held_bytes_peak'], 0)
+        self.assertLessEqual(once['fast_path']['held_bytes_peak'],
+                             fastpath.LSN_HELD_BYTES + 2 * fastpath.LSN_SCAN_BYTES)
+        self.check_copy(target)
+
     def test_page_lsn_takes_a_base_backup_and_a_killed_standby_from_their_redo_points(self):
         """A base backup (proof: its manifest) and a killed standby (--crashed-standby) need not hold, untorn, a page
         changed after their redo point: page-lsn sends every page changed since it, and both copies recover."""
@@ -723,7 +797,9 @@ class RealServer(unittest.TestCase):
         self.sql('UPDATE pgbench_accounts SET abalance = abalance + 4 WHERE aid % 509 = 13')
         self.sql('CHECKPOINT')
         for name, basis, proof, extra in (('lsn-from-backup', backup, 'backup_manifest', ()),
-                                          ('lsn-from-standby', standby, 'crashed standby', ('--crashed-standby',))):
+                                          ('lsn-from-standby', standby, 'crashed standby', ('--crashed-standby',)),
+                                          ('lsn1-from-backup', backup, 'backup_manifest', ('--lsn-single-read',)),
+                                          ('lsn1-from-standby', standby, 'crashed standby', ('--lsn-single-read',))):
             with self.subTest(basis=name):
                 shutil.copytree(basis, self.root / f'{name}-basis', symlinks=True)
                 target, stats = self.refresh(name, f'{name}-basis', '--fast-path', 'page-lsn', *extra)

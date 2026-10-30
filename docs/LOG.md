@@ -4,6 +4,17 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (03:10 UTC): EXP-85 pre-registered: single-read page-lsn
+
+- **Why:** EXP-84's one page-lsn miss (1.123x `pg_basebackup` at scale 1,200, uniform) came with 11% extra source-disk reads. Post-hoc, these were the second reads of chosen pages that had left the page cache.
+- **Built:**
+  - `--lsn-single-read` sends each chosen page from the scan's own read;
+  - `fastpath.lsn_held_runs` yields exactly the runs and bytes the two-read path sends, as a randomized property test checks;
+  - the scanner holds at most about 256 MiB ahead of sending.
+- **Local stage:** 120 single-read trials and 10 negative controls (EXP-82's campaign), and a scale-model timing.
+- **VM stage, only if the local stage holds:** H2's spent cells on the ha set, with two runs each of two reads, single read and `pg_basebackup`.
+- **Deciding:** single read at most 1.05x `pg_basebackup` in uniform. Also predicted: its source-disk reads at most 1.01x `pg_basebackup`'s, and no cost in hot.
+
 ## 2026-10-30 (02:35 UTC): K15: `--crashed-standby` on by default with the fast path
 
 - **The owner's decision**, after EXP-84: `--crashed-standby` is on by default, and `--no-crashed-standby` turns it off. It changes only the fast path's decision. A crashed primary stays refused, and the fast path itself stays opt-in.

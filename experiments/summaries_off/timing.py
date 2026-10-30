@@ -1,7 +1,7 @@
 """EXP-82's local timings (rule 13's local stage): page-lsn and summaries on demand against hashing, on a server that
 never summarized WAL (docs/experiments/EXP-82-summaries-off-local.md).
 
-    .venv/bin/python experiments/summaries_off/timing.py [--scale 50] [--repeats 2] [--seed 821]
+    .venv/bin/python experiments/summaries_off/timing.py [--scale 50] [--repeats 2] [--seed 821] [--arms ...]
 
 One local source S (PostgreSQL 17, data checksums, summarize_wal off, checkpoint_timeout 30 min, max_wal_size 4 GB,
 wal_keep_size 8 GB: the VMs' settings, the WAL since each old copy kept). Two cells, in this order, each with its own
@@ -12,6 +12,7 @@ B0, a base backup taken before the cell's change:
 Each run copies B0 to B and times the refresh of B in place:
 - hash: no fast path (today's path where the server doesn't summarize);
 - page-lsn: --fast-path page-lsn;
+- page-lsn-1 (EXP-85, not in the default arms): page-lsn with --lsn-single-read, the chosen pages sent as scanned;
 - on-demand: summarize_wal turned on (a reload), then --fast-path summaries, which waits for the summarizer to pass
   the backup's start: the timed span starts before the setting is turned on. Afterwards the setting is turned off and
   its summaries removed.
@@ -36,6 +37,7 @@ from crashed_standby_trials import PG_BIN, PORT_S, run  # noqa: E402
 ROOT = Path(__file__).resolve().parents[2]
 CELLS = ('hot', 'scatter')
 ARMS = ('hash', 'page-lsn', 'on-demand')
+SINGLE_READ = 'page-lsn-1'  # EXP-85
 
 
 class Lab(trials.Lab):
@@ -74,6 +76,7 @@ def main():
     ap.add_argument('--repeats', type=int, default=2)
     ap.add_argument('--seed', type=int, default=821)
     ap.add_argument('--out', default=str(ROOT / 'docs' / 'experiments' / 'data' / 'exp82-timing.csv'))
+    ap.add_argument('--arms', nargs='+', choices=(*ARMS, SINGLE_READ), default=list(ARMS))
     a = ap.parse_args()
     rows = []
     with tempfile.TemporaryDirectory(prefix='exp82t-') as temp:
@@ -90,7 +93,7 @@ def main():
                             if line.startswith('START WAL LOCATION'))
                 lab.change(cell)
                 wal = lsn_bytes(lab.lsn()) - lsn_bytes(redo)
-                plan = [(arm, k) for arm in ARMS for k in range(a.repeats)]
+                plan = [(arm, k) for arm in a.arms for k in range(a.repeats)]
                 random.Random(a.seed + CELLS.index(cell)).shuffle(plan)
                 for arm, k in plan:
                     b = root / 'B'
@@ -100,6 +103,8 @@ def main():
                     if arm == 'on-demand':
                         lab.summaries(True)
                         result, stats, _ = lab.refresh(b, 'summaries')
+                    elif arm == SINGLE_READ:
+                        result, stats, _ = lab.refresh(b, 'page-lsn', '--lsn-single-read')
                     else:
                         result, stats, _ = lab.refresh(b, None if arm == 'hash' else 'page-lsn')
                     seconds = time.perf_counter() - started
@@ -110,7 +115,8 @@ def main():
                            'exit': result.returncode, 'fast_used': fast.get('used'), 'summaries': fast.get('summaries'),
                            'pages_sent': (stats.get('pages') or {}).get('sent'),
                            'pages_total': (stats.get('pages') or {}).get('total'), 'wal_bytes_since_b0': wal,
-                           'database_bytes': size}
+                           'database_bytes': size, 'reread_bytes': fast.get('reread_bytes'),
+                           'scan_seconds': fast.get('scan_seconds'), 'held_bytes_peak': fast.get('held_bytes_peak')}
                     if result.returncode == 0:
                         equal, amcheck, _, _ = lab.verify(b)
                         row.update({'rows_equal': equal, 'amcheck_ok': amcheck})

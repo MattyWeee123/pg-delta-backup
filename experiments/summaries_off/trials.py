@@ -3,7 +3,7 @@ and from summaries turned on at refresh time (research loop 3), and does the neg
 (docs/experiments/EXP-82-summaries-off-local.md)
 
     .venv/bin/python experiments/summaries_off/trials.py [--per-arm 40] [--on-demand 20] [--controls 10]
-        [--seed 820] [--scale 4]
+        [--seed 820] [--scale 4] [--single-read] [--out CSV]
 
 One local source S (PostgreSQL 17, data checksums, summarize_wal off, checkpoints every 30 s and on 64 MB of WAL,
 wal_keep_size 1 GB so the WAL since each old copy stays on disk) runs for the whole campaign, under EXP-80's load:
@@ -20,6 +20,7 @@ now and then, a database created with STRATEGY FILE_COPY or WAL_LOG and dropped.
 - lsn-backup-end (negative control): a base backup taken under a heavier load, with no load after, its backup_label
   start moved to the backup's end (the threshold page-lsn would take if it used B's end, not its redo point), then
   page-lsn: pages changed during the backup and stale in B must stay unsent, and the copy is expected wrong.
+With --single-read (EXP-85) every page-lsn refresh, the control's included, has --lsn-single-read.
 Each refreshed copy is started without a signal file and compared with S (every pgbench table's rows by md5, the
 history's count and sum, each side table's row count) and checked with pg_amcheck --heapallindexed. Writes
 docs/experiments/data/exp82-trials.csv.
@@ -152,13 +153,14 @@ def trial(lab, root, number, arm, rng):
         lab.summaries(False)
     else:
         crashed = '--crashed-standby' if kind == 'lsn-crashed' else '--no-crashed-standby'  # explicit since K15
-        result, stats, seconds = lab.refresh(path, 'page-lsn', crashed)
+        result, stats, seconds = lab.refresh(path, 'page-lsn', crashed, *lab.single_read)
     received = (stats.get('receiver') or {}).get('fast_path') or {}
     fast = stats.get('fast_path') or {}
     row.update({'exit': result.returncode, 'seconds': round(seconds, 3), 'fast_used': fast.get('used'),
                 'proof': (received.get('facts') or {}).get('proof'), 'reasons': '; '.join(fast.get('reasons') or [])[:160],
                 'summaries': fast.get('summaries'), 'threshold': fast.get('lsn_threshold'),
-                'pages_sent': (stats.get('pages') or {}).get('sent'), 'pages_total': (stats.get('pages') or {}).get('total')})
+                'pages_sent': (stats.get('pages') or {}).get('sent'), 'pages_total': (stats.get('pages') or {}).get('total'),
+                'single_read': fast.get('lsn_single_read'), 'reread_bytes': fast.get('reread_bytes')})
     if result.returncode == 0:
         equal, amcheck, source, copied = lab.verify(path)
         row.update({'rows_equal': equal, 'amcheck_ok': amcheck})
@@ -180,6 +182,7 @@ def main():
     ap.add_argument('--controls', type=int, default=10)
     ap.add_argument('--seed', type=int, default=820)
     ap.add_argument('--scale', type=int, default=4)
+    ap.add_argument('--single-read', action='store_true', help='page-lsn with --lsn-single-read (EXP-85)')
     ap.add_argument('--out', default=str(ROOT / 'docs' / 'experiments' / 'data' / 'exp82-trials.csv'))
     a = ap.parse_args()
     rng = random.Random(a.seed)
@@ -191,6 +194,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix='exp82-') as temp:
         root = Path(temp)
         lab = Lab(root, a.scale, rng)
+        lab.single_read = ('--lsn-single-read',) if a.single_read else ()
         try:
             for number, arm in enumerate(arms):
                 row = trial(lab, root, number, arm, rng)
