@@ -4,6 +4,14 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (18:30 UTC): EXP-87 done: the second held-out session held in all 7 cells
+
+- **Single read (`--lsn-single-read`):** 0.85–0.97x `pg_basebackup` on H5 (skewed non-HOT updates), H6 (32 GB) and H8 (checksums off); 0.41–0.50x on H7 (local NVMe), where a re-clone is bound by writing a whole copy. Against two reads, 0.95–1.007x. **Eligible to become page-lsn's default** (the owner's decision).
+- **`--crashed-standby`** held again (17 of 17 held-out cells over EXP-84 and EXP-87). **The fast path's defaults** took 0.017–0.50x `pg_basebackup` at 0.5–28% of the pages (0.269x on H5 at 17.5%). 28 of 28 copies were correct.
+- **gcloud expired during the session,** after every cell had finished. Fetch and teardown waited about two hours for a new sign-in, and everything is torn down.
+- **Rule 15:** H5–H8 are spent. H9–H12 are sealed: 2,000 relations, PostgreSQL 18 with io_uring, 4-vCPU VMs, and a cross-region pair.
+- **Seen in the project:** a set named `exp88` (three VMs in us-east1-b) that this work didn't create.
+
 ## 2026-10-30 (13:31 UTC): EXP-87 pre-registered: the second held-out session, on H5–H8
 
 - **The settings,** sealed October 30 before EXP-85's tuning:
