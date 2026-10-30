@@ -9,7 +9,13 @@
 #   union   (EXP-71) pgdelta live, in place, --fast-path summaries --diverged-basis (idea 1: the blocks B's own WAL
 #           names since the checkpoint before the fork, plus the summaries' since), with 8 reader threads, gaps of up
 #           to 2 pages filled and the receiver's syncs on its worker, then started the same way. Its first run per
-#           lag is checked with pg_amcheck --heapallindexed after the timing.
+#           lag is checked with pg_amcheck --heapallindexed after the timing;
+#   crashed (EXP-89b) union's settings with the receiver's --crashed-primary: B0's end proven by its own WAL
+#           (research loop 4); with CRASHED_P=1 the only fast arm that can take B0. Every run is checked with
+#           pg_amcheck --heapallindexed after the timing.
+# CRASHED_P=1 (EXP-89b): at the fork P is not stopped cleanly: its dirty buffers are written out without a checkpoint
+# (pg_buffercache_evict), so its pages past the fork are on disk, and it is stopped with -m immediate, a crash. B0 is
+# then a primary left "in production"; pg_rewind runs crash recovery on it first, as it does for such a target.
 # Each lag forks afresh. On the source VM a standby Q of the current primary P catches up and stops cleanly; P then
 # writes 10,000 rows Q never sees and stops cleanly; P's data directory goes to dest as B0, and Q, promoted onto a new
 # timeline, takes P's place as S. S then runs the lag: "hot10" (the same 1% hot rows updated 10 times) or "uniform"
@@ -28,6 +34,7 @@ SEED=${3:-670}
 SCALE=${SCALE:-600}
 ARMS=${ARMS:-rewind fast full}
 DIAG=${DIAG:-0}
+CRASHED_P=${CRASHED_P:-0}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
 R=${OUT:-/data/exp04-results/exp67}
@@ -91,8 +98,14 @@ fork() {  # $1: the lag's name. Leaves B0 (the old primary) on dest and S (Q pro
   # The fork: P writes what Q never sees, then stops cleanly (a fenced old primary).
   psrc "UPDATE pgbench_accounts SET abalance = abalance - 7 WHERE aid % 6000 = 3" > /dev/null \
     || { echo "the diverging update failed"; return 1; }
-  on_src "python3 experiments/network/source_cluster.py stop-clean --root $ROOT --bin-dir $PGBIN > $W/stop-$1.json" \
-    || { echo "P did not stop cleanly"; return 1; }
+  if [ "$CRASHED_P" = 1 ]; then
+    echo "{\"flushed_buffers\": $(psrc "SELECT count(*) FROM pg_buffercache WHERE isdirty AND pg_buffercache_evict(bufferid)")}" \
+      > "$R/flush-$1.json"
+    on_src "$PGBIN/pg_ctl -D $ROOT/data -m immediate -w stop > /dev/null" || { echo "P did not stop"; return 1; }
+  else
+    on_src "python3 experiments/network/source_cluster.py stop-clean --root $ROOT --bin-dir $PGBIN > $W/stop-$1.json" \
+      || { echo "P did not stop cleanly"; return 1; }
+  fi
   rm -rf "$B0"; mkdir -p "$B0"
   on_src "tar -C $ROOT/data -cf - ." | tar -C "$B0" -xf - || { echo "copying P to dest failed"; return 1; }
   # Q takes P's place, promoted onto a new timeline; its primary_conninfo (P's socket) goes first.
@@ -109,6 +122,7 @@ on_src "mkdir -p $W && python3 experiments/network/source_cluster.py setup $WORK
   --listen-ip $SRC --client-ip $DEST > $W/setup.json" || { echo "set-up failed"; exit 1; }
 # S keeps its WAL since the fork for pg_rewind and the rewound standby (a slot or an archive would do the same).
 psrc "ALTER SYSTEM SET wal_keep_size = '40GB'" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
+[ "$CRASHED_P" = 1 ] && psrc "CREATE EXTENSION IF NOT EXISTS pg_buffercache" > /dev/null
 VERSION=$(psrc "SHOW server_version_num")
 echo "{\"server_version_num\": $VERSION, \"summarize_wal\": \"$(psrc "SHOW summarize_wal")\", \"data_checksums\": \"$(psrc "SHOW data_checksums")\", \"database_bytes\": $(psrc "SELECT pg_database_size('postgres')"), \"scale\": $SCALE}" > "$R/source.json"
 [ "$VERSION" -ge 170011 ] || { echo "the server is $VERSION: the fast path needs 17.11 or later; failed"; exit 1; }
@@ -183,6 +197,19 @@ EOF
         wait "$rp"; rstatus=$?
         [ "$status" = 0 ] && { start_copy "$B" "$d/copy.log" || status=$?; }
         on_src "cat /tmp/exp67-send.json" > "$d/send.json" ;;
+      crashed)
+        tr=null
+        python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
+          --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 --fsync worker --crashed-primary \
+          --stats-json "$d/receive.json" > "$d/receive.log" 2>&1 &
+        rp=$!
+        for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
+        on_src "python3 -m pgdelta send --source $ROOT/data --source-kind live --pg-conn '$CONN' --connect $DEST:7000 \
+          --pg-controldata $PGBIN/pg_controldata --jobs 4 --hash blake3 --fast-path summaries --diverged-basis \
+          --read-ahead 8 --fill-gaps 2 --stats-json /tmp/exp67-send.json" > "$d/send.log" 2>&1 || status=$?
+        wait "$rp"; rstatus=$?
+        [ "$status" = 0 ] && { start_copy "$B" "$d/copy.log" || status=$?; }
+        on_src "cat /tmp/exp67-send.json" > "$d/send.json" ;;
       full)
         tr=null
         target=$FULL
@@ -191,7 +218,7 @@ EOF
     esac
     t1=$(date +%s.%N)
     COPY_STATE=$(pcopy "$STATE")
-    if [ "$arm" = union ] && [ "$k" = 0 ]; then  # EXP-71: every page of the copy, after the timing
+    if { [ "$arm" = union ] && [ "$k" = 0 ]; } || [ "$arm" = crashed ]; then  # EXP-71, EXP-89b: every page, after
       $PGBIN/pg_amcheck -h /tmp -p 5433 -U study --all --heapallindexed --install-missing > "$d/amcheck.log" 2>&1
       echo $? > "$d/amcheck-status"
     fi

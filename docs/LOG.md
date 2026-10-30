@@ -4,6 +4,12 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (23:18 UTC): EXP-89b pre-registered: the crashed old primary at 18 GB on the VMs
+
+- **Setup:** EXP-67's failover lab with `CRASHED_P=1`. The old primary's dirty pages are written out, then it crashes (`-m immediate`) at the fork.
+- **Arms, two runs each, hot10 and uniform:** `pg_rewind` (crash recovery first), pgdelta's hashing (refused), `--crashed-primary` and a re-clone.
+- **Deciding:** every `--crashed-primary` copy taken, its own blocks found, correct and clean under `pg_amcheck`. Predicted: at most 0.5x `pg_rewind` and hashing (hot10), and faster than a re-clone (uniform).
+
 ## 2026-10-30 (23:18 UTC): EXP-89 done: 80 of 80 crashed primaries correct by their own WAL; lost or damaged WAL refused
 
 - **1 held:** 80 of 80 crashed primaries were taken by the fast path and came out correct: 40 on the server's timeline, 40 after a failover. Wrong copies below 3.7% per refresh at 95%.
