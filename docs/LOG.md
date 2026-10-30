@@ -4,6 +4,21 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-30 (22:45 UTC): research loop 4 and EXP-89 pre-registered: the crashed primary, by its own WAL
+
+- **The last loss:** a primary that crashed was refused and hashed, at best a tie. The obstacle is proving where its history ends; crash recovery first is unsound (EXP-80's S2e).
+- **The proof built (`--crashed-primary`, opt-in):**
+  - B's end is the end of its own WAL, read from its redo point and computed exactly (`wal_record_end`, checked against every record of real WAL);
+  - it is refused where the stop looks like loss or damage: a missing or short segment, WAL of the same generation past it, or fsync off;
+  - after a failover, idea 1 lists B's own blocks past the fork.
+- **Prior art, read from PostgreSQL 17's source:** `pg_rewind` runs crash recovery first and trusts its end; PostgreSQL never makes short segments, never removes them from the redo point on, and fsyncs a segment before the next.
+- **Stated blind spot:** an older pg_wal swapped in, or storage losing flushed WAL. The same holds for crash recovery and `pg_rewind`.
+- **EXP-89 (local):**
+  - 40 crashed primaries on the server's timeline and 40 after a failover (with writes past the fork on a table the load never touches);
+  - 30 controls;
+  - 5 blind-spot trials.
+- **Deciding:** all 80 taken and correct; all 30 controls refused.
+
 ## 2026-10-30 (19:29 UTC): K16: single read is page-lsn's default
 
 - **The owner's decision**, after EXP-87: `--lsn-single-read` is on by default with `--fast-path page-lsn`, and `--no-lsn-single-read` gives the two reads. It applies to page-lsn only: off with any other mode, and refused there if asked for.

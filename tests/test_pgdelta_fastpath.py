@@ -2,6 +2,7 @@
 a real PostgreSQL 17 primary's old copy, one cleanly stopped (the fast path runs) and one crashed (it is refused);
 and an old primary after a failover, with and without --diverged-basis (idea 1)."""
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -938,7 +939,7 @@ class FailedOver(unittest.TestCase):
         cls.sql('UPDATE pgbench_accounts SET abalance = -7 WHERE aid % 53 = 0', 5434)
         cls.sql('CREATE TABLE side AS SELECT g, repeat(md5(g::text), 3) AS v FROM generate_series(1, 6000) g', 5434)
         cls.sql('SELECT count(*) FROM pgbench_accounts WHERE abalance = -7', 5434)
-        cls.ctl(primary, 'stop', 5434)
+        cls.ctl(primary, 'stop', 5434, mode=cls.STOP_MODE)
         shutil.copytree(primary, cls.root / 'old')
         # S writes its own changes and its own table after the fork.
         cls.sql('UPDATE pgbench_accounts SET abalance = abalance + 3 WHERE aid % 41 = 0')
@@ -953,6 +954,7 @@ class FailedOver(unittest.TestCase):
         cls.temp.cleanup()
 
     cmd, ctl, sql = (RealServer.__dict__[name] for name in ('cmd', 'ctl', 'sql'))
+    STOP_MODE = 'fast'  # how P stops after the fork; CrashedFailedOver kills it
 
     STATE = ("SELECT md5(string_agg(aid || ':' || abalance, ',' ORDER BY aid)) || '/' || "
              "(SELECT count(*) || ':' || sum(g) FROM side) FROM pgbench_accounts")
@@ -1011,6 +1013,150 @@ class FailedOver(unittest.TestCase):
         self.assertIn('refused', fast['diverged_basis'])
         self.assertEqual(fast['reasons'], [fast['diverged_basis']['refused']])
         self.check_copy(target)
+
+
+class CrashedFailedOver(FailedOver):
+    """Research loop 4: FailedOver's old primary P killed (pg_ctl -m immediate) instead of stopped cleanly: a primary
+    left "in production" past the fork. With --crashed-primary its end is the end of its own WAL, and --diverged-basis
+    then lists what it changed after the fork, as for a clean stop."""
+    STOP_MODE = 'immediate'
+    test_the_old_primary_takes_the_fast_path_with_its_own_wal = None
+    test_without_the_option_the_old_primary_is_refused_and_hashed = None
+    test_an_old_primary_without_the_wal_since_the_checkpoint_is_refused_and_hashed = None
+
+    def test_a_crashed_old_primary_takes_the_fast_path_by_its_own_wal_only_with_crashed_primary(self):
+        target, stats = self.refresh('crashed-diverged', '--crashed-primary')
+        fast, received = stats['fast_path'], stats['receiver']['fast_path']
+        self.assertTrue(fast['used'], fast['reasons'])
+        self.assertEqual(received['facts']['proof'], 'crashed primary')
+        self.assertGreater(fast['diverged_basis']['blocks'], 0)
+        self.assertNotIn('BASIS_NODES', stats['receiver']['bytes_written']['by_message_type'])
+        self.check_copy(target)
+        target, stats = self.refresh('crashed-refused')
+        self.assertFalse(stats['fast_path']['used'])
+        self.assertIn('--crashed-primary', stats['receiver']['fast_path']['refused'])
+        self.check_copy(target)
+
+
+@unittest.skipUnless(available() and all((PG_BIN / tool).exists() for tool in ('pgbench', 'pg_waldump')), SKIP_REASON)
+class CrashedPrimary(unittest.TestCase):
+    """Research loop 4: a primary killed mid-write (pg_ctl -m immediate, "in production") on the server's own timeline,
+    its WAL since the checkpoint spanning two segments. --crashed-primary takes it by the end of its own WAL; a lost
+    tail, a short segment or a damaged record with WAL written after it is refused, and the copy hashed."""
+    cmd, ctl, sql = (classmethod(getattr(RealServer, name).__func__) for name in ('cmd', 'ctl', 'sql'))
+    refresh, check_copy = RealServer.refresh, RealServer.check_copy
+    STATE = "SELECT md5(string_agg(aid || ':' || abalance, ',' ORDER BY aid)) FROM pgbench_accounts"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.temp.name)
+        cls.sockets = Path(tempfile.mkdtemp(prefix='pgc'))
+        cls.source = cls.root / 'S'
+        cls.env = dict(os.environ, LC_ALL='C', LANG='C')
+        cls.cmd([PG_BIN / 'initdb', '-D', cls.source, '-U', 't', '-A', 'trust', '--no-sync', '--data-checksums'])
+        with open(cls.source / 'postgresql.conf', 'a') as conf:
+            conf.write('summarize_wal = on\nwal_keep_size = 512MB\n')
+        cls.ctl(cls.source, 'start')
+        cls.cmd([PG_BIN / 'pgbench', '-i', '-q', '-s', 2, '-h', cls.sockets, '-p', 5432, '-U', 't', 'postgres'])
+        cls.sql('CHECKPOINT')
+        cls.sql('UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid % 89 = 0')
+        cls.sql('SELECT pg_switch_wal()')  # B's WAL since its redo point spans two segments
+        cls.sql('UPDATE pgbench_accounts SET abalance = abalance + 2 WHERE aid % 83 = 0')
+        cls.ctl(cls.source, 'stop', mode='immediate')
+        shutil.copytree(cls.source, cls.root / 'crashed')
+        cls.ctl(cls.source, 'start')
+        cls.sql('UPDATE pgbench_accounts SET abalance = abalance + 3 WHERE aid % 79 = 0')
+        cls.sql('CHECKPOINT')
+        waldump = PG_BIN / 'pg_waldump'
+        control = subprocess.run([str(CONTROLDATA), str(cls.root / 'crashed')], capture_output=True, text=True,
+                                 env=cls.env).stdout
+        cls.redo = L(re.search(r"REDO location:\s+(\S+)", control).group(1))
+        cls.end, cls.detail = fastpath.crashed_wal_end(cls.root / 'crashed' / 'pg_wal', waldump, 1, cls.redo, 16 << 20)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.ctl(cls.source, 'stop', check=False, mode='immediate')
+        shutil.rmtree(cls.sockets, True)
+        cls.temp.cleanup()
+
+    def segment(self, target, lsn):
+        return target / 'pg_wal' / ('00000001%08X%08X' % (lsn >> 32, (lsn & 0xFFFFFFFF) >> 24))
+
+    def test_each_record_ends_where_the_next_begins(self):
+        """wal_record_end against PostgreSQL's own WAL: every record's computed end is the next record's start, or,
+        where it ends on a page boundary, that page's first record after its header; a switch ends its segment."""
+        out = subprocess.run([str(PG_BIN / 'pg_waldump'), '--path', str(self.root / 'crashed' / 'pg_wal'), '--start',
+                              fastpath.format_lsn(self.redo)], capture_output=True, text=True, env=self.env).stdout
+        records = [(m.group(1), int(m.group(2)), L(m.group(3)), m.group(4)) for m in fastpath._WALDUMP_RECORD.finditer(out)]
+        self.assertGreater(len(records), 100)
+        crossings = 0
+        for (rmgr, total, lsn, desc), (_, _, following, _) in zip(records, records[1:]):
+            end = fastpath.wal_record_end(lsn, total, 16 << 20, switch=rmgr == 'XLOG' and desc == 'SWITCH')
+            header = 40 if end % (16 << 20) == 0 else 24
+            with self.subTest(lsn=fastpath.format_lsn(lsn)):
+                self.assertIn(following, (end, end + header) if end % 8192 == 0 else (end,))
+            crossings += following // 8192 != lsn // 8192
+        self.assertGreater(crossings, 5)  # records that cross pages were among them
+        self.assertEqual(fastpath.wal_record_end(records[-1][2], records[-1][1], 16 << 20), self.end)
+
+    def test_a_crashed_primary_with_fsync_off_is_refused(self):
+        target = self.root / 'nofsync-basis'
+        shutil.copytree(self.root / 'crashed', target)
+        with open(target / 'postgresql.auto.conf', 'a') as conf:
+            conf.write("fsync = 'off'\n")
+        self.assertEqual(fastpath.setting(target, 'fsync'), 'off')
+        facts, why = fastpath.basis_facts(target, CONTROLDATA, None, crashed_primary=True)
+        self.assertIsNone(facts)
+        self.assertIn('fsync off', why)
+        self.assertEqual(fastpath.setting(self.root / 'crashed', 'fsync'), None)
+
+    def test_its_end_is_where_its_wal_stops_past_the_switch(self):
+        self.assertIsNotNone(self.end, self.detail)
+        self.assertGreater(self.end >> 24, self.redo >> 24)  # the end lies in a later segment than the redo point
+
+    def test_a_crashed_primary_takes_the_fast_path_only_with_crashed_primary(self):
+        target, stats = self.refresh('taken', 'crashed', '--crashed-primary')
+        fast, received = stats['fast_path'], stats['receiver']['fast_path']
+        self.assertTrue(fast['used'], fast['reasons'])
+        self.assertEqual(received['facts']['proof'], 'crashed primary')
+        self.assertEqual(L(received['facts']['end']), self.end)
+        self.check_copy(target)
+        target, stats = self.refresh('refused', 'crashed')
+        self.assertFalse(stats['fast_path']['used'])
+        self.assertIn('--crashed-primary', stats['receiver']['fast_path']['refused'])
+
+    def test_lost_short_or_damaged_wal_is_refused_and_hashed(self):
+        def lose_tail(target):
+            self.segment(target, self.end).unlink()
+
+        def shorten(target):
+            os.truncate(self.segment(target, self.end), 8 << 20)
+
+        def damage(target):  # a byte of a record in the redo point's segment, with WAL written after it
+            records = subprocess.run([str(PG_BIN / 'pg_waldump'), '--path', str(target / 'pg_wal'), '--start',
+                                      fastpath.format_lsn(self.redo), '--limit', '40'], capture_output=True,
+                                     text=True, env=self.env).stdout
+            lsn = next(L(m) for m in re.findall(r'lsn: (\S+),', records)
+                       if L(m) >> 24 == self.redo >> 24 and L(m) > self.redo and (L(m) % 8192) < 8000)
+            with open(self.segment(target, lsn), 'r+b') as handle:
+                handle.seek((lsn & 0xFFFFFF) + 26)
+                byte = handle.read(1)
+                handle.seek((lsn & 0xFFFFFF) + 26)
+                handle.write(bytes([byte[0] ^ 0xFF]))
+
+        for name, prepare, reason in (('lost-tail', lose_tail, 'lacks'), ('short', shorten, 'bytes'),
+                                      ('damaged', damage, 'written past')):
+            with self.subTest(case=name):
+                target = self.root / name
+                shutil.copytree(self.root / 'crashed', target)
+                prepare(target)
+                shutil.move(target, self.root / f'{name}-basis')
+                target, stats = self.refresh(name, f'{name}-basis', '--crashed-primary')
+                fast, received = stats['fast_path'], stats['receiver']['fast_path']
+                self.assertFalse(fast['used'])
+                self.assertIn('can\'t be proven', received['refused'])
+                self.assertIn(reason, received['refused'])
 
 
 if __name__ == '__main__':

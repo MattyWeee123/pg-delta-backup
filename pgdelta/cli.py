@@ -291,6 +291,13 @@ def _rebuild_options(parser):
                              'crashed standbys came out correct, and it held on every held-out setting (EXP-80, '
                              'EXP-80b, EXP-84). Without the fast path it changes nothing '
                              f'(default: {"on" if fastpath.DEFAULT_CRASHED_STANDBY else "off"})')
+    parser.add_argument('--crashed-primary', action='store_true',
+                        help='with the fast path offered and in place: also take a B that is a primary left "in '
+                             'production" by a crash. Its end is proven by its own WAL, read from its redo point to '
+                             'where it stops, and only where the stop looks like a crash\'s end: inside a whole '
+                             'segment file, with no WAL of the same generation past it. WAL lost or damaged past a '
+                             'point is refused (EXP-62, EXP-80). After a failover it needs --diverged-basis too. '
+                             'Opt-in until its experiments (research loop 4)')
     parser.add_argument('--verify-scope', choices=('auto', *receiver.VERIFY_SCOPES), default='auto',
                         help='what is re-read to verify each file: all of it, or (in place) only the pages this run '
                              'wrote, every other part checked by the digests of B computed before anything was '
@@ -600,7 +607,7 @@ def _receive(args):
 def _receiver_engine(args):
     return {'jobs': args.jobs, 'hash_backend': args.hash_backend, 'rebuild': args.rebuild,
             'verify': args.verify, 'fsync': args.fsync, 'verify_scope': _verify_scope(args),
-            'crashed_standby': _crashed_standby(args)}
+            'crashed_standby': _crashed_standby(args), 'crashed_primary': getattr(args, 'crashed_primary', False)}
 
 
 def _crashed_standby(args):

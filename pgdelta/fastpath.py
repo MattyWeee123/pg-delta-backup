@@ -126,6 +126,13 @@ IDENTITY_KEYS = ('system_identifier', 'catalog_version', 'data_checksum_version'
 _RELATION = re.compile(r'^((?:base/[1-9][0-9]*|global)/[1-9][0-9]*)(_[a-z]+)?(?:\.([1-9][0-9]*))?$')
 _WALDUMP_LSN = re.compile(r'lsn: ([0-9A-Fa-f]+/[0-9A-Fa-f]+)')
 _SEGMENT = re.compile(r'^([0-9A-F]{8})([0-9A-F]{8})([0-9A-F]{8})$')
+# --crashed-primary (research loop 4): WAL page geometry (xlog_internal.h) and pg_waldump's messages.
+WAL_BLCKSZ, WAL_LONG_PHD, WAL_SHORT_PHD = 8192, 40, 24
+_WAL_PAGE_HEADER = struct.Struct('<HHIQ')  # xlp_magic, xlp_info, xlp_tli, xlp_pageaddr
+_WALDUMP_STOP = re.compile(r'error in WAL record at ([0-9A-Fa-f]+/[0-9A-Fa-f]+): (.*)')
+_WALDUMP_ZERO_LENGTH = re.compile(r'invalid record length at ([0-9A-Fa-f]+/[0-9A-Fa-f]+): expected at least \d+, got 0')
+_WALDUMP_RECORD = re.compile(r'rmgr: (\S+)\s+len \(rec/tot\):\s*\d+/\s*(\d+),.*?lsn: ([0-9A-Fa-f]+/[0-9A-Fa-f]+), '
+                             r'prev [0-9A-Fa-f]+/[0-9A-Fa-f]+, desc: (\S+)')
 _PAGE_NUMBER = struct.Struct('>Q')
 _CHECKPOINT = re.compile(r'lsn: ([0-9A-Fa-f]+/[0-9A-Fa-f]+),.*desc: CHECKPOINT_(?:SHUTDOWN|ONLINE) redo '
                          r'([0-9A-Fa-f]+/[0-9A-Fa-f]+)')
@@ -152,9 +159,10 @@ def format_lsn(value):
 
 # --- the receiver: what B can prove about itself ------------------------------------------------------------------
 
-def basis_facts(basis, pg_controldata, marker, crashed_standby=False):
+def basis_facts(basis, pg_controldata, marker, crashed_standby=False, crashed_primary=False):
     """(facts, None) for ACCEPT's "summary", or (None, why B's lineage can't be proven). crashed_standby: a standby
-    left "in archive recovery" by a crash counts, by its minimum recovery point (EXP-80)."""
+    left "in archive recovery" by a crash counts, by its minimum recovery point (EXP-80). crashed_primary: a primary
+    left "in production" by a crash counts, by the end of its own WAL (crashed_wal_end; research loop 4)."""
     basis = Path(basis)
     if marker is not None:
         return None, 'B carries the marker of an interrupted in-place refresh, so it is a mix of two states'
@@ -193,9 +201,24 @@ def basis_facts(basis, pg_controldata, marker, crashed_standby=False):
             recovery = controldata_value(text, 'Minimum recovery ending location') or '0/0'
             end = max(end, parse_lsn(recovery))
             proof = 'clean shutdown in recovery' if state == 'shut down in recovery' else 'crashed standby'
+    elif crashed_primary and state == 'in production':
+        if setting(basis, 'fsync') == 'off':
+            return None, 'B is a primary that crashed with fsync off, so its WAL and pages may have reached disk out ' \
+                         'of order'
+        redo, timeline = parse_lsn(identity['redo_lsn']), identity['timeline']
+        waldump = Path(pg_controldata).parent / 'pg_waldump'
+        if not waldump.exists():
+            return None, f'pg_waldump was not found beside {pg_controldata}, so B\'s own WAL was not read'
+        end, detail = crashed_wal_end(basis / 'pg_wal', waldump, timeline, redo,
+                                      identity.get('wal_segment_size') or 16 << 20)
+        if end is None:
+            return None, f'B is a primary that crashed, and its end can\'t be proven: {detail}'
+        proof = 'crashed primary'
     else:
         hint = (' (a standby that crashed in recovery is taken unless --no-crashed-standby is given)'
-                if state == 'in archive recovery' else '')
+                if state == 'in archive recovery' else
+                ' (a primary that crashed is taken with --crashed-primary, by its own WAL)'
+                if state == 'in production' else '')
         return None, (f'B was not stopped cleanly ({state}), so its end can\'t be proven without all of its WAL'
                       + hint)
     waldump = Path(pg_controldata).parent / 'pg_waldump'
@@ -207,6 +230,22 @@ def basis_facts(basis, pg_controldata, marker, crashed_standby=False):
              'major': _major(basis), 'wal_log_hints': controldata_value(text, 'wal_log_hints setting') == 'on',
              **{key: identity.get(key) for key in IDENTITY_KEYS}}
     return facts, None
+
+
+def setting(basis, name):
+    """B's last setting of `name` in its postgresql.conf, then postgresql.auto.conf (which ALTER SYSTEM writes and
+    which wins), lowercased; None where neither sets it."""
+    value = None
+    for conf in ('postgresql.conf', 'postgresql.auto.conf'):
+        try:
+            text = (Path(basis) / conf).read_text(errors='replace')
+        except OSError:
+            continue
+        for line in text.splitlines():
+            match = re.match(rf"\s*{name}\s*=?\s*'?([A-Za-z0-9_]+)'?", line)
+            if match:
+                value = match.group(1).lower()
+    return value
 
 
 def _major(basis):
@@ -240,6 +279,110 @@ def last_wal_record(pg_wal, waldump, timeline, segment_size, timeout=300):
         if found:
             return max(found)
     return None
+
+
+def wal_record_end(start, total, segment_size, switch=False):
+    """Where a WAL record of `total` bytes starting at `start` ends, as XLogInsert returns it: xlog.c's
+    XLogBytePosToEndRecPtr(XLogRecPtrToBytePos(start) + MAXALIGN(total)), the page headers in between skipped. Every
+    page a record changes carries this LSN. An XLOG SWITCH record ends at its segment's end."""
+    if switch:
+        return (start // segment_size + 1) * segment_size
+    page_bytes = WAL_BLCKSZ - WAL_SHORT_PHD
+    segment_bytes = (segment_size // WAL_BLCKSZ) * page_bytes - (WAL_LONG_PHD - WAL_SHORT_PHD)
+    segment, offset = divmod(start, segment_size)
+    page, in_page = divmod(offset, WAL_BLCKSZ)
+    position = segment * segment_bytes + (in_page - WAL_LONG_PHD if page == 0 else
+                                          WAL_BLCKSZ - WAL_LONG_PHD + (page - 1) * page_bytes + in_page - WAL_SHORT_PHD)
+    segment, left = divmod(position + ((total + 7) & ~7), segment_bytes)
+    if left < WAL_BLCKSZ - WAL_LONG_PHD:
+        offset = left + WAL_LONG_PHD if left else 0
+    else:
+        pages, left = divmod(left - (WAL_BLCKSZ - WAL_LONG_PHD), page_bytes)
+        offset = WAL_BLCKSZ + pages * WAL_BLCKSZ + (left + WAL_SHORT_PHD if left else 0)
+    return segment * segment_size + offset
+
+
+def crashed_wal_end(pg_wal, waldump, timeline, redo, segment_size, timeout=3600):
+    """--crashed-primary (research loop 4): (B's end, details) for a primary that crashed, or (None, why its end can't
+    be proven). PostgreSQL flushes WAL before it writes any page that WAL changed (WAL before data), so every page on
+    B's disk carries an LSN at or before the end of B's durable WAL. That end is read from B's own pg_wal, from its
+    redo point to where pg_waldump stops, and it counts only where the stop looks like a crash's end:
+    - the stop is inside a segment file of B's timeline that is there and whole (reading that runs into a missing
+      file is refused: EXP-62's and EXP-80's old primaries lost their WAL from a segment on);
+    - no WAL page after the stop, in that file or the first page of any later one, is a page of this generation (its
+      header's address its own and the magic B's): WAL written past the stop means damage, not an end. After a crash
+      the space past the end holds zeros or a recycled segment's older pages.
+    What this can't see: a pg_wal replaced by an older copy of itself, or storage that lost WAL it reported flushed."""
+    try:
+        stop = subprocess.run([str(waldump), '--quiet', '--path', str(pg_wal), '--timeline', str(timeline),
+                               '--start', format_lsn(redo)], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f'pg_waldump could not read B\'s WAL: {exc}'
+    match = _WALDUMP_STOP.search(stop.stderr)
+    missing = re.search(r'could not find file "([0-9A-F]{24})"', stop.stderr)
+    if missing:
+        return None, f'B\'s WAL from its redo point {format_lsn(redo)} runs into segment {missing.group(1)}, which B lacks'
+    if match is None:
+        return None, f'B\'s WAL from its redo point {format_lsn(redo)} does not read to a crash\'s end: ' + (
+            stop.stderr.strip().splitlines() or ['no record'])[-1][:200]
+    last, message = parse_lsn(match.group(1)), match.group(2).strip()
+    if 'could not' in message or 'missing' in message:
+        return None, f'B\'s WAL stops at a file it lacks after {format_lsn(last)}: {message[:200]}'
+    try:
+        record = subprocess.run([str(waldump), '--path', str(pg_wal), '--timeline', str(timeline), '--start',
+                                 format_lsn(last), '--limit', '1'], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f'pg_waldump could not read B\'s last WAL record: {exc}'
+    found = _WALDUMP_RECORD.search(record.stdout)
+    if found is None or parse_lsn(found.group(3)) != last:
+        return None, f'B\'s last WAL record at {format_lsn(last)} could not be read back'
+    end = wal_record_end(last, int(found.group(2)), segment_size,
+                         switch=found.group(1) == 'XLOG' and found.group(4) == 'SWITCH')
+    zero = _WALDUMP_ZERO_LENGTH.search(message)
+    # At a page boundary pg_waldump reports the first record position past the page's header.
+    header = WAL_LONG_PHD if end % segment_size == 0 else WAL_SHORT_PHD
+    if zero and parse_lsn(zero.group(1)) not in ((end, end + header) if end % WAL_BLCKSZ == 0 else (end,)):
+        return None, f'B\'s WAL end is ambiguous: its last record ends at {format_lsn(end)}, reading stops at ' \
+                     f'{zero.group(1)}'
+    name = lambda segno: '%08X%08X%08X' % (timeline, segno // (0x100000000 // segment_size),
+                                           segno % (0x100000000 // segment_size))
+    first = Path(pg_wal) / name(redo // segment_size)
+    try:
+        magic = _WAL_PAGE_HEADER.unpack_from(first.read_bytes()[:_WAL_PAGE_HEADER.size])[0]
+    except (OSError, struct.error):
+        return None, f'B\'s WAL segment {first.name} could not be read'
+    segno = end // segment_size
+    try:
+        segments = sorted(int(m.group(2), 16) * (0x100000000 // segment_size) + int(m.group(3), 16)
+                          for m in (_SEGMENT.match(p.name) for p in Path(pg_wal).iterdir())
+                          if m and int(m.group(1), 16) == timeline)
+    except OSError as exc:
+        return None, f'B\'s pg_wal could not be listed: {exc}'
+    if segno not in segments:
+        return None, f'B\'s WAL ends at {format_lsn(end)}, in segment {name(segno)}, which B lacks'
+    pages = 0
+    for number in (s for s in segments if s >= segno):
+        path = Path(pg_wal) / name(number)
+        try:
+            if path.stat().st_size != segment_size:
+                return None, f'B\'s WAL segment {path.name} is {path.stat().st_size} bytes, not {segment_size}'
+            with open(path, 'rb') as handle:
+                starts = (range(-(-(end % segment_size) // WAL_BLCKSZ) * WAL_BLCKSZ, segment_size, WAL_BLCKSZ)
+                          if number == segno else [0])
+                for offset in starts:
+                    handle.seek(offset)
+                    header = handle.read(_WAL_PAGE_HEADER.size)
+                    pages += 1
+                    if len(header) < _WAL_PAGE_HEADER.size:
+                        break
+                    page_magic, _, _, address = _WAL_PAGE_HEADER.unpack(header)
+                    if page_magic == magic and address == number * segment_size + offset:
+                        return None, (f'B\'s pg_wal holds WAL written past where reading stops ({format_lsn(end)}): '
+                                      f'a page at {format_lsn(address)} in {path.name}, so a gap or damage, not an end')
+        except OSError as exc:
+            return None, f'B\'s WAL segment {path.name} could not be read: {exc}'
+    return end, {'end': format_lsn(end), 'last_record': format_lsn(last), 'stop': message[:200],
+                 'pages_checked': pages}
 
 
 def wal_log_hints(basis, pg_controldata):
