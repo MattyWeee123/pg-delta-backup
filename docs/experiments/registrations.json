@@ -260,5 +260,27 @@
    "pgdelta/sender.py": "9ff803fe7bc4e7a1ec2a0a4888862853323d07bacdd3556c086085122c5921a4",
    "pgdelta/transport.py": "7a852b019d22684ff79f027c887d688d4750760c46c971e36d82c2ab60f0bb6c"
   }
+ },
+ "EXP-89b": {
+  "commit": "4a551806d1bc",
+  "files": {
+   "analysis/exp89b.py": "b74aa261c195b9d35baf2334ecd83f65bc8ea154ed108902d99b04677c8f85b3",
+   "analysis/plotting.py": "e632c22f7edcba13e1434416442b78821b3813e365cb3ede4ffdbdc7e16f0017",
+   "experiments/change_patterns/run_study.py": "b9efd66f20cd724777e3c8791a2277cf2e9ea64f758948f2212ab08541e7ff46",
+   "experiments/network/lab_exp67.sh": "649f358018b704bb990ff0483fde55e693207332873b459441d71faff9938236",
+   "experiments/network/source_cluster.py": "e8f12011c6ca9fb24fc67c47f7e9ad6282749cc691c37e4ba7cafb5bc8a8e59a",
+   "infra/gcp/config.sh": "2b4373a5a9a8ead8d72a0294839e94de9aadd3010650a35ac8ddac8c3bf34639",
+   "infra/gcp/create.sh": "18f5871eba9c691b93f05f4b240759dad3ec87ed4cab7056af2bdf478288eafd",
+   "infra/gcp/sets/ha.sh": "9f1e9fbacb540201f68ec71f95dc7e512ea7cf4c6a236d31918dbdceeb407f34",
+   "infra/gcp/startup.sh": "b8c8d3426acaf050e31eb04b0f89df776e6cf3b1faab1afd59c4a69cb12d9491",
+   "infra/gcp/vmset.sh": "99c52f333c7028445a359a4374e7d473cf80b84f9522c916ec06d26085b5c107",
+   "pgdelta/cli.py": "7d2e2812066a9fc2a54b053e31fbdb892748d2692a2b4cd40118555a8c1a9cc8",
+   "pgdelta/fastpath.py": "089e1a72cd188be4c31a79e802c5d579db814cece82199248b9264fb019d0569",
+   "pgdelta/flush.py": "f7e9ce53062204e1350de12440db87b1c3a36401ff9f9c188ee307093f8a5727",
+   "pgdelta/inplace.py": "4a25d21b4c1d7f0772f98781abc6a620def2d0251e44951612d73ae203b69fe2",
+   "pgdelta/live.py": "42f94aa72c5ab80252f819638909d9386629e9172ea3ee50c0bdcc4f05e07419",
+   "pgdelta/receiver.py": "9ecf7d01f65c0b992d9edcffc25d1ef4de7618a6e5f432a02bdd09a9fe76bee9",
+   "pgdelta/sender.py": "9ff803fe7bc4e7a1ec2a0a4888862853323d07bacdd3556c086085122c5921a4"
+  }
  }
 }
