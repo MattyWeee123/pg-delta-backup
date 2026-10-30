@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from pgdelta import fastpath, sender
@@ -293,6 +294,34 @@ class Pages(unittest.TestCase):
         self.assertIs(cli._diverged_basis(Namespace(fast_path=None, diverged_basis=None)), False)
         self.assertIs(cli._diverged_basis(Namespace(fast_path=None, diverged_basis=True)), True)  # check_mode refuses
         self.assertIs(cli._diverged_basis(Namespace()), False)
+
+    def test_the_cli_takes_a_crashed_standby_unless_told_not_to(self):
+        """K15: --crashed-standby is on by default; --no-crashed-standby turns it off, and the receiver a local session
+        starts is told either way."""
+        from argparse import Namespace
+
+        from pgdelta import cli, transport
+        self.assertIs(fastpath.DEFAULT_CRASHED_STANDBY, True)
+        self.assertIs(cli._crashed_standby(Namespace(crashed_standby=None)), True)
+        self.assertIs(cli._crashed_standby(Namespace(crashed_standby=False)), False)
+        self.assertIs(cli._crashed_standby(Namespace(crashed_standby=True)), True)
+        self.assertIs(cli._crashed_standby(Namespace()), True)
+        parser = cli.build_parser()
+        for argv, expected in (([], True), (['--crashed-standby'], True), (['--no-crashed-standby'], False)):
+            for command in (['receive', '--basis', 'B', '--in-place', '--stdio'],
+                            ['local', '--source', 'S', '--basis', 'B', '--in-place']):
+                with self.subTest(command=command[0], argv=argv):
+                    args = parser.parse_args([*command, *argv])
+                    self.assertIs(cli._crashed_standby(args), expected)
+        commands = []
+        with mock.patch.object(transport.subprocess, 'Popen', side_effect=lambda command, **_: commands.append(command)
+                               or (_ for _ in ()).throw(OSError('stop'))):
+            for value in (True, False, None):
+                with self.assertRaises(transport.TransferError):
+                    transport.spawn_local_receiver('B', 'O', crashed_standby=value)
+        self.assertIn('--crashed-standby', commands[0])
+        self.assertIn('--no-crashed-standby', commands[1])
+        self.assertFalse(any('crashed-standby' in str(part) for part in commands[2]))
 
 
 def page(lsn=None, flags=0, lower=40, upper=8000, special=8192, fill=b'x'):
@@ -635,9 +664,10 @@ class RealServer(unittest.TestCase):
                 self.assertIn('the pages written do not match what the source sent', result.stderr)
                 self.assertTrue(os.path.lexists(target / MARKER))
 
-    def test_a_killed_standby_takes_the_fast_path_only_with_crashed_standby(self):
-        """EXP-80: a standby of S killed in recovery ("in archive recovery") is refused, and hashed, without the option;
-        with --crashed-standby its end is its minimum recovery point, the fast path runs, and the copy recovers to S."""
+    def test_a_killed_standby_takes_the_fast_path_unless_told_not_to(self):
+        """EXP-80, K15: a standby of S killed in recovery ("in archive recovery") takes the fast path by default and with
+        --crashed-standby, its end proven by its minimum recovery point, and the copy recovers to S. With
+        --no-crashed-standby it is refused, and hashed."""
         standby = self.root / 'killed-standby'
         self.cmd([PG_BIN / 'pg_basebackup', '-h', self.sockets, '-p', 5432, '-U', 't', '-D', standby, '-R', '-X',
                   'stream', '-c', 'fast'])
@@ -646,18 +676,19 @@ class RealServer(unittest.TestCase):
         self.ctl(standby, 'stop', port=5434, mode='immediate')
         self.sql('UPDATE pgbench_accounts SET abalance = abalance + 2 WHERE aid % 499 = 3')
         self.sql('CHECKPOINT')
-        for name, extra in (('killed-hashed', ()), ('killed-fast', ('--crashed-standby',))):
-            with self.subTest(option=bool(extra)):
+        for name, extra in (('killed-default', ()), ('killed-fast', ('--crashed-standby',)),
+                            ('killed-hashed', ('--no-crashed-standby',))):
+            with self.subTest(option=extra):
                 shutil.copytree(standby, self.root / f'{name}-basis', symlinks=True)
                 target, stats = self.refresh(name, f'{name}-basis', *extra)
                 fast, received = stats['fast_path'], stats['receiver']['fast_path']
-                if extra:
+                if extra != ('--no-crashed-standby',):
                     self.assertTrue(fast['used'], fast['reasons'])
                     self.assertEqual(received['facts']['proof'], 'crashed standby')
                 else:
                     self.assertFalse(fast['used'])
                     self.assertIn('in archive recovery', received['refused'])
-                    self.assertIn('--crashed-standby', received['refused'])
+                    self.assertIn('--no-crashed-standby', received['refused'])
                 (target / 'standby.signal').unlink(missing_ok=True)
                 self.check_copy(target)
 

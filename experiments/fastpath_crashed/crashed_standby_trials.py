@@ -199,7 +199,8 @@ def trial(lab, root, number, arm, rng):
     if arm == 'recovery-first':
         row['recovery_exit'] = lab.recovery_first(path)
         row['state_after_recovery'] = state_of(path)
-    flags = ['--crashed-standby'] if arm in ('crashed-standby', 'crashed-primary') else []
+    # Explicit either way: the other arms ran without it, its default before K15 (October 30) made it on.
+    flags = ['--crashed-standby'] if arm in ('crashed-standby', 'crashed-primary') else ['--no-crashed-standby']
     result, stats, seconds = lab.refresh(path, *flags)
     received = (stats.get('receiver') or {}).get('fast_path') or {}
     fast = stats.get('fast_path') or {}

@@ -104,6 +104,10 @@ DEFAULT_FILL_GAPS = 2
 # The CLI's --diverged-basis with --fast-path: on EXP-67's old primary after a failover, it took 0.20 of pg_rewind's
 # time (hot rows) and 0.53 of a re-clone's (scattered rows), every copy correct (EXP-71).
 DEFAULT_DIVERGED_BASIS = True
+# The CLI's --crashed-standby: 100 of 100 randomized crashed standbys came out correct (EXP-80), refreshed in
+# 0.023-0.233 of hashing's time beyond memory (EXP-80b), and it held in 10 of 10 held-out cells (EXP-84). On by
+# default since the owner's decision K15 (October 30, 2026). It changes only the fast path's decision.
+DEFAULT_CRASHED_STANDBY = True
 # The first releases whose WAL summaries register visibility-map changes (commit f581fa7, August 2026).
 SUMMARY_FIXED = {17: 170011, 18: 180006}
 DEFAULT_TABLESPACE, GLOBAL_TABLESPACE = 1663, 1664
@@ -183,7 +187,7 @@ def basis_facts(basis, pg_controldata, marker, crashed_standby=False):
             end = max(end, parse_lsn(recovery))
             proof = 'clean shutdown in recovery' if state == 'shut down in recovery' else 'crashed standby'
     else:
-        hint = (' (a standby that crashed in recovery is taken with --crashed-standby)'
+        hint = (' (a standby that crashed in recovery is taken unless --no-crashed-standby is given)'
                 if state == 'in archive recovery' else '')
         return None, (f'B was not stopped cleanly ({state}), so its end can\'t be proven without all of its WAL'
                       + hint)

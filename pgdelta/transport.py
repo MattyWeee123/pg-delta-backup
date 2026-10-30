@@ -49,14 +49,15 @@ def stdio_channel():
 
 def spawn_local_receiver(basis, output, *, pg_controldata=None, reuse_any_basis=False,
                          local_source=None, jobs=None, hash_backend=None, rebuild=None, verify=None,
-                         in_place=False, fsync=None, verify_scope=None, crashed_standby=False):
+                         in_place=False, fsync=None, verify_scope=None, crashed_standby=None):
     """Start `receive --stdio` as a child process and return (process, channel).
 
     local_source is S: the child then also refuses to build O inside it.
     jobs, hash_backend, rebuild, verify, fsync and verify_scope, when given, are
     passed on as the child's --jobs, --hash-backend, --rebuild, --verify, --fsync
     and --verify-scope.
-    in_place (output None) passes --in-place instead of --output; crashed_standby passes --crashed-standby.
+    in_place (output None) passes --in-place instead of --output; crashed_standby True or False passes
+    --crashed-standby or --no-crashed-standby, and None leaves the child's default.
     """
     command = [sys.executable, '-c', _CHILD_BOOTSTRAP, _PACKAGE_PARENT, 'receive', '--stdio',
                '--basis', str(Path(basis).absolute())]
@@ -68,8 +69,8 @@ def spawn_local_receiver(basis, output, *, pg_controldata=None, reuse_any_basis=
                     if os.sep in str(pg_controldata) else str(pg_controldata)]
     if reuse_any_basis:
         command.append('--reuse-any-basis')
-    if crashed_standby:
-        command.append('--crashed-standby')
+    if crashed_standby is not None:
+        command.append('--crashed-standby' if crashed_standby else '--no-crashed-standby')
     for flag, value in (('--jobs', jobs), ('--hash-backend', hash_backend), ('--rebuild', rebuild),
                         ('--verify', verify), ('--fsync', fsync), ('--verify-scope', verify_scope)):
         if value is not None:

@@ -276,11 +276,14 @@ def _rebuild_options(parser):
                              'sequential right after writing it. Either way every file is verified '
                              'before O is published; with --jobs 1 it is always sequential '
                              '(default: %(default)s)')
-    parser.add_argument('--crashed-standby', action='store_true',
+    parser.add_argument('--crashed-standby', action=argparse.BooleanOptionalAction, default=None,
                         help='with the fast path offered and in place: also take a B that is a standby left in '
                              'recovery by a crash or a kill ("in archive recovery"), its end proven by its minimum '
                              'recovery point, as for a cleanly stopped standby. A primary that crashed stays refused '
-                             '(EXP-62). Remove a killed server\'s stale postmaster.pid first. Opt-in until EXP-80')
+                             '(EXP-62). Remove a killed server\'s stale postmaster.pid first. 100 of 100 randomized '
+                             'crashed standbys came out correct, and it held on every held-out setting (EXP-80, '
+                             'EXP-80b, EXP-84). Without the fast path it changes nothing '
+                             f'(default: {"on" if fastpath.DEFAULT_CRASHED_STANDBY else "off"})')
     parser.add_argument('--verify-scope', choices=('auto', *receiver.VERIFY_SCOPES), default='auto',
                         help='what is re-read to verify each file: all of it, or (in place) only the pages this run '
                              'wrote, every other part checked by the digests of B computed before anything was '
@@ -590,7 +593,14 @@ def _receive(args):
 def _receiver_engine(args):
     return {'jobs': args.jobs, 'hash_backend': args.hash_backend, 'rebuild': args.rebuild,
             'verify': args.verify, 'fsync': args.fsync, 'verify_scope': _verify_scope(args),
-            'crashed_standby': getattr(args, 'crashed_standby', False)}
+            'crashed_standby': _crashed_standby(args)}
+
+
+def _crashed_standby(args):
+    """--crashed-standby or --no-crashed-standby as given, else fastpath.DEFAULT_CRASHED_STANDBY. It changes only the
+    fast path's decision, which the sender offers, so the receiver needs no --fast-path of its own."""
+    on = getattr(args, 'crashed_standby', None)
+    return fastpath.DEFAULT_CRASHED_STANDBY if on is None else on
 
 
 def _verify_scope(args):

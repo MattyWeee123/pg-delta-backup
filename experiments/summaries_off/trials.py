@@ -151,7 +151,8 @@ def trial(lab, root, number, arm, rng):
         result, stats, seconds = lab.refresh(path, 'summaries')
         lab.summaries(False)
     else:
-        result, stats, seconds = lab.refresh(path, 'page-lsn', *(['--crashed-standby'] if kind == 'lsn-crashed' else []))
+        crashed = '--crashed-standby' if kind == 'lsn-crashed' else '--no-crashed-standby'  # explicit since K15
+        result, stats, seconds = lab.refresh(path, 'page-lsn', crashed)
     received = (stats.get('receiver') or {}).get('fast_path') or {}
     fast = stats.get('fast_path') or {}
     row.update({'exit': result.returncode, 'seconds': round(seconds, 3), 'fast_used': fast.get('used'),

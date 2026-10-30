@@ -4,7 +4,20 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
-## 2026-10-30 (02:40 UTC): EXP-84 done: the first held-out session narrows two claims
+## 2026-10-30 (02:35 UTC): K15: `--crashed-standby` on by default with the fast path
+
+- **The owner's decision**, after EXP-84: `--crashed-standby` is on by default, and `--no-crashed-standby` turns it off. It changes only the fast path's decision. A crashed primary stays refused, and the fast path itself stays opt-in.
+- **The evidence:**
+  - EXP-80: 100 of 100 randomized crashed standbys correct;
+  - EXP-80b: 0.023–0.233 of hashing's time beyond memory;
+  - EXP-84: 10 of 10 held-out cells.
+- **Code:** `fastpath.DEFAULT_CRASHED_STANDBY`; the receiver option is a `BooleanOptionalAction`; a local session's child receiver is passed the setting either way.
+- **Tests:**
+  - the real-server test now refreshes a killed standby by default, with the option, and with `--no-crashed-standby` (refused, hashed);
+  - a unit test covers the CLI and the child receiver's flags.
+- **Harnesses** (EXP-63's check, EXP-64's lab, EXP-80's and EXP-82's trials): every arm that ran without the option now passes `--no-crashed-standby`, so it keeps its registered meaning.
+
+## 2026-10-30 (02:20 UTC): EXP-84 done: the first held-out session narrows two claims
 
 - **`--crashed-standby` held in 10 of 10 cells** on H1–H4 (new workloads, scale 1,200, pd-ssd, PostgreSQL 18.6): proven, correct, within +0.36 s or 0.9% of a clean standby. It is eligible to become a default; that is the owner's decision.
 - **`--selector` failed in 6 of 10:**

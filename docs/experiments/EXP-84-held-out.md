@@ -166,7 +166,7 @@ Per cell, from the tuned results. **A miss narrows that candidate's claim to the
 
 ## What followed
 
-- **`--crashed-standby` held in every held-out cell,** so by this registration it is eligible to become a default with the fast path. Making it one is the owner's decision; RESULTS and its README row say it is eligible.
+- **`--crashed-standby` held in every held-out cell,** so by this registration it is eligible to become a default with the fast path. **The owner made it one** (K15, October 30): `--crashed-standby` is now on by default, and `--no-crashed-standby` turns it off.
 - **`--selector` is not eligible.** Its claim narrows to refreshes of tens of seconds on a disk whose limits it was given. H3 also met the archive's revisit trigger: its default must measure the disks' limits at the session's start. It needs a refit with a fixed cost measured on short refreshes, judged on tuning cells and then on new held-out ones.
 - **page-lsn's claim narrows:** it ties a re-clone up to about twice memory, and for local changes at 4.5x. At 4.5x memory with 28% of the pages changed, it took 1.12x. Single-read page-lsn, which sends from the scan's buffer, is added to the idea archive.
 - **The fast path's defaults transferred** to twice the size, pd-ssd, PostgreSQL 18.6 and four new workloads.

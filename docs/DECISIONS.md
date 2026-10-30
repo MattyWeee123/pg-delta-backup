@@ -229,6 +229,12 @@ Still open: K11 (D13's key design), and the sponsor's answers for K7 and K8.
 | K13 | How should the next work be chosen? | **By the research loop (rule 12):** competitors verified per situation; bottlenecks found by experiment; systems against algorithm decided by measured ceilings; ideas synthesized from papers; every decision committee-grade. "Tuning without this loop is not progress." | Rule 12. The first pass (October 27) audits novelty and competitors, measures the hash path's ceiling, and mines papers; see LOG.md. |
 | K14 | Adopt the workflow changes from the review of recursive self-improvement work (October 28)? | **Adopt all five.** | Rules 13–17 below: a cascade with a proxy-fidelity log, an idea archive, a held-out workload set, scorer integrity, and noise as an explicit bar ([the review](research/2026-10-28-rsi-review.md)). EXP-80 is the first experiment scored under them. |
 
+## Decisions of October 30, 2026
+
+| # | Question | The owner's answer | What follows |
+|---|---|---|---|
+| K15 | Make `--crashed-standby` a default with the fast path, now that it held in every held-out cell (EXP-84)? | **Yes: on by default with the fast path, and record the decision.** | `--crashed-standby` is on by default (`fastpath.DEFAULT_CRASHED_STANDBY`), and `--no-crashed-standby` turns it off. It changes only the fast path's decision: a standby killed or crashed in recovery ("in archive recovery") takes the fast path, its end proven by its minimum recovery point. A crashed primary stays refused. The fast path itself stays opt-in (`--fast-path`). **The evidence:** EXP-80 (100 of 100 randomized crashed standbys correct, wrong copies below 2.95% per refresh at 95%), EXP-80b (0.023–0.233 of hashing's time beyond memory) and EXP-84 (10 of 10 held-out cells). **The harnesses** of EXP-63, EXP-64's lab and EXP-80 to -82 now pass `--no-crashed-standby` wherever they relied on the old default, so their arms keep their registered meaning. |
+
 The O4 question (which number governs when the worst second and the work lost disagree on a large dirty set, EXP-57) was explained to the owner on October 27 and awaits an answer; fast stays the default meanwhile, by EXP-57's registered rule.
 
 ## What T3, T8a and T11 settled (October 24, 2026)

@@ -28,7 +28,8 @@
 # pages are then re-read; without it they are re-read on the pipelined verifier (the default since EXP-77).
 # CRASHED=1 (EXP-80b): each pattern's B0 is a standby instead (pg_basebackup -R), started on dest before the change and
 # killed with pg_ctl -m immediate KILL_AFTER seconds (default 30) into it, while the change goes on to its end on the
-# source; and a final "c" on a fast arm passes the receiver --crashed-standby. Each copy's check removes standby.signal.
+# source; and a final "c" on a fast arm passes the receiver --crashed-standby (every other arm --no-crashed-standby, its
+# meaning before K15 made it the default). Each copy's check removes standby.signal.
 # EXP-81, the competitors in their best modes, with dest's /data on XFS with reflinks (reformat_dest_xfs.sh):
 # - "incr": native incremental, pg_basebackup --incremental against B0's manifest (B0 itself, never started: a
 #   backup chain; the capture synced, as by default), then pg_combinebackup --copy-file-range (each reused block
@@ -281,8 +282,9 @@ EOF
       # "fast" reads one run at a time and syncs in the main loop, as in EXP-64; fastN reads on N threads; a "w"
       # syncs on the worker; "fK" fills clean gaps of up to K pages (EXP-70's --fill-gaps), and no "fK" fills none,
       # since EXP-70 made 2 pages the default; none takes an old primary from its own WAL (EXP-71's default).
-      # A final "s" has --selector choose the fill, or a full copy, instead (EXP-75).
-      fast= fsync='--fsync main'
+      # A final "s" has --selector choose the fill, or a full copy, instead (EXP-75). A crashed standby is taken only
+      # by a final "c" (--crashed-standby), as when it was opt-in: K15 made it the default on October 30.
+      fast= fsync='--fsync main' crashed=--no-crashed-standby
       if [[ "$a" =~ ^fast([0-9]*)([wb]?)(f([0-9]+)|s)?(q?)(c?)$ ]]; then
         fill="--fill-gaps ${BASH_REMATCH[4]:-0}"
         [ "${BASH_REMATCH[3]}" = s ] && fill=--selector
@@ -290,7 +292,7 @@ EOF
         [ "${BASH_REMATCH[2]}" = w ] && fsync='--fsync worker'
         [ "${BASH_REMATCH[2]}" = b ] && fsync='--fsync worker-writeback'
         [ "${BASH_REMATCH[5]}" = q ] && fsync="$fsync --verify sequential"
-        [ "${BASH_REMATCH[6]}" = c ] && fsync="$fsync --crashed-standby"
+        [ "${BASH_REMATCH[6]}" = c ] && crashed=--crashed-standby
       fi
       case "$a" in
         lsn) fast="--fast-path page-lsn --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
@@ -298,7 +300,7 @@ EOF
       esac
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
-        --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 $fsync > "$d/receive.log" 2>&1 &
+        --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 $fsync $crashed > "$d/receive.log" 2>&1 &
       rp=$!
       for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
       t0=$(date +%s.%N)

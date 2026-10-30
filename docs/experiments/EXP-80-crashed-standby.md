@@ -97,6 +97,6 @@ Status: **done October 28, 2026: every prediction held.** 100 of 100 randomized 
 ## What followed
 
 As registered for 1–3 holding:
-- **`--crashed-standby` stays opt-in until EXP-80b times it** beyond memory against hashing and a re-clone. After that, rule 15's held-out session comes before it becomes a default.
+- **`--crashed-standby` stays opt-in until EXP-80b times it** beyond memory against hashing and a re-clone. After that, rule 15's held-out session comes before it becomes a default. *(Both done: EXP-80b, then EXP-84 held in 10 of 10 cells; on by default since K15, October 30.)*
 - **Crash recovery first is rejected,** with S2e as the evidence. The guard's documentation (fastpath.py) says why.
 - **The residual risk is recorded in the idea archive:** a crash-recovered old primary that lost its WAL past the split fools guard v2 and `pg_rewind` alike.
