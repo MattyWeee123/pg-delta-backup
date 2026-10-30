@@ -162,5 +162,25 @@
    "pgdelta/transport.py": "a20f36fccb1e5396bd3110383e8b79aac7f2c80ca111962864b75066fb9d5c3f",
    "pgdelta/tree.py": "1d3aa5672923890636d4bd8759e3379ded75bd2430a14aefdf1408da8dbb62f3"
   }
+ },
+ "EXP-85": {
+  "commit": "e86ddce99298",
+  "files": {
+   "analysis/exp68.py": "bddb9253f0149001eb9fba0ba9b3da280976d91d320e4841c55e1aa03bd70133",
+   "analysis/exp76.py": "496f92ca5c8957d026760013d4b97658b74bf48c7bf142319908cf6fc4770d90",
+   "analysis/exp85.py": "56733e5b3e3aba515840b963cddaac6bc1653f78afda779a0a8f974fb068be56",
+   "analysis/plotting.py": "e632c22f7edcba13e1434416442b78821b3813e365cb3ede4ffdbdc7e16f0017",
+   "experiments/fastpath_crashed/crashed_standby_trials.py": "72b47a6c30f61f33e8e40a5fd1b2e0f3fb31fe934dd82eae22f69e9527476aa4",
+   "experiments/network/disk_series.sh": "6d8bf8ff468f545281a317f58566b29d0da07f1d71be0cdf8701a219011bece8",
+   "experiments/network/lab_exp64.sh": "4f97613de91b1d345bd0eac91f132f4a9e1e9eb69fddfa2925ec593e3a28953b",
+   "experiments/summaries_off/timing.py": "de803fd5bf533112d536d2927fadc8c21a83c4bf3155b443b50603ff8fe124e1",
+   "experiments/summaries_off/trials.py": "5a7b09dc6220e773d869b60ab925e6d803ff96b096d275a43c434b3b71162f5a",
+   "pgdelta/cli.py": "f364d8665af06245f7ef9e3a94e301d1f636cafab4939b1c0d9f45447220683a",
+   "pgdelta/fastpath.py": "2688d833cfe132e1fce4ab53c91f345e7ac86a9525803fbc947aa88f771bb73f",
+   "pgdelta/live.py": "42f94aa72c5ab80252f819638909d9386629e9172ea3ee50c0bdcc4f05e07419",
+   "pgdelta/matching.py": "db6da7593d98cc1168d70a0f8afca72abfb59ca3df1bb2dde742f857f5890fa8",
+   "pgdelta/receiver.py": "8f4ac65d16d316c4a5b013b8ae190ea4943c3f70d19b23500308d60e9dcaa9fa",
+   "pgdelta/sender.py": "9ff803fe7bc4e7a1ec2a0a4888862853323d07bacdd3556c086085122c5921a4"
+  }
  }
 }
