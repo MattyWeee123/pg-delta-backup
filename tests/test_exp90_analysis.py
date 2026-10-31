@@ -74,5 +74,25 @@ class OperationUnits(unittest.TestCase):
         d[exp90.WRITES], d[exp90.WSECT] = 3408, 3408 * 16
         self.assertAlmostEqual(float(exp90_overlap.units(d)), 4192.0)
 
+
+@unittest.skipIf(matplotlib is None, 'needs the analysis venv (matplotlib, numpy)')
+class OtherSessionsArms(unittest.TestCase):
+    def test_the_bounds_figure_takes_arms_it_has_no_label_for(self):
+        """The baseline script runs this analysis on any session's arms (EXP-91's crashed it at the end)."""
+        import exp90
+        import plotting
+        bounds = {'source disk': 88.0, 'dest disk': 87.0, 'link': 42.0, 'source thread': 9.0, 'dest thread': 15.0}
+        rows = [{'pattern': 'uniform', 'rate': rate, 'arm': arm + suffix, 'seconds': 100.0, 'bounds': bounds,
+                 'over_impl': 1.1} for arm in ('hashAVw', 'full', 'hash') for rate, suffix in ((None, ''),
+                                                                                         ('1gbit', '_1g'))]
+        with tempfile.TemporaryDirectory() as folder:
+            saved, plotting.FIGURES = plotting.FIGURES, Path(folder)
+            try:
+                exp90.bounds_figure(rows, 'bounds')
+            finally:
+                plotting.FIGURES = saved
+            self.assertTrue((Path(folder) / 'bounds.svg').exists())
+
+
 if __name__ == '__main__':
     unittest.main()

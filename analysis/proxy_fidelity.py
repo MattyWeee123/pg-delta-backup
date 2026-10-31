@@ -23,7 +23,8 @@ def main():
             if r['proxy'].startswith('local')]
     plotting.style()
     fig, ax = plt.subplots(figsize=(6.4, 5.0))
-    colors = [COLORS['blue'], COLORS['orange'], COLORS['green'], COLORS['purple'], COLORS['red'], COLORS['sky']]
+    colors = [COLORS['blue'], COLORS['orange'], COLORS['green'], COLORS['purple'], COLORS['red'], COLORS['sky'],
+              COLORS['black']]
     mechanisms = list(dict.fromkeys(r['mechanism'] for r in rows))
     assert len(mechanisms) <= len(colors), 'more mechanisms than colors: add one'
     for color, mechanism in zip(colors, mechanisms):

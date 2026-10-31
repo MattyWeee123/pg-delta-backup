@@ -82,9 +82,10 @@ between,exp75,scatterall12,full,,100.94,0.0031
 between,exp76,scatterall12,full,,100.95,0.0031
 between,exp77,scatterall12,full,,101.25,0.0031
 between,exp79b,scatterall12,full,,101.1,0.0031
-between,exp64,uniform,full,,91.15,0.0038
-between,exp64b,uniform,full,,90.96,0.0038
-between,exp68,uniform,full,,90.9,0.0038
-between,exp70,uniform,full,,91.02,0.0038
-between,exp80b,uniform,full,,91.04,0.0038
-between,exp90/lab,uniform,full,,90.8,0.0038
+between,exp64,uniform,full,,91.15,0.0044
+between,exp64b,uniform,full,,90.96,0.0044
+between,exp68,uniform,full,,90.9,0.0044
+between,exp70,uniform,full,,91.02,0.0044
+between,exp80b,uniform,full,,91.04,0.0044
+between,exp90/lab,uniform,full,,90.8,0.0044
+between,exp91/lab,uniform,full,,90.76,0.0044

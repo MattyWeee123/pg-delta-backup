@@ -318,7 +318,7 @@ def timelines(rows, name):
                 ax.plot(x, r['per_second'][key], color=color, lw=1.0, label=label)
             ax.set_ylim(0, 300)
             ax.set_xlim(0, max(x[-1] + r['width'] / 2, 1))
-            ax.set_title(f"{LABELS[arm]}: {r['seconds']:.0f} s", fontsize=9)
+            ax.set_title(f"{LABELS.get(arm, arm)}: {r['seconds']:.0f} s", fontsize=9)
             if j == 0:
                 ax.set_ylabel(f"{pattern}, {'1 Gbit/s' if rate else 'full link'}\nMB/s", fontsize=9)
             if i == len(cells) - 1:
@@ -331,7 +331,8 @@ def timelines(rows, name):
 
 def bounds_figure(rows, name):
     plotting.style()
-    order = sorted(rows, key=lambda r: (r['pattern'], r['rate'] or '', ARMS.index(r['arm'].split('_')[0])))
+    rank = lambda arm: (ARMS.index(arm), '') if arm in ARMS else (len(ARMS), arm)  # other sessions' arms last
+    order = sorted(rows, key=lambda r: (r['pattern'], r['rate'] or '', rank(r['arm'].split('_')[0])))
     fig, ax = plt.subplots(figsize=(9, 0.42 * len(order) + 1.2))
     marks = {'source disk': ('o', COLORS['blue']), 'dest disk': ('s', COLORS['sky']), 'link': ('D', COLORS['black']),
              'source thread': ('^', COLORS['orange']), 'dest thread': ('v', COLORS['red'])}
@@ -340,7 +341,7 @@ def bounds_figure(rows, name):
         for key, (m, c) in marks.items():
             ax.plot(r['bounds'][key], y, m, color=c, ms=6, label=key if y == 0 else None)
         ax.annotate(f"{r['over_impl']:.2f}x", (r['seconds'], y), xytext=(4, -3), textcoords='offset points', fontsize=8)
-    ax.set_yticks(range(len(order)), [f"{r['pattern']}, {LABELS[r['arm'].split('_')[0]]}"
+    ax.set_yticks(range(len(order)), [f"{r['pattern']}, {LABELS.get(r['arm'].split('_')[0], r['arm'].split('_')[0])}"
                                       f"{', 1 Gbit/s' if r['rate'] else ''}" for r in order], fontsize=8)
     ax.invert_yaxis()
     ax.set_xlabel('seconds: the run (grey bar) and the time each resource needed for its work at full speed (marks)')

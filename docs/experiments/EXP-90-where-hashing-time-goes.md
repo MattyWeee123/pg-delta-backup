@@ -134,7 +134,7 @@ Each run starts from a fresh copy of B0 with both VMs' caches dropped. Every pgd
 **The session:**
 - **Where and when:** us-west1 (zones b and c), October 31: the profile 15:42–15:51 UTC, the smoke (scale 20, every arm passed), the scored runs 16:12–17:17.
 - **Afterwards:** the results were fetched and both VMs deleted.
-- **Rule 16:** `analysis/integrity.py check EXP-90` found 42 of 42 registered files unchanged since 098ffcc when the data were scored. Two changed afterwards, neither altering a score: one word of `analysis/exp90.py`'s docstring (a person's name for "the mentor's"), and a test added to `tests/test_exp90_analysis.py` for the post-hoc view.
+- **Rule 16:** `analysis/integrity.py check EXP-90` found 42 of 42 registered files unchanged since 098ffcc when the data were scored. Two changed afterwards, neither altering a score: one word of `analysis/exp90.py`'s docstring (a person's name for "the mentor's"), and a test added to `tests/test_exp90_analysis.py` for the post-hoc view. After EXP-91, the bounds figure places arms it has no label for last (the baseline script had stopped there on EXP-91's arms), with a test.
 - **The data:** each run's scores in [data/exp90-scored.json](data/exp90-scored.json) and the VMs' hash rates in `data/exp90-hashbench-vm-*.json`. The raw samples are in `results/exp04/exp90` (not in git), with the baseline's own `summary.txt`.
 
 **The capacities, measured before the runs (identical on both VMs):**

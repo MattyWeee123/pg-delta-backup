@@ -4,6 +4,19 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-31 (20:43 UTC): EXP-91 done: each change removed its stall, then the receiver's syncs bound
+
+- **E1, the deciding prediction, failed:** with both changes, uniform took 0.818x `hash` at full link (bar 0.70). E2 failed (1.034x `pg_basebackup` at 1 Gbit/s, bar 0.92), and so did E3 and E5. E4 held: hot unchanged, `pg_basebackup` at its bound.
+- **Each change worked:**
+  - verifying as written cut dest's reads beyond the database from 4.88 GB to 0.01 GB, and the verification from 81 s to under 2 s;
+  - hashing ahead cut the source's disk alone from 27 s to 1 s, but ran 11–16 GB ahead on 8 GB VMs, so the source read the pages it sent a second time.
+- **What bound next (post hoc):** the receiver's syncs in its main loop, 78.5 s of 151.5 s. The source's reads and dest's syncs took turns (24 s and 26 s alone).
+- **With the syncs on the worker (`hashAVw`, a reported arm, one run):** 111 s, 0.601x `hash` and 1.13x its bound. **At 1 Gbit/s, 113 s against `pg_basebackup`'s 152 s (0.744):** the first hashing run to beat a re-clone where many pages change. Exploratory until confirmed.
+- **Correctness:** 20 of 20 VM copies matched; 1,000 local fault trials with no wrong copy; 52 of 52 misplaced-write controls caught.
+- **The checks:** 50 of 50 registered files unchanged when scored; `pg_basebackup` within 1% of EXP-90's; the proxy pair logged (local 1.354, VMs 0.818, the opposite sign).
+- **Fixed:** the baseline script's last figure stopped on arms it had no label for (after the data were fetched); `analysis/exp90.py` now places them last, with a test.
+- **Proposed next, EXP-92:** confirm `hashAVw` with two runs per arm, and hold the hashing window to the source's cache. Beside it, structurally different: B's stored digests.
+
 ## 2026-10-31 (UTC): EXP-91 pre-registered: hashing ahead and verifying as written
 
 - **Why:** EXP-90 found hashing's scattered case at 1.70x its bound. The source stopped reading while a send blocked, and the verification re-read 4.86 GB from dest's disk.

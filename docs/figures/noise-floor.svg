@@ -417,8 +417,8 @@ L 517.591161 232.005102
 " clip-path="url(#p3432570f32)" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #e69f00"/>
    </g>
    <g id="line2d_35">
-    <path d="M 42.06207 230.311217 
-L 517.591161 230.311217 
+    <path d="M 42.06207 229.182547 
+L 517.591161 229.182547 
 " clip-path="url(#p3432570f32)" style="fill: none; stroke-dasharray: 3.7,1.6; stroke-dashoffset: 0; stroke: #e69f00"/>
    </g>
    <g id="line2d_36">
@@ -437,7 +437,7 @@ L 517.591161 238.680138
 " style="fill: none; stroke: #000000; stroke-width: 0.8; stroke-linejoin: miter; stroke-linecap: square"/>
    </g>
    <g id="text_11">
-    <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #e69f00" x="470.637391" y="227.042991" transform="rotate(-0 470.637391 227.042991)">pg_basebackup in the same cell, between sessions: 0.31%, 0.38%</text>
+    <text style="font-size: 7.5px; font-family: 'DejaVu Sans', 'Bitstream Vera Sans', 'Computer Modern Sans Serif', 'Lucida Grande', 'Verdana', 'Geneva', 'Lucid', 'Arial', 'Helvetica', 'Avant Garde', sans-serif; text-anchor: end; fill: #e69f00" x="470.637391" y="225.914321" transform="rotate(-0 470.637391 225.914321)">pg_basebackup in the same cell, between sessions: 0.31%, 0.44%</text>
    </g>
    <g id="patch_5">
     <path d="M 400.039035 72.02202 

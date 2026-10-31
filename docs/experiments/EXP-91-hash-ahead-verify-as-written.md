@@ -1,6 +1,12 @@
 # EXP-91: Hashing ahead and verifying as written, where many pages change
 
-Status: **pre-registered October 31, 2026, before any scored run.**
+Status: **done October 31, 2026 (UTC).**
+- **E1, the deciding prediction, failed.** With both changes, the scattered cell took 0.818x today's hashing at full link (bar 0.70). E2, E3 and E5 failed too. E4 held: where few pages change nothing moved, and `pg_basebackup` stayed at its bound.
+- **Each change did what it was built for.** The verification no longer re-reads the disk (4.88 GB to 0.01 GB), and hashing ahead keeps the source reading. Together they exposed a third stall: the receiver syncing each file in its main loop (78.5 s of 151.5 s).
+- **With the syncs on the receiver's worker (`hashAVw`, a reported arm), the cell took 0.601x today's hashing and 1.13x its bound. At 1 Gbit/s that is 0.744x `pg_basebackup`:** the first hashing run to beat a re-clone where many pages change. It was one run and not the registered deciding arm, so it is exploratory: EXP-92 is proposed to confirm it.
+- **Correctness held:** 20 of 20 VM copies matched. Locally, 1,000 fault trials gave no wrong copy, and all 52 misplaced-write controls were caught.
+
+(Pre-registered October 31, before any scored run; the sections up to "The rules this session runs under" are unchanged since.)
 
 ## Why
 
@@ -126,7 +132,152 @@ That makes 24 runs. Every pgdelta copy is started and compared with the source. 
   - E4's 1.03 is the noise bar plus a margin;
   - a deciding ratio within 0.03 of its bar gets a second session.
 
+## Results
+
+**The session:**
+- **Where and when:** us-west1 (zones b and c), October 31: the profile 18:25–18:33 UTC, the smoke (scale 20, every arm passed), the scored runs 18:41–20:41.
+- **Afterwards:** the results were fetched and both VMs deleted (20:43).
+- **Rule 16:** `analysis/integrity.py check EXP-91` found 50 of 50 registered files unchanged since 438d08a when the data were scored. Two changed afterwards, neither altering a score:
+  - `analysis/exp90.py`'s bounds figure now places arms it has no label for last.
+  - The baseline script draws that figure after scoring, and on this session's new arms it had stopped there, after the VMs were deleted and the data fetched.
+  - `analysis/exp91.py` doesn't draw it. The second change is a test of it, added to `tests/test_exp90_analysis.py`.
+- **The data:**
+  - each run's scores: [data/exp91-scored.json](data/exp91-scored.json);
+  - the local scale model: [data/exp91-local.csv](data/exp91-local.csv);
+  - the fault campaign: [data/exp91-campaign.csv](data/exp91-campaign.csv);
+  - the raw samples: `results/exp04/exp91` (not in git).
+
+**The capacities, measured before the runs (as EXP-90's):**
+- **Disks:** 205.5 MB/s and 4,195–4,198 ops/s, reading or writing, on both VMs. With sequential reads and random writes at once, the reads ran at 1.000 of alone and the writes at 0.81.
+- **The link:** 1,934 MB/s unshaped, and 119.5 MB/s shaped.
+
+**Where many pages change (uniform, 28% of the pages):**
+
+| Rate | Arm | Seconds | Over `hash` | Over `pg_basebackup` | T_impl, set by | Measured / T_impl |
+|---|---|---|---|---|---|---|
+| full link | `full` | 90.76 | | 1 | 87.04 s, dest's disk | 1.043 |
+| full link | `hash` | 185.19 | 1 | 2.040 | 110.29 s, dest's disk | 1.679 |
+| full link | `hashA` | 145.35 | 0.785 | 1.601 | 104.32 s, dest's disk | 1.393 |
+| full link | `hashV` | 156.50 | 0.845 | 1.724 | 88.27 s, the source's disk | 1.773 |
+| full link | `hashAV` | 151.53 | **0.818** | 1.670 | 106.55 s, the source's disk | 1.422 |
+| full link | `hashAVw` | 111.23 | 0.601 | 1.226 | 98.39 s, the source's disk | 1.130 |
+| 1 Gbit/s | `full_1g` | 151.80 | | 1 | 149.68 s, the link | 1.014 |
+| 1 Gbit/s | `hash_1g` | 220.80 | 1 | 1.455 | 110.72 s, dest's disk | 1.994 |
+| 1 Gbit/s | `hashA_1g` | 171.54 | 0.777 | 1.130 | 106.55 s, the source's disk | 1.610 |
+| 1 Gbit/s | `hashV_1g` | 178.31 | 0.808 | 1.175 | 88.27 s, the source's disk | 2.020 |
+| 1 Gbit/s | `hashAV_1g` | 156.93 | 0.711 | **1.034** | 106.55 s, the source's disk | 1.473 |
+| 1 Gbit/s | `hashAVw_1g` | 113.01 | 0.512 | 0.744 | 99.35 s, the source's disk | 1.137 |
+
+**Where few pages change (hot, 1% of the rows):**
+- Every hashing arm took 87.7–88.4 s, 1.012–1.020x its bound: both disks reading S and B.
+- Against `pg_basebackup`, that is 0.970–0.971x (90.44 s) at full link and 0.577–0.581x (152.27 s) at 1 Gbit/s.
+
+![The uniform runs, second by second](../figures/exp91-timelines.svg)
+
+![Every run's seconds, by which machine was busy](../figures/exp91-busy.svg)
+
+**The predictions:**
+
+| # | Prediction | Measured | Verdict |
+|---|---|---|---|
+| E1 (deciding) | Uniform, full link: `hashAV` ≤ 0.70x `hash` | 0.818 | **Failed.** 0.118 past the bar, beyond the 0.03 that would call for a second session |
+| E2 | Uniform: `hashAV_1g` ≤ 0.92x `full_1g` | 1.034 | **Failed** |
+| E3 | Uniform, full link: `hashA` and `hashV` each ≤ 0.92x `hash`, and `hashAV` below both | 0.785 and 0.845; `hashAV` 0.818 | **Failed.** Each change helped on its own, but together they didn't add up. `hashAV` took 4.2% longer than `hashA` at full link and 8.5% less at 1 Gbit/s; with one run each, neither order is established |
+| E4 | Hot: every new arm within 1.03x `hash` at its rate; `pg_basebackup` ≤ 1.10x T_impl | 0.994–1.001; 1.014–1.043 | Held |
+| E5 | Uniform `hashAV`, full link: ≤ 10 s of the source's disk alone; ≤ 0.5 GB of dest's reads beyond the database; ≤ 1.30x T_impl | 24 s; 0.01 GB; 1.422 | **Failed.** The reads part held |
+| Correctness | Every copy matches; no wrong output locally; every control caught | 20 of 20 VM copies; 1,000 of 1,000 local trials; 52 of 52 controls | Held |
+
+**The local fault campaign** (EXP-32's, with `--verify-scope as-written --hash-ahead SIZE --read-ahead 3`):
+
+| Fault | Trials | Wrong copy |
+|---|---|---|
+| None | 365 | 0 |
+| B kept writing on its own (diverged) | 169 | 0 |
+| The refresh killed partway | 236 | 0 |
+| B corrupted | 93 | 0 |
+| B truncated | 88 | 0 |
+| Another cluster's copy | 49 | 0 |
+| **All** | **1,000** | **0** |
+
+- **The controls:** all 52 misplaced-write controls were caught, then repaired.
+- **The bound:** the wrong-copy rate is below 0.30% per refresh at 95% confidence, and below 0.69% at 99.9%, as EXP-32's for today's verification.
+- **The window:** the first 500 trials hashed 64 KiB ahead (a few files), the second 500 64 GiB (everything).
+
+**Reported:**
+- **`hashAVw` over `hashAV`:** 1.001 and 1.000 in hot; **0.734 and 0.720 in uniform** (full link, 1 Gbit/s).
+- **The cross-session controls:**
+  - `full`: 90.44 s (hot) and 90.76 s (uniform), against EXP-90's 90.51 and 90.80 s: −0.1% and −0.04%, within 1%.
+  - `full_1g` (uniform): 151.80 s against 153.35 s, −1.0%.
+  - Over seven sessions, `pg_basebackup`'s uniform cell now spreads 0.44% ([noise-floor.csv](../research/noise-floor.csv)).
+  - `hash` (uniform): 185.19 s against 186.93 s (−0.9%) at full link, but **220.80 s against 209.92 s (+5.2%) at 1 Gbit/s.** A single run with a pipelining gap moves more than the 2.23% bar, which comes mostly from runs at their bound.
+- **The proxy pair (rule 13):** the local hashAV/hash was 1.354 (scatter) and 1.358 (hot), against the VMs' 0.818 and 1.000.
+  - In the scattered cell the sign is opposite, far outside rule 13's band.
+  - In memory nothing is evicted, so neither stall exists, and the receiver's page-by-page read-back hashing is pure cost.
+  - This is the third pair where the local model can't predict a disk effect, after EXP-82 and EXP-85. Every local copy (16 of 16) had equal rows and passed `pg_amcheck`.
+- **The counters, uniform at full link:**
+  - **the planner** ran up to 11.4–15.7 GB ahead of the sending (64 GiB allowed);
+  - **the receiver** read back 618,417 pages in 3.4–7.0 s, composed 8,979 nodes, and re-read 73 nodes (3 pages), against 9,041 nodes re-read by `written`.
+
+## Where the time went (post hoc, not registered)
+
+From the timelines, the split by which machine was busy, and pgdelta's timers, for uniform at full link:
+
+| Arm | Seconds | Source disk alone | Dest disk alone | Dest's reads beyond the database | The receiver's syncs | The sender waited on the receiver | The source disk's bound |
+|---|---|---|---|---|---|---|---|
+| `hash` | 185.2 | 27 s | 93 s | 4.88 GB | 119.2 s, in the main loop | 0.13 s | 88.3 s |
+| `hashA` | 145.4 | 1 s | 34 s | 3.65 GB | 81.0 s, in the main loop | 9.2 s | 104.1 s |
+| `hashV` | 156.5 | 40 s | 64 s | 0.01 GB | 79.4 s, in the main loop | 0.13 s | 88.3 s |
+| `hashAV` | 151.5 | 24 s | 26 s | 0.01 GB | 78.5 s, in the main loop | 19.7 s | 106.5 s |
+| `hashAVw` | 111.2 | 0 s | 10 s | 0.02 GB | 102.2 s on the worker; the loop waited 5.5 s | 0.15 s | 98.4 s |
+
+**What each change did:**
+- **Verifying as written did what it was built for.**
+  - Dest's reads beyond the database fell from 4.88 GB to 0.01–0.02 GB in every arm with it, and the verification from 81 s to under 2 s.
+  - Reading back cost the receiver's main thread 3.4–7.0 s.
+- **Hashing ahead did too, at a cost.**
+  - Alone, it cut the source's disk alone from 27 s to 1 s.
+  - But the planner ran 11–16 GB ahead on VMs with 8 GB of memory, so the pages sent had left the source's cache. The source's disk then needed 104–107 s, against 88 s. This is inferred from the bound: the extra 16–18 s is 3.3–3.7 GB at the disk's rate, most of the 5.07 GB sent read a second time. With the worker, the sending kept closer behind (11.4 GB ahead) and the extra fell to 10 s.
+- **Together, a third stall bound: the receiver syncing each file in its main loop.**
+  - With the re-read and the source's idle gone, each file's sync (78.5 s in all) stopped the receiver. The sender then blocked: it waited on the receiver 19.7 s, against 0.13 s in `hash`.
+  - The source's reads and dest's syncs took turns: in the A-and-V panel after 88 s, the source's disk was busy alone for 24 s and dest's for 26 s.
+- **With the syncs on the worker, the turns overlapped.**
+  - `hashAVw` had no second of the source's disk alone, and ran at 1.13x its bound.
+  - What is left is the source's re-reads (a bound of 98.4 s against 88.3 s) and dest's last writes alone (10 s).
+
+**Why the worker gained only 4–5% in EXP-90:** there, the source's idle and the re-read bound first. The three stalls are in series, so removing one or two moves the bottleneck, and only removing all three closes most of the gap. The pre-registration named the syncs as the first candidate if E1 failed, but predicted that the two changes alone would reach the floor. That was wrong.
+
+**What it means for the floor (inferred):**
+- **At 1 Gbit/s:** `hashAVw` took 113 s against `pg_basebackup`'s 152 s (0.744), inside EXP-90's floor estimate of 0.71–0.83x. If the window is held to what the source's cache keeps, its bound returns to about 88 s, and at the same 1.13x the run would take about 0.65x a re-clone.
+- **At full link:** 1.226x `pg_basebackup` now, and about 1.10x at a bound of 88 s: still a loss. All of B is read, so the floor at best ties a re-clone, an algorithm problem.
+
+## What follows (from these results)
+
+- **No default changes.** Both changes stay opt-in. `hashAVw` was a reported arm with one run, so its result is a hypothesis, not a claim (rule 11).
+- **Proposed next, EXP-92 (systems: a confirmation and one tuning):**
+  - `hashAVw` registered as the deciding arm, two runs per arm in uniform at both rates, beside `full` and `hash`;
+  - **the window held to the source's cache** (`--hash-ahead 2G` on the 8 GB VMs), predicted to bring the source's bound back to about 88 s;
+  - hot again, for no harm;
+  - the local fault campaign with all three flags first.
+  - **Bars, set from this session:** uniform `hashAVw_1g` ≤ 0.85x `full_1g` (here 0.744), and `hashAVw` ≤ 0.70x `hash` at full link (here 0.601).
+  - Making these hashing's defaults would then need a held-out session (rule 15, H9–H12).
+- **Beside it, structurally different (rule 14):** B's digests kept from the refresh that wrote B. At full link even the floor ties a re-clone; only not reading B gets past it.
+
 ## Workflow check
+
+| | Check | For this experiment |
+|---|---|---|
+| 1 | Situation, standard, competitor | Hashing against a re-clone (`pg_basebackup`) beyond memory, 28% of the pages changed. **Measured:** both changes took 1.67x a re-clone at full link and 1.03x at 1 Gbit/s, a loss. With the syncs on the worker: 1.23x and **0.744x** (one run, exploratory). Where few pages change: 0.97x and 0.58x |
+| 2 | The bottleneck | **By measurement (post hoc):** once the two targeted stalls were gone, the receiver's syncs in its main loop bound. Its syncs took 78.5 s and the sender waited on it 19.7 s; the source's disk was busy alone for 24 s and dest's for 26 s, taking turns |
+| 3 | Systems or algorithm | **At 1 Gbit/s, systems:** now inside the floor estimate (0.744 against 0.71–0.83). **At full link, algorithm:** a bound of at least 88 s against a re-clone's 91 s |
+| 4 | Papers and prior art | The fast path's syncs on a worker (EXP-68) and its read-ahead (EXP-64b), reused; the mentor's pipelining; EXP-35's composed verification, extended |
+| 5 | Committee-grade | Pre-registered, with the analysis committed first. E1–E3 and E5 failed as registered and are reported so. `hashAVw` is a reported arm, exploratory until EXP-92 confirms it. The mechanism is post hoc; the floor is inferred |
+| 13 | The cascade | The proxy pair is logged: locally 1.354, on the VMs 0.818, the opposite sign. EXP-92 would run tests, then the local fault campaign, then the VMs, since the local model can't show disk effects |
+| 14 | The idea archive | Updated: both changes tested, `hashw` re-tested within `hashAVw`, and the window held to the cache added. Structurally different: B's stored digests |
+| 15 | Held-out workloads | None owed: no default changed and no claim left the project. A default would need H9–H12 |
+| 16 | Scorer integrity | 50 of 50 files unchanged when scored; two changed since (a figure and its test); 20 of 20 copies matched; 52 of 52 controls caught |
+| 17 | The noise bar | E1 is 0.118 past its bar. `hashAVw`'s effect (0.73x) is five times the largest single-run movement seen here (+5.2%), but it is one run, so EXP-92 registers two |
+
+<details><summary>The workflow check as pre-registered</summary>
 
 | | Check | For this experiment |
 |---|---|---|
@@ -140,3 +291,5 @@ That makes 24 runs. Every pgdelta copy is started and compared with the source. 
 | 15 | Held-out workloads | None owed: opt-in, with no default changed and no claim leaving |
 | 16 | Scorer integrity | Registered files; every copy checked; negative controls in the tests and the campaign; E4 controls the bound |
 | 17 | The noise bar | 2.23%; the deciding bars are 6–23 points from the predictions |
+
+</details>
