@@ -7,8 +7,8 @@
 #     experiments/baseline/run.sh                  # the full baseline, about 2.5 hours
 #     SMOKE_ONLY=1 experiments/baseline/run.sh     # a 0.3 GB smoke only, about 40 minutes
 # Settings (environment): PAIR (the VM set's name, default bl- and your user name), NAME, RESULTS (default
-# results/baseline/NAME), SCALE (default 600, about 18 GB), PATTERNS, ARMS, REPEATS (default 1), SEED, ZONES (pairs
-# source-zone:dest-zone, tried in order), KEEP.
+# results/baseline/NAME), SCALE (default 600, about 18 GB), PATTERNS, ARMS (ARMS_hot, say, for one pattern's own),
+# REPEATS (default 1), SEED, ZONES (pairs source-zone:dest-zone, tried in order), KEEP.
 set -u
 cd "$(dirname "$0")/../.."
 export PATH="$PATH:/usr/sbin"
@@ -88,6 +88,11 @@ for rate in full 1g; do
 done
 
 LAB="UTIL=1 ARMS='$ARMS' PATTERNS='$PATTERNS'"
+OWN=
+for p in $PATTERNS; do  # a pattern's own arms (ARMS_hot, say), passed on when set
+  v=ARMS_$p; [ -n "${!v:-}" ] && OWN="$OWN $v='${!v}'"
+done
+LAB="$LAB$OWN"
 lab() {  # $1: the lab's results directory on dest, $2: scale, $3: repeats, $4: seed; waits for it to end
   R ssh dest -- "cd ~/pgd && ($LAB SCALE=$2 OUT=$1 setsid nohup bash experiments/network/lab_exp64.sh $SRC $3 $4 \
     > $1.log 2>&1 < /dev/null &)" > /dev/null 2>&1
@@ -120,7 +125,7 @@ if ! lab "$REMOTE-smoke" 20 1 "$((SEED + 9))"; then
 fi
 say "smoke passed"
 if [ "$SMOKE_ONLY" != 1 ]; then
-  say "lab: scale $SCALE, patterns '$PATTERNS', arms '$ARMS', $REPEATS repeat(s), seed $SEED"
+  say "lab: scale $SCALE, patterns '$PATTERNS', arms '$ARMS'$OWN, $REPEATS repeat(s), seed $SEED"
   lab "$REMOTE" "$SCALE" "$REPEATS" "$SEED"; ok=$?
   [ $ok = 0 ] || say "the lab failed or did not finish: see its log"
 fi

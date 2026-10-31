@@ -21,6 +21,7 @@
 | `hash` | pgdelta hashing both copies: works on any old copy |
 | `hashw` | the same, with the receiver's file syncs on a background thread (`--fsync worker`) |
 | `fast8wf2` | pgdelta's WAL-summary fast path, with its defaults |
+| `hashA`, `hashV`, `hashAVw`, `hashA2GVw`, ... | hashing with EXP-91's options: `A` hashes ahead on its own thread (`--hash-ahead 64G`, or the size after it: `A2G` is 2 GiB), `V` verifies each run as written (`--verify-scope as-written`), `w` syncs on the worker |
 | `X_1g` | arm X on a link shaped to 1 Gbit/s on both VMs (`infra/gcp/throttle.sh`) |
 
 Every pgdelta copy is started and compared with the source (row count and the sum of balances).
@@ -71,7 +72,7 @@ That runs the full baseline: 16 runs at 18 GB, about 2.5 hours.
 | `PAIR` | `bl-` and your user name | The VMs' names: `pgd-PAIR-source`, `pgd-PAIR-dest` |
 | `NAME` | `baseline-` and the time | The run's name |
 | `RESULTS` | `results/baseline/NAME` | Where results go on your machine |
-| `ARMS`, `PATTERNS` | the table above | What runs |
+| `ARMS`, `PATTERNS` | the table above | What runs; `ARMS_hot` (say) gives one pattern its own arms |
 | `REPEATS` | `1` | Runs per arm and change |
 | `SCALE` | `600` | pgbench's scale: 600 is about 18 GB |
 | `KEEP` | `0` | `1` keeps the VMs for a look |

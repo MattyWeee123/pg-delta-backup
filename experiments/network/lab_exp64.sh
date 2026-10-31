@@ -345,11 +345,12 @@ EOF
         od) fast="--fast-path summaries --read-ahead 8 --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
       esac
       # Hashing (EXP-90, EXP-91): "hash" with an "A" hashes ahead on its own thread (--hash-ahead, the pages sent read
-      # on 8 threads), a "V" verifies each run as written (--verify-scope as-written), a "w" syncs on the worker.
-      if [[ "$a" =~ ^hash(A?)(V?)(w?)$ ]]; then
-        [ "${BASH_REMATCH[1]}" = A ] && fast='--hash-ahead 64G --read-ahead 8'
-        [ "${BASH_REMATCH[2]}" = V ] && rflags='--verify-scope as-written'
-        [ "${BASH_REMATCH[3]}" = w ] && fsync='--fsync worker'
+      # on 8 threads), up to 64 GiB of files or the size after it (EXP-92: "A2G", 2 GiB); a "V" verifies each run as
+      # written (--verify-scope as-written), a "w" syncs on the worker.
+      if [[ "$a" =~ ^hash(A([0-9]+[KMGT])?)?(V?)(w?)$ ]]; then
+        [ -n "${BASH_REMATCH[1]}" ] && fast="--hash-ahead ${BASH_REMATCH[2]:-64G} --read-ahead 8"
+        [ "${BASH_REMATCH[3]}" = V ] && rflags='--verify-scope as-written'
+        [ "${BASH_REMATCH[4]}" = w ] && fsync='--fsync worker'
       fi
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \

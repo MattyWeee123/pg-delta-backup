@@ -4,6 +4,14 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-31 (UTC): EXP-92 pre-registered: confirming hashing with its syncs on a worker; the window held to the cache
+
+- **Why:** in EXP-91 the reported arm with the receiver's syncs on its worker (`hashAVw`) beat `pg_basebackup` at 1 Gbit/s where many pages change (0.744), but in one run of an arm not registered as deciding. Its hashing also ran 11–16 GB ahead on 8 GB VMs, so the source read the pages it sent a second time.
+- **The arms:** `full`, `hash`, `hashAVw` and `hashA2GVw` (the same with `--hash-ahead 2G`), two runs each: uniform at full link and 1 Gbit/s, and hot at full link. 24 runs.
+- **Deciding (F1):** uniform `hashAVw_1g` ≤ 0.85x `full_1g`. Also F2 (`hashAVw` ≤ 0.70x `hash` at full link), F3 (the window ends the second reads and is no slower), F4 (no harm in hot; `pg_basebackup` at its bound) and F5 (the mechanism).
+- **Built (opt-in, no pgdelta changes):** arm names carry the window (`A2G`); the baseline passes a pattern's own arms (`ARMS_hot`); `analysis/exp92.py`; `experiments/network/exp92_local.py`; 2 tests of all three options together.
+- **Correctness:** 1,000 local fault trials with all three options, and every VM copy checked.
+
 ## 2026-10-31 (20:43 UTC): EXP-91 done: each change removed its stall, then the receiver's syncs bound
 
 - **E1, the deciding prediction, failed:** with both changes, uniform took 0.818x `hash` at full link (bar 0.70). E2 failed (1.034x `pg_basebackup` at 1 Gbit/s, bar 0.92), and so did E3 and E5. E4 held: hot unchanged, `pg_basebackup` at its bound.
