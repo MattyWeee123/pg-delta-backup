@@ -855,17 +855,20 @@ def check_basis_wal(value):
 
 
 def check_mode(mode, source_kind, subpage, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False,
-               selector=None, lsn_single_read=False):
+               selector=None, lsn_single_read=False, hash_ahead=0):
     if type(read_ahead) is not int or read_ahead < 0:
         raise InvalidInput(f'read-ahead must be a whole number of threads, not {read_ahead!r}')
+    if type(hash_ahead) is not int or hash_ahead < 0:
+        raise InvalidInput(f'hash-ahead must be a whole number of bytes, not {hash_ahead!r}')
     if type(fill_gaps) is not int or fill_gaps < 0:
         raise InvalidInput(f'fill-gaps must be a whole number of pages, not {fill_gaps!r}')
     if lsn_single_read and mode != PAGE_LSN:
         raise InvalidInput('--lsn-single-read sends page-lsn\'s chosen pages as its scan read them, so it needs '
                            '--fast-path page-lsn')
     if mode is None:
-        if read_ahead:
-            raise InvalidInput('--read-ahead reads the fast path\'s chosen pages, so it needs --fast-path')
+        if read_ahead and not hash_ahead:
+            raise InvalidInput('--read-ahead reads the fast path\'s chosen pages, or the pages hashing chose with '
+                               '--hash-ahead, so it needs --fast-path or --hash-ahead')
         if fill_gaps:
             raise InvalidInput('--fill-gaps fills gaps between the fast path\'s chosen pages, so it needs --fast-path')
         if plan_out is not None:

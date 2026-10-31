@@ -4,6 +4,19 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-31 (UTC): EXP-91 pre-registered: hashing ahead and verifying as written
+
+- **Why:** EXP-90 found hashing's scattered case at 1.70x its bound. The source stopped reading while a send blocked, and the verification re-read 4.86 GB from dest's disk.
+- **Built (opt-in):**
+  - the sender's `--hash-ahead SIZE`: S hashed on a planner thread up to SIZE bytes ahead of the file being sent, with the pages sent read on `--read-ahead` threads;
+  - the receiver's `--verify-scope as-written`: each run read back right after it is written, and every node with B's leaf digests composed from those;
+  - the lab's arms `hashA`, `hashV`, `hashAV`, `hashAVw`; `analysis/exp91.py`; `experiments/network/exp91_local.py`; 17 tests.
+- **An independent review before registration** found two defects, now fixed and tested:
+  - the stall watch couldn't see a hung receiver while the sending thread waited for the planner;
+  - `as-written` missed a misplaced run of zero pages in a node sent whole. It now re-reads the pages on either side of such runs.
+- **Deciding (E1):** uniform `hashAV` ≤ 0.70x `hash` at full link. E2: `hashAV_1g` ≤ 0.92x `pg_basebackup` at 1 Gbit/s.
+- **Correctness:** 1,000 local fault trials (EXP-32's campaign) with both changes, and every VM copy checked.
+
 ## 2026-10-31 (17:19 UTC): EXP-90 done: hashing at its bound where few pages change, 1.7x it where many do
 
 - **D1 failed:**

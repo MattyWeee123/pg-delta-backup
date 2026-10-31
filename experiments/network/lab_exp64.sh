@@ -328,7 +328,7 @@ EOF
       # since EXP-70 made 2 pages the default; none takes an old primary from its own WAL (EXP-71's default).
       # A final "s" has --selector choose the fill, or a full copy, instead (EXP-75). A crashed standby is taken only
       # by a final "c" (--crashed-standby), as when it was opt-in: K15 made it the default on October 30.
-      fast= fsync='--fsync main' crashed=--no-crashed-standby
+      fast= fsync='--fsync main' crashed=--no-crashed-standby rflags=
       if [[ "$a" =~ ^fast([0-9]*)([wb]?)(f([0-9]+)|s)?(q?)(c?)$ ]]; then
         fill="--fill-gaps ${BASH_REMATCH[4]:-0}"
         [ "${BASH_REMATCH[3]}" = s ] && fill=--selector
@@ -343,11 +343,17 @@ EOF
         lsn) fast="--fast-path page-lsn --no-lsn-single-read --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
         lsn1) fast="--fast-path page-lsn --lsn-single-read --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
         od) fast="--fast-path summaries --read-ahead 8 --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
-        hashw) fsync='--fsync worker' ;;
       esac
+      # Hashing (EXP-90, EXP-91): "hash" with an "A" hashes ahead on its own thread (--hash-ahead, the pages sent read
+      # on 8 threads), a "V" verifies each run as written (--verify-scope as-written), a "w" syncs on the worker.
+      if [[ "$a" =~ ^hash(A?)(V?)(w?)$ ]]; then
+        [ "${BASH_REMATCH[1]}" = A ] && fast='--hash-ahead 64G --read-ahead 8'
+        [ "${BASH_REMATCH[2]}" = V ] && rflags='--verify-scope as-written'
+        [ "${BASH_REMATCH[3]}" = w ] && fsync='--fsync worker'
+      fi
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
-        --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 $fsync $crashed > "$d/receive.log" 2>&1 &
+        --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 $fsync $crashed $rflags > "$d/receive.log" 2>&1 &
       rp=$!
       for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
       t0=$(date +%s.%N)

@@ -46,6 +46,9 @@ from pgdelta.tree import (BACKENDS, DEFAULT_BACKEND, DEFAULT_JOBS, HashPool, has
 
 STATS_SCHEMA_VERSION = 1
 DEFAULT_WINDOW = 4
+# --hash-ahead (EXP-91): bytes of files S's hashing may run ahead of the file being sent; 0 hashes on the sending
+# thread, `window` files ahead, as before.
+DEFAULT_HASH_AHEAD = 0
 RUN_BYTES = 1 << 20
 # --read-ahead (EXP-64b): how far the fast path's reader threads may read ahead of the sending thread.
 READ_AHEAD_BYTES = 64 << 20
@@ -78,6 +81,9 @@ class Inbox:
         # blocked (time.monotonic(); None while no wait blocks).
         self.last_message = 0.0
         self.waiting_since = self.waiting_for = None
+        # --hash-ahead: since when and for what the planner's quiet wait has blocked, and since when the sending thread
+        # has waited for the planner (_Planner.take). Both at once is a wait on the receiver, for the stall watch.
+        self.quiet_since = self.quiet_for = self.taking_since = None
         self.thread = threading.Thread(target=self._run, name='pgdelta-inbox', daemon=True)
 
     def start(self):
@@ -160,10 +166,12 @@ class Inbox:
         else:
             raise ProtocolError(f'unexpected {protocol.name(code)} from the receiver')
 
-    def wait(self, ready, what, kind=None):
+    def wait(self, ready, what, kind=None, quiet=False):
         """ready()'s first value that isn't None. If it has to block for it, the wait is timed under
-        `kind` (pgdelta.waits.KINDS), waking every poll interval to read the send queue."""
-        timers = self.timers if kind is not None else None
+        `kind` (pgdelta.waits.KINDS), waking every poll interval to read the send queue. A `quiet` wait (the
+        planner's, --hash-ahead) isn't timed; the stall watch counts it only while the sending thread waits for the
+        planner (StallWatch.stalled)."""
+        timers = self.timers if kind is not None and not quiet else None
         blocked = False
         try:
             with self.cond:
@@ -175,6 +183,11 @@ class Inbox:
                         return value
                     if self.closed:
                         raise ChannelClosed(f'receiver closed the connection while the sender waited for {what}')
+                    if quiet:
+                        if self.quiet_since is None:
+                            self.quiet_since, self.quiet_for = time.monotonic(), what
+                        self.cond.wait()
+                        continue
                     if self.waiting_since is None:
                         self.waiting_since, self.waiting_for = time.monotonic(), what
                     if timers is None:
@@ -186,7 +199,10 @@ class Inbox:
                     self.cond.wait(timers.poll)
                     timers.tick()
         finally:
-            self.waiting_since = self.waiting_for = None
+            if quiet:
+                self.quiet_since = self.quiet_for = None
+            else:
+                self.waiting_since = self.waiting_for = None
             if blocked:
                 timers.end()
 
@@ -231,6 +247,10 @@ class StallWatch:
             return 'sending'
         since, what = self.inbox.waiting_since, self.inbox.waiting_for
         if since is not None and now - max(since, self.inbox.last_message) >= self.seconds:
+            return f'waiting for {what}'
+        # --hash-ahead: the sending thread waits for the planner, which waits for the receiver.
+        quiet, what, taking = self.inbox.quiet_since, self.inbox.quiet_for, self.inbox.taking_since
+        if quiet is not None and taking is not None and now - max(quiet, taking, self.inbox.last_message) >= self.seconds:
             return f'waiting for {what}'
         return None
 
@@ -354,14 +374,121 @@ def _parse_accept(accept, file_count):
     return mode == 'reuse', reason, policy, identity, basis_sizes
 
 
+class _FileReader:
+    """A finished backup's or a stopped data directory's files, opened as pgdelta.live.Reader opens a live source's,
+    so that _ReadAhead reads either (--hash-ahead with --read-ahead)."""
+
+    def __init__(self, path_of):
+        self.path_of = path_of
+
+    def open(self, entry):
+        return _FileHandle(open_regular(self.path_of(entry.path)))
+
+
+class _FileHandle:
+    def __init__(self, fd):
+        self.fd = fd
+
+    def read(self, offset, length):
+        return pread_exact(self.fd, length, offset)
+
+    def close(self):
+        os.close(self.fd)
+
+
+class _Planner:
+    """--hash-ahead (EXP-91): S's files hashed, compared with B's node digests, and their leaf requests made on a
+    thread of their own, up to `limit` bytes of files ahead of the file being sent (always at least one file).
+
+    Without it, one thread hashes a file, then sends the oldest pending file's pages, then hashes the next, so
+    S is not read while a send blocks: EXP-90's source read nothing for 40 s while dest wrote, then read its last
+    9 GB alone. Here the sending thread takes the planned jobs in order, and sends the leaf requests queued here
+    before each run of pages (only it writes to the channel). A job's requests are queued before the job, so they
+    always precede its pages on the wire, as the receiver requires in place.
+    """
+
+    def __init__(self, sender, entries, first_index, limit):
+        self.sender, self.limit = sender, limit
+        self.entries = list(enumerate(entries, first_index))
+        self.cond = threading.Condition()
+        self.jobs, self.requests = deque(), deque()
+        self.ahead = 0  # bytes of the files planned and not yet sent
+        self.done = self.stopped = False
+        self.error = None
+        self.room_wait_seconds = self.plan_wait_seconds = 0.0
+        self.most_ahead = 0
+        self.thread = threading.Thread(target=self._run, name='pgdelta-plan', daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        try:
+            for index, entry in self.entries:
+                with self.cond:
+                    started = time.perf_counter()
+                    self.cond.wait_for(lambda: self.stopped or not self.ahead
+                                       or self.ahead + entry.size <= self.limit)
+                    self.room_wait_seconds += time.perf_counter() - started
+                    if self.stopped:
+                        return
+                    self.ahead += entry.size
+                    self.most_ahead = max(self.most_ahead, self.ahead)
+                job = self.sender._plan(index, entry, self.requests)
+                with self.cond:
+                    self.jobs.append(job)
+                    self.cond.notify_all()
+        except BaseException as exc:
+            if not isinstance(exc, PgDeltaError):
+                exc = TransferError(f'hashing ahead failed: {exc!r}')
+            with self.cond:
+                self.error = exc
+                self.cond.notify_all()
+        finally:
+            with self.cond:
+                self.done = True
+                self.cond.notify_all()
+
+    def take(self):
+        """The next planned job, in order; the planner's failure, if it failed first."""
+        started, inbox = time.perf_counter(), self.sender.inbox
+        with self.cond:
+            if not self.jobs:
+                inbox.taking_since = time.monotonic()
+            try:
+                self.cond.wait_for(lambda: self.jobs or self.error is not None or self.done)
+            finally:
+                inbox.taking_since = None
+            self.plan_wait_seconds += time.perf_counter() - started
+            if self.jobs:
+                return self.jobs.popleft()
+            if self.error is not None:
+                raise self.error
+            raise TransferError('hashing ahead ended before every file was planned')
+
+    def sent(self, job):
+        with self.cond:
+            self.ahead -= job.entry.size
+            self.cond.notify_all()
+
+    def stop(self, timeout=JOIN_SECONDS):
+        with self.cond:
+            self.stopped = True
+            self.cond.notify_all()
+        self.thread.join(timeout)
+
+
 class _Sender:
     def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                  hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
                  fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False, selector=None,
-                 lsn_single_read=False):
+                 lsn_single_read=False, hash_ahead=DEFAULT_HASH_AHEAD):
         self.started = time.perf_counter()
+        # --hash-ahead (EXP-91): the planner thread of the files being hashed (None without it, or between
+        # _send_files calls); what all its planners did.
+        self.hash_ahead, self.planner = hash_ahead, None
+        self.hash_ahead_counts = {'bytes': hash_ahead, 'room_wait_seconds': 0.0, 'plan_wait_seconds': 0.0,
+                                  'most_ahead_bytes': 0, 'read_ahead_reads': 0, 'read_ahead_wait_seconds': 0.0}
         # --read-ahead (EXP-64b): the fast path's chosen pages read on this many threads ahead of sending (0: one run
         # at a time in the sending thread, as in EXP-64); and what the reading did.
         self.read_ahead, self.ahead = read_ahead, None
@@ -520,7 +647,8 @@ class _Sender:
 
     def _run(self):
         fastpath.check_mode(self.fast_path, self.source_kind, self.subpage, self.read_ahead, self.plan_out,
-                            self.fill_gaps, self.diverged_basis, self.selector, self.lsn_single_read)
+                            self.fill_gaps, self.diverged_basis, self.selector, self.lsn_single_read,
+                            self.hash_ahead)
         if self.source_kind not in datadir.SOURCE_KINDS:
             raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
                                f'not {self.source_kind!r}')
@@ -1006,7 +1134,26 @@ class _Sender:
                                       self.node_blocks, self.pool)
 
     def _send_files(self, entries, first_index):
-        """Hash, compare and send `entries` (file indexes from first_index on), up to `window` files ahead."""
+        """Hash, compare and send `entries` (file indexes from first_index on), up to `window` files ahead; with
+        --hash-ahead, hashed on the planner's thread up to hash_ahead bytes ahead (_Planner)."""
+        if self.hash_ahead:
+            self.planner, finished = _Planner(self, entries, first_index, self.hash_ahead), False
+            try:
+                for _ in range(len(entries)):
+                    job = self.planner.take()
+                    self._finish(job)
+                    self.planner.sent(job)
+                finished = True
+            finally:
+                planner, self.planner = self.planner, None
+                # Every file planned: the thread has ended. After a failure it may be hashing or waiting for the
+                # receiver; it is a daemon and stops at its next check, so the failure is reported now.
+                planner.stop(JOIN_SECONDS if finished else 0.1)
+                counts = self.hash_ahead_counts
+                counts['room_wait_seconds'] += planner.room_wait_seconds
+                counts['plan_wait_seconds'] += planner.plan_wait_seconds
+                counts['most_ahead_bytes'] = max(counts['most_ahead_bytes'], planner.most_ahead)
+            return
         pending = deque()
         for index, entry in enumerate(entries, first_index):
             self.inbox.check()
@@ -1072,7 +1219,10 @@ class _Sender:
         """The file read for the listed `path` (datadir: an unlogged relation's main fork is its init fork)."""
         return self.source / (path if self.selection is None else self.selection.source_path(path))
 
-    def _plan(self, index, entry):
+    def _plan(self, index, entry, requests=None):
+        """Hash a file of S, compare it with B's node digests and ask for the leaf digests of the nodes that
+        differ. On the planner's thread (--hash-ahead) the leaf requests go into `requests`, for the sending thread
+        to send, and the wait for B's digests is quiet."""
         started = time.perf_counter()
         try:
             if self.reader is not None:  # live: always entry.size bytes (pgdelta.live.Reader)
@@ -1091,17 +1241,28 @@ class _Sender:
             job.plan.whole = list(range(tree.node_count))
             return job
         size, nodes = self.inbox.wait(lambda: self.inbox.basis.pop(index, None),
-                                      f'basis digests of {entry.path}', 'basis')
+                                      f'basis digests of {entry.path}', 'basis', quiet=requests is not None)
         if size != job.basis_size or len(nodes) != node_count(size, self.block, self.node_blocks) * DIGEST_SIZE:
             raise ProtocolError(f'BASIS_NODES for {entry.path} disagrees with the announced basis size')
         job.plan = matching.classify_nodes(tree, size, nodes, self.high_churn)
         for start in range(0, len(job.plan.descend), self.max_request):
             chunk = job.plan.descend[start:start + self.max_request]
-            self._send(protocol.LEAF_REQUEST, protocol.encode_leaf_request(index, chunk))
+            frame = protocol.encode_leaf_request(index, chunk)
+            if requests is None:
+                self._send(protocol.LEAF_REQUEST, frame)
+            else:
+                requests.append(frame)
             self.leaf_requests += 1
         return job
 
+    def _send_requests(self):
+        """--hash-ahead: the leaf requests the planner queued, sent now (before a file's pages and each run)."""
+        planner = self.planner
+        while planner is not None and planner.requests:
+            self._send(protocol.LEAF_REQUEST, planner.requests.popleft())
+
     def _finish(self, job):
+        self._send_requests()
         tree, plan = job.tree, job.plan
         pages, blocks = [], {}
         for node in plan.descend:
@@ -1117,10 +1278,23 @@ class _Sender:
             pages += matching.node_pages(tree, node)
         pages.sort()
         old = self._old_blocks(job, blocks) if self.subpage_used else None
-        if self.reader is not None:
-            sent_bytes = self._send_live_pages(job, pages, old) if pages else 0
-        else:
-            sent_bytes = self._send_pages(job, pages, old) if pages else 0
+        ahead = None
+        if pages and self.planner is not None and self.read_ahead:
+            # Hashing ran ahead, so these pages may have left the page cache: read them on read_ahead threads.
+            runs = [(job.index, job.entry, first, count, min(count * self.block, tree.size - first * self.block))
+                    for first, count in matching.runs(pages, self.max_run)]
+            ahead = _ReadAhead(self.reader or _FileReader(self._source_file), runs, self.read_ahead,
+                               READ_AHEAD_BYTES, self.block)
+        try:
+            if self.reader is not None:
+                sent_bytes = self._send_live_pages(job, pages, old, ahead) if pages else 0
+            else:
+                sent_bytes = self._send_pages(job, pages, old, ahead) if pages else 0
+        finally:
+            if ahead is not None:
+                ahead.close()
+                self.hash_ahead_counts['read_ahead_reads'] += ahead.reads
+                self.hash_ahead_counts['read_ahead_wait_seconds'] += ahead.wait_seconds
         digest = job.digest or tree.digest
         self._send(protocol.FILE_DONE, protocol.encode_file_done(job.index, tree.size, digest))
         self.files_digest.add(job.path, tree.size, digest)
@@ -1148,7 +1322,8 @@ class _Sender:
             return blob[at * subpage.DIGESTS_PER_PAGE:(at + 1) * subpage.DIGESTS_PER_PAGE]
         return old
 
-    def _send_pages(self, job, pages, old=None):
+    def _send_pages(self, job, pages, old=None, ahead=None):
+        """`ahead`, a _ReadAhead of exactly these runs (--hash-ahead with --read-ahead), reads them instead."""
         sent = 0
         try:
             fd = open_regular(self._source_file(job.path))
@@ -1159,10 +1334,11 @@ class _Sender:
                 offset = first * self.block
                 length = min(count * self.block, job.tree.size - offset)
                 try:
-                    data = pread_exact(fd, length, offset)
+                    data = pread_exact(fd, length, offset) if ahead is None else ahead.next(job.index, first)
                 except OSError as exc:
                     raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
                 self.inbox.check()
+                self._send_requests()
                 self._send_run(job.index, first, data, old)
                 sent += length
             self._drain_runs()
@@ -1170,7 +1346,7 @@ class _Sender:
             os.close(fd)
         return sent
 
-    def _send_live_pages(self, job, pages, old=None):
+    def _send_live_pages(self, job, pages, old=None, ahead=None):
         """Live: send the pages as read now, each hashed again, and keep the digest of what was sent in job.digest.
 
         A page may have changed since the file was hashed; the copy is made of
@@ -1190,7 +1366,7 @@ class _Sender:
                 offset = first * block
                 length = min(count * block, tree.size - offset)
                 try:
-                    data = handle.read(offset, length)
+                    data = handle.read(offset, length) if ahead is None else ahead.next(job.index, first)
                 except OSError as exc:
                     raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
                 view = memoryview(data)
@@ -1202,6 +1378,7 @@ class _Sender:
                                                     f'must not change once pg_backup_stop has returned')
                         changed[page] = leaf
                 self.inbox.check()
+                self._send_requests()
                 self._send_run(job.index, first, data, old)
                 sent += length
             self._drain_runs()
@@ -1360,6 +1537,11 @@ class _Sender:
             'node_blocks': self.node_blocks,
             'high_churn_node_fraction': self.high_churn,
             'window': self.window,
+            # --hash-ahead (EXP-91): the bound, how far ahead hashing got and what each thread waited for; absent
+            # without it, so a session without it keeps its statistics' keys.
+            **({'hash_ahead': {**{k: round(v, 6) if isinstance(v, float) else v
+                                  for k, v in self.hash_ahead_counts.items()},
+                               'read_ahead_threads': self.read_ahead}} if self.hash_ahead else {}),
             'jobs': self.jobs,
             'hash_backend': self.switches()['hash_backend'],
             'hash': self.hash_algorithm,  # the keyed digest both ends used (EXP-29: blake2b or blake3)
@@ -1438,7 +1620,7 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
                fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False, selector=None,
-               lsn_single_read=False):
+               lsn_single_read=False, hash_ahead=DEFAULT_HASH_AHEAD):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -1482,8 +1664,11 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     pg_basebackup is predicted faster.
     `lsn_single_read`, with fast_path "page-lsn", sends each chosen page from its scan's read instead of reading it
     again (EXP-85).
+    `hash_ahead` bytes (EXP-91): S's files are hashed on a thread of their own, up to that many bytes of files ahead
+    of the one being sent, so S is read while a send blocks (_Planner); `read_ahead` threads then read the pages
+    each file sends. 0 hashes on the sending thread, `window` files ahead. Only the order of the frames changes.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
                    pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, fast_path,
-                   read_ahead, plan_out, fill_gaps, diverged_basis, selector, lsn_single_read).run()
+                   read_ahead, plan_out, fill_gaps, diverged_basis, selector, lsn_single_read, hash_ahead).run()

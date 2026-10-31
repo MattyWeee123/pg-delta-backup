@@ -104,8 +104,11 @@ VERIFY_MODES = ('pipelined', 'sequential')
 DEFAULT_VERIFY = 'pipelined'
 # What is re-read to verify a file: all of it, or (in place only) the pages this run wrote, every other node's
 # digest coming from the basis thread's pass over B (_verify_written). "written" removes the second pass over B
-# that lost v1 the HA case beyond memory (EXP-22).
-VERIFY_SCOPES = ('all', 'written')
+# that lost v1 the HA case beyond memory (EXP-22). "as-written" (EXP-91) reads each run back right after writing
+# it, while its pages are still in memory, and composes every node from those leaves and B's: EXP-90 found
+# "written" re-reading 9,041 nodes whole from the disk, 4.86 GB, after B's reading ahead had evicted them.
+VERIFY_SCOPES = ('all', 'written', 'as-written')
+WRITTEN_SCOPES = ('written', 'as-written')
 DEFAULT_VERIFY_SCOPE = 'all'
 # EXP-32's negative control, a test switch only: with this set to 1 the receiver writes its first movable page
 # run one page away from where it belongs, so the verification must fail and B stay blocked.
@@ -353,6 +356,8 @@ class _Output:
     dirty_start: int = 0
     dirty_end: int = 0
     dirty_bytes: int = 0
+    # --verify-scope as-written: page -> the leaf digest of what was read back right after the page was written.
+    read_back: dict = field(default_factory=dict)
 
     def gaps(self):
         """(first, stop) page ranges that were not received."""
@@ -422,8 +427,8 @@ class _Verifier:
                 if fast_runs is not None:
                     receiver._check_written(entry, size, digest, fast_runs)
                 elif written is not None:
-                    index, runs, nodes_b, leaves_b = written
-                    receiver._verify_written(index, entry, size, digest, runs, nodes_b, leaves_b)
+                    index, runs, nodes_b, leaves_b, read_back = written
+                    receiver._verify_written(index, entry, size, digest, runs, nodes_b, leaves_b, read_back)
                 else:
                     # A window of `jobs` tasks: verification queues behind less than B's hashing does.
                     receiver._verify_file(entry, size, digest, window=receiver.jobs)
@@ -450,6 +455,9 @@ class _Receiver:
         self.misplace_pending, self.misplaced_write = os.environ.get(MISPLACE_ENV) == '1', None
         self.basis_nodes, self.basis_leaves = {}, {}
         self.written_verify = {'nodes_kept': 0, 'nodes_composed': 0, 'nodes_reread': 0, 'pages_reread': 0}
+        if verify_scope == 'as-written':
+            # --verify-scope as-written: the pages read back as they were written, and the main loop's time at it.
+            self.written_verify.update(pages_read_back=0, read_back_seconds=0.0)
         # --compress zstd, when the sender offered it: the codec if this end can decompress, and what it did.
         self.codec = self.compress_offer = None
         # EXP-47: compressed runs are decompressed on a pool of `jobs` threads as they arrive and written in order;
@@ -628,9 +636,9 @@ class _Receiver:
                 raise InvalidInput(f'{label} must be one of {", ".join(choices)}, not {value!r}')
         if self.verify_scope not in VERIFY_SCOPES:
             raise InvalidInput(f'verify scope must be one of {", ".join(VERIFY_SCOPES)}, not {self.verify_scope!r}')
-        if self.verify_scope == 'written' and not self.in_place:
-            raise InvalidInput('--verify-scope written needs --in-place: a new copy O is built by copying B, and '
-                               'only a re-read checks the copy')
+        if self.verify_scope in WRITTEN_SCOPES and not self.in_place:
+            raise InvalidInput(f'--verify-scope {self.verify_scope} needs --in-place: a new copy O is built by '
+                               f'copying B, and only a re-read checks the copy')
 
     def _start_pool(self):
         started = time.perf_counter()
@@ -935,7 +943,7 @@ class _Receiver:
                 if keep:
                     with self.cache_lock:
                         self.leaf_cache[index] = tree.leaf_blob
-                if self.verify_scope == 'written':
+                if self.verify_scope in WRITTEN_SCOPES:
                     self.basis_nodes[index] = tree.node_blob  # read before anything was written to it
                 self.channel.send(protocol.BASIS_NODES,
                                   protocol.encode_basis_nodes(index, size, tree.node_blob))
@@ -995,7 +1003,7 @@ class _Receiver:
                 raise TransferError(f'cannot read basis file {path}: {exc}') from exc
             self.hash_leaf_seconds += time.perf_counter() - started
             self.counts.leaf_nodes_reread += len(nodes)
-        if self.verify_scope == 'written':
+        if self.verify_scope in WRITTEN_SCOPES:
             self.basis_leaves.setdefault(index, {}).update(entries)  # B's, before the file is written
         self.channel.send(protocol.LEAF_DIGESTS, protocol.encode_leaf_digests(index, entries))
         if self.subpage:
@@ -1298,6 +1306,8 @@ class _Receiver:
         output.copied = max(output.copied, end)
         self._wrote(output, offset, length)
         self.rebuild_seconds += time.perf_counter() - started
+        if self.verify_scope == 'as-written' and not self.fast_mode:  # the fast path checks its own runs
+            self._read_back(output, entry, first, offset, length)
         if output.runs and output.runs[-1][0] + output.runs[-1][1] == first:
             output.runs[-1] = (output.runs[-1][0], output.runs[-1][1] + count)
         else:
@@ -1305,6 +1315,32 @@ class _Receiver:
         output.next_page = first + count
         self.counts.pages_received += count
         self.counts.page_bytes_received += length
+
+    def _read_back(self, output, entry, first, offset, length):
+        """--verify-scope as-written: the run just written, read back from where it was meant to go while its
+        pages are still in the page cache, and each page's leaf digest kept for the file's verification. A write
+        that went elsewhere leaves these pages as B had them, so the file's digest fails as with "written"."""
+        started = time.perf_counter()
+        parts, got = [], 0
+        try:
+            while got < length:
+                part = os.pread(output.fd, length - got, offset + got)
+                if not part:
+                    # The file ends before the run: its pages went elsewhere (as when a grown file's last run
+                    # lands a page back), so they are not where they belong.
+                    raise VerificationError(f'{entry.path}: pages {first} to {first + -(-length // self.block) - 1} '
+                                            f'read back short, so they were not written where they belong')
+                parts.append(part)
+                got += len(part)
+        except OSError as exc:
+            raise TransferError(f'cannot read back {entry.path} to verify it: {exc}') from exc
+        back = parts[0] if len(parts) == 1 else b''.join(parts)
+        view, block = memoryview(back), self.block
+        for at in range(0, length, block):
+            output.read_back[first + at // block] = self.hasher.leaf(view[at:at + block])
+        counts = self.written_verify
+        counts['pages_read_back'] += -(-length // block)
+        counts['read_back_seconds'] += time.perf_counter() - started
 
     def _file_done(self, payload):
         index, size, digest = protocol.decode_file_done(payload)
@@ -1346,8 +1382,9 @@ class _Receiver:
             self.current = None
         self.rebuild_seconds += time.perf_counter() - started
         written = None
-        if self.verify_scope == 'written':
-            written = (index, list(output.runs), self.basis_nodes.pop(index, None), self.basis_leaves.pop(index, {}))
+        if self.verify_scope in WRITTEN_SCOPES:
+            written = (index, list(output.runs), self.basis_nodes.pop(index, None), self.basis_leaves.pop(index, {}),
+                       output.read_back if self.verify_scope == 'as-written' and not self.fast_mode else None)
         if self.verifier is not None:
             self._accept_file(entry, size, digest)
             self.verifier.submit(entry, size, digest, written)
@@ -1491,7 +1528,7 @@ class _Receiver:
         os.chmod(path, entry.mode)
         self.counts.files_verified += 1
 
-    def _verify_written(self, index, entry, size, digest, runs, nodes_b, leaves_b):
+    def _verify_written(self, index, entry, size, digest, runs, nodes_b, leaves_b, read_back=None):
         """In place, --verify-scope written: the file's digest from this run's knowledge, re-reading only what it wrote.
 
         A node no page was written to, with the same extent in B as in the file, keeps the digest the basis
@@ -1501,16 +1538,30 @@ class _Receiver:
         full verification would. The file digest must equal the source's. In place every write goes through
         _page_data at the offsets in `runs`, and B is blocked meanwhile; a write elsewhere would leave a page it
         was meant for unchanged, so it fails this check.
+
+        --verify-scope as-written passes `read_back`, page -> the leaf digest of the page read back right after it
+        was written (_read_back). A node with B's leaf digests (its leaves were asked for) is then composed from
+        those and `read_back`, however many of its pages were written; only its pages missing from `read_back` are
+        read again (at most an eighth, else the node is re-read whole). Each of its written pages differed from B's,
+        so a run written elsewhere leaves a page of its own as B had it, which its read-back already failed. A node
+        without them (sent whole) may hold pages equal to B's: a run of like pages written a page away can read
+        back unchanged and change a neighbour instead (zero pages, say). So such a node is checked as by "written",
+        and the pages either side of each run that touches one are read again here (a node of B's kept digest
+        holding one is re-read whole).
         """
         path = self._output_path(entry.path)
         basis_size = self.basis_files.get(index) if self.reuse else None
         block, per_node = self.block, self.node_blocks
         node_size, light = block * per_node, max(1, per_node // 8)
         counts = self.written_verify
-        written_by_node = {}
+        written_by_node, recheck = {}, {}
         for first, count in runs:
             for page in range(first, first + count):
                 written_by_node.setdefault(page // per_node, []).append(page)
+            if read_back is not None and any(not leaves_b.get(node) for node in
+                                             range(first // per_node, (first + count - 1) // per_node + 1)):
+                for page in (first - 1, first + count):
+                    recheck.setdefault(page // per_node, set()).add(page)
         try:
             fd = open_regular(path)
         except OSError as exc:
@@ -1521,27 +1572,36 @@ class _Receiver:
                 lo, hi = node * node_size, min((node + 1) * node_size, size)
                 same_extent = basis_size is not None and min((node + 1) * node_size, basis_size) == hi
                 pages = written_by_node.get(node, [])
-                if (not pages and same_extent and nodes_b is not None
+                again = recheck.get(node, set())
+                if (not pages and not again and same_extent and nodes_b is not None
                         and (node + 1) * DIGEST_SIZE <= len(nodes_b)):
                     nodes.append(nodes_b[node * DIGEST_SIZE:(node + 1) * DIGEST_SIZE])
                     counts['nodes_kept'] += 1
                     continue
                 first, stop = node * per_node, page_count(hi, block)
                 blob = leaves_b.get(node, b'')
-                composable = (pages and len(pages) <= light
-                              and all(page in pages or (page - first + 1) * DIGEST_SIZE <= len(blob)
+                written = set(pages)
+                if read_back is not None and blob:
+                    # as-written: what wasn't read back as written, and a run's neighbour, is read again.
+                    need = {page for page in range(first, stop)
+                            if (page in written and page not in read_back) or page in again}
+                else:
+                    need = written
+                composable = (pages and len(need) <= light
+                              and all(page in written or (page - first + 1) * DIGEST_SIZE <= len(blob)
                                       for page in range(first, stop)))
                 if not composable:
                     nodes.append(None)
                     heavy.append(node)
                     continue
-                written = set(pages)
                 leaves = []
                 for page in range(first, stop):
-                    if page in written:
+                    if page in need:
                         data = pread_exact(fd, min(block, size - page * block), page * block)
                         leaves.append(self.hasher.leaf(data))
                         counts['pages_reread'] += 1
+                    elif page in written:
+                        leaves.append(read_back[page])
                     else:
                         leaves.append(blob[(page - first) * DIGEST_SIZE:(page - first + 1) * DIGEST_SIZE])
                 nodes.append(self.hasher.node(b''.join(leaves)))

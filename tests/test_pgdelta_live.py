@@ -1012,7 +1012,8 @@ class StallWatchTests(unittest.TestCase):
 
     def test_a_stall_is_measured_from_the_last_sign_of_progress(self):
         channel = mock.Mock(sending_since=None)
-        inbox = mock.Mock(waiting_since=None, waiting_for=None, last_message=0.0)
+        inbox = mock.Mock(waiting_since=None, waiting_for=None, last_message=0.0, quiet_since=None, quiet_for=None,
+                          taking_since=None)  # the last three: --hash-ahead's planner (EXP-91)
         watch = sender.StallWatch(channel, inbox, 10.0)
         self.assertIsNone(watch.stalled(1000.0))  # not blocked on the receiver: working is no stall
         channel.sending_since = 100.0

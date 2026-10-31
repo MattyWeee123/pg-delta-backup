@@ -158,6 +158,20 @@ def _jobs_option(parser, what, sides=1, live=False):
     parser.add_argument('--hash-backend', choices=BACKENDS, default=DEFAULT_BACKEND, help=argparse.SUPPRESS)
 
 
+def _byte_size(text):
+    """A number of bytes, with an optional binary suffix: 512, 64K, 256M, 32G, 1T."""
+    units = {'': 1, 'K': 1 << 10, 'M': 1 << 20, 'G': 1 << 30, 'T': 1 << 40}
+    text = text.strip()
+    number, unit = (text[:-1], text[-1].upper()) if text[-1:].isalpha() else (text, '')
+    try:
+        value = int(number) * units[unit]
+    except (ValueError, KeyError):
+        raise argparse.ArgumentTypeError(f'not a size in bytes (512, 64K, 256M, 32G): {text!r}') from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f'must be 0 or more, not {text}')
+    return value
+
+
 def _non_negative_int(text):
     try:
         value = int(text)
@@ -302,7 +316,9 @@ def _rebuild_options(parser):
                         help='what is re-read to verify each file: all of it, or (in place) only the pages this run '
                              'wrote, every other part checked by the digests of B computed before anything was '
                              'written. auto is written with --in-place and all otherwise: written removes the second '
-                             'pass over B, and was shown correct in 3,000 randomized trials (EXP-32, EXP-33, EXP-35) '
+                             'pass over B, and was shown correct in 3,000 randomized trials (EXP-32, EXP-33, EXP-35). '
+                             'as-written (in place; EXP-91) reads each run back right after writing it, while it is '
+                             'still in memory, and composes every node from those pages and B\'s digests '
                              '(default: %(default)s)')
     # T3 arm (b): where the output files are fsynced.
     parser.add_argument('--fsync', choices=flush.FSYNC_CHOICES, default=flush.DEFAULT_FSYNC,
@@ -444,6 +460,12 @@ def _sender_options(parser):
                         help='hash up to N files ahead of the one being sent, so their leaf-digest round '
                              'trips overlap hashing. It changes the order of the frames on the wire, not '
                              'what is sent (default: %(default)s)')
+    parser.add_argument('--hash-ahead', type=_byte_size, default=sender.DEFAULT_HASH_AHEAD, metavar='SIZE',
+                        help='hash S on a thread of its own, up to SIZE bytes of files (K, M, G or T: binary) ahead '
+                             'of the file being sent, so S is read while a send waits for the receiver, instead of '
+                             '--window; the pages each file sends are then read on --read-ahead threads (default '
+                             f'{fastpath.DEFAULT_READ_AHEAD} with it). It changes the order of the frames on the wire, '
+                             'not what is sent. 0 is off (EXP-91; default: off)')
 
 
 def _reuse_any_basis_option(parser):
@@ -642,15 +664,16 @@ def _sender_kwargs(args, identity):
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
             'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
             'read_ahead': _read_ahead(args), 'plan_out': getattr(args, 'plan_out', None),
+            'hash_ahead': getattr(args, 'hash_ahead', 0),
             'fill_gaps': _fill_gaps(args), 'diverged_basis': _diverged_basis(args), 'selector': _selector(args),
             'lsn_single_read': _lsn_single_read(args)}
 
 
 def _read_ahead(args):
-    """--read-ahead as given, else fastpath.DEFAULT_READ_AHEAD with --fast-path and 0 without."""
+    """--read-ahead as given, else fastpath.DEFAULT_READ_AHEAD with --fast-path or --hash-ahead and 0 without."""
     threads = getattr(args, 'read_ahead', None)
     if threads is None:
-        return fastpath.DEFAULT_READ_AHEAD if getattr(args, 'fast_path', None) else 0
+        return fastpath.DEFAULT_READ_AHEAD if getattr(args, 'fast_path', None) or getattr(args, 'hash_ahead', 0) else 0
     return threads
 
 
