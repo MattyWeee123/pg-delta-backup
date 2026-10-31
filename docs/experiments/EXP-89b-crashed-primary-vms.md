@@ -1,6 +1,6 @@
 # EXP-89b: An 18 GB primary that crashed after a failover, on the VMs: --crashed-primary against pg_rewind, hashing and a re-clone
 
-Status: **pre-registered October 30, 2026, before any scored run.** *Amended before any scored data:* the smoke's `crashed` runs exited 3. The lab passed the receiver a `--stats-json` it doesn't take; the receiver's statistics come back in the sender's. The option is removed, the files are recorded again at the fixed commit, and the smoke runs again on the same VMs. It follows [EXP-89](EXP-89-crashed-primary.md), the local correctness campaign.
+Status: **done October 30, 2026: every prediction held.** An 18 GB primary that crashed after a failover was brought current in 7.1 s for hot rows, against `pg_rewind`'s 37.7 s and hashing's 90.9 s, and in 44.4 s for scattered rows, against a re-clone's 91.2 s. All 4 `--crashed-primary` copies were proven by their own WAL in 0.8 s, matched the new primary and passed `pg_amcheck`; 16 of 16 copies matched. **Pre-registered October 30, 2026, before any scored run.** *Amended before any scored data:* the smoke's `crashed` runs exited 3. The lab passed the receiver a `--stats-json` it doesn't take; the receiver's statistics come back in the sender's. The option is removed, the files are recorded again at the fixed commit, and the smoke runs again on the same VMs. It follows [EXP-89](EXP-89-crashed-primary.md), the local correctness campaign.
 
 ## Question
 
@@ -75,3 +75,44 @@ From EXP-71, where a cleanly stopped old primary was refreshed by idea 1 in 0.20
 | 15 | Held-out workloads | Before a default: H9–H12 |
 | 16 | Scorer integrity | Recorded at registration |
 | 17 | The noise bar | 2.23%; bars of 0.5x |
+
+## Results
+
+**Scorer integrity (rule 16):** `analysis/integrity.py check EXP-89b` reports 17 of 17 files unchanged since the amended registration commit (86e8fa4).
+
+**The session:** the `ha` set in us-west1-b and us-west1-c, October 30–31 (UTC), 16 runs (seed 891), with every run exiting 0. The smoke at scale 20 passed first. Data: `results/exp04/exp89b`.
+
+![EXP-89b: an 18 GB primary that crashed after a failover, brought current](../figures/exp89b-crashed-primary.svg)
+
+*How to read it:* each bar is one arm's mean over its two runs, in seconds to a copy that accepts connections (`pg_rewind`'s: to replayed to the new primary's LSN). Shorter is better. Blue is `--crashed-primary`.
+
+| # | Prediction | Result |
+|---|---|---|
+| 1 | **Deciding:** every `crashed` run takes the fast path with the proof "crashed primary", lists B's own blocks, matches S and passes `pg_amcheck` | **Held: 4 of 4.** B's own blocks: 20,207 (hot10) and 20,099 (uniform); the WAL-end proof took 0.81–0.84 s |
+| 2 | `hot10`: at most 0.5x `pg_rewind` and 0.5x hashing; `uniform`: faster than the re-clone | **Held:** 0.188x `pg_rewind` and 0.078x hashing (hot10); 0.487x the re-clone (uniform) |
+| 3 | Every `fast` run refused; every copy matches S | **Held:** 4 of 4 refused ("B was not stopped cleanly (in production)"), and 16 of 16 copies matched |
+
+**Times (seconds; each run, then the mean over the re-clone's):**
+
+| Lag | `crashed` | `rewind` | `fast` (hashing) | `full` (re-clone) |
+|---|---|---|---|---|
+| hot10 | 7.05, 7.14: **0.078x** | 37.43, 38.00: 0.414x | 90.92, 90.89: 0.998x | 91.28, 90.92 |
+| uniform | 44.52, 44.28: **0.487x** | 459.87, 456.53: 5.02x | 187.66, 192.58: 2.08x | 91.21, 91.21 |
+
+**Reported:**
+- **`pg_rewind`'s two steps:** crash recovery and the rewind took 24.2–24.3 s (hot10) and 71.1–74.1 s (uniform); replaying the new primary's WAL took the rest.
+- **The crashed arm's work:** 34,822 pages sent for hot10 and 864,952 for uniform, with B's own blocks read from its WAL in each.
+- **Against EXP-71's cleanly stopped old primary,** in another session (inferred, not compared under rule 17): 7.1 s against 6.9 s (hot10) and 44.4 s against 48.2 s (uniform). Proving a crashed primary's end costs about 0.8 s here.
+- **The spread of each arm's two runs:** 0.0–2.6%, far inside every bar.
+
+**What this session can't see:**
+- **Torn WAL tails:** the old primary was stopped by `pg_ctl -m immediate`, a process kill. The operating system's cache kept its WAL whole. Real power loss comes next.
+- **Held-out settings:** none was used (rule 15). A default needs a held-out session first.
+
+## What followed
+
+- **The scorecard's last loss is a win, opt-in, wherever the old primary's WAL is intact.** A crashed old primary after a failover was the one situation where pgdelta lost (it hashed, at best a tie with a re-clone). With `--crashed-primary` it took 0.19x `pg_rewind`'s time for hot rows and 0.49x a re-clone's for scattered ones, as fast as a cleanly stopped one.
+- **Next:**
+  1. real power loss: hard resets of a primary's VM, for torn WAL tails;
+  2. a held-out session (H9–H12) before any default.
+

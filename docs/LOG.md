@@ -4,6 +4,15 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-31 (02:20 UTC): EXP-89b done: a crashed old primary at 18 GB, 0.19x `pg_rewind`, 0.49x a re-clone
+
+- **1 held:** all 4 `--crashed-primary` runs were proven by the old primary's own WAL (0.8 s), found its own blocks past the fork (about 20,000), matched the new primary and passed `pg_amcheck`.
+- **2 held:** hot10 7.1 s against `pg_rewind`'s 37.7 s (0.188) and hashing's 90.9 s (0.078); uniform 44.4 s against a re-clone's 91.2 s (0.487). `pg_rewind` took 458 s there, and hashing 190 s.
+- **3 held:** hashing's arm was refused the fast path in 4 of 4, and 16 of 16 copies matched.
+- **What it means:** the scorecard's last loss, a crashed old primary, is a win where its WAL is intact (opt-in).
+- **Not yet tested:** torn WAL tails from real power loss, and held-out settings.
+- **The pipeline:** its watcher looked for the last run's line, and the lab's closing line followed within the same minute, so it waited on. The results were fetched and the set torn down by hand; no run was affected.
+
 ## 2026-10-30 (23:18 UTC): EXP-89b pre-registered: the crashed old primary at 18 GB on the VMs
 
 - **Setup:** EXP-67's failover lab with `CRASHED_P=1`. The old primary's dirty pages are written out, then it crashes (`-m immediate`) at the fork.
