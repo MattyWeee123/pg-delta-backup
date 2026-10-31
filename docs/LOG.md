@@ -4,6 +4,27 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-31 (17:19 UTC): EXP-90 done: hashing at its bound where few pages change, 1.7x it where many do
+
+- **D1 failed:**
+  - hot `hash` ran at 1.012 and 1.020 of its slowest resource's time;
+  - uniform at **1.695** and **1.927**, past the 1.30 bar: a pipelining gap.
+- **D2–D4 held:**
+  - `pg_basebackup` kept a 1 Gbit/s link 98% busy;
+  - hashing took 0.579 of it in hot and 1.369 in uniform;
+  - no hashing run was bound by CPU, and SHA-256 hashes at 0.474 of BLAKE3's speed on the VMs' CPU;
+  - `pg_basebackup` ran within 1.022–1.043 of its bound, so the bound arithmetic works.
+- **The disk:** sequential reads and random writes barely share a budget (1.81, against the predicted ≤ 1.2). Random reads and random writes do share one: 4,180–4,200 ops/s together.
+- **Where the gap is** (post hoc, `analysis/exp90_overlap.py`), in the uniform run:
+  - the source read nothing for 40 s while blocked in `send()`, then read S's last 9 GB alone (28 s);
+  - 4.86 of the 5.07 GB written were re-read from the disk to verify.
+- **What it means:**
+  - at 1 Gbit/s a systems problem: the floor is 0.71–0.83x a re-clone, against today's 1.37x;
+  - at full link at best a tie, since all of B is read: an algorithm problem, which B's stored digests would address.
+- **`hashw`:** 0.95–0.96 in uniform, 1.00 in hot; one run each.
+- **The checks:** the cross-session control was within 1%, and 12 of 12 copies matched.
+- **Proposed next, EXP-91:** the sender keeps hashing while a send blocks, and the receiver verifies written pages while they are still in memory.
+
 ## 2026-10-31 (15:18 UTC): EXP-90 pre-registered: where the hashing path's time goes; the team's baseline script
 
 - **Why:** the team's industry mentor, reviewing the hashing approach at the October 30 weekly meeting, asked for:

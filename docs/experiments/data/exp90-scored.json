@@ -1,0 +1,738 @@
+[
+ {
+  "run": 0,
+  "pattern": "hot",
+  "arm": "full_1g",
+  "rate": "1gbit",
+  "seconds": 152.5,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.25,
+   "source CPUs": 3.11,
+   "source thread": 19.51,
+   "dest disk": 86.74,
+   "dest CPUs": 6.44,
+   "dest thread": 35.79,
+   "link": 149.16
+  },
+  "t_impl": 149.16,
+  "binding": "link",
+  "over_impl": 1.022,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.007,
+  "mean_use": {
+   "source disk use": 0.568,
+   "source CPU use": 0.021,
+   "source thread use": 0.128,
+   "dest disk use": 0.568,
+   "dest CPU use": 0.042,
+   "dest thread use": 0.235,
+   "link use": 0.981
+  },
+  "width": 1.0
+ },
+ {
+  "run": 1,
+  "pattern": "hot",
+  "arm": "fast8wf2_1g",
+  "rate": "1gbit",
+  "seconds": 2.3,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 0.5,
+   "source CPUs": 0.13,
+   "source thread": 0.2,
+   "dest disk": 0.6,
+   "dest CPUs": 0.14,
+   "dest thread": 0.26,
+   "link": 1.01
+  },
+  "t_impl": 1.01,
+  "binding": "link",
+  "over_impl": 2.277,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.09,
+   "page_send_s": 1.090985
+  },
+  "phases": {
+   "hash_source_s": 1.124432,
+   "hash_basis_seconds": 0.0,
+   "rebuild_seconds": 0.385231,
+   "fsync_seconds": 0.609971,
+   "fsync_wait_seconds": 0.246579,
+   "verify_seconds": 0.200766
+  },
+  "slack": 0.364,
+  "mean_use": {
+   "source disk use": 0.285,
+   "source CPU use": 0.056,
+   "source thread use": 0.091,
+   "dest disk use": 0.543,
+   "dest CPU use": 0.061,
+   "dest thread use": 0.126,
+   "link use": 0.45
+  },
+  "width": 0.2
+ },
+ {
+  "run": 2,
+  "pattern": "hot",
+  "arm": "hashw_1g",
+  "rate": "1gbit",
+  "seconds": 88.38,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.64,
+   "source CPUs": 4.17,
+   "source thread": 5.75,
+   "dest disk": 86.64,
+   "dest CPUs": 4.33,
+   "dest thread": 5.72,
+   "link": 0.95
+  },
+  "t_impl": 86.64,
+  "binding": "source disk",
+  "over_impl": 1.02,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.103,
+   "page_send_s": 0.811501
+  },
+  "phases": {
+   "hash_source_s": 86.636563,
+   "hash_basis_seconds": 86.347126,
+   "rebuild_seconds": 0.143284,
+   "fsync_seconds": 0.633134,
+   "fsync_wait_seconds": 0.017578,
+   "verify_seconds": 1.335474
+  },
+  "t_alg": 86.58,
+  "over_alg": 1.021,
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.984,
+   "source CPU use": 0.047,
+   "source thread use": 0.072,
+   "dest disk use": 0.985,
+   "dest CPU use": 0.049,
+   "dest thread use": 0.071,
+   "link use": 0.009
+  },
+  "width": 1.0
+ },
+ {
+  "run": 3,
+  "pattern": "hot",
+  "arm": "hash",
+  "rate": null,
+  "seconds": 87.66,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.64,
+   "source CPUs": 3.9,
+   "source thread": 5.78,
+   "dest disk": 86.64,
+   "dest CPUs": 4.17,
+   "dest thread": 5.77,
+   "link": 0.06
+  },
+  "t_impl": 86.64,
+  "binding": "dest disk",
+  "over_impl": 1.012,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.104,
+   "page_send_s": 0.04099
+  },
+  "phases": {
+   "hash_source_s": 86.722935,
+   "hash_basis_seconds": 86.391456,
+   "rebuild_seconds": 0.54543,
+   "fsync_seconds": 0.425872,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 1.485282
+  },
+  "t_alg": 86.58,
+  "over_alg": 1.013,
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.992,
+   "source CPU use": 0.044,
+   "source thread use": 0.072,
+   "dest disk use": 0.996,
+   "dest CPU use": 0.047,
+   "dest thread use": 0.071,
+   "link use": 0.001
+  },
+  "width": 1.0
+ },
+ {
+  "run": 4,
+  "pattern": "hot",
+  "arm": "hash_1g",
+  "rate": "1gbit",
+  "seconds": 88.36,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.64,
+   "source CPUs": 3.87,
+   "source thread": 5.8,
+   "dest disk": 86.64,
+   "dest CPUs": 4.18,
+   "dest thread": 5.76,
+   "link": 0.95
+  },
+  "t_impl": 86.64,
+  "binding": "dest disk",
+  "over_impl": 1.02,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.113,
+   "page_send_s": 0.800512
+  },
+  "phases": {
+   "hash_source_s": 86.633258,
+   "hash_basis_seconds": 86.344637,
+   "rebuild_seconds": 0.548943,
+   "fsync_seconds": 0.428574,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 1.377719
+  },
+  "t_alg": 86.58,
+  "over_alg": 1.021,
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.984,
+   "source CPU use": 0.044,
+   "source thread use": 0.072,
+   "dest disk use": 0.985,
+   "dest CPU use": 0.047,
+   "dest thread use": 0.071,
+   "link use": 0.009
+  },
+  "width": 1.0
+ },
+ {
+  "run": 5,
+  "pattern": "hot",
+  "arm": "full",
+  "rate": null,
+  "seconds": 90.51,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.64,
+   "source CPUs": 3.15,
+   "source thread": 20.82,
+   "dest disk": 86.74,
+   "dest CPUs": 5.58,
+   "dest thread": 34.29,
+   "link": 9.23
+  },
+  "t_impl": 86.74,
+  "binding": "dest disk",
+  "over_impl": 1.043,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.0,
+  "mean_use": {
+   "source disk use": 0.963,
+   "source CPU use": 0.035,
+   "source thread use": 0.231,
+   "dest disk use": 0.959,
+   "dest CPU use": 0.063,
+   "dest thread use": 0.381,
+   "link use": 0.103
+  },
+  "width": 1.0
+ },
+ {
+  "run": 6,
+  "pattern": "hot",
+  "arm": "hashw",
+  "rate": null,
+  "seconds": 87.71,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.64,
+   "source CPUs": 4.14,
+   "source thread": 5.75,
+   "dest disk": 86.64,
+   "dest CPUs": 4.44,
+   "dest thread": 5.82,
+   "link": 0.06
+  },
+  "t_impl": 86.64,
+  "binding": "dest disk",
+  "over_impl": 1.012,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.093,
+   "page_send_s": 0.075227
+  },
+  "phases": {
+   "hash_source_s": 86.745808,
+   "hash_basis_seconds": 86.388291,
+   "rebuild_seconds": 0.131982,
+   "fsync_seconds": 0.669128,
+   "fsync_wait_seconds": 0.013856,
+   "verify_seconds": 1.361206
+  },
+  "t_alg": 86.58,
+  "over_alg": 1.013,
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.991,
+   "source CPU use": 0.047,
+   "source thread use": 0.071,
+   "dest disk use": 0.996,
+   "dest CPU use": 0.05,
+   "dest thread use": 0.071,
+   "link use": 0.001
+  },
+  "width": 1.0
+ },
+ {
+  "run": 7,
+  "pattern": "hot",
+  "arm": "fast8wf2",
+  "rate": null,
+  "seconds": 1.65,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 0.5,
+   "source CPUs": 0.13,
+   "source thread": 0.2,
+   "dest disk": 0.6,
+   "dest CPUs": 0.14,
+   "dest thread": 0.23,
+   "link": 0.06
+  },
+  "t_impl": 0.6,
+  "binding": "dest disk",
+  "over_impl": 2.74,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.074,
+   "page_send_s": 0.47009
+  },
+  "phases": {
+   "hash_source_s": 0.448827,
+   "hash_basis_seconds": 0.0,
+   "rebuild_seconds": 0.515014,
+   "fsync_seconds": 0.605833,
+   "fsync_wait_seconds": 0.392707,
+   "verify_seconds": 0.170623
+  },
+  "slack": 0.5,
+  "mean_use": {
+   "source disk use": 0.346,
+   "source CPU use": 0.078,
+   "source thread use": 0.125,
+   "dest disk use": 0.75,
+   "dest CPU use": 0.083,
+   "dest thread use": 0.143,
+   "link use": 0.039
+  },
+  "width": 0.2
+ },
+ {
+  "run": 8,
+  "pattern": "uniform",
+  "arm": "full_1g",
+  "rate": "1gbit",
+  "seconds": 153.35,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.42,
+   "source CPUs": 3.03,
+   "source thread": 20.0,
+   "dest disk": 87.05,
+   "dest CPUs": 6.6,
+   "dest thread": 40.68,
+   "link": 149.67
+  },
+  "t_impl": 149.67,
+  "binding": "link",
+  "over_impl": 1.025,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.007,
+  "mean_use": {
+   "source disk use": 0.571,
+   "source CPU use": 0.02,
+   "source thread use": 0.131,
+   "dest disk use": 0.567,
+   "dest CPU use": 0.044,
+   "dest thread use": 0.266,
+   "link use": 0.978
+  },
+  "width": 1.0
+ },
+ {
+  "run": 9,
+  "pattern": "uniform",
+  "arm": "fast8wf2_1g",
+  "rate": "1gbit",
+  "seconds": 64.53,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 36.52,
+   "source CPUs": 3.79,
+   "source thread": 11.66,
+   "dest disk": 34.22,
+   "dest CPUs": 2.5,
+   "dest thread": 10.98,
+   "link": 58.87
+  },
+  "t_impl": 58.87,
+  "binding": "link",
+  "over_impl": 1.096,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.11,
+   "page_send_s": 51.518699
+  },
+  "phases": {
+   "hash_source_s": 58.817891,
+   "hash_basis_seconds": 0.0,
+   "rebuild_seconds": 8.327336,
+   "fsync_seconds": 31.947236,
+   "fsync_wait_seconds": 2.576453,
+   "verify_seconds": 1.556153
+  },
+  "slack": 0.047,
+  "mean_use": {
+   "source disk use": 0.574,
+   "source CPU use": 0.059,
+   "source thread use": 0.182,
+   "dest disk use": 0.538,
+   "dest CPU use": 0.039,
+   "dest thread use": 0.175,
+   "link use": 0.918
+  },
+  "width": 1.0
+ },
+ {
+  "run": 10,
+  "pattern": "uniform",
+  "arm": "fast8wf2",
+  "rate": null,
+  "seconds": 41.84,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 35.79,
+   "source CPUs": 3.43,
+   "source thread": 10.53,
+   "dest disk": 34.22,
+   "dest CPUs": 2.38,
+   "dest thread": 9.24,
+   "link": 3.64
+  },
+  "t_impl": 35.79,
+  "binding": "source disk",
+  "over_impl": 1.169,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.086,
+   "page_send_s": 6.752302
+  },
+  "phases": {
+   "hash_source_s": 35.399062,
+   "hash_basis_seconds": 0.0,
+   "rebuild_seconds": 9.172276,
+   "fsync_seconds": 32.047139,
+   "fsync_wait_seconds": 3.573966,
+   "verify_seconds": 1.585715
+  },
+  "slack": 0.073,
+  "mean_use": {
+   "source disk use": 0.876,
+   "source CPU use": 0.082,
+   "source thread use": 0.257,
+   "dest disk use": 0.832,
+   "dest CPU use": 0.058,
+   "dest thread use": 0.229,
+   "link use": 0.089
+  },
+  "width": 1.0
+ },
+ {
+  "run": 11,
+  "pattern": "uniform",
+  "arm": "hash",
+  "rate": null,
+  "seconds": 186.93,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 88.27,
+   "source CPUs": 6.3,
+   "source thread": 9.26,
+   "dest disk": 110.27,
+   "dest CPUs": 9.08,
+   "dest thread": 10.09,
+   "link": 2.63
+  },
+  "t_impl": 110.27,
+  "binding": "dest disk",
+  "over_impl": 1.695,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.144,
+   "page_send_s": 93.033753
+  },
+  "phases": {
+   "hash_source_s": 86.61115,
+   "hash_basis_seconds": 101.621216,
+   "rebuild_seconds": 124.568809,
+   "fsync_seconds": 120.500364,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 80.394885
+  },
+  "t_alg": 86.58,
+  "over_alg": 2.159,
+  "slack": 0.032,
+  "mean_use": {
+   "source disk use": 0.471,
+   "source CPU use": 0.033,
+   "source thread use": 0.08,
+   "dest disk use": 0.839,
+   "dest CPU use": 0.048,
+   "dest thread use": 0.091,
+   "link use": 0.014
+  },
+  "width": 1.0
+ },
+ {
+  "run": 12,
+  "pattern": "uniform",
+  "arm": "full",
+  "rate": null,
+  "seconds": 90.8,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.93,
+   "source CPUs": 3.16,
+   "source thread": 20.6,
+   "dest disk": 87.04,
+   "dest CPUs": 6.45,
+   "dest thread": 36.72,
+   "link": 9.26
+  },
+  "t_impl": 87.04,
+  "binding": "dest disk",
+  "over_impl": 1.043,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.0,
+  "mean_use": {
+   "source disk use": 0.966,
+   "source CPU use": 0.035,
+   "source thread use": 0.229,
+   "dest disk use": 0.959,
+   "dest CPU use": 0.072,
+   "dest thread use": 0.408,
+   "link use": 0.103
+  },
+  "width": 1.0
+ },
+ {
+  "run": 13,
+  "pattern": "uniform",
+  "arm": "hashw",
+  "rate": null,
+  "seconds": 177.86,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 88.27,
+   "source CPUs": 5.24,
+   "source thread": 8.3,
+   "dest disk": 98.93,
+   "dest CPUs": 8.31,
+   "dest thread": 9.05,
+   "link": 2.63
+  },
+  "t_impl": 98.93,
+  "binding": "dest disk",
+  "over_impl": 1.798,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.172,
+   "page_send_s": 84.27367
+  },
+  "phases": {
+   "hash_source_s": 86.605293,
+   "hash_basis_seconds": 103.996741,
+   "rebuild_seconds": 85.119504,
+   "fsync_seconds": 127.849381,
+   "fsync_wait_seconds": 0.041643,
+   "verify_seconds": 78.793542
+  },
+  "t_alg": 86.58,
+  "over_alg": 2.054,
+  "slack": 0.017,
+  "mean_use": {
+   "source disk use": 0.496,
+   "source CPU use": 0.029,
+   "source thread use": 0.079,
+   "dest disk use": 0.862,
+   "dest CPU use": 0.047,
+   "dest thread use": 0.083,
+   "link use": 0.015
+  },
+  "width": 1.0
+ },
+ {
+  "run": 14,
+  "pattern": "uniform",
+  "arm": "hash_1g",
+  "rate": "1gbit",
+  "seconds": 209.92,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 88.27,
+   "source CPUs": 5.52,
+   "source thread": 8.84,
+   "dest disk": 108.92,
+   "dest CPUs": 9.89,
+   "dest thread": 12.89,
+   "link": 42.46
+  },
+  "t_impl": 108.92,
+  "binding": "dest disk",
+  "over_impl": 1.927,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.141,
+   "page_send_s": 116.487241
+  },
+  "phases": {
+   "hash_source_s": 86.55797,
+   "hash_basis_seconds": 96.542333,
+   "rebuild_seconds": 112.292815,
+   "fsync_seconds": 107.417859,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 75.056515
+  },
+  "t_alg": 86.58,
+  "over_alg": 2.425,
+  "slack": 0.029,
+  "mean_use": {
+   "source disk use": 0.42,
+   "source CPU use": 0.026,
+   "source thread use": 0.07,
+   "dest disk use": 0.811,
+   "dest CPU use": 0.047,
+   "dest thread use": 0.09,
+   "link use": 0.203
+  },
+  "width": 1.0
+ },
+ {
+  "run": 15,
+  "pattern": "uniform",
+  "arm": "hashw_1g",
+  "rate": "1gbit",
+  "seconds": 202.31,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 88.27,
+   "source CPUs": 5.65,
+   "source thread": 8.8,
+   "dest disk": 101.85,
+   "dest CPUs": 9.5,
+   "dest thread": 10.13,
+   "link": 42.47
+  },
+  "t_impl": 101.85,
+  "binding": "dest disk",
+  "over_impl": 1.986,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.168,
+   "page_send_s": 108.93256
+  },
+  "phases": {
+   "hash_source_s": 86.518619,
+   "hash_basis_seconds": 107.594391,
+   "rebuild_seconds": 87.660874,
+   "fsync_seconds": 141.630361,
+   "fsync_wait_seconds": 0.033604,
+   "verify_seconds": 83.585302
+  },
+  "t_alg": 86.58,
+  "over_alg": 2.337,
+  "slack": 0.02,
+  "mean_use": {
+   "source disk use": 0.437,
+   "source CPU use": 0.028,
+   "source thread use": 0.072,
+   "dest disk use": 0.836,
+   "dest CPU use": 0.047,
+   "dest thread use": 0.083,
+   "link use": 0.21
+  },
+  "width": 1.0
+ }
+]

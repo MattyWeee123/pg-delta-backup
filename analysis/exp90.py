@@ -25,7 +25,7 @@ Capacities, all measured in this session:
 Per run, over its clock: the work each resource did, from the counters, over its capacity, is a lower bound on the
 run's time for this implementation's own work (T_impl, the largest of: each disk, the link either way, each VM's
 CPUs, the busiest thread). Measured over T_impl is how far the run is from keeping its slowest resource busy: the room
-Ben's pipelining could take. For the hashing arms, T_alg puts one read of the database in place of the disks' reads
+the mentor's pipelining could take. For the hashing arms, T_alg puts one read of the database in place of the disks' reads
 (the work the algorithm needs: every page of B and S read once, the changed pages written and sent). Scores:
 D1 every hash run (hot, uniform; full link, 1 Gbit/s) has measured / T_impl <= 1.15 ("at its bound"; >= 1.30 is
    "a pipelining gap", between "partial").

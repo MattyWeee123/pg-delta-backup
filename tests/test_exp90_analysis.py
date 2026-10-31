@@ -63,5 +63,16 @@ class SamplerFormat(unittest.TestCase):
             self.assertTrue(np.allclose(exp90.at(ts, ticks, [10.0, 11.0]), [100, 180]))
 
 
+@unittest.skipIf(matplotlib is None, 'needs the analysis venv (matplotlib, numpy)')
+class OperationUnits(unittest.TestCase):
+    def test_an_operation_over_256_kib_counts_once_per_256_kib(self):
+        import exp90
+        import exp90_overlap
+        d = np.zeros(14)
+        # fio's mixed point: 196 reads of 1 MiB and 3,408 writes of 8 KiB in a second are 784 + 3,408 units.
+        d[exp90.READS], d[exp90.RSECT] = 196, 196 * 2048
+        d[exp90.WRITES], d[exp90.WSECT] = 3408, 3408 * 16
+        self.assertAlmostEqual(float(exp90_overlap.units(d)), 4192.0)
+
 if __name__ == '__main__':
     unittest.main()

@@ -114,4 +114,5 @@ The script deploys your working tree's tracked files (`git ls-files`), so commit
 | The hash test | [experiments/network/hashbench.py](../network/hashbench.py) |
 | The link test | [experiments/network/link_probe.py](../network/link_probe.py) |
 | The analysis | [analysis/exp90.py](../../analysis/exp90.py) |
+| Which machine was busy, and dest's operations (EXP-90's post-hoc view) | [analysis/exp90_overlap.py](../../analysis/exp90_overlap.py) |
 | The VMs | [infra/gcp/](../../infra/gcp/) |
