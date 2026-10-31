@@ -4,6 +4,24 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-10-31 (15:18 UTC): EXP-90 pre-registered: where the hashing path's time goes; the team's baseline script
+
+- **Why:** the team's industry mentor, reviewing the hashing approach at the October 30 weekly meeting, asked for:
+  - each side's link use over time before any optimizing;
+  - batched, pipelined hash exchange;
+  - a faster hash (SHA-256 or native code);
+  - a baseline the team can run.
+- **Already known:** the protocol batches and overlaps its exchange. In EXP-89b's scattered hashing run, the sender waited on the receiver for 0.15 s of 186 s. Never measured: each resource over time, and whether the disk's reads and writes share one budget.
+- **Built:**
+  - `util_series.py` samples link, disk, CPU and threads on both VMs every 0.1 s;
+  - `fio_mixed.sh` measures the disk alone and mixed;
+  - `link_probe.py` measures the link;
+  - `hashbench.py` gains SHA-256;
+  - the lab gains shaped-link arms (`_1g`) and `hashw`;
+  - `experiments/baseline/run.sh` (with a README) runs it all with one command.
+- **Deciding (D1):** every hashing run is at the bound of its slowest resource (measured / T_impl ≤ 1.15). Its control (D4): `pg_basebackup` at its bound.
+- **The Mac's hash rates (the local stage):** SHA-256 at 1.33x BLAKE3 per page.
+
 ## 2026-10-31 (02:20 UTC): EXP-89b done: a crashed old primary at 18 GB, 0.19x `pg_rewind`, 0.49x a re-clone
 
 - **1 held:** all 4 `--crashed-primary` runs were proven by the old primary's own WAL (0.8 s), found its own blocks past the fork (about 20,000), matched the new primary and passed `pg_amcheck`.

@@ -60,6 +60,11 @@
 # and pgbench's branches, tellers and history, since the held-out patterns tpcb, append and retention change them.
 # Every copy of B0 or B0s is a real one (cp --reflink=never: on XFS cp would otherwise share blocks with B0), and each
 # run records dest's received network bytes (net_rx_bytes) and, for incr and walg, its phases' seconds.
+# EXP-90 (where hashing's time goes): UTIL=1 samples both VMs' link, /data disk and CPU, and the threads of pgdelta,
+# pg_basebackup and walsenders, every 0.1 s around each run (util_series.py: util-dest.txt, util-source.txt). An arm
+# with a suffix "_N[mg]" (hash_1g) runs on a link shaped to N Mbit/s or Gbit/s: infra/gcp/throttle.sh caps both
+# VMs' egress just before the clock and is removed after it (meta.json's "rate"). "hashw" is "hash" with the
+# receiver's syncs on its worker (--fsync worker), as the fast path has had since EXP-68.
 set -u
 SRC=$1
 REPEATS=${2:-2}
@@ -259,8 +264,9 @@ EOF
     d="$R/run-$(printf %02d "$i")"
     mkdir -p "$d"
     rm -rf "$B" "$FULL" "$INC"
-    copied=null base=$B0 a=$arm
+    copied=null base=$B0 a=$arm rate=
     [ "${arm#sb_}" != "$arm" ] && base=$B0S a=${arm#sb_}
+    [[ "$a" =~ ^(.+)_([0-9]+)([mg])$ ]] && a=${BASH_REMATCH[1]} rate=${BASH_REMATCH[2]}${BASH_REMATCH[3]}bit
     if [ "$a" != full ] && [ "$a" != incr ]; then
       c0=$(date +%s.%N); cp -a --reflink=never "$base" "$B"; c1=$(date +%s.%N)
       copied=$(python3 -c "print(round($c1 - $c0, 2))")
@@ -271,6 +277,15 @@ EOF
       bash experiments/network/disk_series.sh > "$d/series-dest.txt" 2> /dev/null & sp=$!
       on_src "nohup bash experiments/network/disk_series.sh > /tmp/exp64-series.txt 2> /dev/null < /dev/null & echo \$! > /tmp/exp64-series.pid"
       sleep 0.5  # a few samples before t0
+    fi
+    if [ -n "$rate" ]; then
+      sudo bash infra/gcp/throttle.sh "$rate" > "$d/throttle-dest.txt" 2>&1 && \
+        on_src "sudo bash infra/gcp/throttle.sh $rate" > "$d/throttle-source.txt" 2>&1 || { echo "throttle failed"; exit 1; }
+    fi
+    if [ "${UTIL:-0}" = 1 ]; then
+      python3 experiments/network/util_series.py > "$d/util-dest.txt" 2> /dev/null & up=$!
+      on_src "nohup python3 experiments/network/util_series.py > /tmp/exp90-util.txt 2> /dev/null < /dev/null & echo \$! > /tmp/exp90-util.pid"
+      sleep 1  # ten samples before t0
     fi
     rstatus=null status= plan=null phases=null
     rx0=$(netrx)
@@ -328,6 +343,7 @@ EOF
         lsn) fast="--fast-path page-lsn --no-lsn-single-read --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
         lsn1) fast="--fast-path page-lsn --lsn-single-read --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
         od) fast="--fast-path summaries --read-ahead 8 --fill-gaps 2 --no-diverged-basis" fsync='--fsync worker' ;;
+        hashw) fsync='--fsync worker' ;;
       esac
       [ "$PLAN" = 1 ] && [ -n "$fast" ] && fast="$fast --plan-out /tmp/exp64-plan.json" && on_src "rm -f /tmp/exp64-plan.json"
       python3 -m pgdelta receive --basis "$B" --in-place --listen "$DEST:7000" \
@@ -362,6 +378,16 @@ EOF
     fi
     disks | sed 's/^/after /' >> "$d/diskstats.txt"
     rx1=$(netrx)
+    if [ "${UTIL:-0}" = 1 ]; then
+      sleep 1  # ten samples after t1
+      kill "$up"; wait "$up" 2> /dev/null
+      on_src 'kill $(cat /tmp/exp90-util.pid); sleep 0.3; cat /tmp/exp90-util.txt; rm -f /tmp/exp90-util.txt /tmp/exp90-util.pid' \
+        > "$d/util-source.txt"
+    fi
+    if [ -n "$rate" ]; then
+      sudo bash infra/gcp/throttle.sh off >> "$d/throttle-dest.txt" 2>&1
+      on_src "sudo bash infra/gcp/throttle.sh off" >> "$d/throttle-source.txt" 2>&1
+    fi
     if [ "$SERIES" = 1 ]; then
       sleep 0.5  # a few samples after t1
       kill "$sp"; wait "$sp" 2> /dev/null
@@ -389,8 +415,9 @@ EOF
       $PGBIN/pg_ctl -D "$cdir" -m fast -w stop > /dev/null 2>&1
       verify="{\"source\": \"$SOURCE_STATE\", \"copy\": \"$COPY_STATE\", \"match\": $([ "$SOURCE_STATE" = "$COPY_STATE" ] && echo true || echo false)}"
     fi
-    printf '{"run": %s, "pattern": "%s", "arm": "%s", "repeat": %s, "t0": %s, "t1": %s, "status": %s, "receiver_status": %s, "copy_seconds": %s, "verify": %s, "plan": %s, "phases": %s, "net_rx_bytes": %s}\n' \
-      "$i" "$pattern" "$arm" "$k" "$t0" "$t1" "$status" "$rstatus" "$copied" "$verify" "$plan" "$phases" "$((rx1 - rx0))" > "$d/meta.json"
+    printf '{"run": %s, "pattern": "%s", "arm": "%s", "repeat": %s, "t0": %s, "t1": %s, "status": %s, "receiver_status": %s, "copy_seconds": %s, "verify": %s, "plan": %s, "phases": %s, "net_rx_bytes": %s, "rate": %s}\n' \
+      "$i" "$pattern" "$arm" "$k" "$t0" "$t1" "$status" "$rstatus" "$copied" "$verify" "$plan" "$phases" "$((rx1 - rx0))" \
+      "$([ -n "$rate" ] && echo "\"$rate\"" || echo null)" > "$d/meta.json"
     echo "$(date -u +%T) run $i: $pattern $arm repeat $k: $(python3 -c "print(round($t1 - $t0, 2))") s, exit $status" \
       "$([ "$verify" != null ] && python3 -c "import json,sys; print('match', json.loads(sys.argv[1])['match'])" "$verify")"
     i=$((i + 1))

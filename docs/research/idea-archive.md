@@ -60,6 +60,9 @@ Every idea tried or proposed, with where it won, where it lost, and what should 
 | pgdelta's own mutual TLS 1.3 | systems | opt-in (`--tls-*`) | EXP-58, -72 | About 2% at 2 and 5 Gbit/s after the transport fix | — |
 | IBLT set reconciliation | algorithm | rejected | Research loop 1 | — / still needs every page read | — |
 | Content-defined chunking, cross-file matching | algorithm | rejected | EXP-37 | — / no reuse after `VACUUM FULL` by any strategy | — |
+| Hashing with the receiver's syncs on its worker (`hashw`: `--fsync worker` without the fast path) | systems | in test (EXP-90) | EXP-89b's timers: 121 s of main-loop syncs in a 186 s scattered refresh; measured for hashing only at 2.1 GB (EXP-10, -14) | — | EXP-90's result |
+| SHA-256 for the leaves (the CPU's SHA instructions), in place of BLAKE3 | systems | in test (EXP-90) | Mac: 1.33x BLAKE3 per 8 KiB page (EXP-90's local stage) | — | A run bound by CPU, and SHA-256 faster on that CPU |
+| B's digests kept from the refresh that wrote B, so an unchanged B isn't read again | algorithm | proposed (EXP-90) | — | Would remove hashing's floor beyond memory (reading all of B) / needs proof that B is unchanged since: the lineage problem again | EXP-90 finds hashing at its bound (D1) |
 
 ## Measurements owed (from research loop 2's scorecard)
 
