@@ -4,6 +4,14 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-01 (01:45 UTC): Several TCP connections added to the idea archive
+
+- **Why:** the team's industry mentor asked on October 30 about more than one connection. pgdelta sends everything over one (D36), and rule 14 says every idea is archived with its evidence, which this one wasn't.
+- **The evidence it carries:**
+  - in the same region, one stream isn't the limit: EXP-11's speeds, and EXP-92's hashing used 0.39–0.40 of the 1 Gbit/s link;
+  - at long round trips on default buffers it is: on EXP-15's real 31 ms link one stream reached 0.70–0.79 Gbit/s, and an application without root can lift that only with more streams (EXP-13).
+- **Status:** unbuilt. It is revisited when a refresh's link is busy most of the run below its rate. It would be tested on a long round trip other than H12, which stays sealed.
+
 ## 2026-11-01 (00:00 UTC): EXP-92 done: hashing with its syncs on a worker beats a re-clone at 1 Gbit/s, confirmed; the 2 GiB window lost
 
 - **F1, the deciding prediction, held:** where many pages change, `hashAVw` took 0.706x `pg_basebackup` at 1 Gbit/s (108.1 s against 153.0 s; each run 0.711 and 0.702; bar 0.85). EXP-91's single run (0.744) is confirmed with two runs per arm.
