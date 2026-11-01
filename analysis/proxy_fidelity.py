@@ -25,12 +25,13 @@ def main():
     fig, ax = plt.subplots(figsize=(6.4, 5.0))
     colors = [COLORS['blue'], COLORS['orange'], COLORS['green'], COLORS['purple'], COLORS['red'], COLORS['sky'],
               COLORS['black']]
+    styles = [(color, marker) for marker in 'os^' for color in colors]  # a shape per round of the colors
     mechanisms = list(dict.fromkeys(r['mechanism'] for r in rows))
-    assert len(mechanisms) <= len(colors), 'more mechanisms than colors: add one'
-    for color, mechanism in zip(colors, mechanisms):
+    assert len(mechanisms) <= len(styles), 'more mechanisms than styles: add one'
+    for (color, marker), mechanism in zip(styles, mechanisms):
         mine = [r for r in rows if r['mechanism'] == mechanism]
         xs, ys = [float(r['proxy_ratio']) for r in mine], [float(r['vm_ratio']) for r in mine]
-        ax.plot(xs, ys, 'o', color=color, ms=7, label=mechanism)
+        ax.plot(xs, ys, marker, color=color, ms=7, label=mechanism)
         shift = statistics.median(y / x for x, y in zip(xs, ys))
         print(f'{mechanism}: VM over proxy {shift:.3f} (median of {len(mine)})')
     top = max(1.05, max(float(r['proxy_ratio']) for r in rows) * 1.05, max(float(r['vm_ratio']) for r in rows) * 1.05)

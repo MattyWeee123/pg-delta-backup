@@ -78,6 +78,18 @@ within,exp85-h2,hot,sb_lsn1,2,174.13,0.0002
 within,exp85-h2,uniform,full,2,177.62,0.0
 within,exp85-h2,uniform,sb_lsn,2,198.78,0.0003
 within,exp85-h2,uniform,sb_lsn1,2,174.7,0.0002
+within,exp92/lab,hot,full,2,90.59,0.0
+within,exp92/lab,hot,hash,2,87.71,0.0002
+within,exp92/lab,hot,hashA2GVw,2,87.73,0.0
+within,exp92/lab,hot,hashAVw,2,87.72,0.001
+within,exp92/lab,uniform,full,2,90.84,0.0
+within,exp92/lab,uniform,full_1g,2,153.04,0.0004
+within,exp92/lab,uniform,hash,2,182.97,0.0136
+within,exp92/lab,uniform,hashA2GVw,2,137.59,0.0113
+within,exp92/lab,uniform,hashA2GVw_1g,2,137.79,0.0024
+within,exp92/lab,uniform,hashAVw,2,106.86,0.0115
+within,exp92/lab,uniform,hashAVw_1g,2,108.1,0.0131
+within,exp92/lab,uniform,hash_1g,2,204.94,0.0115
 between,exp75,scatterall12,full,,100.94,0.0031
 between,exp76,scatterall12,full,,100.95,0.0031
 between,exp77,scatterall12,full,,101.25,0.0031
@@ -89,3 +101,4 @@ between,exp70,uniform,full,,91.02,0.0044
 between,exp80b,uniform,full,,91.04,0.0044
 between,exp90/lab,uniform,full,,90.8,0.0044
 between,exp91/lab,uniform,full,,90.76,0.0044
+between,exp92/lab,uniform,full,,90.84,0.0044

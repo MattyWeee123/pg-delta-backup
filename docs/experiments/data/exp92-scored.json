@@ -1,0 +1,1976 @@
+[
+ {
+  "run": 0,
+  "pattern": "hot",
+  "arm": "hashAVw",
+  "rate": null,
+  "seconds": 87.76,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.23,
+   "source CPUs": 4.37,
+   "source thread": 5.49,
+   "dest disk": 86.62,
+   "dest CPUs": 4.57,
+   "dest thread": 5.58,
+   "link": 0.06
+  },
+  "t_impl": 86.62,
+  "binding": "dest disk",
+  "over_impl": 1.013,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.088,
+   "page_send_s": 0.0898
+  },
+  "phases": {
+   "hash_source_s": 86.598888,
+   "hash_basis_seconds": 86.499774,
+   "rebuild_seconds": 0.13404,
+   "fsync_seconds": 0.711753,
+   "fsync_wait_seconds": 0.015349,
+   "verify_seconds": 0.364248
+  },
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.991,
+   "source CPU use": 0.049,
+   "source thread use": 0.068,
+   "dest disk use": 0.991,
+   "dest CPU use": 0.051,
+   "dest thread use": 0.069,
+   "link use": 0.001
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 86.0,
+   "source disk only": 0.0,
+   "dest disk only": 0.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 2.0,
+   "dest busy: reads only": 84.0,
+   "dest busy: writes only": 0.0
+  },
+  "ops": {
+   "read_ops": 68661,
+   "read_gb": 17.8,
+   "write_ops": 1909,
+   "write_gb": 0.12,
+   "floor_s": 16.5,
+   "max_10s_units": 899
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 68719476736,
+   "room_wait_seconds": 0.001339,
+   "plan_wait_seconds": 86.451994,
+   "most_ahead_bytes": 2147483648,
+   "read_ahead_reads": 121,
+   "read_ahead_wait_seconds": 0.000669,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 17677,
+   "nodes_composed": 97,
+   "nodes_reread": 19,
+   "pages_reread": 3,
+   "pages_read_back": 13880,
+   "read_back_seconds": 0.05830602100013493
+  },
+  "options": [
+   68719476736,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 1,
+  "pattern": "hot",
+  "arm": "hashA2GVw",
+  "rate": null,
+  "seconds": 87.73,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.63,
+   "source CPUs": 4.1,
+   "source thread": 5.51,
+   "dest disk": 86.61,
+   "dest CPUs": 4.17,
+   "dest thread": 5.63,
+   "link": 0.06
+  },
+  "t_impl": 86.63,
+  "binding": "source disk",
+  "over_impl": 1.013,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.086,
+   "page_send_s": 0.095319
+  },
+  "phases": {
+   "hash_source_s": 86.890172,
+   "hash_basis_seconds": 86.348281,
+   "rebuild_seconds": 0.132825,
+   "fsync_seconds": 0.716055,
+   "fsync_wait_seconds": 0.015723,
+   "verify_seconds": 0.423773
+  },
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.991,
+   "source CPU use": 0.046,
+   "source thread use": 0.068,
+   "dest disk use": 0.996,
+   "dest CPU use": 0.047,
+   "dest thread use": 0.069,
+   "link use": 0.001
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 86.0,
+   "source disk only": 0.0,
+   "dest disk only": 0.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 2.0,
+   "dest busy: reads only": 84.0,
+   "dest busy: writes only": 0.0
+  },
+  "ops": {
+   "read_ops": 68634,
+   "read_gb": 17.8,
+   "write_ops": 1924,
+   "write_gb": 0.12,
+   "floor_s": 16.7,
+   "max_10s_units": 925
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 2147483648,
+   "room_wait_seconds": 0.001299,
+   "plan_wait_seconds": 86.74039,
+   "most_ahead_bytes": 2147483648,
+   "read_ahead_reads": 121,
+   "read_ahead_wait_seconds": 0.000374,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 17677,
+   "nodes_composed": 97,
+   "nodes_reread": 19,
+   "pages_reread": 3,
+   "pages_read_back": 13880,
+   "read_back_seconds": 0.060864945002549575
+  },
+  "options": [
+   2147483648,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 2,
+  "pattern": "hot",
+  "arm": "full",
+  "rate": null,
+  "seconds": 90.6,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.63,
+   "source CPUs": 2.92,
+   "source thread": 19.7,
+   "dest disk": 86.74,
+   "dest CPUs": 6.0,
+   "dest thread": 34.54,
+   "link": 9.4
+  },
+  "t_impl": 86.74,
+  "binding": "dest disk",
+  "over_impl": 1.044,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.963,
+   "source CPU use": 0.033,
+   "source thread use": 0.219,
+   "dest disk use": 0.958,
+   "dest CPU use": 0.067,
+   "dest thread use": 0.384,
+   "link use": 0.104
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": null,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 83.0,
+   "source disk only": 4.0,
+   "dest disk only": 3.0,
+   "nothing busy": 0.0,
+   "dest busy: reads and writes at once": 0.0,
+   "dest busy: reads only": 0.0,
+   "dest busy: writes only": 86.0
+  },
+  "ops": {
+   "read_ops": 92,
+   "read_gb": 0.0,
+   "write_ops": 69240,
+   "write_gb": 17.83,
+   "floor_s": 16.2,
+   "max_10s_units": 804
+  },
+  "extra_read_gb": -17.79,
+  "hash_ahead": null,
+  "verify_written": null,
+  "options": [
+   null,
+   null,
+   null
+  ]
+ },
+ {
+  "run": 3,
+  "pattern": "hot",
+  "arm": "hash",
+  "rate": null,
+  "seconds": 87.7,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.63,
+   "source CPUs": 4.11,
+   "source thread": 5.53,
+   "dest disk": 86.6,
+   "dest CPUs": 3.98,
+   "dest thread": 5.71,
+   "link": 0.06
+  },
+  "t_impl": 86.63,
+  "binding": "source disk",
+  "over_impl": 1.012,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.11,
+   "page_send_s": 0.060678
+  },
+  "phases": {
+   "hash_source_s": 86.732108,
+   "hash_basis_seconds": 86.329521,
+   "rebuild_seconds": 0.553431,
+   "fsync_seconds": 0.427184,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 1.263835
+  },
+  "t_alg": 86.55,
+  "over_alg": 1.013,
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.991,
+   "source CPU use": 0.046,
+   "source thread use": 0.07,
+   "dest disk use": 0.995,
+   "dest CPU use": 0.045,
+   "dest thread use": 0.071,
+   "link use": 0.001
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 86.0,
+   "source disk only": 0.0,
+   "dest disk only": 0.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 2.0,
+   "dest busy: reads only": 84.0,
+   "dest busy: writes only": 0.0
+  },
+  "ops": {
+   "read_ops": 68544,
+   "read_gb": 17.8,
+   "write_ops": 1589,
+   "write_gb": 0.12,
+   "floor_s": 16.6,
+   "max_10s_units": 868
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": null,
+  "verify_written": {
+   "nodes_kept": 17677,
+   "nodes_composed": 6,
+   "nodes_reread": 110,
+   "pages_reread": 8
+  },
+  "options": [
+   null,
+   "main",
+   "written"
+  ]
+ },
+ {
+  "run": 4,
+  "pattern": "hot",
+  "arm": "full",
+  "rate": null,
+  "seconds": 90.59,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.63,
+   "source CPUs": 3.04,
+   "source thread": 20.26,
+   "dest disk": 86.74,
+   "dest CPUs": 5.66,
+   "dest thread": 34.16,
+   "link": 9.4
+  },
+  "t_impl": 86.74,
+  "binding": "dest disk",
+  "over_impl": 1.044,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.963,
+   "source CPU use": 0.034,
+   "source thread use": 0.225,
+   "dest disk use": 0.958,
+   "dest CPU use": 0.064,
+   "dest thread use": 0.379,
+   "link use": 0.104
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": null,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 83.0,
+   "source disk only": 3.0,
+   "dest disk only": 3.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 0.0,
+   "dest busy: reads only": 0.0,
+   "dest busy: writes only": 86.0
+  },
+  "ops": {
+   "read_ops": 101,
+   "read_gb": 0.0,
+   "write_ops": 68990,
+   "write_gb": 17.83,
+   "floor_s": 16.2,
+   "max_10s_units": 807
+  },
+  "extra_read_gb": -17.79,
+  "hash_ahead": null,
+  "verify_written": null,
+  "options": [
+   null,
+   null,
+   null
+  ]
+ },
+ {
+  "run": 5,
+  "pattern": "hot",
+  "arm": "hashA2GVw",
+  "rate": null,
+  "seconds": 87.73,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.63,
+   "source CPUs": 3.98,
+   "source thread": 5.48,
+   "dest disk": 86.62,
+   "dest CPUs": 4.16,
+   "dest thread": 5.7,
+   "link": 0.06
+  },
+  "t_impl": 86.63,
+  "binding": "source disk",
+  "over_impl": 1.013,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.079,
+   "page_send_s": 0.116834
+  },
+  "phases": {
+   "hash_source_s": 86.915223,
+   "hash_basis_seconds": 86.455944,
+   "rebuild_seconds": 0.138942,
+   "fsync_seconds": 0.691596,
+   "fsync_wait_seconds": 0.016359,
+   "verify_seconds": 0.380455
+  },
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.991,
+   "source CPU use": 0.045,
+   "source thread use": 0.068,
+   "dest disk use": 0.995,
+   "dest CPU use": 0.047,
+   "dest thread use": 0.07,
+   "link use": 0.001
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 86.0,
+   "source disk only": 0.0,
+   "dest disk only": 0.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 2.0,
+   "dest busy: reads only": 84.0,
+   "dest busy: writes only": 0.0
+  },
+  "ops": {
+   "read_ops": 68672,
+   "read_gb": 17.8,
+   "write_ops": 1844,
+   "write_gb": 0.12,
+   "floor_s": 16.6,
+   "max_10s_units": 919
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 2147483648,
+   "room_wait_seconds": 0.001306,
+   "plan_wait_seconds": 86.755163,
+   "most_ahead_bytes": 2147483648,
+   "read_ahead_reads": 121,
+   "read_ahead_wait_seconds": 0.000325,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 17677,
+   "nodes_composed": 97,
+   "nodes_reread": 19,
+   "pages_reread": 3,
+   "pages_read_back": 13880,
+   "read_back_seconds": 0.06792258800214768
+  },
+  "options": [
+   2147483648,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 6,
+  "pattern": "hot",
+  "arm": "hash",
+  "rate": null,
+  "seconds": 87.72,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.63,
+   "source CPUs": 4.23,
+   "source thread": 5.49,
+   "dest disk": 86.62,
+   "dest CPUs": 4.22,
+   "dest thread": 5.76,
+   "link": 0.06
+  },
+  "t_impl": 86.63,
+  "binding": "source disk",
+  "over_impl": 1.013,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.098,
+   "page_send_s": 0.090783
+  },
+  "phases": {
+   "hash_source_s": 86.741341,
+   "hash_basis_seconds": 86.330109,
+   "rebuild_seconds": 0.53819,
+   "fsync_seconds": 0.423216,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 1.253519
+  },
+  "t_alg": 86.55,
+  "over_alg": 1.014,
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.991,
+   "source CPU use": 0.048,
+   "source thread use": 0.068,
+   "dest disk use": 0.996,
+   "dest CPU use": 0.048,
+   "dest thread use": 0.071,
+   "link use": 0.001
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 86.0,
+   "source disk only": 0.0,
+   "dest disk only": 0.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 2.0,
+   "dest busy: reads only": 84.0,
+   "dest busy: writes only": 0.0
+  },
+  "ops": {
+   "read_ops": 68643,
+   "read_gb": 17.8,
+   "write_ops": 1589,
+   "write_gb": 0.12,
+   "floor_s": 16.6,
+   "max_10s_units": 875
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": null,
+  "verify_written": {
+   "nodes_kept": 17677,
+   "nodes_composed": 6,
+   "nodes_reread": 110,
+   "pages_reread": 8
+  },
+  "options": [
+   null,
+   "main",
+   "written"
+  ]
+ },
+ {
+  "run": 7,
+  "pattern": "hot",
+  "arm": "hashAVw",
+  "rate": null,
+  "seconds": 87.68,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.63,
+   "source CPUs": 4.07,
+   "source thread": 5.47,
+   "dest disk": 86.6,
+   "dest CPUs": 4.13,
+   "dest thread": 5.65,
+   "link": 0.06
+  },
+  "t_impl": 86.63,
+  "binding": "source disk",
+  "over_impl": 1.012,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.083,
+   "page_send_s": 0.117238
+  },
+  "phases": {
+   "hash_source_s": 86.86995,
+   "hash_basis_seconds": 86.321541,
+   "rebuild_seconds": 0.137345,
+   "fsync_seconds": 0.668404,
+   "fsync_wait_seconds": 0.01585,
+   "verify_seconds": 0.420565
+  },
+  "slack": 0.011,
+  "mean_use": {
+   "source disk use": 0.991,
+   "source CPU use": 0.046,
+   "source thread use": 0.068,
+   "dest disk use": 0.995,
+   "dest CPU use": 0.047,
+   "dest thread use": 0.071,
+   "link use": 0.001
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 86.0,
+   "source disk only": 0.0,
+   "dest disk only": 0.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 2.0,
+   "dest busy: reads only": 84.0,
+   "dest busy: writes only": 0.0
+  },
+  "ops": {
+   "read_ops": 68561,
+   "read_gb": 17.8,
+   "write_ops": 1849,
+   "write_gb": 0.12,
+   "floor_s": 16.6,
+   "max_10s_units": 916
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 68719476736,
+   "room_wait_seconds": 0.001294,
+   "plan_wait_seconds": 86.700614,
+   "most_ahead_bytes": 2147483648,
+   "read_ahead_reads": 121,
+   "read_ahead_wait_seconds": 0.000317,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 17677,
+   "nodes_composed": 97,
+   "nodes_reread": 19,
+   "pages_reread": 3,
+   "pages_read_back": 13880,
+   "read_back_seconds": 0.06783447199859438
+  },
+  "options": [
+   68719476736,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 8,
+  "pattern": "uniform",
+  "arm": "hashA2GVw",
+  "rate": null,
+  "seconds": 138.37,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.72,
+   "source CPUs": 8.94,
+   "source thread": 16.58,
+   "dest disk": 86.63,
+   "dest CPUs": 7.66,
+   "dest thread": 14.23,
+   "link": 2.68
+  },
+  "t_impl": 86.72,
+  "binding": "source disk",
+  "over_impl": 1.596,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.14,
+   "page_send_s": 71.173896
+  },
+  "phases": {
+   "hash_source_s": 86.73004,
+   "hash_basis_seconds": 86.386301,
+   "rebuild_seconds": 69.161613,
+   "fsync_seconds": 98.400556,
+   "fsync_wait_seconds": 0.013151,
+   "verify_seconds": 1.396362
+  },
+  "slack": 0.007,
+  "mean_use": {
+   "source disk use": 0.631,
+   "source CPU use": 0.064,
+   "source thread use": 0.143,
+   "dest disk use": 0.787,
+   "dest CPU use": 0.055,
+   "dest thread use": 0.111,
+   "link use": 0.019
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 52.0,
+   "source disk only": 31.0,
+   "dest disk only": 54.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 79.0,
+   "dest busy: reads only": 8.0,
+   "dest busy: writes only": 19.0
+  },
+  "ops": {
+   "read_ops": 68690,
+   "read_gb": 17.8,
+   "write_ops": 272740,
+   "write_gb": 5.07,
+   "floor_s": 81.2,
+   "max_10s_units": 4907
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 2147483648,
+   "room_wait_seconds": 50.432831,
+   "plan_wait_seconds": 52.304635,
+   "most_ahead_bytes": 2147483648,
+   "read_ahead_reads": 249424,
+   "read_ahead_wait_seconds": 0.469836,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 8979,
+   "nodes_reread": 73,
+   "pages_reread": 3,
+   "pages_read_back": 618417,
+   "read_back_seconds": 4.493665728909946
+  },
+  "options": [
+   2147483648,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 9,
+  "pattern": "uniform",
+  "arm": "hashAVw_1g",
+  "rate": "1gbit",
+  "seconds": 108.81,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 97.31,
+   "source CPUs": 9.14,
+   "source thread": 16.16,
+   "dest disk": 86.62,
+   "dest CPUs": 7.88,
+   "dest thread": 14.53,
+   "link": 42.49
+  },
+  "t_impl": 97.31,
+  "binding": "source disk",
+  "over_impl": 1.118,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.147,
+   "page_send_s": 53.284391
+  },
+  "phases": {
+   "hash_source_s": 89.321486,
+   "hash_basis_seconds": 86.41745,
+   "rebuild_seconds": 35.577608,
+   "fsync_seconds": 98.216187,
+   "fsync_wait_seconds": 3.951429,
+   "verify_seconds": 0.954317
+  },
+  "slack": 0.009,
+  "mean_use": {
+   "source disk use": 0.931,
+   "source CPU use": 0.084,
+   "source thread use": 0.157,
+   "dest disk use": 1.01,
+   "dest CPU use": 0.072,
+   "dest thread use": 0.144,
+   "link use": 0.393
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 26.0,
+   "both disks": 77.0,
+   "source disk only": 0.0,
+   "dest disk only": 4.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 77.0,
+   "dest busy: reads only": 9.0,
+   "dest busy: writes only": 20.0
+  },
+  "ops": {
+   "read_ops": 68580,
+   "read_gb": 17.8,
+   "write_ops": 271600,
+   "write_gb": 5.07,
+   "floor_s": 80.8,
+   "max_10s_units": 4924
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 68719476736,
+   "room_wait_seconds": 0.001449,
+   "plan_wait_seconds": 7.891853,
+   "most_ahead_bytes": 11406458846,
+   "read_ahead_reads": 249424,
+   "read_ahead_wait_seconds": 34.250105,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 8979,
+   "nodes_reread": 73,
+   "pages_reread": 3,
+   "pages_read_back": 618417,
+   "read_back_seconds": 4.414960134203284
+  },
+  "options": [
+   68719476736,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 10,
+  "pattern": "uniform",
+  "arm": "hashAVw",
+  "rate": null,
+  "seconds": 106.25,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 96.72,
+   "source CPUs": 9.09,
+   "source thread": 16.8,
+   "dest disk": 86.63,
+   "dest CPUs": 7.43,
+   "dest thread": 13.99,
+   "link": 2.68
+  },
+  "t_impl": 96.72,
+  "binding": "source disk",
+  "over_impl": 1.099,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.138,
+   "page_send_s": 44.556778
+  },
+  "phases": {
+   "hash_source_s": 89.432087,
+   "hash_basis_seconds": 86.457513,
+   "rebuild_seconds": 42.925337,
+   "fsync_seconds": 97.373339,
+   "fsync_wait_seconds": 5.518198,
+   "verify_seconds": 0.937586
+  },
+  "slack": 0.009,
+  "mean_use": {
+   "source disk use": 0.928,
+   "source CPU use": 0.085,
+   "source thread use": 0.167,
+   "dest disk use": 1.014,
+   "dest CPU use": 0.07,
+   "dest thread use": 0.142,
+   "link use": 0.025
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 95.0,
+   "source disk only": 0.0,
+   "dest disk only": 10.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 79.0,
+   "dest busy: reads only": 7.0,
+   "dest busy: writes only": 19.0
+  },
+  "ops": {
+   "read_ops": 68701,
+   "read_gb": 17.81,
+   "write_ops": 274800,
+   "write_gb": 5.07,
+   "floor_s": 81.7,
+   "max_10s_units": 4930
+  },
+  "extra_read_gb": 0.02,
+  "hash_ahead": {
+   "bytes": 68719476736,
+   "room_wait_seconds": 0.001403,
+   "plan_wait_seconds": 12.796565,
+   "most_ahead_bytes": 11126022144,
+   "read_ahead_reads": 249424,
+   "read_ahead_wait_seconds": 35.369486,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 8979,
+   "nodes_reread": 73,
+   "pages_reread": 3,
+   "pages_read_back": 618417,
+   "read_back_seconds": 4.2476587918936275
+  },
+  "options": [
+   68719476736,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 11,
+  "pattern": "uniform",
+  "arm": "hashAVw_1g",
+  "rate": "1gbit",
+  "seconds": 107.39,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 97.31,
+   "source CPUs": 8.88,
+   "source thread": 16.27,
+   "dest disk": 86.62,
+   "dest CPUs": 7.85,
+   "dest thread": 14.58,
+   "link": 42.49
+  },
+  "t_impl": 97.31,
+  "binding": "source disk",
+  "over_impl": 1.104,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.292,
+   "page_send_s": 52.395858
+  },
+  "phases": {
+   "hash_source_s": 89.317312,
+   "hash_basis_seconds": 86.407256,
+   "rebuild_seconds": 34.496627,
+   "fsync_seconds": 96.028956,
+   "fsync_wait_seconds": 2.614825,
+   "verify_seconds": 0.915132
+  },
+  "slack": 0.009,
+  "mean_use": {
+   "source disk use": 0.937,
+   "source CPU use": 0.082,
+   "source thread use": 0.158,
+   "dest disk use": 1.012,
+   "dest CPU use": 0.073,
+   "dest thread use": 0.144,
+   "link use": 0.396
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 26.0,
+   "both disks": 77.0,
+   "source disk only": 0.0,
+   "dest disk only": 3.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 77.0,
+   "dest busy: reads only": 9.0,
+   "dest busy: writes only": 20.0
+  },
+  "ops": {
+   "read_ops": 68610,
+   "read_gb": 17.8,
+   "write_ops": 273053,
+   "write_gb": 5.07,
+   "floor_s": 81.2,
+   "max_10s_units": 4918
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 68719476736,
+   "room_wait_seconds": 0.001338,
+   "plan_wait_seconds": 7.929043,
+   "most_ahead_bytes": 11406458846,
+   "read_ahead_reads": 249424,
+   "read_ahead_wait_seconds": 33.909579,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 8979,
+   "nodes_reread": 73,
+   "pages_reread": 3,
+   "pages_read_back": 618417,
+   "read_back_seconds": 4.378638414214038
+  },
+  "options": [
+   68719476736,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 12,
+  "pattern": "uniform",
+  "arm": "hashA2GVw_1g",
+  "rate": "1gbit",
+  "seconds": 137.62,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.93,
+   "source CPUs": 8.18,
+   "source thread": 15.72,
+   "dest disk": 86.62,
+   "dest CPUs": 6.91,
+   "dest thread": 13.01,
+   "link": 42.5
+  },
+  "t_impl": 86.93,
+  "binding": "source disk",
+  "over_impl": 1.583,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.181,
+   "page_send_s": 77.967681
+  },
+  "phases": {
+   "hash_source_s": 86.801962,
+   "hash_basis_seconds": 86.403845,
+   "rebuild_seconds": 71.795703,
+   "fsync_seconds": 96.226578,
+   "fsync_wait_seconds": 0.013817,
+   "verify_seconds": 1.484584
+  },
+  "slack": 0.007,
+  "mean_use": {
+   "source disk use": 0.633,
+   "source CPU use": 0.059,
+   "source thread use": 0.135,
+   "dest disk use": 0.785,
+   "dest CPU use": 0.05,
+   "dest thread use": 0.099,
+   "link use": 0.309
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 12.0,
+   "both disks": 40.0,
+   "source disk only": 31.0,
+   "dest disk only": 53.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 77.0,
+   "dest busy: reads only": 9.0,
+   "dest busy: writes only": 19.0
+  },
+  "ops": {
+   "read_ops": 68623,
+   "read_gb": 17.8,
+   "write_ops": 272293,
+   "write_gb": 5.07,
+   "floor_s": 81.1,
+   "max_10s_units": 4910
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 2147483648,
+   "room_wait_seconds": 49.895288,
+   "plan_wait_seconds": 45.242527,
+   "most_ahead_bytes": 2147483648,
+   "read_ahead_reads": 249424,
+   "read_ahead_wait_seconds": 0.462609,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 8979,
+   "nodes_reread": 73,
+   "pages_reread": 3,
+   "pages_read_back": 618417,
+   "read_back_seconds": 4.161975555061872
+  },
+  "options": [
+   2147483648,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 13,
+  "pattern": "uniform",
+  "arm": "full_1g",
+  "rate": "1gbit",
+  "seconds": 153.01,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.92,
+   "source CPUs": 2.8,
+   "source thread": 18.41,
+   "dest disk": 87.04,
+   "dest CPUs": 5.61,
+   "dest thread": 35.49,
+   "link": 149.64
+  },
+  "t_impl": 149.64,
+  "binding": "link",
+  "over_impl": 1.023,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.007,
+  "mean_use": {
+   "source disk use": 0.568,
+   "source CPU use": 0.018,
+   "source thread use": 0.12,
+   "dest disk use": 0.569,
+   "dest CPU use": 0.037,
+   "dest thread use": 0.232,
+   "link use": 0.978
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": null,
+  "busy": {
+   "link busy": 149.0,
+   "both disks": 0.0,
+   "source disk only": 0.0,
+   "dest disk only": 3.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 0.0,
+   "dest busy: reads only": 0.0,
+   "dest busy: writes only": 50.0
+  },
+  "ops": {
+   "read_ops": 145,
+   "read_gb": 0.0,
+   "write_ops": 69374,
+   "write_gb": 17.89,
+   "floor_s": 16.6,
+   "max_10s_units": 669
+  },
+  "extra_read_gb": -17.79,
+  "hash_ahead": null,
+  "verify_written": null,
+  "options": [
+   null,
+   null,
+   null
+  ]
+ },
+ {
+  "run": 14,
+  "pattern": "uniform",
+  "arm": "hashA2GVw_1g",
+  "rate": "1gbit",
+  "seconds": 137.95,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.93,
+   "source CPUs": 8.23,
+   "source thread": 15.81,
+   "dest disk": 86.62,
+   "dest CPUs": 6.58,
+   "dest thread": 13.81,
+   "link": 42.49
+  },
+  "t_impl": 86.93,
+  "binding": "source disk",
+  "over_impl": 1.587,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.154,
+   "page_send_s": 78.254383
+  },
+  "phases": {
+   "hash_source_s": 86.861293,
+   "hash_basis_seconds": 86.408211,
+   "rebuild_seconds": 71.670983,
+   "fsync_seconds": 96.651189,
+   "fsync_wait_seconds": 0.018826,
+   "verify_seconds": 1.453868
+  },
+  "slack": 0.007,
+  "mean_use": {
+   "source disk use": 0.63,
+   "source CPU use": 0.059,
+   "source thread use": 0.136,
+   "dest disk use": 0.789,
+   "dest CPU use": 0.048,
+   "dest thread use": 0.105,
+   "link use": 0.309
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 12.0,
+   "both disks": 41.0,
+   "source disk only": 30.0,
+   "dest disk only": 53.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 77.0,
+   "dest busy: reads only": 9.0,
+   "dest busy: writes only": 20.0
+  },
+  "ops": {
+   "read_ops": 68634,
+   "read_gb": 17.8,
+   "write_ops": 273231,
+   "write_gb": 5.07,
+   "floor_s": 81.3,
+   "max_10s_units": 4909
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 2147483648,
+   "room_wait_seconds": 50.151823,
+   "plan_wait_seconds": 45.362576,
+   "most_ahead_bytes": 2147483648,
+   "read_ahead_reads": 249424,
+   "read_ahead_wait_seconds": 0.469428,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 8979,
+   "nodes_reread": 73,
+   "pages_reread": 3,
+   "pages_read_back": 618417,
+   "read_back_seconds": 4.409108724318685
+  },
+  "options": [
+   2147483648,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 15,
+  "pattern": "uniform",
+  "arm": "hash_1g",
+  "rate": "1gbit",
+  "seconds": 203.77,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 88.26,
+   "source CPUs": 5.23,
+   "source thread": 9.09,
+   "dest disk": 107.62,
+   "dest CPUs": 8.85,
+   "dest thread": 11.91,
+   "link": 42.46
+  },
+  "t_impl": 107.62,
+  "binding": "dest disk",
+  "over_impl": 1.893,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.142,
+   "page_send_s": 110.399016
+  },
+  "phases": {
+   "hash_source_s": 86.522028,
+   "hash_basis_seconds": 94.645683,
+   "rebuild_seconds": 105.220217,
+   "fsync_seconds": 100.629832,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 73.331547
+  },
+  "t_alg": 86.55,
+  "over_alg": 2.354,
+  "slack": 0.025,
+  "mean_use": {
+   "source disk use": 0.433,
+   "source CPU use": 0.026,
+   "source thread use": 0.07,
+   "dest disk use": 0.806,
+   "dest CPU use": 0.043,
+   "dest thread use": 0.086,
+   "link use": 0.209
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 37.0,
+   "both disks": 53.0,
+   "source disk only": 31.0,
+   "dest disk only": 77.0,
+   "nothing busy": 5.0,
+   "dest busy: reads and writes at once": 59.0,
+   "dest busy: reads only": 70.0,
+   "dest busy: writes only": 30.0
+  },
+  "ops": {
+   "read_ops": 263743,
+   "read_gb": 22.12,
+   "write_ops": 265846,
+   "write_gb": 5.07,
+   "floor_s": 126.1,
+   "max_10s_units": 4893
+  },
+  "extra_read_gb": 4.33,
+  "hash_ahead": null,
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 11,
+   "nodes_reread": 9041,
+   "pages_reread": 97
+  },
+  "options": [
+   null,
+   "main",
+   "written"
+  ]
+ },
+ {
+  "run": 16,
+  "pattern": "uniform",
+  "arm": "hash",
+  "rate": null,
+  "seconds": 184.21,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 88.26,
+   "source CPUs": 5.08,
+   "source thread": 8.52,
+   "dest disk": 110.22,
+   "dest CPUs": 8.59,
+   "dest thread": 9.93,
+   "link": 2.68
+  },
+  "t_impl": 110.22,
+  "binding": "dest disk",
+  "over_impl": 1.671,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.136,
+   "page_send_s": 90.927019
+  },
+  "phases": {
+   "hash_source_s": 86.600171,
+   "hash_basis_seconds": 99.978173,
+   "rebuild_seconds": 122.207187,
+   "fsync_seconds": 118.251087,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 81.340722
+  },
+  "t_alg": 86.55,
+  "over_alg": 2.128,
+  "slack": 0.027,
+  "mean_use": {
+   "source disk use": 0.48,
+   "source CPU use": 0.027,
+   "source thread use": 0.075,
+   "dest disk use": 0.839,
+   "dest CPU use": 0.046,
+   "dest thread use": 0.089,
+   "link use": 0.015
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 59.0,
+   "source disk only": 28.0,
+   "dest disk only": 92.0,
+   "nothing busy": 5.0,
+   "dest busy: reads and writes at once": 74.0,
+   "dest busy: reads only": 54.0,
+   "dest busy: writes only": 23.0
+  },
+  "ops": {
+   "read_ops": 231867,
+   "read_gb": 22.65,
+   "write_ops": 263559,
+   "write_gb": 5.07,
+   "floor_s": 118.0,
+   "max_10s_units": 4868
+  },
+  "extra_read_gb": 4.86,
+  "hash_ahead": null,
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 11,
+   "nodes_reread": 9041,
+   "pages_reread": 97
+  },
+  "options": [
+   null,
+   "main",
+   "written"
+  ]
+ },
+ {
+  "run": 17,
+  "pattern": "uniform",
+  "arm": "full",
+  "rate": null,
+  "seconds": 90.85,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.93,
+   "source CPUs": 3.06,
+   "source thread": 20.54,
+   "dest disk": 87.04,
+   "dest CPUs": 5.7,
+   "dest thread": 36.16,
+   "link": 9.43
+  },
+  "t_impl": 87.04,
+  "binding": "dest disk",
+  "over_impl": 1.044,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.0,
+  "mean_use": {
+   "source disk use": 0.966,
+   "source CPU use": 0.034,
+   "source thread use": 0.228,
+   "dest disk use": 0.958,
+   "dest CPU use": 0.064,
+   "dest thread use": 0.401,
+   "link use": 0.105
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": null,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 83.0,
+   "source disk only": 4.0,
+   "dest disk only": 3.0,
+   "nothing busy": 0.0,
+   "dest busy: reads and writes at once": 0.0,
+   "dest busy: reads only": 0.0,
+   "dest busy: writes only": 86.0
+  },
+  "ops": {
+   "read_ops": 146,
+   "read_gb": 0.0,
+   "write_ops": 69261,
+   "write_gb": 17.89,
+   "floor_s": 16.2,
+   "max_10s_units": 793
+  },
+  "extra_read_gb": -17.79,
+  "hash_ahead": null,
+  "verify_written": null,
+  "options": [
+   null,
+   null,
+   null
+  ]
+ },
+ {
+  "run": 18,
+  "pattern": "uniform",
+  "arm": "hash",
+  "rate": null,
+  "seconds": 181.73,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 88.26,
+   "source CPUs": 5.24,
+   "source thread": 8.47,
+   "dest disk": 110.32,
+   "dest CPUs": 8.47,
+   "dest thread": 9.97,
+   "link": 2.68
+  },
+  "t_impl": 110.32,
+  "binding": "dest disk",
+  "over_impl": 1.647,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.115,
+   "page_send_s": 88.436197
+  },
+  "phases": {
+   "hash_source_s": 86.627951,
+   "hash_basis_seconds": 102.491749,
+   "rebuild_seconds": 119.21823,
+   "fsync_seconds": 115.187551,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 82.332055
+  },
+  "t_alg": 86.55,
+  "over_alg": 2.1,
+  "slack": 0.039,
+  "mean_use": {
+   "source disk use": 0.485,
+   "source CPU use": 0.029,
+   "source thread use": 0.076,
+   "dest disk use": 0.836,
+   "dest CPU use": 0.046,
+   "dest thread use": 0.091,
+   "link use": 0.015
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 56.0,
+   "source disk only": 28.0,
+   "dest disk only": 90.0,
+   "nothing busy": 7.0,
+   "dest busy: reads and writes at once": 76.0,
+   "dest busy: reads only": 50.0,
+   "dest busy: writes only": 20.0
+  },
+  "ops": {
+   "read_ops": 231596,
+   "read_gb": 22.67,
+   "write_ops": 259535,
+   "write_gb": 5.07,
+   "floor_s": 116.9,
+   "max_10s_units": 4920
+  },
+  "extra_read_gb": 4.88,
+  "hash_ahead": null,
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 11,
+   "nodes_reread": 9041,
+   "pages_reread": 97
+  },
+  "options": [
+   null,
+   "main",
+   "written"
+  ]
+ },
+ {
+  "run": 19,
+  "pattern": "uniform",
+  "arm": "full_1g",
+  "rate": "1gbit",
+  "seconds": 153.07,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.93,
+   "source CPUs": 2.85,
+   "source thread": 18.44,
+   "dest disk": 87.04,
+   "dest CPUs": 5.73,
+   "dest thread": 35.9,
+   "link": 149.64
+  },
+  "t_impl": 149.64,
+  "binding": "link",
+  "over_impl": 1.023,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.007,
+  "mean_use": {
+   "source disk use": 0.568,
+   "source CPU use": 0.019,
+   "source thread use": 0.121,
+   "dest disk use": 0.569,
+   "dest CPU use": 0.038,
+   "dest thread use": 0.235,
+   "link use": 0.978
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": null,
+  "busy": {
+   "link busy": 150.0,
+   "both disks": 0.0,
+   "source disk only": 0.0,
+   "dest disk only": 3.0,
+   "nothing busy": 0.0,
+   "dest busy: reads and writes at once": 0.0,
+   "dest busy: reads only": 0.0,
+   "dest busy: writes only": 50.0
+  },
+  "ops": {
+   "read_ops": 150,
+   "read_gb": 0.0,
+   "write_ops": 69327,
+   "write_gb": 17.89,
+   "floor_s": 16.4,
+   "max_10s_units": 601
+  },
+  "extra_read_gb": -17.79,
+  "hash_ahead": null,
+  "verify_written": null,
+  "options": [
+   null,
+   null,
+   null
+  ]
+ },
+ {
+  "run": 20,
+  "pattern": "uniform",
+  "arm": "full",
+  "rate": null,
+  "seconds": 90.84,
+  "status": 0,
+  "match": null,
+  "bounds": {
+   "source disk": 86.93,
+   "source CPUs": 2.89,
+   "source thread": 20.27,
+   "dest disk": 87.04,
+   "dest CPUs": 5.69,
+   "dest thread": 35.92,
+   "link": 9.44
+  },
+  "t_impl": 87.04,
+  "binding": "dest disk",
+  "over_impl": 1.044,
+  "busiest_thread": {
+   "source": "postgres",
+   "dest": "pg_basebackup"
+  },
+  "slack": 0.0,
+  "mean_use": {
+   "source disk use": 0.966,
+   "source CPU use": 0.032,
+   "source thread use": 0.225,
+   "dest disk use": 0.958,
+   "dest CPU use": 0.064,
+   "dest thread use": 0.399,
+   "link use": 0.105
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": null,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 83.0,
+   "source disk only": 4.0,
+   "dest disk only": 3.0,
+   "nothing busy": 0.0,
+   "dest busy: reads and writes at once": 0.0,
+   "dest busy: reads only": 0.0,
+   "dest busy: writes only": 86.0
+  },
+  "ops": {
+   "read_ops": 105,
+   "read_gb": 0.0,
+   "write_ops": 69124,
+   "write_gb": 17.89,
+   "floor_s": 16.2,
+   "max_10s_units": 792
+  },
+  "extra_read_gb": -17.79,
+  "hash_ahead": null,
+  "verify_written": null,
+  "options": [
+   null,
+   null,
+   null
+  ]
+ },
+ {
+  "run": 21,
+  "pattern": "uniform",
+  "arm": "hashA2GVw",
+  "rate": null,
+  "seconds": 136.82,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 86.93,
+   "source CPUs": 8.48,
+   "source thread": 16.53,
+   "dest disk": 86.64,
+   "dest CPUs": 7.21,
+   "dest thread": 13.13,
+   "link": 2.68
+  },
+  "t_impl": 86.93,
+  "binding": "source disk",
+  "over_impl": 1.574,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.134,
+   "page_send_s": 71.724767
+  },
+  "phases": {
+   "hash_source_s": 87.000967,
+   "hash_basis_seconds": 86.50195,
+   "rebuild_seconds": 70.632649,
+   "fsync_seconds": 96.898227,
+   "fsync_wait_seconds": 0.017469,
+   "verify_seconds": 1.533621
+  },
+  "slack": 0.007,
+  "mean_use": {
+   "source disk use": 0.635,
+   "source CPU use": 0.062,
+   "source thread use": 0.144,
+   "dest disk use": 0.786,
+   "dest CPU use": 0.053,
+   "dest thread use": 0.103,
+   "link use": 0.02
+  },
+  "width": 1.0,
+  "repeat": 0,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 53.0,
+   "source disk only": 31.0,
+   "dest disk only": 51.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 79.0,
+   "dest busy: reads only": 7.0,
+   "dest busy: writes only": 18.0
+  },
+  "ops": {
+   "read_ops": 68710,
+   "read_gb": 17.81,
+   "write_ops": 271042,
+   "write_gb": 5.07,
+   "floor_s": 80.8,
+   "max_10s_units": 4933
+  },
+  "extra_read_gb": 0.02,
+  "hash_ahead": {
+   "bytes": 2147483648,
+   "room_wait_seconds": 48.995501,
+   "plan_wait_seconds": 50.802734,
+   "most_ahead_bytes": 2147483648,
+   "read_ahead_reads": 249424,
+   "read_ahead_wait_seconds": 0.481232,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 8979,
+   "nodes_reread": 73,
+   "pages_reread": 3,
+   "pages_read_back": 618417,
+   "read_back_seconds": 4.209109503024592
+  },
+  "options": [
+   2147483648,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 22,
+  "pattern": "uniform",
+  "arm": "hashAVw",
+  "rate": null,
+  "seconds": 107.47,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 96.89,
+   "source CPUs": 9.15,
+   "source thread": 16.73,
+   "dest disk": 86.63,
+   "dest CPUs": 7.15,
+   "dest thread": 13.62,
+   "link": 2.68
+  },
+  "t_impl": 96.89,
+  "binding": "source disk",
+  "over_impl": 1.109,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.136,
+   "page_send_s": 45.859554
+  },
+  "phases": {
+   "hash_source_s": 89.43559,
+   "hash_basis_seconds": 86.456471,
+   "rebuild_seconds": 44.00927,
+   "fsync_seconds": 98.625875,
+   "fsync_wait_seconds": 5.512281,
+   "verify_seconds": 0.887647
+  },
+  "slack": 0.009,
+  "mean_use": {
+   "source disk use": 0.921,
+   "source CPU use": 0.084,
+   "source thread use": 0.165,
+   "dest disk use": 1.013,
+   "dest CPU use": 0.066,
+   "dest thread use": 0.137,
+   "link use": 0.025
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 0.0,
+   "both disks": 94.0,
+   "source disk only": 0.0,
+   "dest disk only": 12.0,
+   "nothing busy": 1.0,
+   "dest busy: reads and writes at once": 79.0,
+   "dest busy: reads only": 7.0,
+   "dest busy: writes only": 20.0
+  },
+  "ops": {
+   "read_ops": 68691,
+   "read_gb": 17.8,
+   "write_ops": 274149,
+   "write_gb": 5.07,
+   "floor_s": 81.5,
+   "max_10s_units": 4923
+  },
+  "extra_read_gb": 0.01,
+  "hash_ahead": {
+   "bytes": 68719476736,
+   "room_wait_seconds": 0.00164,
+   "plan_wait_seconds": 13.286134,
+   "most_ahead_bytes": 11126022144,
+   "read_ahead_reads": 249424,
+   "read_ahead_wait_seconds": 35.114105,
+   "read_ahead_threads": 8
+  },
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 8979,
+   "nodes_reread": 73,
+   "pages_reread": 3,
+   "pages_read_back": 618417,
+   "read_back_seconds": 4.173714059777012
+  },
+  "options": [
+   68719476736,
+   "worker",
+   "as-written"
+  ]
+ },
+ {
+  "run": 23,
+  "pattern": "uniform",
+  "arm": "hash_1g",
+  "rate": "1gbit",
+  "seconds": 206.12,
+  "status": 0,
+  "match": true,
+  "bounds": {
+   "source disk": 88.26,
+   "source CPUs": 5.24,
+   "source thread": 8.58,
+   "dest disk": 108.15,
+   "dest CPUs": 8.58,
+   "dest thread": 11.78,
+   "link": 42.46
+  },
+  "t_impl": 108.15,
+  "binding": "dest disk",
+  "over_impl": 1.906,
+  "busiest_thread": {
+   "source": "python3",
+   "dest": "python3"
+  },
+  "protocol": {
+   "waits_s": 0.145,
+   "page_send_s": 112.891359
+  },
+  "phases": {
+   "hash_source_s": 86.527126,
+   "hash_basis_seconds": 95.123667,
+   "rebuild_seconds": 108.321886,
+   "fsync_seconds": 103.744021,
+   "fsync_wait_seconds": 0.0,
+   "verify_seconds": 74.322182
+  },
+  "t_alg": 86.55,
+  "over_alg": 2.382,
+  "slack": 0.029,
+  "mean_use": {
+   "source disk use": 0.428,
+   "source CPU use": 0.025,
+   "source thread use": 0.067,
+   "dest disk use": 0.808,
+   "dest CPU use": 0.041,
+   "dest thread use": 0.084,
+   "link use": 0.206
+  },
+  "width": 1.0,
+  "repeat": 1,
+  "receiver_status": 0,
+  "busy": {
+   "link busy": 36.0,
+   "both disks": 54.0,
+   "source disk only": 29.0,
+   "dest disk only": 81.0,
+   "nothing busy": 6.0,
+   "dest busy: reads and writes at once": 57.0,
+   "dest busy: reads only": 74.0,
+   "dest busy: writes only": 31.0
+  },
+  "ops": {
+   "read_ops": 257432,
+   "read_gb": 22.23,
+   "write_ops": 273104,
+   "write_gb": 5.07,
+   "floor_s": 126.4,
+   "max_10s_units": 4773
+  },
+  "extra_read_gb": 4.44,
+  "hash_ahead": null,
+  "verify_written": {
+   "nodes_kept": 8798,
+   "nodes_composed": 11,
+   "nodes_reread": 9041,
+   "pages_reread": 97
+  },
+  "options": [
+   null,
+   "main",
+   "written"
+  ]
+ }
+]

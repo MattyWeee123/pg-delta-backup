@@ -4,6 +4,27 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-01 (00:00 UTC): EXP-92 done: hashing with its syncs on a worker beats a re-clone at 1 Gbit/s, confirmed; the 2 GiB window lost
+
+- **F1, the deciding prediction, held:** where many pages change, `hashAVw` took 0.706x `pg_basebackup` at 1 Gbit/s (108.1 s against 153.0 s; each run 0.711 and 0.702; bar 0.85). EXP-91's single run (0.744) is confirmed with two runs per arm.
+- **F2, F4 and F5 held:**
+  - 0.584x today's hashing at full link, where it still takes 1.18x a re-clone;
+  - nothing moved in hot, and `pg_basebackup` stayed at its bound;
+  - the receiver waited 5.5 s on its syncs, and the cell took 1.10x its bound.
+- **F3 failed:**
+  - the 2 GiB window ended the source's second reads (its bound 96.8 to 86.8 s; the sending's wait 35 to 0.5 s);
+  - but with one file of lookahead the planner waited 50 s for room, and the disks took turns: 1.29x the 64 GiB window.
+  - The window for a held-out session stays 64 GiB.
+- **What binds now (post hoc):** dest's disk was busy 104–106 s of every scattered run with all three options, and `hashAVw`'s runs were only 1–3 s longer. It reads all of B (86.6 s), then writes after B's last read.
+- **Correctness:** 24 of 24 runs valid, 18 of 18 copies matched. Locally, 1,007 fault trials gave no wrong copy, and 53 of 53 controls were caught. A harness error at trial 1,008 (`os.killpg`'s permission race on macOS) stopped the second half; it resumed from there unchanged.
+- **The checks:**
+  - 51 of 51 registered files unchanged when scored;
+  - the controls within 1% of EXP-91's;
+  - every cell's runs within 1.36%. Rule 17's within-session bar is now 1.92%, refreshed with this session.
+  - Four proxy pairs logged; `hashAVw` over `hash` had the opposite sign locally again.
+- **Fixed for the logs:** `analysis/proxy_fidelity.py` now gives each mechanism a shape as well as a color.
+- **Proposed next:** a held-out session (H9–H12) before the three options become hashing's defaults. Beside it, structurally different: B's stored digests.
+
 ## 2026-10-31 (UTC): EXP-92 pre-registered: confirming hashing with its syncs on a worker; the window held to the cache
 
 - **Why:** in EXP-91 the reported arm with the receiver's syncs on its worker (`hashAVw`) beat `pg_basebackup` at 1 Gbit/s where many pages change (0.744), but in one run of an arm not registered as deciding. Its hashing also ran 11–16 GB ahead on 8 GB VMs, so the source read the pages it sent a second time.
