@@ -503,6 +503,25 @@ stays as registered, and the slow path is accepted: scoring runs detached and bl
 If it is worth optimising later, the shape is NumPy `int64` arrays (8 bytes a field rather than ~160) and
 windowing before materialising — a larger change that would need its own verification that no number moves.
 
+### 7. Stage 2 takes `v1_j1` in place of the deferred `v1_fast` (rule 8, before the runs)
+
+Stage 2's registered arms were `none`, `full`, `v1`, `v1_fast`. `v1_fast` is deferred for the structural
+reasons in amendment 1 (an in-place refresh destroys the manifest lineage proof; the `none_nosum` blocks open a
+summary gap), so its slot is free.
+
+Amendment 5 made **the worker floor** the live question: stage 1 showed the shipped two workers missing O4 at
+0.8 of capacity, and what matters next is whether any count is safe there. Beyond memory is where that question
+bites hardest, because past cache v1's verification re-read becomes a real disk pass (EXP-48) — the arm already
+paying 5.2 times the tolerance in memory has more to lose, and one worker has half the reads in flight.
+
+So stage 2 runs **`none`, `full`, `v1`, `v1_j1`** at L60 and L80, 2 repeats: the same arm count as registered,
+with `v1_j1` in the deferred slot. The cell is informative whichever way amendment 5 falls — if one worker meets
+O4 in memory, the question is whether it survives the disk pass; if it misses in memory, beyond memory can only
+be worse and the cell says how much. Keeping it out would have meant a whole extra session later to ask it.
+
+`SCALE=600` gives about 18 GB, the size `lab_exp64.sh` uses for the `ha` set, so stage 2's cluster is EXP-48's
+and EXP-64's rather than a new one.
+
 ## Rules this experiment is run under
 
 | Rule | What it requires here |
