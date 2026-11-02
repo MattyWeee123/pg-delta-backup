@@ -46,7 +46,14 @@ SEED=${4:-880}
 PLAN=${5:-full}
 DEST=$(hostname -I | awk '{print $1}')
 cd ~/pgd
-R=${OUT:-/data/exp04-results/exp88${PLAN/full/}}
+# A RUNS= invocation (the registered extra repeats) must NOT write into the grid's directory: its run index
+# restarts at 0, so run-000 onwards would overwrite the grid's. It gets its own session directory, which the
+# analysis reads as a second session of the same cells. OUT= still overrides either way.
+if [ -n "${RUNS:-}" ] && [ -z "${OUT:-}" ]; then
+  R=/data/exp04-results/exp88-extra-$SEED
+else
+  R=${OUT:-/data/exp04-results/exp88${PLAN/full/}}
+fi
 mkdir -p "$R"
 KEY=$HOME/.ssh/exp04_ed25519
 # -n: inside the plan loop ssh must not read the plan from stdin.
@@ -286,8 +293,15 @@ for lev in $LEVELS_PLANNED; do
   while read -r i arm level k want; do
     [ "$level" = "$lev" ] || continue
     d="$R/run-$(printf %03d "$i")"
-    mkdir -p "$d"
     run_id="exp88-$(printf %03d "$i")"
+    # Refuse rather than replace. The directory is keyed on the plan index, which restarts per invocation, so a
+    # second invocation sharing an output directory would silently overwrite real runs. This already happened
+    # once; a guard is worth more than remembering not to.
+    if [ -e "$d/run.json" ]; then
+      echo "$(date -u +%T) refusing to overwrite $d (it already holds a run); use OUT= for a new session" >&2
+      exit 1
+    fi
+    mkdir -p "$d"
     if [ "$want" != "$CURRENT_SUM" ]; then
       psrc "ALTER SYSTEM SET summarize_wal = $want" > /dev/null && psrc "SELECT pg_reload_conf()" > /dev/null
       for x in $(seq 120); do [ "$(psrc "SHOW summarize_wal")" = "$want" ] && break; sleep 0.25; done

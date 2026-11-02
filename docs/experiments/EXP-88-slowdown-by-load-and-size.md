@@ -475,6 +475,34 @@ that costs (EXP-28: about twice two workers'). If 2 fails, the finding is that p
 near saturation at every worker count measured, and the remedy is an owner-level design question rather than a
 default change.
 
+### 6. Two harness changes after stage 1, and one optimisation rejected (rule 16)
+
+**Declared, and the scorer re-registered:**
+
+- **`lab_exp88.sh`: a `RUNS=` invocation no longer writes into the grid's directory.** The registered
+  near-the-line rule's documented mechanism (`RUNS="arm:level" SKIP_SETUP=1`) restarted the run index at 0 and
+  wrote into the grid's own output directory, so `run-000` onwards were overwritten. On 2 November that happened:
+  the grid's `full`/L30/rep0 and `none`/L30/rep0 were replaced by the two extra `v1_j4` runs. **Nothing was lost
+  only because the grid had already been fetched** — luck, not design. A `RUNS=` invocation now gets its own
+  session directory, and a run directory that already holds a run makes the driver **stop rather than replace
+  it**. The guard is there as well as the fix because the convention had already failed once.
+- **`infra/gcp/create.sh`: `MIN_CPU_PLATFORM` and `IMAGE` are read.** Stages 2 and 3 separate a page-cache
+  effect by varying RAM alone, so an unpinned host generation would be unattributable. Both are no-ops when
+  unset, checked against an unpinned set's dry run.
+
+Neither changes a score: stage 1's data was collected and analysed before both, and neither file scores
+anything — one provisions machines, the other orchestrates runs.
+
+**Rejected: a per-level parse cache.** The analysis parses each level's log once per run, so L60's 120 MB log was
+inflated and parsed 15 times; stage 1 took over an hour to score. A cache keyed on the path set was written and
+then **withdrawn before use**: stage 1's three logs hold **27.3 million transactions**, and holding them as
+parsed Python tuples cost about **4.4 GB** — measured at 5.09 GiB resident against the container's 7.6 GiB, on
+the edge of being killed. It traded a tolerable time cost for an intolerable memory one. The analysis therefore
+stays as registered, and the slow path is accepted: scoring runs detached and blocks nothing.
+
+If it is worth optimising later, the shape is NumPy `int64` arrays (8 bytes a field rather than ~160) and
+windowing before materialising — a larger change that would need its own verification that no number moves.
+
 ## Rules this experiment is run under
 
 | Rule | What it requires here |
