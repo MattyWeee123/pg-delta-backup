@@ -246,18 +246,18 @@
   }
  },
  "EXP-88": {
-  "commit": "c663e6825753",
+  "commit": "6d97eaab9519",
   "files": {
    "analysis/exp28.py": "88bbe89551463c227a0180e1d9ac269037ea6b2ba126ea37b8e4294e3d3d8e4e",
    "analysis/exp88.py": "00178365ca0252cecab89dbdcffbc92e3c33c0cc72a19218b0f375cae61b25e7",
    "experiments/network/agent.py": "2e4638a83ae94f5bac8ac339dc7e329c4ba723b7b3dcd040fcbd369f7daebbd5",
-   "experiments/network/lab_exp88.sh": "2ce1af54ae543c717593011b591a2afc9529b3982af90ac54a25f9ac67a8b4d1",
+   "experiments/network/lab_exp88.sh": "6d3d123bff0fd7b16f6bfcb546fbb1c21dcc5371c6f73b8c983ac36b94b05e4d",
    "experiments/network/load/abort.sql": "1c17a4e57ea37cadac31afb4dce514cc25c43bbb18136605bfad3b6c09049c2a",
    "experiments/network/load/commit.sql": "1130bf602c609ddf31013ddc752b8637d73f2170b30bac70582c0a2f386f01d0",
    "experiments/network/measure.py": "4f3e3199a25af4edc9d52f96715258df802ca77f23bfeab965e1b1156e1243c3",
    "experiments/network/source_cluster.py": "e8f12011c6ca9fb24fc67c47f7e9ad6282749cc691c37e4ba7cafb5bc8a8e59a",
    "infra/gcp/config.sh": "2b4373a5a9a8ead8d72a0294839e94de9aadd3010650a35ac8ddac8c3bf34639",
-   "infra/gcp/create.sh": "18f5871eba9c691b93f05f4b240759dad3ec87ed4cab7056af2bdf478288eafd",
+   "infra/gcp/create.sh": "29edeb7712e83157d4ae311c691d603663fba34834120a142a3806d16ac100fe",
    "infra/gcp/teardown.sh": "4371413529a1edf69da350382126a2f3bb4d7988a744384b31a150cc65631469",
    "pgdelta/cli.py": "f364d8665af06245f7ef9e3a94e301d1f636cafab4939b1c0d9f45447220683a",
    "pgdelta/fastpath.py": "2688d833cfe132e1fce4ab53c91f345e7ac86a9525803fbc947aa88f771bb73f",
