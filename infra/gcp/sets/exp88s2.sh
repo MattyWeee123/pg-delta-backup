@@ -14,7 +14,11 @@ ROLES=${ROLES:-source dest client}
 ZONE=${ZONE:-us-east1-b}
 MACHINE=${MACHINE:-n2-highcpu-8}
 DATA_DISK=${DATA_DISK:-pd-balanced}
-# 18 GB of cluster, plus B, plus pg_basebackup's output while a `full` run holds it, plus WAL and headroom.
-PD_SIZE_GB=${PD_SIZE_GB:-200}
+# 150 GB, matching the ha set that EXP-48 and EXP-64 ran their 18 GB beyond-memory work on. The size is NOT
+# chosen for capacity: pd-balanced's IOPS and throughput scale with provisioned size, so a smaller disk would
+# be a slower disk and would change the very effect this stage measures. 150 GB holds the 18 GB cluster, B, a
+# working copy of B and pg_basebackup's output with room to spare.
+# (Note: ha.sh's comment claims 500 GiB while its value is 150. The value is what ran; the comment is stale.)
+PD_SIZE_GB=${PD_SIZE_GB:-150}
 # Held identical between stages 2 and 3 so a different host generation cannot be read as the cache effect.
 MIN_CPU_PLATFORM=${MIN_CPU_PLATFORM:-Intel Cascade Lake}
