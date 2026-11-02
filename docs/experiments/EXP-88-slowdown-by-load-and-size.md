@@ -439,6 +439,42 @@ Worth recording for its own sake: **the synthetic fixture could not have caught 
 that asked for the fast path and was refused, so the two cases were indistinguishable in the tests while being
 distinguishable in life. The test that asserted the old wording was itself encoding the bug.
 
+### 5. A `v1_j1` arm near saturation, added because prediction 3 failed (rule 8)
+
+Stage 1 found the shipped two-worker default **missing O4 at 0.8 of capacity** by 5.2 times the work-lost
+tolerance, while meeting it cleanly at 0.3 and 0.6. The registered consequence is a load-aware worker cap. But
+stage 1 cannot say what that cap should be, or whether one exists: it ran **one** worker count near saturation.
+
+So the live question is now narrower and sharper than the registration anticipated: **is any worker count safe
+at 0.8?** EXP-28 found one worker meeting O4 at 0.6 on this machine shape, in twice the time of two. Whether it
+still does at 0.8 is the difference between "cap the workers" and "pgdelta cannot meet O4 near saturation at
+all", and those imply very different products.
+
+**Added, before the runs:** a `v1_j1` arm, and `v1_j4` extended to L80 (stage 1 ran it at L60 only). The driver
+needs no change — it derives `--jobs N` from any arm named `v1_jN`. Cells: `none`, `full`, `v1`, `v1_j1`,
+`v1_j4` at L60 and L80, 3 repeats, on stage 1's machine shape so the comparison is direct. 30 runs, about
+1 hour, about 2 USD.
+
+`v1` runs again rather than being carried over from stage 1: W and D are net of **that session's own** `none`
+runs, so each session must be self-contained, and it doubles as a replication of stage 1's L80 miss.
+
+**Predictions, before any run:**
+
+1. `v1_j1` meets O4 at L60, as EXP-28 found one worker doing at 0.6.
+2. **Deciding: `v1_j1` meets O4 at L80.** *Wrong if it misses* — then no worker count tested meets O4 near
+   saturation on this shape, a worker cap is not a sufficient remedy, and the live path needs something else
+   (throttling its reads, or backing off on observed latency). That is a materially worse finding than stage 1's
+   and would be reported as such.
+3. `v1_j4`'s excess over `full` at L80 is larger than at L60: the cost grows with load.
+4. `v1` reproduces stage 1's L80 miss (W excess above 0.05 and D excess above 0.03). *Wrong if it meets O4* —
+   then stage 1's headline does not replicate within the same shape and nothing downstream stands until that is
+   explained.
+
+**What follows:** if 2 holds, the cap's floor is one worker near saturation and the write-up reports the time
+that costs (EXP-28: about twice two workers'). If 2 fails, the finding is that pgdelta's live path misses O4
+near saturation at every worker count measured, and the remedy is an owner-level design question rather than a
+default change.
+
 ## Rules this experiment is run under
 
 | Rule | What it requires here |
