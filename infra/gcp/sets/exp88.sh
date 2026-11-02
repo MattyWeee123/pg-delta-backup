@@ -17,8 +17,8 @@ ZONE=${ZONE:-us-east1-b}
 MACHINE=${MACHINE:-n2-standard-8}
 DATA_DISK=${DATA_DISK:-local-nvme}
 LOCAL_SSDS=${LOCAL_SSDS:-4}
-# NOT YET EFFECTIVE: create.sh does not read MIN_CPU_PLATFORM on this branch, so this is recorded intent, not a
-# pinned platform. It does not matter for stage 1 (one machine shape, and verdicts are within-session ratios),
-# but it is load-bearing for stages 2 and 3, whose whole point is a page-cache contrast that a different host
-# generation would confound. Port the create.sh option before stage 2 runs, then delete this comment.
+# create.sh reads this now (ported before stage 2). NOTE FOR THE RECORD: stage 1's own runs were created BEFORE
+# that port, so they ran on an unpinned platform. It does not affect their verdicts, which are within-session
+# ratios against pg_basebackup under the same load, but stage 1's absolute times are not pinned-platform numbers
+# and stages 2 and 3 should not be compared with them on absolutes.
 MIN_CPU_PLATFORM=${MIN_CPU_PLATFORM:-Intel Cascade Lake}

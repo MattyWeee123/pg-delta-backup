@@ -95,8 +95,17 @@ for role in ${missing[@]+"${missing[@]}"}; do
   # No service account: the VMs need no Google API access, only the metadata
   # server, which works without one. The metadata's pgd-* keys say which set and
   # role the VM is (experiments/network/agent.py env records them).
+  # An exact image replaces the family when IMAGE is set (EXP-13 pins one image across both its sessions);
+  # --image-project is kept either way. A minimum CPU platform is added only when asked for: EXP-88's stages 2
+  # and 3 vary RAM alone, so an unpinned host generation would confound the one effect they exist to separate.
+  image_flags=(--image-family "$IMAGE_FAMILY")
+  if [ -n "$(pgd_role "$role" IMAGE)" ]; then image_flags=(--image "$(pgd_role "$role" IMAGE)"); fi
+  platform_flags=()
+  if [ -n "$(pgd_role "$role" MIN_CPU_PLATFORM)" ]; then
+    platform_flags=(--min-cpu-platform "$(pgd_role "$role" MIN_CPU_PLATFORM)")
+  fi
   gc compute instances create "$vm" --zone "$(pgd_role "$role" ZONE)" --machine-type "$(pgd_role "$role" MACHINE)" \
-    --image-family "$IMAGE_FAMILY" --image-project "$IMAGE_PROJECT" \
+    "${image_flags[@]}" --image-project "$IMAGE_PROJECT" ${platform_flags[@]+"${platform_flags[@]}"} \
     --boot-disk-size 50GB --boot-disk-type pd-balanced ${disk_flags[@]+"${disk_flags[@]}"} \
     --no-service-account --no-scopes \
     --metadata "block-project-ssh-keys=TRUE,ssh-keys=$SSH_USER:$pubkey,pgd-set=$SET_NAME,pgd-role=$role,pgd-data-disk=$disk" \
