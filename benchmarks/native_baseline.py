@@ -29,6 +29,9 @@ from benchmarks import methods
 from benchmarks.backup import (atomic_json, basebackup_command, directory_bytes,
                                prepare_backup, run_backup, run_command, verify_basis)
 from benchmarks.resources import ResourceSampler
+from benchmarks.native_oracle import (backup_endpoint, check_operation_prefix,
+                                      check_replay_endpoint, cutoff_options,
+                                      successful_operations)
 
 
 TOOLS = ("postgres", "initdb", "pg_ctl", "psql", "pg_basebackup",
@@ -163,6 +166,8 @@ class Trial:
         self.commands = []
         self.counter = 0
         self.phase_logs = {}
+        self.open_transaction = None
+        self.open_transaction_files = None
 
     def command(self, name, arguments=(), *, sql=None, check=True, timeout=120,
                 monitor_resources=False, executable=None):
@@ -197,18 +202,26 @@ class Trial:
   'io', (SELECT json_agg(row_to_json(i)) FROM pg_stat_io i)
 )::text;"""))
 
-    def start(self, data, socket, target=None):
+    def start(self, data, socket, target=None, *, cutoff=None, reference=False):
         socket.mkdir(exist_ok=True)
         options = ["-k", str(socket), "-h", "", "-p", "5432",
                    "-c", "archive_mode=off", "-c", "primary_conninfo=",
                    "-c", "restore_command="] if data != self.source else ["-k", str(socket), "-h", "", "-p", "5432"]
-        if target:
+        if target or reference:
             options += ["-c", "restore_command=" + shlex.join([sys.executable,
                 str(Path(__file__).with_name("wal_copy.py")), "restore",
-                str(self.archive / "%f"), "%p"]),
+                str(self.archive / "%f"), "%p"])]
+        if target:
+            options += [
                 "-c", "recovery_target_name=" + target,
                 "-c", "recovery_target_timeline=current",
                 "-c", "recovery_target_action=pause", "-c", "hot_standby=on"]
+        if cutoff:
+            options += cutoff_options(cutoff, reference=reference)
+            if not reference:
+                # Archive-recovery mode requires a nonempty restore_command.
+                # Always fail archive fetches: only the package's pg_wal exists.
+                options += ['-c', 'restore_command=false']
         self.started.append(data)  # Also attempt cleanup if startup times out.
         self.command("pg_ctl", ["-D", data, "-l", self.output / (data.name + "-server.log"),
                                 "-o", shlex.join(options), "-w", "-t", "45", "start"])
@@ -330,6 +343,9 @@ UPDATE bench.accounts SET balance = balance + CASE WHEN id = :a THEN 1 ELSE -1 E
  WHERE id IN (:a, :b);
 INSERT INTO bench.ledger VALUES (:client_id, :seq, :a, :b);
 COMMIT;
+BEGIN;
+INSERT INTO bench.markers VALUES ('aborted:' || :client_id || ':' || :seq, 'must not survive');
+ROLLBACK;
 """)
         argv = [self.tools["pgbench"], "-h", str(self.socket), "-p", "5432", "-U", "bench", "-n",
                 "-c", "2", "-j", "2", "-T", str(self.args.duration), "-R", str(self.args.rate),
@@ -357,7 +373,45 @@ COMMIT;
         if self.sql("SELECT count(*) FROM pg_stat_activity WHERE datname='postgres' AND application_name='pgbench';") != "0":
             raise RuntimeError("Workload writers did not drain")
 
-    def restore(self, backup, label, expected=None, target=None):
+    def ledger_operations(self, socket):
+        rows = self.sql('SELECT worker, seq FROM bench.ledger ORDER BY worker, seq;', socket)
+        return {tuple(map(int, line.split('|'))) for line in rows.splitlines()}
+
+    def begin_uncommitted(self):
+        """Keep a transaction open across capture, without touching workload rows."""
+        log = self.output / 'open-transaction.out'
+        self.open_transaction_files = [log.open('w'), (self.output / 'open-transaction.err').open('w')]
+        self.open_transaction = subprocess.Popen(
+            [self.tools['psql'], '-X', '-qAt', '-v', 'ON_ERROR_STOP=1',
+             '-h', str(self.socket), '-p', '5432', '-U', 'bench', '-d', 'postgres'],
+            stdin=subprocess.PIPE, stdout=self.open_transaction_files[0],
+            stderr=self.open_transaction_files[1], text=True, env=controlled_env())
+        self.open_transaction.stdin.write("BEGIN; INSERT INTO bench.markers VALUES "
+                                          "('in_flight', 'must not survive');\n\\echo ORACLE_READY\n")
+        self.open_transaction.stdin.flush()
+        deadline = time.monotonic() + 10
+        while 'ORACLE_READY' not in log.read_text():
+            if self.open_transaction.poll() is not None or time.monotonic() >= deadline:
+                raise RuntimeError('In-flight transaction did not become ready')
+            time.sleep(.05)
+
+    def end_uncommitted(self):
+        if self.open_transaction:
+            if self.open_transaction.poll() is not None:
+                raise RuntimeError('In-flight transaction exited before capture completed')
+            self.open_transaction.communicate('ROLLBACK;\n', timeout=10)
+            if self.open_transaction.returncode:
+                raise RuntimeError('In-flight transaction failed')
+            self.open_transaction = None
+        if self.open_transaction_files:
+            for file in self.open_transaction_files:
+                file.close()
+            self.open_transaction_files = None
+
+    def restore(self, backup, label, expected=None, target=None, *, cutoff=None,
+                reference=False, acknowledged=None):
+        if target and cutoff or reference and not cutoff:
+            raise ValueError('Specify one recovery target; a reference requires a cutoff')
         restored = self.root / label
         socket = self.root / (label + "-sock")
         started = time.perf_counter()
@@ -365,18 +419,26 @@ COMMIT;
         # Only these controlled fixtures are supported, never arbitrary PGDATA.
         for name in ("standby.signal", "recovery.signal"):
             (restored / name).unlink(missing_ok=True)
-        if target:
+        if target or cutoff:
             (restored / "recovery.signal").touch()
-        self.start(restored, socket, target)
-        if target:
+        self.start(restored, socket, target, cutoff=cutoff, reference=reference)
+        replay_lsn = None
+        if target or cutoff:
             deadline = time.monotonic() + 45
             while self.sql("SELECT pg_is_wal_replay_paused();", socket) != "t":
                 if time.monotonic() >= deadline:
                     raise RuntimeError("Recovery did not pause at the requested target")
                 time.sleep(.05)
-            server_log = (self.output / (label + "-server.log")).read_text()
-            if target not in server_log:
-                raise RuntimeError("Restore log did not identify the requested target")
+            if target:
+                server_log = (self.output / (label + "-server.log")).read_text()
+                if target not in server_log:
+                    raise RuntimeError("Restore log did not identify the requested target")
+            if cutoff:
+                replay_lsn = self.sql('SELECT pg_last_wal_replay_lsn();', socket)
+                check_replay_endpoint(cutoff, replay_lsn)
+                identity = self.sql('SELECT system_identifier FROM pg_control_system();', socket)
+                if identity != cutoff['system_identifier']:
+                    raise RuntimeError('Restored cluster identity differs from recovery endpoint')
         elif self.sql("SELECT pg_is_in_recovery();", socket) != "f":
             raise RuntimeError("Package-only recovery did not complete")
         actual = self.state(socket, label)
@@ -384,11 +446,32 @@ COMMIT;
             raise RuntimeError("Restored logical data/schema differs from independent source export")
         if actual["balance_total"] != self.args.rows * 1000000:
             raise RuntimeError("Atomic transfer conservation invariant failed")
+        if acknowledged is not None:
+            operations = self.ledger_operations(socket)
+            check_operation_prefix(operations, acknowledged)
+            if not operations:
+                raise RuntimeError('Active cutoff contains no workload transactions')
+            forbidden = self.sql("SELECT count(*) FROM bench.markers WHERE name IN "
+                                 "('rolled_back', 'in_flight', 'after_capture') OR name LIKE 'aborted:%';", socket)
+            if forbidden != '0':
+                raise RuntimeError('Rollback, in-flight or post-capture data survived at cutoff')
+        if cutoff and not reference:
+            # Prove that the package can finish recovery, not only serve reads
+            # while paused. Resuming at a reached target ends recovery there.
+            self.sql('SELECT pg_wal_replay_resume();', socket)
+            deadline = time.monotonic() + 45
+            while self.sql('SELECT pg_is_in_recovery();', socket) != 'f':
+                if time.monotonic() >= deadline:
+                    raise RuntimeError('Package recovery did not complete after cutoff check')
+                time.sleep(.05)
         self.stop(restored)
         shutil.rmtree(restored)
         return {"seconds": time.perf_counter() - started, "startup": "pass",
                 "logical_match": "pass" if expected is not None else "not_checked",
-                "conservation": "pass", "target": target, "state": actual}
+                "conservation": "pass", "target": target, "state": actual,
+                "cutoff": cutoff, "replay_lsn": replay_lsn,
+                "external_wal_allowed": bool(target or reference),
+                "operation_prefix": 'pass' if acknowledged is not None else 'not_checked'}
 
     def marker(self):
         target = "baseline_" + uuid.uuid4().hex
@@ -403,6 +486,15 @@ COMMIT;
         return target, lsn
 
     def cleanup(self):
+        if self.open_transaction:
+            if self.open_transaction.poll() is None:
+                self.open_transaction.kill()
+            self.open_transaction.communicate(timeout=5)
+            self.open_transaction = None
+        if self.open_transaction_files:
+            for file in self.open_transaction_files:
+                file.close()
+            self.open_transaction_files = None
         if self.source_sampler:
             self.source_sampler.stop()
             self.source_sampler = None
@@ -453,6 +545,8 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
         ) if spec.trusts_basis else None
     if mode == "active":
         trial.launch_workload()
+        if spec is not None:
+            trial.begin_uncommitted()
     else:
         expected = trial.state(trial.socket, "expected")
     stats_before = trial.pg_stats()
@@ -521,6 +615,7 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
             # Workload must stay active through the measured backup interval.
             if not measured['workload_running']:
                 raise RuntimeError("Workload finished before backup; increase --duration")
+            trial.end_uncommitted()
             trial.finish_workload()
         logs = sorted(trial.output.glob("pgbench-log.*"))
         if not logs:
@@ -531,24 +626,38 @@ def run_trial(trial: Trial, method: str, mode: str, negative_controls: bool) -> 
         record["workload_all"] = entire
         if entire["failures"] or entire["skipped"]:
             raise RuntimeError("Workload has failed/skipped transactions")
+        acknowledged = successful_operations(logs)
+        check_operation_prefix(trial.ledger_operations(trial.socket), acknowledged, complete=True)
+        if method != NO_BACKUP:
+            trial.sql("INSERT INTO bench.markers VALUES ('after_capture', 'must be absent at cutoff');")
         expected = trial.state(trial.socket, "expected-after-workload")
         if expected["ledger"]["rows"] != entire["all_logged_successes"]:
             raise RuntimeError("External successful transaction count differs from source ledger")
     if method == NO_BACKUP:
         record["status"] = "pass"
         return record
-    record["self_contained_restore"] = trial.restore(output, "package-restore",
-                                                     expected if mode == "quiescent" else None)
     if mode == "active":
+        cutoff = backup_endpoint(output, record['system_identifier'])
+        record['recovery_endpoint'] = cutoff
+        # Flush reference WAL beyond the boundary, so exclusive LSN recovery
+        # can observe the next record. Never expose this archive to candidate.
         supplement_start = time.perf_counter()
         target, lsn = trial.marker()
         record["pitr_target"] = {"name": target, "lsn": lsn}
         record["pitr_archive_bytes"] = directory_bytes(trial.archive)
         record["pitr_wal_preparation_seconds"] = time.perf_counter() - supplement_start
+        record['cutoff_reference_restore'] = trial.restore(
+            basis, 'cutoff-reference', cutoff=cutoff, reference=True,
+            acknowledged=acknowledged)
+        cutoff_expected = record['cutoff_reference_restore']['state']
+        record['self_contained_restore'] = trial.restore(
+            output, 'package-restore', cutoff_expected, cutoff=cutoff,
+            acknowledged=acknowledged)
         record["pitr_restore"] = trial.restore(output, "pitr-restore", expected, target)
-        record["active_package_exact_cutoff_oracle"] = "not_implemented"
-        record["correctness_scope"] = "package startup/invariant plus PITR-assisted exact logical match"
+        record["active_package_exact_cutoff_oracle"] = "pass"
+        record["correctness_scope"] = "self-contained exact logical match at manifest end LSN against independent B0/archive reference; additional later PITR check"
     else:
+        record['self_contained_restore'] = trial.restore(output, 'package-restore', expected)
         record["correctness_scope"] = "self-contained exact logical match to quiescent source"
     if negative_controls:
         corrupted = trial.root / "corrupted"
@@ -655,8 +764,9 @@ def main(argv=None):
     args.output = args.output.resolve()
     args.output.mkdir(parents=True)
     version = subprocess.check_output([tools["postgres"], "--version"], text=True).strip()
-    # v3: trial methods carry registry names (v2 used "full"/"incremental").
-    bundle = {"schema_version": 3, "status": "running", "scope": "native baseline smoke",
+    # v4 adds the active exact-cutoff oracle and rollback/in-flight probes.
+    # v3 introduced registry names (v2 used "full"/"incremental").
+    bundle = {"schema_version": 4, "status": "running", "scope": "native baseline smoke",
         "performance_claim": "descriptive local measurements; not a controlled cross-host performance baseline",
         "postgres_version": version, "python_version": platform.python_version(),
         "platform": platform.platform(), "cpu_count": os.cpu_count(),
