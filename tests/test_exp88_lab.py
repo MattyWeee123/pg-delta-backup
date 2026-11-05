@@ -19,9 +19,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
+import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +61,24 @@ def code() -> str:
     """The driver's executable lines: whole-line comments are dropped, so the header may name what is absent."""
     lines = [line for line in DRIVER.read_text().splitlines() if not line.lstrip().startswith('#')]
     return '\n'.join(lines)
+
+
+def flags_for(arm: str):
+    """(jobs, fast, ha, rflags) that the driver derives for `arm`, by running the driver's own block.
+
+    The block is cut out of the script and executed rather than reimplemented here, so this tests the shipped
+    derivation. Reimplementing it would only prove that two copies of the same mistake agree.
+    """
+    text = DRIVER.read_text()
+    start = text.index('    jobs= fast= ha= rflags=')
+    end = text.index('    rp=\n', start)
+    block = textwrap.dedent(text[start:end])
+    script = f'set -u\narm={shlex.quote(arm)}\nHASH_AHEAD=64G\nREAD_AHEAD=8\n{block}\n' \
+             'printf "%s\\n%s\\n%s\\n%s\\n" "$jobs" "$fast" "$ha" "$rflags"\n'
+    done = subprocess.run([BASH, '-c', script], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    jobs, fast, ha, rflags = done.stdout.split('\n')[:4]
+    return jobs, fast, ha, rflags
 
 
 TEMPORARY = []
@@ -131,10 +151,45 @@ class TheDriverItself(unittest.TestCase):
         self.assertIn('window_t1 "$t0" "$t1"', text)
 
     def test_the_deciding_arm_asks_for_no_jobs_so_pgdelta_s_shipped_default_picks_it(self):
-        """v1 is the product as it ships: on an 8-vCPU source the rule gives 2, which is EXP-28's cell."""
+        """v1 is the product as it ships: on an 8-vCPU source the rule gives 2, which is EXP-28's cell.
+
+        This runs the driver's own derivation rather than matching its source text. An earlier version of this
+        test asserted the exact line, which made any rewrite of the block a failure even when every arm still
+        derived the same flags - and a test that pins the implementation cannot tell a fix from a regression.
+        """
+        self.assertEqual(flags_for('v1'), ('', '', '', ''))
+
+    def test_an_explicit_worker_count_comes_from_the_arm_name_including_with_hash_ahead(self):
+        """v1_j4_ha must read 4. The old ${arm##*_j} form would have passed `--jobs 4_ha`, which pgdelta
+        refuses - loudly, but only once the VMs were up and the load was running."""
+        self.assertEqual(flags_for('v1_j1')[0], '--jobs 1')
+        self.assertEqual(flags_for('v1_j4')[0], '--jobs 4')
+        self.assertEqual(flags_for('v1_j4_ha')[0], '--jobs 4')
+        self.assertEqual(flags_for('v1_j1_ha')[0], '--jobs 1')
+
+    def test_the_fast_path_arm_still_asks_for_the_summaries_mode(self):
+        self.assertEqual(flags_for('v1_fast')[1], '--fast-path summaries')
+        for arm in ('v1', 'v1_j4', 'v1_ha', 'none', 'full'):
+            self.assertEqual(flags_for(arm)[1], '', arm)
+
+    def test_exp93_s_hash_ahead_arms_put_flags_on_both_ends_and_leave_every_other_arm_alone(self):
+        """EXP-93 measures EXP-92's hashAVw recipe under load: hash-ahead on the sender, and the receiver
+        flags it was measured with. Every EXP-88 arm must be untouched by the addition."""
+        for arm in ('v1_ha', 'v1_j4_ha'):
+            _, _, ha, rflags = flags_for(arm)
+            self.assertEqual(ha, '--hash-ahead 64G --read-ahead 8', arm)
+            self.assertEqual(rflags, '--fsync worker --verify-scope as-written', arm)
+        for arm in ('none', 'none_nosum', 'full', 'v1', 'v1_j1', 'v1_j4', 'v1_fast'):
+            _, _, ha, rflags = flags_for(arm)
+            self.assertEqual(ha, '', arm)
+            self.assertEqual(rflags, '', arm)
+
+    def test_the_receiver_is_launched_with_the_arm_s_receiver_flags(self):
+        """The receiver starts before the timed window, so its flags must be derived before it launches. If
+        the derivation moved back below the launch, EXP-93's arms would silently lose half the recipe."""
         text = code()
-        self.assertIn('[ "${arm#v1_j}" != "$arm" ] && jobs="--jobs ${arm##*_j}"', text)
-        self.assertIn('[ "$arm" = v1_fast ] && fast="--fast-path summaries"', text)
+        self.assertIn('--jobs 4 $rflags > "$d/receive.log"', text)
+        self.assertLess(text.index('rflags="--fsync worker'), text.index('pgdelta receive --basis'))
 
 
 class TheCellsThePlanCovers(unittest.TestCase):

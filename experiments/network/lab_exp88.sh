@@ -70,6 +70,12 @@ SETTLE=15 TAIL=10 NONE_SECONDS=8 CLIENTS=128 THREADS=4
 SCALE=${SCALE:-70}
 # EXP-28 ran blake2b, so the gate compares like with like; HASH=auto takes pgdelta's shipped default instead.
 HASH=${HASH:-blake2b}
+# EXP-93's hash-ahead arms. 64G is lab_exp64.sh:351's value, the one EXP-91 and EXP-92 measured their
+# 0.706x with; --read-ahead is not an independent choice (--hash-ahead turns it on implicitly,
+# cli.py:_read_ahead), so naming it here is documentation rather than a second variable. Unused by every
+# EXP-88 arm.
+HASH_AHEAD=${HASH_AHEAD:-64G}
+READ_AHEAD=${READ_AHEAD:-8}
 LOAD_DIR=/dev/shm/exp88
 WINDOW_FILE=${WINDOW_FILE:-/dev/shm/exp88/backup-window.json}
 WINDOW_DIR=$(dirname "$WINDOW_FILE")
@@ -310,10 +316,27 @@ for lev in $LEVELS_PLANNED; do
       [ "$want" = off ] && GAP=1
       echo "$(date -u +%T) summarize_wal = $want"
     fi
+    # Each arm's flags, derived here rather than in the dispatch below, because the receiver is launched
+    # ahead of the timed window and EXP-93's recipe puts flags on the receiver too.
+    #   v1        the product as it ships: no --jobs, so pgdelta's own live rule picks it (2 on 8 vCPUs)
+    #   v1_jN     an explicit worker count
+    #   v1_fast   the WAL-summary fast path
+    #   *_ha      EXP-93: hash-ahead on the sender, paired with the receiver flags EXP-92's hashAVw used
+    jobs= fast= ha= rflags=
+    case "$arm" in
+      v1_j*) n=${arm#v1_j}; jobs="--jobs ${n%_ha}" ;;   # ${n%_ha} so v1_j4_ha reads 4, not "4_ha"
+    esac
+    [ "$arm" = v1_fast ] && fast="--fast-path summaries"
+    case "$arm" in
+      *_ha) ha="--hash-ahead $HASH_AHEAD --read-ahead $READ_AHEAD"
+            # Destination-side, and not expected to move W or D; included so the arm is the recipe the
+            # 0.706x claim rests on rather than a reconstruction of it. as-written needs --in-place, set.
+            rflags="--fsync worker --verify-scope as-written" ;;
+    esac
     rp=
     if [ "${arm#v1}" != "$arm" ]; then  # the receiver listens before the clock starts
       python3 -m pgdelta receive --basis "$B" --in-place --listen 0.0.0.0:7000 \
-        --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 > "$d/receive.log" 2>&1 &
+        --basis-pg-controldata "$PGBIN/pg_controldata" --jobs 4 $rflags > "$d/receive.log" 2>&1 &
       rp=$!
       for x in $(seq 200); do ss -ltn | grep -q ':7000 ' && break; sleep 0.05; done
     fi
@@ -322,7 +345,6 @@ for lev in $LEVELS_PLANNED; do
     sleep "$SETTLE"
     on_src "head -1 /proc/stat" > "$d/cpu-before.txt"
     disks > "$d/disks-before.txt"
-    jobs= fast=
     t0=$(date +%s.%N)
     window_t0 "$t0" &
     case "$arm" in
@@ -330,12 +352,10 @@ for lev in $LEVELS_PLANNED; do
       full) $PGBIN/pg_basebackup -h "$SRC" -p 5432 -U study -D "$FULL" -X stream -c fast \
               --sync-method=fsync > "$d/full.log" 2>&1
             status=$? ;;
-      v1*) # v1: no --jobs, so pgdelta's own rule picks it (2 on an 8-vCPU source) - the product as it ships.
-           [ "${arm#v1_j}" != "$arm" ] && jobs="--jobs ${arm##*_j}"
-           [ "$arm" = v1_fast ] && fast="--fast-path summaries"
+      v1*) # The flags were derived above, before the receiver started.
            on_src "python3 experiments/network/cpu_time.py /tmp/exp88-cpu.txt python3 -m pgdelta send \
              --source $ROOT/data --source-kind live --pg-conn '$CONN' --connect $DEST:7000 \
-             --pg-controldata $PGBIN/pg_controldata $jobs $fast --hash $HASH \
+             --pg-controldata $PGBIN/pg_controldata $jobs $fast $ha --hash $HASH \
              --stats-json /tmp/exp88-send.json" > "$d/send.log" 2>&1
            status=$?
            wait "$rp"; rstatus=$? ;;
@@ -350,7 +370,7 @@ for lev in $LEVELS_PLANNED; do
     fi
     write_run_json "$d" "$run_id" "$arm" "$level" "$k" "$i" "$t0" "$t1" "$status" "${rstatus:-}" "$rate" \
       "$C" "${SHARE_OF[$lev]}" "$sumwal" "$GAP" "$jobs" "$HASH" "$LINK"
-    rstatus= jobs= fast=
+    rstatus= jobs= fast= ha= rflags=
     sleep "$TAIL"
     rm -rf "$FULL"
     echo "$(date -u +%T) run $i: $arm, $lev, repeat $k, summarize_wal $sumwal:" \
