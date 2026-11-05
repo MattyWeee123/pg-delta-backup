@@ -597,12 +597,35 @@ def kill_quietly(pid: int) -> None:
 class AgentProcesses(unittest.TestCase):
     """The agent's background and probe commands, run for real where they need no root or Linux tool."""
 
+    @staticmethod
+    def wait_for_samples(out, count, timeout=30.0):
+        """Wait until the sampler has written `count` readings, rather than sleeping a fixed time.
+
+        The sampler is a subprocess that has to import agent.py - and measure.py with it - before it can read
+        anything. On a slow filesystem that import alone takes seconds: measured November 5, 2026, 2.07 s from a
+        Windows bind mount through Docker against 0.22 s from a local disk. A fixed sleep short enough to keep
+        the suite quick is then shorter than the start-up, so the sampler writes nothing and the test fails for
+        a reason that has nothing to do with the sampler. (It failed exactly that way on the Windows checkout
+        the tests/docker image exists to serve.)
+        """
+        path = Path(agent.net_sampler_paths(out)['samples'])
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                with open(path) as stream:
+                    if sum(1 for _ in stream) >= count:
+                        return
+            except OSError:  # the sampler has not opened it yet
+                pass
+            time.sleep(0.02)
+        raise AssertionError(f'the sampler wrote fewer than {count} readings in {timeout:g} s')
+
     def test_the_net_sampler_starts_samples_and_stops(self):
         with tempfile.TemporaryDirectory() as tmp:
             started = agent.cmd_net_sampler(Namespace(action='start', out=tmp, peer=None, exclude_port=[],
                                                       qdisc_iface=None, interval=0.05))
             self.assertEqual(started['argv'][2:4], ['net-sampler', 'run'])
-            time.sleep(0.5)
+            self.wait_for_samples(tmp, 3)
             stopped = agent.cmd_net_sampler(Namespace(action='stop', out=tmp))
         self.assertEqual(stopped['pid'], started['pid'])
         self.assertGreaterEqual(stopped['final']['samples'], 3)
@@ -757,7 +780,7 @@ class AgentProcesses(unittest.TestCase):
             started = agent.cmd_net_sampler(Namespace(action='start', out=tmp, peer=None, exclude_port=[],
                                                       qdisc_iface=None, interval=0.05))
             self.assertFalse(Path(tmp, agent.NET_SAMPLER_FILES['final']).exists())
-            time.sleep(0.3)
+            self.wait_for_samples(tmp, 1)
             stopped = agent.cmd_net_sampler(Namespace(action='stop', out=tmp))
         self.assertEqual(stopped['final']['pid'], started['pid'])
         self.assertNotEqual(stopped['final']['samples'], 999)

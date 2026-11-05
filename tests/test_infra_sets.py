@@ -297,6 +297,48 @@ class ConfigResolution(unittest.TestCase):
             self.assertEqual(vms['dest']['machine'], 'n2-standard-16')
             del self.sets
 
+    def setting(self, pair, *names):
+        """Settings config.sh resolves for `pair` that load_config does not export (MIN_CPU_PLATFORM,
+        MAX_RUN_HOURS): read straight out of the shell, as create.sh reads them."""
+        config_sh = Path(remote.__file__).resolve().parents[2] / 'infra' / 'gcp' / 'config.sh'
+        script = f'set -e; source {shlex.quote(str(config_sh))}; ' + '; '.join(
+            f'printf "%s\\0" "${name}"' for name in names)
+        env = {'PATH': os.environ['PATH'], 'PAIR': pair}
+        done = subprocess.run(['bash', '-c', script], capture_output=True, text=True, env=env)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return dict(zip(names, done.stdout.split('\0')))
+
+    def test_the_committed_dr94_set_is_exp13s_pair_shape_with_its_own_name(self):
+        """EXP-94's cross-session comparison with EXP-20 and EXP-24 has no meaning if the pair shape moves.
+
+        So dr94 does not restate the shape: it sources sets/exp13.sh, the file those sessions ran, and adds
+        only its own name (so teardown is scoped to this session) and a tighter server-side run cap.
+        """
+        sets = str(Path(remote.__file__).resolve().parents[2] / 'infra' / 'gcp' / 'sets')
+        self.sets = sets
+        try:
+            dr94, exp13 = self.config('dr94'), self.config('exp13')
+            self.assertEqual(dr94['SET_FILE'], str(Path(sets, 'dr94.sh')))
+            self.assertEqual((dr94['SOURCE_VM'], dr94['DEST_VM']), ('pgd-dr94-source', 'pgd-dr94-dest'))
+            self.assertEqual(dr94['ZONE'], 'us-central1-a')
+            # identical hardware, role for role, to what EXP-20 and EXP-24 ran on
+            for role in ('source', 'dest'):
+                with self.subTest(role=role):
+                    shape = {key: value for key, value in dr94['VMS'][role].items() if key != 'name'}
+                    self.assertEqual(shape, {key: value for key, value in exp13['VMS'][role].items()
+                                             if key != 'name'})
+                    self.assertEqual((shape['machine'], shape['data_disk'], shape['local_ssds']),
+                                     ('n2-standard-8', 'local-nvme', '4'))
+        finally:
+            del self.sets
+        both = {pair: self.setting(pair, 'MIN_CPU_PLATFORM', 'MAX_RUN_HOURS') for pair in ('dr94', 'exp13')}
+        self.assertEqual(both['dr94']['MIN_CPU_PLATFORM'], 'Intel Cascade Lake')
+        self.assertEqual(both['dr94']['MIN_CPU_PLATFORM'], both['exp13']['MIN_CPU_PLATFORM'])
+        # The session is about 90 minutes. The cap is enforced by Compute Engine itself, so a forgotten pair
+        # cannot bill for days even when no local credential can reach the API.
+        self.assertEqual(both['dr94']['MAX_RUN_HOURS'], '4')
+        self.assertLess(int(both['dr94']['MAX_RUN_HOURS']), int(both['exp13']['MAX_RUN_HOURS']))
+
     def test_a_set_without_a_file_takes_the_defaults(self):
         config = self.config('zz')
         self.assertEqual(config['SET_FILE'], '')
@@ -353,6 +395,10 @@ class DryRun(unittest.TestCase):
             self.assertEqual(made[f'pgd-{role}'], [
                 'compute', 'instances', 'create', f'pgd-{role}', '--zone', 'us-central1-b',
                 '--machine-type', 'n2-standard-8', '--image-family', 'debian-12', '--image-project', 'debian-cloud',
+                # The self-termination guard: Compute Engine enforces MAX_RUN_HOURS itself, so a forgotten set
+                # cannot bill for days even when no local credential can reach the API. STOP rather than DELETE
+                # because Compute Engine refuses DELETE for a VM with local SSDs.
+                '--max-run-duration', '8h', '--instance-termination-action', 'STOP',
                 '--boot-disk-size', '50GB', '--boot-disk-type', 'pd-balanced', *['--local-ssd=interface=NVME'] * 4,
                 '--no-service-account', '--no-scopes', '--metadata',
                 'block-project-ssh-keys=TRUE,ssh-keys=bench:ssh-ed25519 AAAATEST bench@pgd-bench,'

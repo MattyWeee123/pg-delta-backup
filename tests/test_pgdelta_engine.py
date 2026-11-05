@@ -724,11 +724,21 @@ class PoolReadyTests(unittest.TestCase):
                 while pool.ready_seconds is None and time.monotonic() < deadline:
                     time.sleep(0.01)
                 self.assertGreaterEqual(pool.ready_seconds, SLOW_WORKER_SECONDS)
-                first, pids, workers = pool.first_ready_seconds, pool.ready_pids, set(pool._executor._processes)
+                first, ready = pool.first_ready_seconds, pool.ready_seconds
+                pids, workers = pool.ready_pids, set(pool._executor._processes)
             finally:
                 pool.close()
         self.assertEqual(result.digest, reference_tree(data, KEY, BLOCK, 4)[2])
-        self.assertLess(first, SLOW_WORKER_SECONDS)
+        # Exactly one worker sleeps SLOW_WORKER_SECONDS longer (slow_first_worker_init), so the two fast ones
+        # are ready that much earlier: the gap between the first worker being ready and all three being ready
+        # is the artificial delay. Asserting `first < SLOW_WORKER_SECONDS` instead compares the delay with the
+        # absolute cost of starting a worker, which is not the delay at all - spawning a worker has to import
+        # pgdelta, and on a slow filesystem that alone is slower than the delay (measured November 5, 2026:
+        # 2.07 s to import from a Windows bind mount through Docker against 0.22 s from a local disk, which is
+        # why this failed on the checkout tests/docker exists to serve). The gap is what the test is about.
+        self.assertGreaterEqual(ready - first, SLOW_WORKER_SECONDS * 0.8,
+                                'the fast workers were not ready before the slow one')
+        self.assertLess(first, ready)
         self.assertEqual(len(pids), 3)
         self.assertEqual(pids, workers)
         self.assertEqual(multiprocessing.active_children(), [])

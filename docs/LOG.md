@@ -4,6 +4,116 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-05: EXP-94 pre-registered: whether keeping the sender's stream full removes v1's need for BBR at DR round trips
+
+- **Why now:** the [November 5 survey](research/2026-11-05-codebase-and-latency-survey.md) found that
+  `--hash-ahead` (EXP-91) is the fix [EXP-21](experiments/EXP-21-tcp-diagnosis.md) proposed and nobody
+  connected. EXP-21 traced v1's DR slowdown for scattered changes to cubic's slow mode hitting a short, bursty
+  stream and wrote that pgdelta "can avoid needing [BBR] by keeping its stream full between files".
+  `--hash-ahead` does exactly that; it was built to remove a sender stall at 1 Gbit/s and has **never been
+  measured at any round trip**. Since [EXP-26](experiments/EXP-26-bbr-fairness.md) left BBR opt-in for
+  unfairness, a sender-side fix that needs no host setting is worth more than the transport fix EXP-24 found.
+- **What is registered:** [EXP-94](experiments/EXP-94-dr-hash-ahead.md). EXP-20's and EXP-24's cells again with
+  one arm added on each congestion control: `pgdelta_direct_inplace_ha` (cubic) and
+  `pgdelta_direct_inplace_bbr_ha`, both `--hash-ahead 64G --read-ahead 8`. Seven arms at six conditions, hot
+  and uniform 1%, 3 repeats: **222 runs**, about 105 minutes, on EXP-13's pair shape under its own set name
+  (`infra/gcp/sets/dr94.sh`, which sources `sets/exp13.sh` so the hardware cannot drift from the sessions being
+  compared with).
+- **A selection dropped because its own test refused it.** The first draft picked four cells by the size of
+  EXP-24's measured cubic-to-BBR gap and kept `2:60:default` as EXP-20's headline cell. The test written to
+  check that stated reason against the committed data (`tests/test_exp94_plan.py`) failed: **`2:60:default` has
+  almost no gap in EXP-24** (uniform `R_fast` 1.645 cubic against 1.629 BBR), because cubic did not fall into
+  its slow mode there in that session - while in **EXP-20's** session the same cell and the same arm gave
+  **2.578**. Rather than re-justify the selection, it is gone: EXP-94 runs **every cell those sessions ran**, so
+  no ratio is cherry-picked, prediction 2's comparability gate applies in every cell, and the cell where the two
+  prior sessions disagree by 57% is kept instead of quietly avoided.
+- **Two predictions added once the harness turned out to already measure the mechanism.** `measure.T12_FIELDS`
+  carries `leaf_wait_idle_s`: the time the sender was blocked waiting for leaf digests **while its socket had
+  nothing unsent and nothing in flight** (`pgdelta/waits.py` splits every wait by `SIOCOUTQNSD`/`SIOCOUTQ`). An
+  idle leaf wait *is* a stream that is not full, so EXP-21's sentence is directly measurable rather than
+  inferred from the clock. Prediction 6 is that ratio (bar 0.25), to be read **independently** of prediction 1:
+  if the stall vanishes and the time does not move, the stall was not what governed, which is what EXP-90 and
+  EXP-91 found at 0.1 ms. Prediction 7 counts the slow mode by **EXP-23's own rule** (`page_send_s` above 2.0x
+  the link floor) with its exact Clopper-Pearson interval, so the counts are comparable with EXP-23's and
+  EXP-24's rather than resting on a second definition.
+- **The gap that stays open, and why it is not in this session.** The survey's loudest gap is the fast path at
+  DR round trips (G1, G2). It cannot be in this session: `--fast-path` requires `--source-kind live`
+  (`pgdelta/fastpath.py`, `check_mode`), every DR arm EXP-20 and EXP-24 ran is `--source-kind datadir` (a
+  cleanly stopped source), and `experiments/network/run_exp04.py` has no live-source plumbing at all. Measuring
+  it needs that plumbing **and** a live-source hashing control, or the fast path and the source kind change
+  together and neither can be read. That is **EXP-95**.
+- **What was built for it, test-first:** the two arms in `experiments/network/measure.py`; `sets/dr94.sh`; and
+  `tests/test_exp94_plan.py`, which parses the registration's own run lines and checks the plan they produce is
+  those 222 runs, that `parcopy16` runs only where EXP-20 ran it, and that the conditions are exactly EXP-20's
+  and EXP-24's - so the run count is verified rather than asserted, before a pair exists; and
+  **`analysis/exp94.py` with `tests/test_exp94_analysis.py`** (23 tests over synthetic records), which fixes in
+  code what each prediction means: that a ratio between the bar and 1 is "gained less than the bar" and not a
+  pass, that a hot difference inside rule 17's band is a tie and never a gain, that a cell where v1 never waited
+  idle is reported rather than divided by, and that only the two cells prediction 7 names get a verdict. The
+  scorer takes `--out` because a smoke run over synthetic records wrote fake numbers into
+  `docs/experiments/data` once.
+- **A pre-existing failure found and fixed on the way:** `tests/test_infra_sets.py`'s expected
+  `gcloud compute instances create` command still lacked `--max-run-duration` and
+  `--instance-termination-action`, which the self-termination guard (944e1bb) adds. It failed at the merge
+  commit too, so it came in with the guard rather than with this work. `infra/gcp/create.sh` is a file EXP-94
+  registers, and the session's cost safety rests on that guard, so it is fixed here rather than carried.
+- **Grafana now shows the DR chain.** `infra/observability/backfill.py` carried only the slowdown experiments
+  (EXP-12, -28, -57), so the thing the latency work actually decided could not be seen at all. It now carries
+  EXP-20 and both of EXP-24's v1 arms, with a new committed dashboard
+  (`grafana/dashboards/pgdelta-dr-latency.json`) putting `EXP-24-cubic` beside `EXP-24-bbr` - 2.29 against 0.63
+  of the fastest parallel copy for scattered changes at 60 ms tuned. A `--only` flag imports one session's
+  blocks without duplicating the ones already in the volume, which is how EXP-94's cells will be added.
+
+## 2026-11-05: Four pre-existing test failures found on the Windows checkout, three fixed, one characterised
+
+Found while getting a green suite before registering EXP-94 (rule 16 registers hashes at the registration
+commit, so the suite has to be green first). **All four failed at the merge commit c77c203 as well** - checked
+in a worktree at HEAD, not assumed - so none came from EXP-94's work.
+
+**1-2. Two timing-dependent tests, same root cause, both fixed.** `tests/test_exp13_core.py`'s two net-sampler
+tests and `tests/test_pgdelta_engine.py`'s `PoolReadyTests` all compared an artificial delay with the
+**absolute** cost of starting a Python subprocess. That cost is a property of the filesystem, and it was
+measured rather than guessed:
+
+| Importing `experiments/network/agent.py` (which pulls in `measure.py`) | Seconds |
+|---|---:|
+| from a Windows bind mount through Docker | **2.07** |
+| from the container's own disk | **0.22** |
+
+So a sampler started and stopped 0.5 s later had not finished importing: it sat in `D` state, never opened its
+samples file, wrote 0 readings, and `stop` returned `final: None`. From the container's own disk the same code
+wrote 9 readings and passed. The sampler was never broken - which matters, because EXP-94's predictions 6 and 7
+read exactly what it records.
+
+The fixes keep each test's intent and drop the filesystem assumption: the sampler tests **wait for the
+condition** (3 readings written, 30 s timeout) instead of sleeping, and the pool test asserts the **gap**
+between the first worker being ready and all three being ready, which is the artificial delay, rather than an
+absolute bound. Both still catch what they were written for: a sampler that writes nothing, and a
+`ready_seconds` set by the first worker alone.
+
+**3. `tests/test_infra_sets.py`'s expected create command** lacked `--max-run-duration` and
+`--instance-termination-action`, which the self-termination guard (944e1bb) adds. Fixed, and the expectation now
+carries a comment saying what the guard is for - the session's cost safety rests on it.
+
+**4. `pg_rewind` in scenario S2c: characterised, not fixed, and it is not a data-loss bug.** PostgreSQL 17.11.
+`pg_rewind` itself succeeded (`servers diverged at 0/5043BE8`, `rewinding from last common checkpoint
+0/5043B70`, `Done!`, exit 0) and **`diverged_before_recovery.diverged_left` was 0**. One page differs only
+**after** bring-up - replay to the source, promotion, `CHECKPOINT`, a clean stop - and it is:
+
+```
+base/5/2840  block 2  cause: content
+```
+
+Database 5 is `postgres`; relfilenode **2840 is `pg_toast.pg_toast_2619`, the TOAST table of `pg_statistic`** -
+optimizer column statistics, not user data. Confirmed by querying a fresh 17.11 cluster, not inferred from the
+number. The page's classification moved from `other` (1) before recovery to `diverged_left` (1) after it, which
+is what autovacuum or `ANALYZE` writing statistics during bring-up looks like.
+
+**Left alone deliberately.** The scenario's comparison counts a statistics page as diverged content. Changing
+what that comparison counts would move the correctness numbers EXP-86 and EXP-89b published, so it is a scoring
+decision that needs its own registration, not a fix slipped in beside EXP-94. Recorded here with its evidence
+for the owner to decide.
+
 ## 2026-11-01 (01:45 UTC): Several TCP connections added to the idea archive
 
 - **Why:** the team's industry mentor asked on October 30 about more than one connection. pgdelta sends everything over one (D36), and rule 14 says every idea is archived with its evidence, which this one wasn't.

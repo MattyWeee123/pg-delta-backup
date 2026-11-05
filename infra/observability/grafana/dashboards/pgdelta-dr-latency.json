@@ -1,0 +1,429 @@
+{
+ "uid": "pgdelta-dr-latency",
+ "title": "pgdelta: DR round-trip latency (EXP-20, -24; EXP-94 pending)",
+ "description": "v1 against the full copies at disaster-recovery round trips, as measured. EXP-20 on cubic, EXP-24 with BBR on pgdelta's own socket, the pair that showed EXP-20's verdict for scattered changes was cubic's slow mode (EXP-21, EXP-23). Backfilled from the committed CSVs by infra/observability/backfill.py; not an evidence path - cite the write-ups. Panels use range queries reduced with lastNotNull, because each session is a flat line across its own window and the windows do not overlap: an instant query would show at most one session.",
+ "tags": [
+  "pgdelta",
+  "latency",
+  "dr",
+  "evidence",
+  "backfilled"
+ ],
+ "timezone": "utc",
+ "editable": false,
+ "schemaVersion": 39,
+ "refresh": "",
+ "time": {
+  "from": "2026-10-25T03:00:00.000Z",
+  "to": "2026-10-25T08:30:00.000Z"
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "text",
+   "title": "How to read this",
+   "gridPos": {
+    "h": 8,
+    "w": 24,
+    "x": 0,
+    "y": 0
+   },
+   "options": {
+    "mode": "markdown",
+    "content": "**The DR round-trip chain, as measured.** Each ratio is v1's median time divided by a baseline's at the same condition (`RATE:RTT_MS:HOST`, so `2:60:tuned` is 2 Gbit/s, 60 ms, 128 MiB TCP buffers). **Below 1 v1 is faster**; the project reads a win against EXP-09's 0.90 band.\n\n- **EXP-20** (Oct 25, cubic): the deciding cells. Verdict **\"local changes only\"** at 20, 60 and 120 ms - hot 0.31-0.63, but uniform 1% 1.70-3.20. EXP-13's expectation for scattered changes failed badly.\n- **EXP-21 / EXP-23** found why, and it was not buffers or round trips: **cubic's congestion window**. v1's page stream is short and bursty (610 MB), so a lost burst set cubic's threshold low and it grew back slowly. One `pg_basebackup` stream escapes this because it sends 2.1 GB continuously. Cubic fell into that slow mode in 12 of 15 runs at 20 ms; BBR in 0 of 30.\n- **EXP-24** (same session, both v1s in every repeat): with BBR on pgdelta's own socket, **v1 holds at every DR round trip, scattered changes included**. Compare `EXP-24-cubic` with `EXP-24-bbr` below - that pair is the evidence that EXP-20's verdict was cubic's slow mode, not v1's design.\n- **BBR stays opt-in** (EXP-26: a BBR newcomer took 81-96% of the link from cubic traffic). That is why **EXP-94** is measuring `--hash-ahead` instead: EXP-21 said pgdelta \"can avoid needing [BBR] by keeping its stream full between files\", and a sender-side fix needs no host setting and is fair.\n\nThese are **committed aggregates, flat across each session's window** - the time axis carries only *when the session ran*, never a curve. Cite the write-ups, not this page."
+   }
+  },
+  {
+   "id": 2,
+   "type": "bargauge",
+   "title": "Scattered changes (uniform 1%): v1 \u00f7 fastest parallel copy",
+   "description": "The deciding reading. Cubic is above 1 at every DR round trip; BBR brings it below 1. EXP-20 2.58 at 60 ms default; EXP-24-bbr 1.63 there and 0.63 at 60 ms tuned.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "pgdelta-prom"
+   },
+   "gridPos": {
+    "h": 20,
+    "w": 12,
+    "x": 0,
+    "y": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 3,
+     "min": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.9
+       },
+       {
+        "color": "red",
+        "value": 1.0
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": ""
+    },
+    "minVizWidth": 8,
+    "valueMode": "color"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "pgdelta-prom"
+     },
+     "expr": "pgdelta_evidence_ratio{pattern=\"uniform\",against=\"fastest_parallel_copy\"}",
+     "legendFormat": "{{experiment}} @ {{condition}}",
+     "instant": false,
+     "range": true,
+     "interval": "5m"
+    }
+   ]
+  },
+  {
+   "id": 3,
+   "type": "bargauge",
+   "title": "Local changes (hot): v1 \u00f7 fastest parallel copy",
+   "description": "Where v1's lead was never in doubt: 0.31-0.63 on cubic. BBR changes it little, as EXP-24 predicted (within 10% at every condition).",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "pgdelta-prom"
+   },
+   "gridPos": {
+    "h": 20,
+    "w": 12,
+    "x": 12,
+    "y": 8
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 3,
+     "min": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.9
+       },
+       {
+        "color": "red",
+        "value": 1.0
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": ""
+    },
+    "minVizWidth": 8,
+    "valueMode": "color"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "pgdelta-prom"
+     },
+     "expr": "pgdelta_evidence_ratio{pattern=\"hot\",against=\"fastest_parallel_copy\"}",
+     "legendFormat": "{{experiment}} @ {{condition}}",
+     "instant": false,
+     "range": true,
+     "interval": "5m"
+    }
+   ]
+  },
+  {
+   "id": 4,
+   "type": "bargauge",
+   "title": "Scattered changes: v1 \u00f7 one pg_basebackup stream",
+   "description": "The qualifier EXP-13's verdict carries. On tuned hosts one stream beat cubic v1 by about 2x for scattered changes (2.06-2.30); with BBR v1 is back under 1 everywhere.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "pgdelta-prom"
+   },
+   "gridPos": {
+    "h": 20,
+    "w": 12,
+    "x": 0,
+    "y": 28
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 3,
+     "min": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.9
+       },
+       {
+        "color": "red",
+        "value": 1.0
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": ""
+    },
+    "minVizWidth": 8,
+    "valueMode": "color"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "pgdelta-prom"
+     },
+     "expr": "pgdelta_evidence_ratio{pattern=\"uniform\",against=\"one_pg_basebackup_stream\"}",
+     "legendFormat": "{{experiment}} @ {{condition}}",
+     "instant": false,
+     "range": true,
+     "interval": "5m"
+    }
+   ]
+  },
+  {
+   "id": 5,
+   "type": "bargauge",
+   "title": "Local changes: v1 \u00f7 one pg_basebackup stream",
+   "description": "One stream pays the full round trip on 2.1 GB, so its disadvantage grows with the delay: v1 reaches 0.07 of it at 120 ms default.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "pgdelta-prom"
+   },
+   "gridPos": {
+    "h": 20,
+    "w": 12,
+    "x": 12,
+    "y": 28
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "none",
+     "decimals": 3,
+     "min": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.9
+       },
+       {
+        "color": "red",
+        "value": 1.0
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": ""
+    },
+    "minVizWidth": 8,
+    "valueMode": "color"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "pgdelta-prom"
+     },
+     "expr": "pgdelta_evidence_ratio{pattern=\"hot\",against=\"one_pg_basebackup_stream\"}",
+     "legendFormat": "{{experiment}} @ {{condition}}",
+     "instant": false,
+     "range": true,
+     "interval": "5m"
+    }
+   ]
+  },
+  {
+   "id": 6,
+   "type": "bargauge",
+   "title": "v1's own seconds, scattered changes (uniform 1%)",
+   "description": "The numerator behind the ratios: what v1 actually took. Cubic 25.5 s at 60 ms default against BBR's 16.0 s, and 23.9 s against 6.6 s at 60 ms tuned.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "pgdelta-prom"
+   },
+   "gridPos": {
+    "h": 20,
+    "w": 12,
+    "x": 0,
+    "y": 48
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 3,
+     "min": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": ""
+    },
+    "minVizWidth": 8,
+    "valueMode": "color"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "pgdelta-prom"
+     },
+     "expr": "pgdelta_evidence_refresh_seconds{pattern=\"uniform\",arm=\"v1\"}",
+     "legendFormat": "{{experiment}} @ {{condition}}",
+     "instant": false,
+     "range": true,
+     "interval": "5m"
+    }
+   ]
+  },
+  {
+   "id": 7,
+   "type": "bargauge",
+   "title": "The baselines' seconds, scattered changes",
+   "description": "Why the two ratios differ so much: one pg_basebackup stream (`full`) pays the round trip on the whole 2.1 GB, the fastest parallel copy (`b_fast`) spreads it over 8 or 16 streams.",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "pgdelta-prom"
+   },
+   "gridPos": {
+    "h": 16,
+    "w": 12,
+    "x": 12,
+    "y": 48
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "s",
+     "decimals": 3,
+     "min": 0,
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "blue",
+        "value": null
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "displayMode": "gradient",
+    "orientation": "horizontal",
+    "showUnfilled": true,
+    "reduceOptions": {
+     "calcs": [
+      "lastNotNull"
+     ],
+     "fields": ""
+    },
+    "minVizWidth": 8,
+    "valueMode": "color"
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "pgdelta-prom"
+     },
+     "expr": "pgdelta_evidence_refresh_seconds{experiment=\"EXP-20\",pattern=\"uniform\",arm=~\"full|b_fast\"}",
+     "legendFormat": "{{arm}} @ {{condition}}",
+     "instant": false,
+     "range": true,
+     "interval": "5m"
+    }
+   ]
+  }
+ ]
+}

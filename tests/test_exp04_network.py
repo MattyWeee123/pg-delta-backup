@@ -1957,7 +1957,8 @@ class NewMethodFlags(unittest.TestCase):
                          {'pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
                           *measure.V1PROXY_METHODS, *measure.T12_V1_ARMS, *measure.CC_V1_ARMS,
                           *measure.VS_V1_ARMS, *measure.ZSTD_V1_ARMS, *measure.HASH_V1_ARMS,
-                          *measure.NATIVE_TLS_V1_ARMS, *measure.PGBACKREST_METHODS})
+                          *measure.NATIVE_TLS_V1_ARMS, *measure.HA_V1_ARMS,
+                          *measure.PGBACKREST_METHODS})
 
     def test_an_aged_trial_skips_the_row_level_check(self):
         # EXP-59: the aging rows are on top of the trial's k, so the check can't match; it is skipped and said so.
@@ -1991,6 +1992,38 @@ class NewMethodFlags(unittest.TestCase):
             self.assertNotIn('--hash', args['receive'])
             self.assertIn(method, measure.T12_METHODS)  # they run under --conditions
         self.assertNotIn('--hash', measure.PGDELTA_ARGS['pgdelta_direct_inplace_bbr']['send'])
+
+    def test_the_hash_ahead_arms_pin_hash_ahead_and_read_ahead(self):
+        # EXP-94 (G3, from the November 5 survey): EXP-21 traced v1's DR slowdown to cubic's slow mode hitting a
+        # short, bursty stream and wrote that pgdelta "can avoid needing [BBR] by keeping its stream full between
+        # files". --hash-ahead (EXP-91) does that. These arms take it to DR round trips, with and without BBR, so a
+        # sender-side fix can be read against the transport fix EXP-24 measured. Both pin --read-ahead as well as
+        # --hash-ahead: it defaults to 8 only *because* --hash-ahead is set (pgdelta/cli.py _read_ahead), and a
+        # change of that rule must not be able to move what these arms measure.
+        v1 = measure.PGDELTA_ARGS['pgdelta_direct_inplace']
+        ahead = ('--hash-ahead', '64G', '--read-ahead', '8')
+        for method, extra in (('pgdelta_direct_inplace_ha', ()),
+                              ('pgdelta_direct_inplace_bbr_ha', ('--congestion-control', 'bbr'))):
+            with self.subTest(method=method):
+                args = measure.PGDELTA_ARGS[method]
+                self.assertEqual(args['send'],
+                                 (*JOBS, '--source-kind', 'datadir', '--window', '4', *extra, *ahead))
+                # the receiver takes nothing of it: --hash-ahead reorders the sender's frames only (EXP-91)
+                self.assertEqual(args['receive'], v1['receive'])
+                for group in (measure.PGDELTA_DIRECT_METHODS, measure.IN_PLACE_METHODS,
+                              measure.SOURCE_STOP_METHODS, measure.OPTIONAL_METHODS, measure.T12_METHODS):
+                    self.assertIn(method, group)
+                self.assertIn(method, measure.PROC_SCOPE)
+                # a protocol reading beside v1, never v1's own place in a row (EXP-13's rule for its side arms)
+                self.assertEqual(measure.TIERS[method], 'protocol')
+        self.assertIn('pgdelta_direct_inplace_ha', measure.HA_V1_ARMS)
+        self.assertIn('pgdelta_direct_inplace_bbr_ha', measure.HA_V1_ARMS)
+        self.assertEqual(measure.pgdelta_required_options(['pgdelta_direct_inplace_ha'])['send'],
+                         ('--jobs', '--source-kind', '--window', '--hash-ahead', '--read-ahead'))
+        # v1 itself and EXP-24's BBR arm must stay exactly as EXP-20 and EXP-24 ran them: they are this
+        # session's cross-session controls (rule 17), so neither may gain a flag here.
+        self.assertNotIn('--hash-ahead', v1['send'])
+        self.assertNotIn('--hash-ahead', measure.PGDELTA_ARGS['pgdelta_direct_inplace_bbr']['send'])
 
     def test_each_new_pgdelta_method_pins_its_flags(self):
         def receive(*middle, fsync='main', in_place=False):

@@ -71,7 +71,34 @@ SESSIONS = {
     'EXP-57': Session('EXP-57', utc('2026-10-27T12:00:00'), utc('2026-10-27T13:00:00'),
                       'October 27, 2026, one VM, 6 runs after a smoke; the write-up records no clock time, '
                       'so midday UTC stands in'),
+    # The DR round-trip chain. EXP-24 ran both v1s in every repeat on EXP-21/23's pair, so its two arms share
+    # one window and are told apart by the experiment label, not by time.
+    'EXP-20': Session('EXP-20', utc('2026-10-25T03:59:00'), utc('2026-10-25T05:11:00'),
+                      'VMs 03:59-05:11 UTC, October 25, 2026; 126 runs, all verified'),
+    'EXP-24-cubic': Session('EXP-24-cubic', utc('2026-10-25T06:30:00'), utc('2026-10-25T07:41:00'),
+                            '06:30-07:41 UTC, October 25, 2026; 150 runs, all verified. The cubic v1 of the '
+                            'same session as EXP-24-bbr'),
+    'EXP-24-bbr': Session('EXP-24-bbr', utc('2026-10-25T06:30:00'), utc('2026-10-25T07:41:00'),
+                          '06:30-07:41 UTC, October 25, 2026; v1 asking for BBR on its own data socket, '
+                          'every one of its 36 runs got it'),
 }
+
+# The three arms a DR row holds, and the metric label each becomes. A row is wide - v1, full and b_fast are
+# three arms' seconds side by side - so they become one metric split by `arm`, as the latency quantiles are.
+DR_ARMS = {'refresh_seconds_v1': ('v1', 'v1'),
+           'refresh_seconds_full': ('full', 'full'),
+           'refresh_seconds_b_fast': ('b_fast', 'b_fast')}
+# The verdict's two ratios, named by what they divide by rather than by the column's name (rule 3's yardstick
+# is the fastest durable parallel copy; R_F0 is against one pg_basebackup stream).
+DR_RATIOS = {'ratio_fast': ('R_fast', 'fastest_parallel_copy'),
+             'ratio_f0': ('R_F0', 'one_pg_basebackup_stream')}
+DR_VALUES = {**{suffix: (column, {'arm': arm}) for suffix, (column, arm) in DR_ARMS.items()},
+             **{suffix: (column, {'against': against}) for suffix, (column, against) in DR_RATIOS.items()}}
+
+
+def dr_spec(csv_name: str, session: str) -> 'Spec':
+    """One DR cells CSV (pattern, condition, v1, full, b_fast, R_fast, R_F0) mapped onto metrics."""
+    return Spec(csv_name, SESSIONS[session], ('pattern', 'condition'), dict(DR_VALUES))
 
 SPECS = (
     # EXP-28: v1 live on a busy primary against one pg_basebackup stream. The arm labels are what the cliff
@@ -101,12 +128,26 @@ SPECS = (
         'dirty_gb': ('dirty_gb', {}),
         'start_blocked_seconds': ('start_blocked_s', {}),
     }),
+    # EXP-20: the deciding DR cells at 20, 60 and 120 ms on cubic - "local changes only".
+    dr_spec('exp20-cells.csv', 'EXP-20'),
+    # EXP-24: the same cells again with both v1s in every repeat. The pair is the project's evidence that
+    # EXP-20's verdict for scattered changes was cubic's slow mode (EXP-21, EXP-23) and not v1's design.
+    dr_spec('exp20-cells-exp24-inplace.csv', 'EXP-24-cubic'),
+    dr_spec('exp20-cells-exp24-bbr.csv', 'EXP-24-bbr'),
+    # Adding a later DR session is two lines: a Session with the window its write-up records, and a dr_spec
+    # over the CSV analysis/exp20.py wrote for it. EXP-94 will be four of each (its --tag values: exp94-cubic,
+    # exp94-bbr, exp94-ha, exp94-bbr-ha), and then `python backfill.py --only EXP-94-ha,...` imports just
+    # those blocks. The dashboard needs no edit: its deciding panels do not filter by experiment, which
+    # tests/test_observability.py holds them to.
 )
 
 # All three latency columns share one metric name, separated by the quantile label, so a panel can plot them
 # together. The suffixes above exist only to key the mapping.
 METRIC_OF_SUFFIX = {
     'latency_ms': 'latency_ms', 'latency_ms_p50': 'latency_ms', 'latency_ms_p99': 'latency_ms',
+    # The DR arms and ratios likewise: one metric each, separated by `arm` and by `against`.
+    **{suffix: 'refresh_seconds' for suffix in DR_ARMS},
+    **{suffix: 'ratio' for suffix in DR_RATIOS},
 }
 
 HELP = {
@@ -119,6 +160,8 @@ HELP = {
     'source_cpu_seconds': "The source VM's CPU-seconds over the window.",
     'dirty_gb': 'Gigabytes of dirty shared buffers when the start checkpoint began.',
     'start_blocked_seconds': 'Seconds pg_backup_start was blocked by its checkpoint.',
+    'ratio': "A DR cell's verdict ratio: the arm's median time divided by the baseline named in `against`. "
+             'Below 1 pgdelta is faster.',
 }
 
 
@@ -164,14 +207,18 @@ def samples(spec: Spec, step_seconds: float):
                 yield (metric, labels, value, stamp)
 
 
-def render(step_seconds: float) -> str:
-    """The whole backfill as one OpenMetrics document.
+def render(step_seconds: float, only: tuple[str, ...] | None = None) -> str:
+    """The backfill as one OpenMetrics document; with `only`, just those sessions.
 
     promtool requires samples grouped by metric family and, within a family, non-decreasing timestamps per
     series, so everything is collected and sorted before anything is written.
+
+    `only` exists because the Prometheus volume keeps what was imported before: a new session's blocks can be
+    added on their own, where rendering everything again would write a second copy of samples already stored.
     """
+    specs = SPECS if only is None else tuple(spec for spec in SPECS if spec.session.experiment in only)
     collected: dict[str, list[tuple[dict[str, str], float, float]]] = {}
-    for spec in SPECS:
+    for spec in specs:
         for metric, labels, value, stamp in samples(spec, step_seconds):
             collected.setdefault(metric, []).append((labels, value, stamp))
 
@@ -199,9 +246,21 @@ def main(argv: list[str] | None = None) -> int:
                              "inside Prometheus's 5-minute staleness lookback so range queries stay "
                              'continuous, while not storing a point a minute for a flat line')
     parser.add_argument('--stdout', action='store_true', help='write to stdout instead of --out')
+    parser.add_argument('--only', default=None,
+                        help='render only these sessions, comma-separated (for example '
+                             '"EXP-20,EXP-24-cubic,EXP-24-bbr"). The Prometheus volume keeps earlier imports, '
+                             "so this is how a new session's blocks are added without duplicating them")
     args = parser.parse_args(argv)
 
-    document = render(args.step_seconds)
+    only = None
+    if args.only is not None:
+        only = tuple(name.strip() for name in args.only.split(',') if name.strip())
+        unknown = [name for name in only if name not in SESSIONS]
+        if unknown:
+            # Refused rather than rendered empty: a typo must not look like a successful import of nothing.
+            raise SystemExit(f'unknown session(s) {", ".join(unknown)}; known: {", ".join(SESSIONS)}')
+
+    document = render(args.step_seconds, only)
     if args.stdout:
         sys.stdout.write(document)
         return 0
@@ -213,8 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         stream.write(document)
     series = len({line.split(' ')[0] for line in document.splitlines() if not line.startswith('#')})
     points = sum(1 for line in document.splitlines() if not line.startswith('#'))
-    print(f'{out}: {points} samples over {series} metric names '
-          f'({", ".join(session.experiment for session in SESSIONS.values())})')
+    print(f'{out}: {points} samples over {series} series '
+          f'({", ".join(only or SESSIONS)})')
     return 0
 
 

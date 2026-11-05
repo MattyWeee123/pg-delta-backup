@@ -68,6 +68,12 @@ HASH_V1_ARMS = ('pgdelta_direct_inplace_bbr_b2', 'pgdelta_direct_inplace_bbr_b3'
 # EXP-58: v1 with BBR and BLAKE3 over pgdelta's own mutual TLS 1.3 (--tls-cert, --tls-key, --tls-ca), with the
 # session's CA (agent.py tls-material): the receiver presents server.crt, the sender client.crt.
 NATIVE_TLS_V1_ARMS = ('pgdelta_direct_inplace_bbr_b3_tls',)
+# EXP-94 (G3 of the November 5 survey): v1 with the sender hashing ahead of the file it is sending
+# (--hash-ahead, EXP-91), with and without BBR. EXP-21 traced v1's DR slowdown to cubic's slow mode hitting a
+# short, bursty stream, and said pgdelta "can avoid needing [BBR] by keeping its stream full between files";
+# --hash-ahead does that, and was never measured at a round trip. The pair is what separates the sender-side fix
+# from the transport fix EXP-24 measured.
+HA_V1_ARMS = ('pgdelta_direct_inplace_ha', 'pgdelta_direct_inplace_bbr_ha')
 # EXP-31: v1 verifying only what it wrote (--verify-scope written), without the second pass over B.
 VS_V1_ARMS = ('pgdelta_direct_inplace_vw',)
 TLS_METHODS = ('pgdelta_direct_inplace_tls',)
@@ -77,7 +83,7 @@ TLS_METHODS = ('pgdelta_direct_inplace_tls',)
 # T12's side arms are v1's path too.
 PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
                           *V1PROXY_METHODS, *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS,
-                          *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS)
+                          *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS, *HA_V1_ARMS)
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
 PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block', 'pgbackrest_zst_async')
 # T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On
@@ -121,7 +127,8 @@ PARCOPY_METHODS = tuple(PARCOPY_VARIANTS)
 T2_METHODS = ('full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS, 'parcopy8', 'parcopy4',
               'pgdelta_direct_inplace_j8')
 # The arms EXP-13 (T12) adds; its runs need --conditions (the emulated WAN) and CRC32C manifests.
-T12_METHODS = (*T12_V1_ARMS, *CC_V1_ARMS, *ZSTD_V1_ARMS, *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS, 'parcopy16')
+T12_METHODS = (*T12_V1_ARMS, *CC_V1_ARMS, *ZSTD_V1_ARMS, *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS, *HA_V1_ARMS,
+               'parcopy16')
 # T10a (EXP-12), the source's slowdown under a fixed-rate load (run_exp04 --load). none: an empty timed
 # phase of --none-window-s, the null's own windows; capture: the staged capture alone, a local
 # pg_basebackup of S on the source; bracket: pg_backup_start and pg_backup_stop in one session.
@@ -146,7 +153,8 @@ RSYNC_METHODS = ('rsync_8k', 'rsync_default')
 STAGED_METHODS = PGDELTA_STAGED_METHODS + RSYNC_METHODS
 # pgdelta refreshing B itself (--in-place) rather than writing a new copy O.
 IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', *V1PROXY_METHODS,
-                    *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS, *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS)
+                    *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS, *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS,
+                    *HA_V1_ARMS)
 # Methods that patch B, a copy of B0 made before the cache drop and not timed: in a real
 # refresh B already exists. The copy keeps B0 itself unchanged for the next method.
 BASIS_COPY_METHODS = IN_PLACE_METHODS + PGBACKREST_METHODS
@@ -202,7 +210,9 @@ TIERS = {'full': 'omni_today', 'full_nosync': 'diagnostic', 'full_syncfs': 'rele
          # EXP-60's: v1 with BBR, its hash pinned to BLAKE2b or BLAKE3.
          'pgdelta_direct_inplace_bbr_b2': 'protocol', 'pgdelta_direct_inplace_bbr_b3': 'protocol',
          # EXP-58's: the same as _b3, inside pgdelta's own TLS.
-         'pgdelta_direct_inplace_bbr_b3_tls': 'protocol'}
+         'pgdelta_direct_inplace_bbr_b3_tls': 'protocol',
+         # EXP-94's: v1 with the sender hashing ahead, cubic and with BBR.
+         'pgdelta_direct_inplace_ha': 'protocol', 'pgdelta_direct_inplace_bbr_ha': 'protocol'}
 # The engine each pgdelta method runs, named by its flags, so that no change of pgdelta's
 # defaults can change what a method measures (as compare_methods pins EXP-02's):
 # - pgdelta: EXP-06's choice, which is also the command line's default on these 8-vCPU
@@ -286,6 +296,13 @@ PGDELTA_ENGINES.update({
                                           'native_tls': True},
     # EXP-31: v1's engine verifying only the pages it wrote.
     'pgdelta_direct_inplace_vw': {**_V1_ENGINE, 'verify_scope': 'written'},
+    # EXP-94: v1's engine with the sender hashing ahead of the file it sends, cubic and with BBR. 64 GiB is
+    # EXP-91's hashA value: far past the 2.1 GB these DR cells copy, so the planner is never the limit and the
+    # arm measures hashing ahead rather than a particular budget. read_ahead is pinned at pgdelta's own default
+    # with --hash-ahead (8), because that default is derived from --hash-ahead rather than fixed.
+    'pgdelta_direct_inplace_ha': {**_V1_ENGINE, 'hash_ahead': '64G', 'read_ahead': 8},
+    'pgdelta_direct_inplace_bbr_ha': {**_V1_ENGINE, 'congestion_control': 'bbr', 'hash_ahead': '64G',
+                                      'read_ahead': 8},
 })
 del _V1_ENGINE
 
@@ -330,6 +347,10 @@ def pgdelta_args(engine: dict) -> dict:
         send += ('--subpage',)
     if engine.get('hash'):
         send += ('--hash', engine['hash'])
+    if engine.get('hash_ahead'):
+        send += ('--hash-ahead', engine['hash_ahead'])
+    if engine.get('read_ahead') is not None:
+        send += ('--read-ahead', str(engine['read_ahead']))
     return {'send': send, 'receive': receive}
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import math
+import re
 import sys
 import time
 import unittest
@@ -19,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'infra' / 'observability'))
 sys.path.insert(0, str(ROOT / 'experiments' / 'network'))
 
+import backfill  # noqa: E402
 import pgbench_exporter as exporter  # noqa: E402
 
 # A corpus covering every shape PostgreSQL 17 writes, plus the malformed lines a truncated log can end with.
@@ -227,6 +229,199 @@ class CollectorTests(unittest.TestCase):
         made = self.collector(window_seconds=2.0)
         made.poll(now=now)
         self.assertIn('pgdelta_txn_rate_per_second 5.0', made.render(now=now))
+
+
+
+
+class DrLatencyBackfill(unittest.TestCase):
+    """The DR round-trip evidence (EXP-20, EXP-24, EXP-94) reaches Prometheus.
+
+    Before this, backfill.py carried only the slowdown experiments (EXP-12, -28, -57), so the one thing the
+    latency chain actually decided - whether v1 holds at 20, 60 and 120 ms, and that EXP-20's "local changes
+    only" was cubic's slow mode rather than v1's design (EXP-21, EXP-23, EXP-24) - could not be seen in Grafana
+    at all. These CSVs are wide: v1, full and b_fast are three arms' seconds in one row, so each becomes the
+    same metric separated by an `arm` label, as the three latency quantiles already are.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.backfill = backfill
+        cls.rendered = cls.backfill.render(step_seconds=600.0)
+
+    def series(self, metric):
+        return [line for line in self.rendered.splitlines() if line.startswith(metric + '{')]
+
+    def test_each_dr_session_is_rendered_with_its_own_experiment_label(self):
+        for experiment in ('EXP-20', 'EXP-24-cubic', 'EXP-24-bbr'):
+            with self.subTest(experiment=experiment):
+                self.assertIn(experiment, self.backfill.SESSIONS)
+                self.assertTrue([line for line in self.series('pgdelta_evidence_refresh_seconds')
+                                 if f'experiment="{experiment}"' in line],
+                                f'no refresh_seconds series for {experiment}')
+
+    def test_the_three_arms_of_a_row_become_one_metric_split_by_arm(self):
+        hot60 = [line for line in self.series('pgdelta_evidence_refresh_seconds')
+                 if 'experiment="EXP-20"' in line and 'pattern="hot"' in line
+                 and 'condition="2:60:default"' in line]
+        arms = {line.split('arm="')[1].split('"')[0] for line in hot60}
+        self.assertEqual(arms, {'v1', 'full', 'b_fast'})
+        # EXP-20's measured hot 60 ms row: v1 5.35 s, one pg_basebackup 44.44 s, fastest parallel copy 9.94 s
+        v1 = next(line for line in hot60 if 'arm="v1"' in line)
+        self.assertAlmostEqual(float(v1.split('} ')[1].split()[0]), 5.35, places=2)
+
+    def test_both_verdict_ratios_are_rendered_and_named_by_what_they_divide_by(self):
+        ratios = [line for line in self.series('pgdelta_evidence_ratio')
+                  if 'experiment="EXP-20"' in line and 'pattern="uniform"' in line
+                  and 'condition="2:60:default"' in line]
+        against = {line.split('against="')[1].split('"')[0] for line in ratios}
+        self.assertEqual(against, {'fastest_parallel_copy', 'one_pg_basebackup_stream'})
+        r_fast = next(line for line in ratios if 'against="fastest_parallel_copy"' in line)
+        self.assertAlmostEqual(float(r_fast.split('} ')[1].split()[0]), 2.58, places=2)
+
+    def test_bbr_is_the_arm_that_rescues_scattered_changes(self):
+        """EXP-24's deciding reading: cubic 2.36 and BBR below 1 for uniform 1% at 60 ms tuned."""
+        def r_fast(experiment):
+            line = next(line for line in self.series('pgdelta_evidence_ratio')
+                        if f'experiment="{experiment}"' in line and 'pattern="uniform"' in line
+                        and 'condition="2:60:tuned"' in line and 'against="fastest_parallel_copy"' in line)
+            return float(line.split('} ')[1].split()[0])
+        self.assertGreater(r_fast('EXP-24-cubic'), 1.0)
+        self.assertLess(r_fast('EXP-24-bbr'), 1.0)
+
+    def test_every_rendered_metric_still_has_a_help_line(self):
+        emitted = {line.split('{')[0] for line in self.rendered.splitlines()
+                   if line and not line.startswith('#')}
+        helped = {line.split()[2] for line in self.rendered.splitlines() if line.startswith('# HELP ')}
+        self.assertEqual(emitted, helped)
+        # a HELP line that just repeats the metric name means HELP was never written for it
+        for line in self.rendered.splitlines():
+            if line.startswith('# HELP '):
+                metric, text = line.split()[2], ' '.join(line.split()[3:])
+                self.assertNotEqual(metric, text, f'{metric} has no help text of its own')
+
+
+class BackfillSessionFilter(unittest.TestCase):
+    """--only imports one session's blocks without re-importing the rest.
+
+    Prometheus's data volume already holds the sessions imported before, so a new session (EXP-94, say) must be
+    addable on its own; rendering everything again would write a second block of samples already stored.
+    """
+
+    def test_only_keeps_just_the_named_sessions(self):
+        document = backfill.render(step_seconds=600.0, only=('EXP-20',))
+        emitted = {line.split('experiment="')[1].split('"')[0]
+                   for line in document.splitlines() if 'experiment="' in line}
+        self.assertEqual(emitted, {'EXP-20'})
+        self.assertIn('pgdelta_evidence_ratio', document)
+
+    def test_several_sessions_can_be_named_at_once(self):
+        document = backfill.render(step_seconds=600.0, only=('EXP-24-cubic', 'EXP-24-bbr'))
+        emitted = {line.split('experiment="')[1].split('"')[0]
+                   for line in document.splitlines() if 'experiment="' in line}
+        self.assertEqual(emitted, {'EXP-24-cubic', 'EXP-24-bbr'})
+
+    def test_no_filter_renders_every_session_as_before(self):
+        document = backfill.render(step_seconds=600.0)
+        emitted = {line.split('experiment="')[1].split('"')[0]
+                   for line in document.splitlines() if 'experiment="' in line}
+        self.assertEqual(emitted, set(backfill.SESSIONS))
+
+    def test_an_unknown_session_is_refused_rather_than_rendering_nothing(self):
+        """A typo must not look like a successful import of an empty document."""
+        with self.assertRaises(SystemExit) as raised:
+            backfill.main(['--stdout', '--only', 'EXP-99'])
+        self.assertIn('EXP-99', str(raised.exception))
+
+
+class DrDashboard(unittest.TestCase):
+    """Every panel of the committed DR dashboard matches series the backfill actually renders.
+
+    This exists because of a bug it would have caught. The panels first used instant queries, as the older
+    evidence dashboard's do. A backfilled session is a flat line across its own window and the windows do not
+    overlap - EXP-20 ran 03:59-05:11 UTC, EXP-24 06:30-07:41 - so an instant query, evaluated at the time
+    range's end, showed at most one session, and none once the range ended more than Prometheus's 5-minute
+    staleness lookback past the last sample. A panel whose matchers name a label the backfill never writes
+    fails the same way: silently empty.
+    """
+
+    DASHBOARD = ROOT / 'infra' / 'observability' / 'grafana' / 'dashboards' / 'pgdelta-dr-latency.json'
+
+    @classmethod
+    def setUpClass(cls):
+        cls.panels = [panel for panel in json.loads(cls.DASHBOARD.read_text())['panels']
+                      if panel['type'] != 'text']
+        cls.rendered = backfill.render(step_seconds=600.0)
+
+    @staticmethod
+    def matchers(expr):
+        """(metric, [(label, operator, value)]) from a simple `metric{a="b",c=~"d|e"}` selector."""
+        metric, _, rest = expr.partition('{')
+        found = []
+        for clause in re.findall(r'(\w+)\s*(=~|=)\s*"([^"]*)"', rest):
+            found.append(clause)
+        return metric, found
+
+    def matching_lines(self, expr):
+        metric, clauses = self.matchers(expr)
+        lines = []
+        for line in self.rendered.splitlines():
+            if not line.startswith(metric + '{'):
+                continue
+            labels = dict(re.findall(r'(\w+)="([^"]*)"', line.split('}')[0]))
+            if all((labels.get(name) in value.split('|')) if op == '=~' else (labels.get(name) == value)
+                   for name, op, value in clauses):
+                lines.append(line)
+        return lines
+
+    def test_every_panel_matches_series_the_backfill_renders(self):
+        for panel in self.panels:
+            for target in panel['targets']:
+                with self.subTest(panel=panel['id'], expr=target['expr']):
+                    self.assertTrue(self.matching_lines(target['expr']),
+                                    f'panel {panel["id"]} matches nothing the backfill writes')
+
+    def test_no_panel_uses_an_instant_query(self):
+        for panel in self.panels:
+            for target in panel['targets']:
+                with self.subTest(panel=panel['id']):
+                    self.assertFalse(target.get('instant'),
+                                     'an instant query is evaluated at the range end and would show at most '
+                                     'one of the three sessions')
+                    self.assertTrue(target.get('range'))
+
+    def test_the_deciding_comparison_has_both_of_exp24s_arms_in_one_panel(self):
+        """The dashboard's whole point: cubic beside BBR in the same cells."""
+        scattered = next(panel for panel in self.panels if panel['id'] == 2)
+        experiments = {re.search(r'experiment="([^"]*)"', line).group(1)
+                       for line in self.matching_lines(scattered['targets'][0]['expr'])}
+        self.assertEqual(experiments, {'EXP-20', 'EXP-24-cubic', 'EXP-24-bbr'})
+
+    def test_the_deciding_panels_do_not_filter_by_experiment_so_a_new_session_needs_no_dashboard_edit(self):
+        """EXP-94's cells should appear beside EXP-20's and EXP-24's by backfilling them, nothing more.
+
+        A panel that names `experiment="EXP-20"` shows only EXP-20 forever, which is how a comparison
+        dashboard quietly stops comparing. The two ratio panels and the arm-seconds panel are the comparison,
+        so they must stay open; the baselines panel is deliberately one session's and is allowed to pin it.
+        """
+        open_panels = [panel for panel in self.panels if panel['id'] in (2, 3, 4, 5, 6)]
+        self.assertEqual(len(open_panels), 5)
+        for panel in open_panels:
+            for target in panel['targets']:
+                with self.subTest(panel=panel['id']):
+                    self.assertNotIn('experiment=', target['expr'],
+                                     'this panel would not show a later session')
+                    self.assertIn('{{experiment}}', target['legendFormat'],
+                                  'a panel comparing sessions has to name which is which')
+
+    def test_the_dashboards_time_range_covers_every_session_it_plots(self):
+        dashboard = json.loads(self.DASHBOARD.read_text())
+        start = backfill.utc(dashboard['time']['from'].replace('Z', '').replace('.000', ''))
+        end = backfill.utc(dashboard['time']['to'].replace('Z', '').replace('.000', ''))
+        for name in ('EXP-20', 'EXP-24-cubic', 'EXP-24-bbr'):
+            with self.subTest(session=name):
+                session = backfill.SESSIONS[name]
+                self.assertLessEqual(start, session.start)
+                self.assertGreaterEqual(end, session.end)
 
 
 if __name__ == '__main__':
