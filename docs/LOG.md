@@ -4,6 +4,166 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-01 (01:45 UTC): Several TCP connections added to the idea archive
+
+- **Why:** the team's industry mentor asked on October 30 about more than one connection. pgdelta sends everything over one (D36), and rule 14 says every idea is archived with its evidence, which this one wasn't.
+- **The evidence it carries:**
+  - in the same region, one stream isn't the limit: EXP-11's speeds, and EXP-92's hashing used 0.39–0.40 of the 1 Gbit/s link;
+  - at long round trips on default buffers it is: on EXP-15's real 31 ms link one stream reached 0.70–0.79 Gbit/s, and an application without root can lift that only with more streams (EXP-13).
+- **Status:** unbuilt. It is revisited when a refresh's link is busy most of the run below its rate. It would be tested on a long round trip other than H12, which stays sealed.
+
+## 2026-11-01 (00:00 UTC): EXP-92 done: hashing with its syncs on a worker beats a re-clone at 1 Gbit/s, confirmed; the 2 GiB window lost
+
+- **F1, the deciding prediction, held:** where many pages change, `hashAVw` took 0.706x `pg_basebackup` at 1 Gbit/s (108.1 s against 153.0 s; each run 0.711 and 0.702; bar 0.85). EXP-91's single run (0.744) is confirmed with two runs per arm.
+- **F2, F4 and F5 held:**
+  - 0.584x today's hashing at full link, where it still takes 1.18x a re-clone;
+  - nothing moved in hot, and `pg_basebackup` stayed at its bound;
+  - the receiver waited 5.5 s on its syncs, and the cell took 1.10x its bound.
+- **F3 failed:**
+  - the 2 GiB window ended the source's second reads (its bound 96.8 to 86.8 s; the sending's wait 35 to 0.5 s);
+  - but with one file of lookahead the planner waited 50 s for room, and the disks took turns: 1.29x the 64 GiB window.
+  - The window for a held-out session stays 64 GiB.
+- **What binds now (post hoc):** dest's disk was busy 104–106 s of every scattered run with all three options, and `hashAVw`'s runs were only 1–3 s longer. It reads all of B (86.6 s), then writes after B's last read.
+- **Correctness:** 24 of 24 runs valid, 18 of 18 copies matched. Locally, 1,007 fault trials gave no wrong copy, and 53 of 53 controls were caught. A harness error at trial 1,008 (`os.killpg`'s permission race on macOS) stopped the second half; it resumed from there unchanged.
+- **The checks:**
+  - 51 of 51 registered files unchanged when scored;
+  - the controls within 1% of EXP-91's;
+  - every cell's runs within 1.36%. Rule 17's within-session bar is now 1.92%, refreshed with this session.
+  - Four proxy pairs logged; `hashAVw` over `hash` had the opposite sign locally again.
+- **Fixed for the logs:** `analysis/proxy_fidelity.py` now gives each mechanism a shape as well as a color.
+- **Proposed next:** a held-out session (H9–H12) before the three options become hashing's defaults. Beside it, structurally different: B's stored digests.
+
+## 2026-10-31 (UTC): EXP-92 pre-registered: confirming hashing with its syncs on a worker; the window held to the cache
+
+- **Why:** in EXP-91 the reported arm with the receiver's syncs on its worker (`hashAVw`) beat `pg_basebackup` at 1 Gbit/s where many pages change (0.744), but in one run of an arm not registered as deciding. Its hashing also ran 11–16 GB ahead on 8 GB VMs, so the source read the pages it sent a second time.
+- **The arms:** `full`, `hash`, `hashAVw` and `hashA2GVw` (the same with `--hash-ahead 2G`), two runs each: uniform at full link and 1 Gbit/s, and hot at full link. 24 runs.
+- **Deciding (F1):** uniform `hashAVw_1g` ≤ 0.85x `full_1g`. Also F2 (`hashAVw` ≤ 0.70x `hash` at full link), F3 (the window ends the second reads and is no slower), F4 (no harm in hot; `pg_basebackup` at its bound) and F5 (the mechanism).
+- **Built (opt-in, no pgdelta changes):** arm names carry the window (`A2G`); the baseline passes a pattern's own arms (`ARMS_hot`); `analysis/exp92.py`; `experiments/network/exp92_local.py`; 2 tests of all three options together.
+- **Correctness:** 1,000 local fault trials with all three options, and every VM copy checked.
+
+## 2026-10-31 (20:43 UTC): EXP-91 done: each change removed its stall, then the receiver's syncs bound
+
+- **E1, the deciding prediction, failed:** with both changes, uniform took 0.818x `hash` at full link (bar 0.70). E2 failed (1.034x `pg_basebackup` at 1 Gbit/s, bar 0.92), and so did E3 and E5. E4 held: hot unchanged, `pg_basebackup` at its bound.
+- **Each change worked:**
+  - verifying as written cut dest's reads beyond the database from 4.88 GB to 0.01 GB, and the verification from 81 s to under 2 s;
+  - hashing ahead cut the source's disk alone from 27 s to 1 s, but ran 11–16 GB ahead on 8 GB VMs, so the source read the pages it sent a second time.
+- **What bound next (post hoc):** the receiver's syncs in its main loop, 78.5 s of 151.5 s. The source's reads and dest's syncs took turns (24 s and 26 s alone).
+- **With the syncs on the worker (`hashAVw`, a reported arm, one run):** 111 s, 0.601x `hash` and 1.13x its bound. **At 1 Gbit/s, 113 s against `pg_basebackup`'s 152 s (0.744):** the first hashing run to beat a re-clone where many pages change. Exploratory until confirmed.
+- **Correctness:** 20 of 20 VM copies matched; 1,000 local fault trials with no wrong copy; 52 of 52 misplaced-write controls caught.
+- **The checks:** 50 of 50 registered files unchanged when scored; `pg_basebackup` within 1% of EXP-90's; the proxy pair logged (local 1.354, VMs 0.818, the opposite sign).
+- **Fixed:** the baseline script's last figure stopped on arms it had no label for (after the data were fetched); `analysis/exp90.py` now places them last, with a test.
+- **Proposed next, EXP-92:** confirm `hashAVw` with two runs per arm, and hold the hashing window to the source's cache. Beside it, structurally different: B's stored digests.
+
+## 2026-10-31 (UTC): EXP-91 pre-registered: hashing ahead and verifying as written
+
+- **Why:** EXP-90 found hashing's scattered case at 1.70x its bound. The source stopped reading while a send blocked, and the verification re-read 4.86 GB from dest's disk.
+- **Built (opt-in):**
+  - the sender's `--hash-ahead SIZE`: S hashed on a planner thread up to SIZE bytes ahead of the file being sent, with the pages sent read on `--read-ahead` threads;
+  - the receiver's `--verify-scope as-written`: each run read back right after it is written, and every node with B's leaf digests composed from those;
+  - the lab's arms `hashA`, `hashV`, `hashAV`, `hashAVw`; `analysis/exp91.py`; `experiments/network/exp91_local.py`; 17 tests.
+- **An independent review before registration** found two defects, now fixed and tested:
+  - the stall watch couldn't see a hung receiver while the sending thread waited for the planner;
+  - `as-written` missed a misplaced run of zero pages in a node sent whole. It now re-reads the pages on either side of such runs.
+- **Deciding (E1):** uniform `hashAV` ≤ 0.70x `hash` at full link. E2: `hashAV_1g` ≤ 0.92x `pg_basebackup` at 1 Gbit/s.
+- **Correctness:** 1,000 local fault trials (EXP-32's campaign) with both changes, and every VM copy checked.
+
+## 2026-10-31 (17:19 UTC): EXP-90 done: hashing at its bound where few pages change, 1.7x it where many do
+
+- **D1 failed:**
+  - hot `hash` ran at 1.012 and 1.020 of its slowest resource's time;
+  - uniform at **1.695** and **1.927**, past the 1.30 bar: a pipelining gap.
+- **D2–D4 held:**
+  - `pg_basebackup` kept a 1 Gbit/s link 98% busy;
+  - hashing took 0.579 of it in hot and 1.369 in uniform;
+  - no hashing run was bound by CPU, and SHA-256 hashes at 0.474 of BLAKE3's speed on the VMs' CPU;
+  - `pg_basebackup` ran within 1.022–1.043 of its bound, so the bound arithmetic works.
+- **The disk:** sequential reads and random writes barely share a budget (1.81, against the predicted ≤ 1.2). Random reads and random writes do share one: 4,180–4,200 ops/s together.
+- **Where the gap is** (post hoc, `analysis/exp90_overlap.py`), in the uniform run:
+  - the source read nothing for 40 s while blocked in `send()`, then read S's last 9 GB alone (28 s);
+  - 4.86 of the 5.07 GB written were re-read from the disk to verify.
+- **What it means:**
+  - at 1 Gbit/s a systems problem: the floor is 0.71–0.83x a re-clone, against today's 1.37x;
+  - at full link at best a tie, since all of B is read: an algorithm problem, which B's stored digests would address.
+- **`hashw`:** 0.95–0.96 in uniform, 1.00 in hot; one run each.
+- **The checks:** the cross-session control was within 1%, and 12 of 12 copies matched.
+- **Proposed next, EXP-91:** the sender keeps hashing while a send blocks, and the receiver verifies written pages while they are still in memory.
+
+## 2026-10-31 (15:18 UTC): EXP-90 pre-registered: where the hashing path's time goes; the team's baseline script
+
+- **Why:** the team's industry mentor, reviewing the hashing approach at the October 30 weekly meeting, asked for:
+  - each side's link use over time before any optimizing;
+  - batched, pipelined hash exchange;
+  - a faster hash (SHA-256 or native code);
+  - a baseline the team can run.
+- **Already known:** the protocol batches and overlaps its exchange. In EXP-89b's scattered hashing run, the sender waited on the receiver for 0.15 s of 186 s. Never measured: each resource over time, and whether the disk's reads and writes share one budget.
+- **Built:**
+  - `util_series.py` samples link, disk, CPU and threads on both VMs every 0.1 s;
+  - `fio_mixed.sh` measures the disk alone and mixed;
+  - `link_probe.py` measures the link;
+  - `hashbench.py` gains SHA-256;
+  - the lab gains shaped-link arms (`_1g`) and `hashw`;
+  - `experiments/baseline/run.sh` (with a README) runs it all with one command.
+- **Deciding (D1):** every hashing run is at the bound of its slowest resource (measured / T_impl ≤ 1.15). Its control (D4): `pg_basebackup` at its bound.
+- **The Mac's hash rates (the local stage):** SHA-256 at 1.33x BLAKE3 per page.
+
+## 2026-10-31 (02:20 UTC): EXP-89b done: a crashed old primary at 18 GB, 0.19x `pg_rewind`, 0.49x a re-clone
+
+- **1 held:** all 4 `--crashed-primary` runs were proven by the old primary's own WAL (0.8 s), found its own blocks past the fork (about 20,000), matched the new primary and passed `pg_amcheck`.
+- **2 held:** hot10 7.1 s against `pg_rewind`'s 37.7 s (0.188) and hashing's 90.9 s (0.078); uniform 44.4 s against a re-clone's 91.2 s (0.487). `pg_rewind` took 458 s there, and hashing 190 s.
+- **3 held:** hashing's arm was refused the fast path in 4 of 4, and 16 of 16 copies matched.
+- **What it means:** the scorecard's last loss, a crashed old primary, is a win where its WAL is intact (opt-in).
+- **Not yet tested:** torn WAL tails from real power loss, and held-out settings.
+- **The pipeline:** its watcher looked for the last run's line, and the lab's closing line followed within the same minute, so it waited on. The results were fetched and the set torn down by hand; no run was affected.
+
+## 2026-10-30 (23:18 UTC): EXP-89b pre-registered: the crashed old primary at 18 GB on the VMs
+
+- **Setup:** EXP-67's failover lab with `CRASHED_P=1`. The old primary's dirty pages are written out, then it crashes (`-m immediate`) at the fork.
+- **Arms, two runs each, hot10 and uniform:** `pg_rewind` (crash recovery first), pgdelta's hashing (refused), `--crashed-primary` and a re-clone.
+- **Deciding:** every `--crashed-primary` copy taken, its own blocks found, correct and clean under `pg_amcheck`. Predicted: at most 0.5x `pg_rewind` and hashing (hot10), and faster than a re-clone (uniform).
+
+## 2026-10-30 (23:18 UTC): EXP-89 done: 80 of 80 crashed primaries correct by their own WAL; lost or damaged WAL refused
+
+- **1 held:** 80 of 80 crashed primaries were taken by the fast path and came out correct: 40 on the server's timeline, 40 after a failover. Wrong copies below 3.7% per refresh at 95%.
+- **2 held:** 40 of 40 failovers found the old primary's own blocks past the fork (median 1,244), including pages no summary lists.
+- **3 held:** 30 of 30 controls (WAL lost, damaged, lost after a failover) were refused and hashed correctly.
+- **The blind spot,** as stated: an older pg_wal swapped in passed 5 of 5 and gave 5 wrong copies.
+- **Amended before any scored data:** the first launch stopped on a blind-spot copy too broken to query. The harness now records such a copy as wrong.
+- **Next:** EXP-89b on the VMs at 18 GB, against `pg_rewind`, hashing and a re-clone.
+
+## 2026-10-30 (22:45 UTC): research loop 4 and EXP-89 pre-registered: the crashed primary, by its own WAL
+
+- **The last loss:** a primary that crashed was refused and hashed, at best a tie. The obstacle is proving where its history ends; crash recovery first is unsound (EXP-80's S2e).
+- **The proof built (`--crashed-primary`, opt-in):**
+  - B's end is the end of its own WAL, read from its redo point and computed exactly (`wal_record_end`, checked against every record of real WAL);
+  - it is refused where the stop looks like loss or damage: a missing or short segment, WAL of the same generation past it, or fsync off;
+  - after a failover, idea 1 lists B's own blocks past the fork.
+- **Prior art, read from PostgreSQL 17's source:** `pg_rewind` runs crash recovery first and trusts its end; PostgreSQL never makes short segments, never removes them from the redo point on, and fsyncs a segment before the next.
+- **Stated blind spot:** an older pg_wal swapped in, or storage losing flushed WAL. The same holds for crash recovery and `pg_rewind`.
+- **EXP-89 (local):**
+  - 40 crashed primaries on the server's timeline and 40 after a failover (with writes past the fork on a table the load never touches);
+  - 30 controls;
+  - 5 blind-spot trials.
+- **Deciding:** all 80 taken and correct; all 30 controls refused.
+
+## 2026-10-30 (19:29 UTC): K16: single read is page-lsn's default
+
+- **The owner's decision**, after EXP-87: `--lsn-single-read` is on by default with `--fast-path page-lsn`, and `--no-lsn-single-read` gives the two reads. It applies to page-lsn only: off with any other mode, and refused there if asked for.
+- **The evidence:**
+  - EXP-85: 0.984x `pg_basebackup` at 4.5x memory, against 1.119x;
+  - EXP-86: correct on Linux, ext4 and XFS;
+  - EXP-87: 7 of 7 held-out cells, 0.41–0.97x `pg_basebackup` and 0.95–1.007x two reads.
+- **Code:** `fastpath.DEFAULT_LSN_SINGLE_READ`; the CLI's `_lsn_single_read` resolves it only with page-lsn.
+- **Tests:** the real-server tests now run page-lsn by default (single read) and with `--no-lsn-single-read`, and a unit test covers the resolver.
+- **Harnesses:** EXP-82's trials and timing, EXP-85b's controls, EXP-86's campaign and the lab's `lsn` arm now pass `--no-lsn-single-read` wherever they meant two reads.
+
+## 2026-10-30 (18:30 UTC): EXP-87 done: the second held-out session held in all 7 cells
+
+- **Single read (`--lsn-single-read`):** 0.85–0.97x `pg_basebackup` on H5 (skewed non-HOT updates), H6 (32 GB) and H8 (checksums off); 0.41–0.50x on H7 (local NVMe), where a re-clone is bound by writing a whole copy. Against two reads, 0.95–1.007x. **Eligible to become page-lsn's default** (the owner's decision).
+- **`--crashed-standby`** held again (17 of 17 held-out cells over EXP-84 and EXP-87). **The fast path's defaults** took 0.017–0.50x `pg_basebackup` at 0.5–28% of the pages (0.269x on H5 at 17.5%). 28 of 28 copies were correct.
+- **gcloud expired during the session,** after every cell had finished. Fetch and teardown waited about two hours for a new sign-in, and everything is torn down.
+- **Rule 15:** H5–H8 are spent. H9–H12 are sealed: 2,000 relations, PostgreSQL 18 with io_uring, 4-vCPU VMs, and a cross-region pair.
+- **Seen in the project:** a set named `exp88` (three VMs in us-east1-b) that this work didn't create.
+
 ## 2026-10-30 (13:31 UTC): EXP-87 pre-registered: the second held-out session, on H5–H8
 
 - **The settings,** sealed October 30 before EXP-85's tuning:

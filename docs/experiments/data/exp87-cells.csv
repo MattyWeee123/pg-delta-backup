@@ -1,0 +1,8 @@
+setting,pattern,crashed_s,crashed_match,crashed_status,clean_s,clean_match,clean_status,single_s,single_match,single_status,lsn_s,lsn_match,lsn_status,full_s,full_match,full_status,crashed_proof,crashed_used,single_proof,single_used,single_read,single_reread_bytes,single_held_bytes_peak,lsn_reread_bytes,pages_chosen_share
+h5,gaussidx,25.044,True,0,24.994,True,0,89.963,True,0,89.897,True,0,92.758,,0,crashed standby,True,clean shutdown in recovery,True,True,0,9265152,3883368448,0.1748
+h6,hot,1.757,True,0,1.725,True,0,87.631,True,0,87.742,True,0,103.095,,0,crashed standby,True,clean shutdown in recovery,True,True,0,8388608,96919552,0.0054
+h6,uniform,43.311,True,0,43.504,True,0,87.902,True,0,88.371,True,0,103.031,,0,crashed standby,True,clean shutdown in recovery,True,True,0,34824192,7004946432,0.2824
+h7,hot,1.281,True,0,1.163,True,0,13.145,True,0,13.059,True,0,31.948,,0,crashed standby,True,clean shutdown in recovery,True,True,0,58720256,96919552,0.0054
+h7,uniform,17.11,True,0,16.36,True,0,16.225,True,0,17.019,True,0,32.628,,0,crashed standby,True,clean shutdown in recovery,True,True,0,277405696,7004946432,0.2824
+h8,hot,2.107,True,0,1.743,True,0,87.631,True,0,87.694,True,0,90.523,,0,crashed standby,True,clean shutdown in recovery,True,True,0,8388608,96919552,0.0054
+h8,uniform,42.295,True,0,41.958,True,0,88.182,True,0,88.793,True,0,90.806,,0,crashed standby,True,clean shutdown in recovery,True,True,0,9011200,7004946432,0.2824

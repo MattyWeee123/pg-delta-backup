@@ -51,7 +51,7 @@ These rules guard against all three at this project's cost of about an hour a VM
 - Each pass proposes at least one structurally different idea beside any tuning.
 - An idea that loses is archived with its conditions, never deleted.
 
-**15. Held-out workloads.** The settings in [research/held-out-workloads.md](research/held-out-workloads.md) not yet spent (H5–H8 since EXP-84 spent H1–H4) are sealed: never used to tune or to decide. A setting a held-out session has used is spent, may then be used to tune, and is replaced.
+**15. Held-out workloads.** The settings in [research/held-out-workloads.md](research/held-out-workloads.md) not yet spent (H9–H12, since EXP-84 and EXP-87 spent H1–H8) are sealed: never used to tune or to decide. A setting a held-out session has used is spent, may then be used to tune, and is replaced.
 - They run only at a milestone (before a default changes, or before a claim leaves the project), in a pre-registered session predicted from the tuned results.
 - A miss narrows the claim; it is never tuned away.
 
@@ -62,7 +62,7 @@ These rules guard against all three at this project's cost of about an hour a VM
 - **A negative control** is built wherever one can be (EXP-80's S2e).
 
 **17. Noise as an explicit bar.** [research/noise-floor.csv](research/noise-floor.csv), refreshed with every VM session by `analysis/noise_floor.py`.
-- **Within a session, as of EXP-85:** two runs of a cell differ by up to 2.23% at the 95th percentile for runs of 10 s or more, and 7.11% under 10 s.
+- **Within a session, as of EXP-92:** two runs of a cell differ by up to 1.92% at the 95th percentile for runs of 10 s or more, and 7.11% under 10 s.
 - **Between sessions,** `pg_basebackup` in the same cell moves about 0.3%.
 - **A deciding effect inside that spread** gets a second session (rule 11), or is reported as a tie.
 - **A cross-session comparison** needs its control arm within 1% of the earlier session's.

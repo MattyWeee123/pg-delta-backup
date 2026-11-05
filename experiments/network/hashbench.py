@@ -6,6 +6,9 @@ Hashes 8 KiB pages the way pgdelta.hashing.Hasher.leaf does (a pre-keyed state c
 16-byte digest), with BLAKE2b (hashlib) and BLAKE3 (the blake3 package, the official Rust implementation's Python
 binding), in N worker processes for --seconds each, --repeats times, alternating the two. Prints one JSON object:
 pages per second per process for each hash and N, the medians and the ratio, the CPU model and the SIMD flags.
+EXP-90: --hashes adds sha256 (hashlib's, OpenSSL's, which uses the CPU's SHA instructions where it has them), keyed
+the same way: a state that has absorbed the key padded to one 64-byte block, copied, updated with the page, and its
+digest cut to 16 bytes.
 """
 from __future__ import annotations
 
@@ -30,6 +33,13 @@ def worker(name, seconds, queue):
             state = base.copy()
             state.update(page)
             return state.digest()
+    elif name == 'sha256':
+        base = hashlib.sha256(key.ljust(64, b'\0'))
+
+        def leaf():
+            state = base.copy()
+            state.update(page)
+            return state.digest()[:16]
     else:
         import blake3
         base = blake3.blake3(key=key)
@@ -64,7 +74,7 @@ def cpu_info():
         return {'model': platform.processor() or platform.machine(), 'flags': []}
     model = next((line.split(':', 1)[1].strip() for line in text.splitlines() if line.startswith('model name')), None)
     flags = next((line.split(':', 1)[1].split() for line in text.splitlines() if line.startswith('flags')), [])
-    return {'model': model, 'flags': sorted(f for f in flags if f in ('sse4_1', 'avx2', 'avx512f', 'avx512vl'))}
+    return {'model': model, 'flags': sorted(f for f in flags if f in ('sse4_1', 'avx2', 'avx512f', 'avx512vl', 'sha_ni'))}
 
 
 def main():
@@ -72,19 +82,24 @@ def main():
     ap.add_argument('--seconds', type=float, default=3.0)
     ap.add_argument('--repeats', type=int, default=5)
     ap.add_argument('--procs', default='1,4')
+    ap.add_argument('--hashes', default='blake2b,blake3')
     a = ap.parse_args()
     import blake3
     out = {'cpu': cpu_info(), 'cpus': os.cpu_count(), 'python': platform.python_version(),
            'blake3': blake3.__version__, 'seconds': a.seconds, 'repeats': a.repeats, 'by_procs': {}}
+    names = a.hashes.split(',')
     for procs in (int(p) for p in a.procs.split(',')):
-        runs = {'blake2b': [], 'blake3': []}
+        runs = {name: [] for name in names}
         for _ in range(a.repeats):
-            for name in ('blake2b', 'blake3'):
+            for name in names:
                 runs[name].append(measure(name, procs, a.seconds))
         med = {name: statistics.median(v) for name, v in runs.items()}
         out['by_procs'][procs] = {'pages_per_s_per_proc': {k: [round(x) for x in v] for k, v in runs.items()},
-                                  'median': {k: round(v) for k, v in med.items()},
-                                  'ratio_blake3': round(med['blake3'] / med['blake2b'], 3)}
+                                  'median': {k: round(v) for k, v in med.items()}}
+        if {'blake2b', 'blake3'} <= med.keys():
+            out['by_procs'][procs]['ratio_blake3'] = round(med['blake3'] / med['blake2b'], 3)
+        if {'sha256', 'blake3'} <= med.keys():
+            out['by_procs'][procs]['ratio_sha256_to_blake3'] = round(med['sha256'] / med['blake3'], 3)
     print(json.dumps(out))
 
 

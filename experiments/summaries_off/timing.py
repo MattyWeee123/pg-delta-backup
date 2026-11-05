@@ -105,8 +105,10 @@ def main():
                         result, stats, _ = lab.refresh(b, 'summaries')
                     elif arm == SINGLE_READ:
                         result, stats, _ = lab.refresh(b, 'page-lsn', '--lsn-single-read')
-                    else:
-                        result, stats, _ = lab.refresh(b, None if arm == 'hash' else 'page-lsn')
+                    elif arm == 'hash':
+                        result, stats, _ = lab.refresh(b, None)
+                    else:  # two reads, explicit since K16 made single read page-lsn's default
+                        result, stats, _ = lab.refresh(b, 'page-lsn', '--no-lsn-single-read')
                     seconds = time.perf_counter() - started
                     if arm == 'on-demand':
                         lab.summaries(False)

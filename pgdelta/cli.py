@@ -158,6 +158,20 @@ def _jobs_option(parser, what, sides=1, live=False):
     parser.add_argument('--hash-backend', choices=BACKENDS, default=DEFAULT_BACKEND, help=argparse.SUPPRESS)
 
 
+def _byte_size(text):
+    """A number of bytes, with an optional binary suffix: 512, 64K, 256M, 32G, 1T."""
+    units = {'': 1, 'K': 1 << 10, 'M': 1 << 20, 'G': 1 << 30, 'T': 1 << 40}
+    text = text.strip()
+    number, unit = (text[:-1], text[-1].upper()) if text[-1:].isalpha() else (text, '')
+    try:
+        value = int(number) * units[unit]
+    except (ValueError, KeyError):
+        raise argparse.ArgumentTypeError(f'not a size in bytes (512, 64K, 256M, 32G): {text!r}') from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f'must be 0 or more, not {text}')
+    return value
+
+
 def _non_negative_int(text):
     try:
         value = int(text)
@@ -226,11 +240,13 @@ def _compress_option(parser):
                              'and these go with the summaries\' blocks since that checkpoint. B must have been '
                              'stopped cleanly, keep that WAL, and have data checksums or wal_log_hints (idea 1, '
                              'EXP-69, EXP-69b, EXP-71) (default: on with --fast-path)')
-    parser.add_argument('--lsn-single-read', action='store_true',
+    parser.add_argument('--lsn-single-read', action=argparse.BooleanOptionalAction, default=None,
                         help='with --fast-path page-lsn: send each chosen page from the scan\'s own read of it, '
                              'never reading it again. The scanner holds at most about 256 MiB of chosen pages ahead '
-                             'of sending. Without it, at 4.5x memory the second reads missed the page cache and page-'
-                             'lsn took 1.12x pg_basebackup (EXP-84). Opt-in until EXP-85')
+                             'of sending. With --no-lsn-single-read each chosen page is read again after the scan; at '
+                             '4.5x memory those second reads missed the page cache and page-lsn took 1.12x '
+                             'pg_basebackup (EXP-84), against 0.98x with one read (EXP-85, EXP-87) '
+                             f'(default: {"on" if fastpath.DEFAULT_LSN_SINGLE_READ else "off"} with --fast-path page-lsn)')
     parser.add_argument('--selector', action='store_true',
                         help='with --fast-path, where the guard lets it run: predict its time from its plan at each '
                              'fill (0, 1, 2 and 4 pages), from the disks\' limits below, and take the fastest fill '
@@ -289,11 +305,20 @@ def _rebuild_options(parser):
                              'crashed standbys came out correct, and it held on every held-out setting (EXP-80, '
                              'EXP-80b, EXP-84). Without the fast path it changes nothing '
                              f'(default: {"on" if fastpath.DEFAULT_CRASHED_STANDBY else "off"})')
+    parser.add_argument('--crashed-primary', action='store_true',
+                        help='with the fast path offered and in place: also take a B that is a primary left "in '
+                             'production" by a crash. Its end is proven by its own WAL, read from its redo point to '
+                             'where it stops, and only where the stop looks like a crash\'s end: inside a whole '
+                             'segment file, with no WAL of the same generation past it. WAL lost or damaged past a '
+                             'point is refused (EXP-62, EXP-80). After a failover it needs --diverged-basis too. '
+                             'Opt-in until its experiments (research loop 4)')
     parser.add_argument('--verify-scope', choices=('auto', *receiver.VERIFY_SCOPES), default='auto',
                         help='what is re-read to verify each file: all of it, or (in place) only the pages this run '
                              'wrote, every other part checked by the digests of B computed before anything was '
                              'written. auto is written with --in-place and all otherwise: written removes the second '
-                             'pass over B, and was shown correct in 3,000 randomized trials (EXP-32, EXP-33, EXP-35) '
+                             'pass over B, and was shown correct in 3,000 randomized trials (EXP-32, EXP-33, EXP-35). '
+                             'as-written (in place; EXP-91) reads each run back right after writing it, while it is '
+                             'still in memory, and composes every node from those pages and B\'s digests '
                              '(default: %(default)s)')
     # T3 arm (b): where the output files are fsynced.
     parser.add_argument('--fsync', choices=flush.FSYNC_CHOICES, default=flush.DEFAULT_FSYNC,
@@ -435,6 +460,12 @@ def _sender_options(parser):
                         help='hash up to N files ahead of the one being sent, so their leaf-digest round '
                              'trips overlap hashing. It changes the order of the frames on the wire, not '
                              'what is sent (default: %(default)s)')
+    parser.add_argument('--hash-ahead', type=_byte_size, default=sender.DEFAULT_HASH_AHEAD, metavar='SIZE',
+                        help='hash S on a thread of its own, up to SIZE bytes of files (K, M, G or T: binary) ahead '
+                             'of the file being sent, so S is read while a send waits for the receiver, instead of '
+                             '--window; the pages each file sends are then read on --read-ahead threads (default '
+                             f'{fastpath.DEFAULT_READ_AHEAD} with it). It changes the order of the frames on the wire, '
+                             'not what is sent. 0 is off (EXP-91; default: off)')
 
 
 def _reuse_any_basis_option(parser):
@@ -598,7 +629,7 @@ def _receive(args):
 def _receiver_engine(args):
     return {'jobs': args.jobs, 'hash_backend': args.hash_backend, 'rebuild': args.rebuild,
             'verify': args.verify, 'fsync': args.fsync, 'verify_scope': _verify_scope(args),
-            'crashed_standby': _crashed_standby(args)}
+            'crashed_standby': _crashed_standby(args), 'crashed_primary': getattr(args, 'crashed_primary', False)}
 
 
 def _crashed_standby(args):
@@ -633,15 +664,16 @@ def _sender_kwargs(args, identity):
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
             'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
             'read_ahead': _read_ahead(args), 'plan_out': getattr(args, 'plan_out', None),
+            'hash_ahead': getattr(args, 'hash_ahead', 0),
             'fill_gaps': _fill_gaps(args), 'diverged_basis': _diverged_basis(args), 'selector': _selector(args),
-            'lsn_single_read': getattr(args, 'lsn_single_read', False)}
+            'lsn_single_read': _lsn_single_read(args)}
 
 
 def _read_ahead(args):
-    """--read-ahead as given, else fastpath.DEFAULT_READ_AHEAD with --fast-path and 0 without."""
+    """--read-ahead as given, else fastpath.DEFAULT_READ_AHEAD with --fast-path or --hash-ahead and 0 without."""
     threads = getattr(args, 'read_ahead', None)
     if threads is None:
-        return fastpath.DEFAULT_READ_AHEAD if getattr(args, 'fast_path', None) else 0
+        return fastpath.DEFAULT_READ_AHEAD if getattr(args, 'fast_path', None) or getattr(args, 'hash_ahead', 0) else 0
     return threads
 
 
@@ -660,6 +692,15 @@ def _selector(args):
     if getattr(args, 'fill_gaps', None) is not None:
         raise InvalidInput('--selector chooses the fill itself, so it does not take --fill-gaps')
     return selector.Disks(args.selector_read_ops, args.selector_write_ops, args.selector_mb_per_second * 1e6)
+
+
+def _lsn_single_read(args):
+    """--lsn-single-read or --no-lsn-single-read as given, else fastpath.DEFAULT_LSN_SINGLE_READ with --fast-path
+    page-lsn and off otherwise (it is page-lsn's own option: check_mode refuses it elsewhere)."""
+    on = getattr(args, 'lsn_single_read', None)
+    if on is None:
+        return fastpath.DEFAULT_LSN_SINGLE_READ and getattr(args, 'fast_path', None) == fastpath.PAGE_LSN
+    return on
 
 
 def _diverged_basis(args):

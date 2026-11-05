@@ -101,9 +101,9 @@ class SubpageTests(unittest.TestCase):
     def test_a_patch_beyond_b_is_refused(self):
         original = sender_module._Sender._send_pages
 
-        def beyond(self, job, pages, old=None):
+        def beyond(self, job, pages, old=None, ahead=None):
             if job.path != 'base/1/grown':
-                return original(self, job, pages, old)
+                return original(self, job, pages, old, ahead)
             # Patch one block of page 5, which B (5 pages) doesn't have, as if B held it.
             body = (1).to_bytes(2, 'big') + bytes(512)
             self._send(protocol.PAGE_DELTA, protocol.page_data_head(job.index, 5), body)

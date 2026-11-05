@@ -219,7 +219,7 @@ Times are each arm's mean over its runs.
 - **Single read restores page-lsn's tie with a re-clone at 4.5x memory:** 0.984x `pg_basebackup`, against two reads' 1.119x. It reads each page of S once, as `pg_basebackup` does.
   - It cost nothing measurable where few pages changed.
   - It was correct in 120 of 120 local trials and 8 of 8 VM copies.
-- **It stays opt-in (`--lsn-single-read`) for now.** Making it page-lsn's default is a default change, so rule 15 needs a held-out session on H5–H8 first.
+- **It stays opt-in (`--lsn-single-read`) for now** *(since then: EXP-87 held in 7 of 7 held-out cells, and it has been page-lsn's default since K16, October 30)*. Making it page-lsn's default is a default change, so rule 15 needs a held-out session on H5–H8 first.
 - **The claim in RESULTS:** with single read, page-lsn ties or beats a re-clone on every setting measured: 0.86–0.98x in EXP-84's nine cells, and 0.98x in both H2 cells here. That claim still has to pass H5–H8.
 - **Rule 13, for mechanisms that turn on reads beyond memory:** local timings don't predict the VMs, so the local stage gates correctness only.
 - **Still open:** single read's CPU cost in memory (1.116x in scatter), which a faster run builder could remove (one slice per run of contiguous pages). It doesn't show on the VMs measured.
