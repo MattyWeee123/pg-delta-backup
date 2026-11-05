@@ -522,6 +522,55 @@ be worse and the cell says how much. Keeping it out would have meant a whole ext
 `SCALE=600` gives about 18 GB, the size `lab_exp64.sh` uses for the `ha` set, so stage 2's cluster is EXP-48's
 and EXP-64's rather than a new one.
 
+### 8. Stage 3's extra `v1_j4` cell, and the registered files that changed after the runs (rule 8, rule 16)
+
+Recorded after stage 3's runs and before its cells were read.
+
+**Stage 3 ran 18 runs, not the registered 16, and the extra two are additive.** The session was launched with
+`ARMS='none full v1 v1_j1' LEVELS='L60 L80' SCALE=600` and no `L60_ONLY`, and the driver's default for that
+variable is `${L60_ONLY:-v1_j4}`, which substitutes on *unset as well as empty*. So the plan gained a
+`v1_j4`/L60 cell nobody asked for. Counted from the session log, every registered cell has its 2 repeats -
+`none`, `full`, `v1`, `v1_j1` at both L60 and L80, 16 runs - plus `v1_j4`/L60 twice. **Nothing was displaced
+and nothing was lost.**
+
+This is the same deviation stage 2 had, from the same cause, which is the one piece of luck in it: both
+beyond-memory and in-memory sessions carry the same unplanned cell, so the two stages remain comparable
+including in the extra. The `v1_j4`/L60 cells are reported as an unregistered extra in both, and no verdict
+rests on them.
+
+The cause is worth naming because it is a general trap rather than a typo: `${VAR:-default}` substitutes the
+default when `VAR` is empty *or* unset, while `${VAR-default}` substitutes only when unset. A driver that wants
+"no diagnostic arm" to be expressible needs the second form. Not changed here - changing the driver between
+stage 3's runs and its analysis is exactly the kind of edit rule 16 exists to prevent - and left as the next
+driver change to make, before any further session uses `L60_ONLY`.
+
+**Three registered files have changed since EXP-88 was registered at `6d97eaa`.** `integrity.py check EXP-88`
+reports 13 of 16 unchanged, and the three are:
+
+| File | Change | When, relative to EXP-88's runs |
+|---|---|---|
+| `infra/gcp/config.sh` | `MAX_RUN_HOURS` default (+5 lines) | declared in `944e1bb`, after stage 2 |
+| `infra/gcp/create.sh` | self-termination flags (+11 lines) | declared in `944e1bb`, after stage 2 |
+| `experiments/network/lab_exp88.sh` | EXP-93's arm names (+27/-7) | **after all three stages had run** |
+
+**EXP-88's registration is deliberately left at `6d97eaa` rather than refreshed at the current commit.**
+Re-registering now would record EXP-88's data as having been produced by code that did not exist when it ran,
+which is the opposite of what rule 16 is for. The honest record is the one above: the check reports three
+changed files, and each is accounted for.
+
+What produced each stage, for the record: stage 3 was deployed at commit `8287300` (tree `05dc3b9d8a03`), which
+is before the `lab_exp88.sh` edit. The `config.sh` and `create.sh` changes govern how long a VM lives and
+nothing a run measures; they were made after a stage-2 set billed for about 57 hours because teardown needs a
+live credential and the credential expired, and stage 3's VMs carried `maxRunDuration` 28800 s with
+`DELETE` - verified on the live instances before the session started, not just in the set file.
+
+The `lab_exp88.sh` change is additive: it adds `HASH_AHEAD`/`READ_AHEAD` and two arm names, and moves the
+per-arm flag derivation above the receiver launch. Every EXP-88 arm derives byte-identical flags across the
+change, which is now asserted by test rather than by inspection (`tests/test_exp88_lab.py`, five tests over
+`none`, `none_nosum`, `full`, `v1`, `v1_j1`, `v1_j4`, `v1_fast` and the two new arms). EXP-93 is registered
+separately at `051d681` with 18 files - EXP-88's 16 plus `pgdelta/sender.py` and `pgdelta/receiver.py`, which
+EXP-88 should have registered and did not: `sender.py` performs the source-side reads W and D measure.
+
 ## Rules this experiment is run under
 
 | Rule | What it requires here |
