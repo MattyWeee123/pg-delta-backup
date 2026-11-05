@@ -6,7 +6,7 @@ It changes no registered design. Where this document and an experiment's own wri
 wins, and a departure needs a rule-8 note there, not here. Its purpose is to say in one place what we are about
 to run, in what order, what it costs, and what the dashboards will and will not show.
 
-- **First:** [EXP-66](../experiments/EXP-66-slowdown-by-load-and-size.md) — application latency under load.
+- **First:** [EXP-88](../experiments/EXP-88-slowdown-by-load-and-size.md) — application latency under load.
   Pre-registered, staged, **~$6 and ~5 h**, nothing unbuilt blocking stage 1.
 - **Second:** [EXP-13](../experiments/EXP-13-latency-transport.md) — network latency at DR round trips.
   Pre-registered and reviewed twice, **~$18**, needs seven harness items first (three now built).
@@ -18,7 +18,7 @@ to run, in what order, what it costs, and what the dashboards will and will not 
 The project measures two unrelated quantities. They need different loads, different arms, and different
 dashboards, and conflating them is the easiest way to draw a wrong conclusion.
 
-| | **Application latency — EXP-66** | **Network latency — EXP-13** |
+| | **Application latency — EXP-88** | **Network latency — EXP-13** |
 |---|---|---|
 | The question | While a backup runs, how much slower does the database get for its users? | Over a WAN, how long does the refresh itself take, and what limits it? |
 | The metric | p50/p95/p99 of transaction response time; work the load lost; throughput lost; failed transactions | Wall-clock refresh time; wire bytes; achieved throughput; protocol wait time |
@@ -28,12 +28,12 @@ dashboards, and conflating them is the easiest way to draw a wrong conclusion.
 | Dashboard | **the live one** (`pgdelta-live-slowdown`) — this is its purpose | run-level panels; the live one sits empty |
 
 That last row is the practical consequence: the live dashboard — p50/p95/p99 with the backup window shaded — is
-the **primary instrument for EXP-66** and is **empty during EXP-13**, because EXP-13 runs no load at all. That
+the **primary instrument for EXP-88** and is **empty during EXP-13**, because EXP-13 runs no load at all. That
 is correct behaviour in both cases.
 
 ---
 
-## 2. The test we are running first: EXP-66
+## 2. The test we are running first: EXP-88
 
 ### Why it goes first
 
@@ -107,9 +107,9 @@ O4 is already written in. A new latency threshold would create a second, weaker 
 
 ---
 
-## 3. How EXP-66 is visualised
+## 3. How EXP-88 is visualised
 
-EXP-66 has a load, a client VM and a recorded backup window, which is exactly what the live dashboard was built
+EXP-88 has a load, a client VM and a recorded backup window, which is exactly what the live dashboard was built
 for. **This is the figure originally sketched for this work, realised against real data.**
 
 ### 3.1 Live, during a run — `pgdelta-live-slowdown`
@@ -128,17 +128,17 @@ Two properties that matter more than the panels:
   nothing. This is not a convenience: O4's bar is 0.05 s of the load's work and a worst drop of 0.03, small
   enough that an agent's own CPU could spend it, and EXP-28 moved the client off the source for exactly that
   reason. **Nothing in this stack may ever scrape the source.**
-- **The driver writes the window.** `lab_exp66.sh` writes `{"t0_utc": …}` when the timed arm starts and adds
+- **The driver writes the window.** `lab_exp88.sh` writes `{"t0_utc": …}` when the timed arm starts and adds
   `t1_utc` when it ends, so the shading is the real window.
 
 One caveat, and it is the same one the analysis handles: t0/t1 are on **dest's** clock while the log is on the
-**client's**. `analysis/exp66.py` maps between them with chrony's offsets; a dashboard showing both without
+**client's**. `analysis/exp88.py` maps between them with chrony's offsets; a dashboard showing both without
 that mapping is off by the skew. Fine for watching a run, not for a number.
 
 ### 3.2 After the runs — the evidence dashboard
 
 `backfill.py` turns the committed per-cell CSV into `pgdelta_evidence_*` series, as it already does for EXP-12,
-EXP-28 and EXP-57. For EXP-66 it gains a `load_level` and a `stage` label, so the panels become:
+EXP-28 and EXP-57. For EXP-88 it gains a `load_level` and a `stage` label, so the panels become:
 
 | Panel | What it answers |
 |---|---|
@@ -150,15 +150,15 @@ EXP-28 and EXP-57. For EXP-66 it gains a `load_level` and a `stage` label, so th
 | refresh time beside the two O4 numbers | the trade: speed bought at what cost to the load |
 
 **A dashboard is never where a verdict is read.** It cannot show the flags that qualify one — fragile, near the
-line, not judged. `analysis/exp66.py` owns verdicts; the panels are for seeing shape and spotting nonsense.
+line, not judged. `analysis/exp88.py` owns verdicts; the panels are for seeing shape and spotting nonsense.
 
 ### 3.3 What has to be built for this
 
 Small, and none of it needs a VM:
 
-1. `experiments/network/lab_exp66.sh` — the driver, including the window file.
-2. `analysis/exp66.py` — the analysis and its figure, **committed before any data**.
-3. `backfill.py` — `load_level` and `stage` labels, and EXP-66's cell CSV.
+1. `experiments/network/lab_exp88.sh` — the driver, including the window file.
+2. `analysis/exp88.py` — the analysis and its figure, **committed before any data**.
+3. `backfill.py` — `load_level` and `stage` labels, and EXP-88's cell CSV.
 4. The evidence dashboard — faceting by load level, and the δ threshold lines.
 5. Failed transactions wired into the analysis: `analysis/exp28.py`'s "failed" counts failed *runs*, not failed
    transactions, so this is genuinely new.
@@ -167,7 +167,7 @@ Small, and none of it needs a VM:
 
 ## 4. The test after it: EXP-13
 
-Everything below is unchanged from the October 30 plan; it moves behind EXP-66, it is not reduced.
+Everything below is unchanged from the October 30 plan; it moves behind EXP-88, it is not reduced.
 
 ### What it asks
 
@@ -258,10 +258,10 @@ A lean window-only subset can close D29 before the rest is finished, under rule 
 
 ## 6. Sequence
 
-1. **Build EXP-66's harness** — the driver, `analysis/exp66.py`, the backfill labels, the faceted dashboard.
+1. **Build EXP-88's harness** — the driver, `analysis/exp88.py`, the backfill labels, the faceted dashboard.
    No VM.
-2. **EXP-66 stage 1** (~$2, ~1.2 h, `us-east1`). Smoke first; it gates the grid. **Stop and read the result.**
-3. **EXP-66 stage 2** if stage 1 holds; **stage 3** only if stage 2 finds a difference to explain.
+2. **EXP-88 stage 1** (~$2, ~1.2 h, `us-east1`). Smoke first; it gates the grid. **Stop and read the result.**
+3. **EXP-88 stage 2** if stage 1 holds; **stage 3** only if stage 2 finds a difference to explain.
 4. **Finish EXP-13's items 2–5**; item 6 waits on the COS read.
 5. **EXP-13 session 1** — created 13:00–15:00 UTC in `us-central1-a`, with the fallback zone ready.
 6. **EXP-13 session 2** — a different UTC day, ≥12 h later, fresh VMs, the second seeds.
@@ -274,7 +274,7 @@ the actual RTT recorded and no injected delay.
 
 ## 7. What neither test settles
 
-- **EXP-66:** one load shape (the bank scripts); B is minutes old, not hours; no added latency; 18 GB is not TB
+- **EXP-88:** one load shape (the bank scripts); B is minutes old, not hours; no added latency; 18 GB is not TB
   scale; the fast path needs `summarize_wal` on, which Omni ships off.
 - **EXP-13:** an emulated WAN (EXP-15 checks one real path); a stopped source throughout (a live source is
   T8's); 2.1 GB in RAM on local NVMe in one zone.
