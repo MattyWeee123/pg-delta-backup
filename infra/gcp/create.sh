@@ -107,6 +107,16 @@ for role in ${missing[@]+"${missing[@]}"}; do
   if [ -n "${_max_hours:-}" ] && [ "${_max_hours}" != 0 ]; then
     if [ "$disk" = local-nvme ]; then _action=STOP; else _action=DELETE; fi
     runtime_flags=(--max-run-duration "${_max_hours}h" --instance-termination-action "$_action")
+    # gcloud refuses a VM that has a local SSD and a termination timestamp unless this is given:
+    #   "VM has a Local SSD attached but an undefined value for
+    #    `--discard-local-ssds-at-termination-timestamp`"
+    # true is what the guard already means here. The action for a local-SSD VM is STOP, and stopping one loses
+    # its local SSDs' contents regardless, which is why the comment above says to fetch results first.
+    # Found on 2026-11-05 by the first real create since the guard was added: a dry run never asks the API, so
+    # DRY_RUN=1 and tests/test_infra_sets.py both passed while creation was impossible.
+    if [ "$disk" = local-nvme ]; then
+      runtime_flags+=(--discard-local-ssds-at-termination-timestamp=true)
+    fi
   fi
   image_flags=(--image-family "$IMAGE_FAMILY")
   if [ -n "$(pgd_role "$role" IMAGE)" ]; then image_flags=(--image "$(pgd_role "$role" IMAGE)"); fi

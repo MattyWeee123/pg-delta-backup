@@ -398,7 +398,15 @@ class DryRun(unittest.TestCase):
                 # The self-termination guard: Compute Engine enforces MAX_RUN_HOURS itself, so a forgotten set
                 # cannot bill for days even when no local credential can reach the API. STOP rather than DELETE
                 # because Compute Engine refuses DELETE for a VM with local SSDs.
+                #
+                # --discard-local-ssds-at-termination-timestamp is required, not optional: gcloud refuses to
+                # create a VM that has a local SSD and a termination timestamp without it ("VM has a Local SSD
+                # attached but an undefined value for ..."). Found on November 5, 2026 by the first real
+                # create.sh call since the guard was added - a dry run cannot catch it, because it never asks
+                # the API. true matches what the guard already does: the action is STOP, and a stopped VM loses
+                # its local SSDs' contents anyway (config.sh says so).
                 '--max-run-duration', '8h', '--instance-termination-action', 'STOP',
+                '--discard-local-ssds-at-termination-timestamp=true',
                 '--boot-disk-size', '50GB', '--boot-disk-type', 'pd-balanced', *['--local-ssd=interface=NVME'] * 4,
                 '--no-service-account', '--no-scopes', '--metadata',
                 'block-project-ssh-keys=TRUE,ssh-keys=bench:ssh-ed25519 AAAATEST bench@pgd-bench,'
