@@ -98,6 +98,16 @@ for role in ${missing[@]+"${missing[@]}"}; do
   # An exact image replaces the family when IMAGE is set (EXP-13 pins one image across both its sessions);
   # --image-project is kept either way. A minimum CPU platform is added only when asked for: EXP-88's stages 2
   # and 3 vary RAM alone, so an unpinned host generation would confound the one effect they exist to separate.
+  # Self-termination, so a forgotten set cannot bill for days (it once billed for 57 hours). Compute Engine
+  # enforces this server-side, so it holds even when no local credential can reach the API to tear down.
+  # DELETE is refused for VMs with local SSDs, so those STOP instead: that ends compute billing, the large
+  # part, and the boot disk keeps costing a little. MAX_RUN_HOURS=0 disables it.
+  runtime_flags=()
+  _max_hours=$(pgd_role "$role" MAX_RUN_HOURS)
+  if [ -n "${_max_hours:-}" ] && [ "${_max_hours}" != 0 ]; then
+    if [ "$disk" = local-nvme ]; then _action=STOP; else _action=DELETE; fi
+    runtime_flags=(--max-run-duration "${_max_hours}h" --instance-termination-action "$_action")
+  fi
   image_flags=(--image-family "$IMAGE_FAMILY")
   if [ -n "$(pgd_role "$role" IMAGE)" ]; then image_flags=(--image "$(pgd_role "$role" IMAGE)"); fi
   platform_flags=()
@@ -106,6 +116,7 @@ for role in ${missing[@]+"${missing[@]}"}; do
   fi
   gc compute instances create "$vm" --zone "$(pgd_role "$role" ZONE)" --machine-type "$(pgd_role "$role" MACHINE)" \
     "${image_flags[@]}" --image-project "$IMAGE_PROJECT" ${platform_flags[@]+"${platform_flags[@]}"} \
+    ${runtime_flags[@]+"${runtime_flags[@]}"} \
     --boot-disk-size 50GB --boot-disk-type pd-balanced ${disk_flags[@]+"${disk_flags[@]}"} \
     --no-service-account --no-scopes \
     --metadata "block-project-ssh-keys=TRUE,ssh-keys=$SSH_USER:$pubkey,pgd-set=$SET_NAME,pgd-role=$role,pgd-data-disk=$disk" \

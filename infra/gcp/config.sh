@@ -47,6 +47,11 @@ MACHINE=${MACHINE:-n2-standard-8}
 #                pgd-data and deleted with its VM. Its throughput grows with its
 #                size, so the size has no default.
 DATA_DISK=${DATA_DISK:-local-nvme}
+# How long a VM may run before Compute Engine terminates it by itself, so an abandoned session cannot bill for
+# days. A session is about 2 hours; 8 gives generous headroom and only fires when one has been forgotten. VMs
+# with local SSDs are STOPped rather than DELETEd (Compute Engine refuses DELETE for those), which ends compute
+# billing but loses their local-SSD contents - fetch results before walking away. Set 0 to disable.
+MAX_RUN_HOURS=${MAX_RUN_HOURS:-8}
 LOCAL_SSDS=${LOCAL_SSDS:-4}
 PD_SIZE_GB=${PD_SIZE_GB:-}
 IMAGE_FAMILY=${IMAGE_FAMILY:-debian-12}
