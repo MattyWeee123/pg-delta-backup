@@ -1,0 +1,67 @@
+prediction,arm_bytes,arm_s,band,bar,base_bytes,base_s,condition,deciding,denominator,earlier_s,expected,interval,method,now_s,numerator,pattern,ratio,runs,slow,verdict
+1,,,,0.8,,4.661,2:0:default,False,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,uniform,0.9903,3,,reported (cubic not in the slow mode here)
+1,,,,0.8,,15.828,2:20:default,True,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,uniform,0.4216,3,,held
+1,,,,0.8,,24.755,2:60:default,False,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,uniform,0.6041,3,,reported (cubic not in the slow mode here)
+1,,,,0.8,,37.455,2:120:default,False,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,uniform,0.7354,3,,reported (cubic not in the slow mode here)
+1,,,,0.8,,6.269,2:60:tuned,False,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,uniform,0.8472,3,,reported (cubic not in the slow mode here)
+1,,,,0.8,,30.015,2:120:tuned,True,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,uniform,0.2103,3,,held
+2,,,,0.01,,,2:0:default,,,10.284,,,,10.265,,hot,0.9982,,,held
+2,,,,0.01,,,2:120:default,,,86.863,,,,86.201,,hot,0.9924,,,held
+2,,,,0.01,,,2:120:tuned,,,13.12,,,,13.299,,hot,1.0136,,,failed
+2,,,,0.01,,,2:20:default,,,16.175,,,,16.153,,hot,0.9986,,,held
+2,,,,0.01,,,2:60:default,,,44.97,,,,44.143,,hot,0.9816,,,failed
+2,,,,0.01,,,2:60:tuned,,,11.596,,,,11.604,,hot,1.0007,,,held
+2,,,,0.01,,,2:0:default,,,10.314,,,,10.296,,uniform,0.9983,,,held
+2,,,,0.01,,,2:120:default,,,87.612,,,,87.003,,uniform,0.993,,,held
+2,,,,0.01,,,2:120:tuned,,,13.276,,,,13.248,,uniform,0.9979,,,held
+2,,,,0.01,,,2:20:default,,,16.229,,,,16.117,,uniform,0.9931,,,held
+2,,,,0.01,,,2:60:default,,,44.759,,,,43.966,,uniform,0.9823,,,failed
+2,,,,0.01,,,2:60:tuned,,,11.656,,,,11.586,,uniform,0.994,,,held
+3,,,0.0711,1.03,,2.088,2:0:default,,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,hot,1.0062,3,,tie (inside the noise band)
+3,,,0.0711,1.03,,2.926,2:20:default,,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,hot,0.7738,3,,"gained in hot, which the mechanism does not predict"
+3,,,0.0711,1.03,,4.895,2:60:default,,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,hot,0.5438,3,,"gained in hot, which the mechanism does not predict"
+3,,,0.0711,1.03,,6.406,2:120:default,,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,hot,0.527,3,,"gained in hot, which the mechanism does not predict"
+3,,,0.0711,1.03,,3.392,2:60:tuned,,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,hot,0.6963,3,,"gained in hot, which the mechanism does not predict"
+3,,,0.0711,1.03,,6.123,2:120:tuned,,pgdelta_direct_inplace,,,,,,pgdelta_direct_inplace_ha,hot,0.4767,3,,"gained in hot, which the mechanism does not predict"
+4,,,,1.05,,4.646,2:0:default,,pgdelta_direct_inplace_bbr,,,,,,pgdelta_direct_inplace_bbr_ha,uniform,0.9929,3,,held (the two fixes address the same stall)
+4,,,,1.05,,6.722,2:20:default,,pgdelta_direct_inplace_bbr,,,,,,pgdelta_direct_inplace_bbr_ha,uniform,0.9627,3,,held (the two fixes address the same stall)
+4,,,,1.05,,15.943,2:60:default,,pgdelta_direct_inplace_bbr,,,,,,pgdelta_direct_inplace_bbr_ha,uniform,0.9489,3,,a further gain: the two fixes address different stalls
+4,,,,1.05,,31.823,2:120:default,,pgdelta_direct_inplace_bbr,,,,,,pgdelta_direct_inplace_bbr_ha,uniform,0.9039,3,,a further gain: the two fixes address different stalls
+4,,,,1.05,,6.159,2:60:tuned,,pgdelta_direct_inplace_bbr,,,,,,pgdelta_direct_inplace_bbr_ha,uniform,0.8561,3,,a further gain: the two fixes address different stalls
+4,,,,1.05,,8.433,2:120:tuned,,pgdelta_direct_inplace_bbr,,,,,,pgdelta_direct_inplace_bbr_ha,uniform,0.7614,3,,a further gain: the two fixes address different stalls
+5,2122375168,,,1.05,2122383360,,2:0:default,,,,,,,,,,1.0,,,held
+5,2122366976,,,1.05,2122366976,,2:20:default,,,,,,,,,,1.0,,,held
+5,2122358784,,,1.05,2122334208,,2:60:default,,,,,,,,,,1.0,,,held
+5,2122371072,,,1.05,2122362880,,2:120:default,,,,,,,,,,1.0,,,held
+5,2122334208,,,1.05,2122362880,,2:60:tuned,,,,,,,,,,1.0,,,held
+5,2122346496,,,1.05,2122366976,,2:120:tuned,,,,,,,,,,1.0,,,held
+6,,0.013,,0.25,,0.005,2:0:default,,,,,,,,,,2.462,,,failed
+6,,0.222,,0.25,,0.271,2:20:default,,,,,,,,,,0.8187,,,failed
+6,,0.429,,0.25,,0.836,2:60:default,,,,,,,,,,0.5124,,,failed
+6,,0.847,,0.25,,1.914,2:120:default,,,,,,,,,,0.4426,,,failed
+6,,0.428,,0.25,,1.015,2:60:tuned,,,,,,,,,,0.4217,,,failed
+6,,0.848,,0.25,,2.237,2:120:tuned,,,,,,,,,,0.3792,,,failed
+7,,,,,,,2:0:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:120:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:120:tuned,,,,,"(0.0943, 0.9916)",pgdelta_direct_inplace,,,,,3,2,"reported, not predicted"
+7,,,,,,,2:20:default,,,,at least 2 of 3,"(0.0943, 0.9916)",pgdelta_direct_inplace,,,,,3,2,held
+7,,,,,,,2:60:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:60:tuned,,,,,"(0.0084, 0.9057)",pgdelta_direct_inplace,,,,,3,1,"reported, not predicted"
+7,,,,,,,2:0:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:120:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:120:tuned,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:20:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:60:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:60:tuned,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:0:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:120:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:120:tuned,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:20:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:60:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:60:tuned,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_bbr_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:0:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:120:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:120:tuned,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:20:default,,,,0 of 3,"(0.0, 0.7076)",pgdelta_direct_inplace_ha,,,,,3,0,held
+7,,,,,,,2:60:default,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_ha,,,,,3,0,"reported, not predicted"
+7,,,,,,,2:60:tuned,,,,,"(0.0, 0.7076)",pgdelta_direct_inplace_ha,,,,,3,0,"reported, not predicted"

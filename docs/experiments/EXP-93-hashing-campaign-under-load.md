@@ -1,9 +1,23 @@
 # EXP-93: what the hashing campaign's speed cost the source's load
 
-Status: **pre-registered November 5, 2026, before any run and before any VM for it exists.** One session on
-EXP-88 stage 1's exact shape (three VMs, a 2 GB cluster on 32 GB of RAM, local NVMe, `us-east1-b`), about 2
-hours of VM time, roughly the cost of EXP-88 stage 1. It asks one question that EXP-90, EXP-91 and EXP-92 could
-not ask, because all three ran with the source idle.
+Status: **done November 6, 2026 — 36 runs, all passing. The campaign's recipe is not O4-safe near saturation,
+and the 2×2 says the worker count is why, not hashing ahead.**
+
+`v1_j4_ha` (`--jobs 4 --hash-ahead 64G --read-ahead 8`) costs the load **0.816 s of work lost net at 0.8 of
+capacity — 16.3× O4's tolerance** — where the shipped two-worker default costs 0.172 s (3.4×). **Hash-ahead on
+its own is load-neutral to slightly protective**: at the shipped cap it costs 0.145 s, *less* than the default.
+Going 2→4 workers costs 4.0–5.6×; turning hash-ahead on costs 0.84× at two workers. **At 0.6 of capacity all
+four pgdelta arms meet O4, at half the tolerances.** The replication gate held — `v1` reproduced EXP-88 stage
+1's miss on a different pair in a different region.
+
+Prediction 6 **failed**: hash-ahead did not shorten the refresh window under load (0.973–1.012×), which EXP-94
+independently corroborates — its gain is a round-trip phenomenon and this link was unshaped at 0.155 ms.
+
+Originally **pre-registered November 5, 2026**, before any run and before any VM for it existed, and
+re-registered at `717f267` before the session with no run in existence. One session on EXP-88 stage 1's exact
+shape (three VMs, a 2 GB cluster on 32 GB of RAM, local NVMe, `us-east1-b`); it took 26 minutes of session and
+about 40 minutes of VM time. It asks one question that EXP-90, EXP-91 and EXP-92 could not ask, because all
+three ran with the source idle.
 
 ## Question
 
@@ -259,3 +273,190 @@ outcome, and are raised for the owner rather than made unilaterally:
 - **The disk-bytes instrument is broken on this shape** (above). Displacement is not tested here.
 - **Neither fast-path mode is exercised.** `page-lsn` - whose read strategy became a default in K16 and which
   has no load cell at all - remains unmeasured under load after this session. It is the next hole, not this one.
+
+---
+
+## Results
+
+**Run November 6, 2026. The replication gate held, the campaign's recipe is the worst arm at 0.8 of capacity,
+and the 2×2 says plainly which of its three mechanisms is responsible: the worker count, not hashing ahead.**
+
+`v1_j4_ha` — `--jobs 4 --hash-ahead 64G --read-ahead 8`, the configuration EXP-92's 0.706× headline rests on —
+costs the load **0.816 s of work lost net, 16.3× O4's tolerance**, where the shipped two-worker default costs
+0.172 s (3.4×). Hash-ahead **on its own is not the problem**: at two workers it costs 0.145 s, slightly *less*
+than the shipped default. Prediction 6 failed: hash-ahead did not shorten the refresh window under load at all,
+which is consistent with EXP-94 finding its gain only at a round trip.
+
+### The session
+
+| | |
+|---|---|
+| **Set** | `pgd-exp93-source` / `-dest` (`n2-standard-8`, 32 GB, 4 local NVMe in RAID 0) and `pgd-exp93-client` (`n2-standard-4`), `us-east1-b` |
+| **Shape** | `sets/exp93.sh` sources `sets/exp88.sh` — EXP-88 stage 1's set, unchanged |
+| **Image** | `debian-12-bookworm-v20261102`, pinned with `IMAGE=` |
+| **Platform** | `Intel Cascade Lake` on all three, read back from the live instances |
+| **Cost guard** | `maxRunDuration` 10,800 s; `STOP` on the two local-SSD VMs (Compute Engine refuses `DELETE` for those), `DELETE` on the client. Read back from the live instances |
+| **Created** | 06:36:55 UTC; provisioned, deployed and SSH set up by 06:43:53 |
+| **Session** | 06:45:30 set-up → **07:11:24 done**, 26 minutes. `B` 2.1 GB. Order seed **930**, declared before the run |
+| **Runs** | **36, exactly the registered plan** — 6 arms × 2 levels × 3 repeats. **All 36 exited 0**, 0 failed and 0 skipped transactions in every arm |
+| **Torn down** | 07:16:35, verified: the set's three VMs and their disks gone, EXP-94's pair untouched |
+| **Rule 16** | `check EXP-93` reported **20 of 20 files unchanged since `717f267`** before the session, and reports the same after it |
+
+**Capacity, measured on an unloaded source before the runs:** C = **35,504.97 tps** (runs 36,284.64 /
+35,504.97 / 35,378.30), giving **L60 = 21,300** and **L80 = 28,400** offered transactions a second. The link was
+left unshaped, RTT 0.155 ms. `summarize_wal` stayed on for all 36 runs — EXP-93 has no `none_nosum` arm, so the
+driver made **0** server-setting changes.
+
+**One discrepancy in this document's own design text, recorded rather than quietly reconciled.** The shape
+paragraph above says "scale 130"; the session ran the driver's default, **scale 70**, which
+`lab_exp88.sh:69-70` documents as "EXP-28's ~2 GB pilot cluster (stage 1)" — and it produced **B = 2.1 GB**,
+the size the registration asks for. Stage 1's run records carry no `scale` key, so the match to stage 1 rests
+on both sessions having taken that same documented default. The realized cluster size is the thing the design
+depends on and it is correct; the "130" is an error in the prose, not in what ran.
+
+**C is 14% above EXP-88 stage 1's 31,152.54, and that is expected rather than a problem.** Stage 1's VMs were
+created before `create.sh` read `MIN_CPU_PLATFORM`, so stage 1 ran on an unpinned host generation and this
+session ran on a pinned Cascade Lake. Both levels are 0.6 and 0.8 of their **own** session's measured C, which
+is what every verdict here is relative to. A comparison of absolute seconds with stage 1's is labelled
+**"platform changed"**, as `sets/exp93.sh` records.
+
+**The data:** [data/exp88-cellsexp93.csv](data/exp88-cellsexp93.csv) (scored by `analysis/exp88.py`, reused
+unchanged as registered); the raw session in `results/exp04/sets/exp93/exp93` (386 MB, not in git) with
+`exp93-lab.log` beside it.
+
+**One instrument was known broken going in and is not relied on.** Every run carries
+`wal_device_separate=False` — WAL shares the data device on this shape — so the per-end non-WAL read/write
+bytes are not "besides WAL" as designed. **No claim about cache displacement is made from them**, exactly as
+the registration said. `source_cpu_s` is also empty, the `analysis/exp88.py` key-name defect EXP-88's write-up
+declared; it is not recovered here because nothing in this session's predictions needs it.
+
+### The cells
+
+`full` is the bar in each level. δ_W = max(0.05 s, 0.15 × W_net(`full`)) = **0.05 s** at both levels, δ_D =
+**0.03**. "×δ" is the excess over `full` as a multiple of its tolerance, so **above 1.00 is a miss**.
+
+**L60 — 0.6 of capacity (R = 21,300):**
+
+| Arm | Runs | Refresh (s) | W_net (s) | W over `full` | ×δ_W | D_net | D over `full` | ×δ_D | Meets O4 (½ / 1 / 2) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `none` | 3 | 8.00 | 0.000 | — | — | 0.000 | — | — | *the null* |
+| `full` | 3 | 5.53 | 0.003 | — | — | 0.001 | — | — | *the bar* |
+| `v1` | 3 | 6.00 | 0.000 | −0.003 | −0.06 | 0.000 | −0.001 | −0.03 | ✓ ✓ ✓ |
+| `v1_j4` | 3 | 4.13 | 0.009 | +0.006 | +0.12 | 0.007 | +0.006 | +0.20 | ✓ ✓ ✓ |
+| `v1_ha` | 3 | 5.84 | 0.000 | −0.003 | −0.06 | 0.000 | −0.001 | −0.03 | ✓ ✓ ✓ |
+| `v1_j4_ha` | 3 | 4.11 | 0.002 | −0.001 | −0.02 | 0.002 | +0.001 | +0.03 | ✓ ✓ ✓ |
+
+**All four pgdelta arms meet O4 at 0.6 of capacity, and all four meet it at half the tolerances.** At this level
+the configuration question does not arise.
+
+**L80 — 0.8 of capacity (R = 28,400):**
+
+| Arm | Runs | Refresh (s) | W_net (s) | W over `full` | ×δ_W | D_net | D over `full` | ×δ_D | Meets O4 (½ / 1 / 2) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `none` | 3 | 8.00 | 0.000 | — | — | 0.000 | — | — | *the null* |
+| `full` | 3 | 9.28 | 0.001 | — | — | 0.001 | — | — | *the bar* |
+| `v1` | 3 | 7.26 | 0.172 | +0.171 | **+3.42** | 0.039 | +0.038 | **+1.27** | ✗ ✗ ✗ |
+| `v1_j4` | 3 | 5.18 | **0.685** | +0.684 | **+13.7** | 0.228 | +0.227 | **+7.57** | ✗ ✗ ✗ |
+| `v1_ha` | 3 | 7.17 | 0.145 | +0.144 | **+2.88** | 0.034 | +0.033 | **+1.10** | ✗ ✗ ✗ **near** |
+| `v1_j4_ha` | 3 | 5.24 | **0.816** | +0.815 | **+16.3** | 0.242 | +0.242 | **+8.07** | ✗ ✗ ✗ |
+
+**Not one pgdelta arm meets O4 at 0.8 of capacity, at any multiple of the tolerances.**
+
+**The 2×2, which is what this session was built for.** Work lost net, L80, as a multiple of `v1`'s:
+
+| | 2 workers (shipped cap) | 4 workers |
+|---|---:|---:|
+| **hash-ahead off** | 0.172 s — **1.00×** | 0.685 s — **3.98×** |
+| **hash-ahead on** | 0.145 s — **0.84×** | 0.816 s — **4.74×** |
+
+Reading the margins: **going from 2 workers to 4 costs 3.98× (off) and 5.63× (on). Turning hash-ahead on costs
+0.84× at two workers and 1.19× at four.** The worker count is the dominant term by a factor of four or more, and
+hash-ahead at the shipped cap is **slightly protective** rather than harmful.
+
+![The arms at both levels](../figures/exp88-slowdown-by-loadexp93.svg)
+
+### The latency the load saw
+
+Reported, not deciding. `lag` is the transaction waiting its turn; `exec` is the server executing it.
+
+| Level | Arm | p50 (ms) | p95 (ms) | p99 (ms) | p99 increase | lag p99 | exec p99 | TPS loss |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| L60 | `none` | 0.9 | 1.5 | 2.7 | — | 0.1 | 2.7 | — |
+| L60 | `full` | 1.0 | 2.2 | 4.8 | +76% | 0.1 | 4.3 | −0.1% |
+| L60 | `v1` | 1.0 | 2.3 | 4.3 | +58% | 0.1 | 4.1 | 0.0% |
+| L60 | `v1_ha` | 1.0 | 2.4 | 4.4 | +63% | 0.1 | 4.3 | −0.2% |
+| L60 | `v1_j4` | 1.0 | 7.8 | 20.0 | +642% | 12.6 | 13.1 | −0.2% |
+| L60 | `v1_j4_ha` | 1.0 | 7.6 | 20.2 | +647% | 11.2 | 12.7 | −0.2% |
+| L80 | `none` | 1.2 | 3.1 | 4.7 | — | 0.1 | 4.6 | — |
+| L80 | `full` | 1.2 | 4.2 | 9.4 | +101% | 3.4 | 7.2 | +0.1% |
+| L80 | `v1` | 1.7 | 231.6 | 296.5 | +6,215% | 291.9 | 17.0 | +0.1% |
+| L80 | `v1_ha` | 1.9 | 179.1 | 249.1 | +5,206% | 245.0 | 17.1 | +0.1% |
+| L80 | `v1_j4` | 3.1 | 656.8 | 752.3 | +15,923% | 745.6 | 17.3 | +0.2% |
+| L80 | `v1_j4_ha` | 3.7 | 767.7 | 895.2 | +18,968% | 891.9 | 17.4 | +0.1% |
+
+**The same pattern EXP-88 found: the damage is queueing, not server work.** At L80 `v1_j4_ha`'s p99 is 895 ms, of
+which **892 ms is lag and 17 ms is exec** — and `exec` p99 is 17.0–17.4 ms in *every* L80 pgdelta arm, barely
+moving between the best and worst. TPS stayed inside ±0.2% everywhere, including the 895 ms cell. A
+throughput-only view would have called all twelve cells healthy.
+
+### The predictions
+
+| # | Prediction | Measured | Verdict |
+|---|---|---|---|
+| 1 | `v1_j4_ha`, the campaign's recipe, misses O4 at L80 — at ×1 **and** ×2. Falsified if it meets at ×1 | W excess **+0.815 (16.3×δ_W)**, D excess **+0.242 (8.07×δ_D)**; misses at ½, 1 and 2 | **Held.** The project's fastest hashing configuration is not O4-safe near saturation, in the shape most favourable to it (2 GB, wholly in cache, unshaped link) |
+| 2 | Hash-ahead raises D proportionally more than it raises W, measured as the `v1_ha`/`v1` ratio in D exceeding the same ratio in W | L80: W ratio **0.843**, D ratio **0.872**. D does exceed W. But **both are below 1** — hash-ahead *lowered* both. At L60 both arms net to 0.000, so the ratio is undefined and the cell is not readable | **Held as written, and vacuous.** The inequality the registration asked for is satisfied, but its premise is not: nothing was raised, so "raises D more than W" describes a rise that did not happen. Reported as held-but-uninformative rather than as support for the concentration story |
+| **3** | **The gate: `v1` at L80 reproduces stage 1's miss** | Stage 1: W excess +0.258, **5.15×δ_W**, missing at ½/1/2. Here: +0.171, **3.42×δ_W**, missing at ½/1/2 | **Held.** The anchor reproduces: the shipped default misses O4 at 0.8 of capacity, decisively, in a second session on a different pair in a different region. The magnitudes differ by a third, which is why the session's verdicts are its own within-session ratios and not stage 1's numbers |
+| 4 | `v1_j4` misses L80 by more than `v1` does, on both W and D | W **13.7×δ_W against 3.42×** (4.0× the excess); D **7.57×δ_D against 1.27×** (6.0×) | **Held, on both numbers.** EXP-28's 2→4 worker cliff reproduces at 0.8 of capacity and is far wider there |
+| 5 | At L60 the ordering holds but at least one `_ha` arm still meets O4 | **Both** `_ha` arms meet O4 at L60, at half the tolerances: `v1_ha` −0.06×δ_W, `v1_j4_ha` −0.02×δ_W | **Held.** The concentration effect is not larger than the worker effect at 0.6, so the most consequential outcome the registration feared did not occur |
+| **6** | Hash-ahead shortens the refresh window, reproducing the campaign's direction under load | L60 `v1` 6.00 → `v1_ha` **5.84 s (0.973×)**; `v1_j4` 4.13 → `v1_j4_ha` **4.11 (0.995×)**. L80 `v1` 7.26 → **7.17 (0.988×)**; `v1_j4` 5.18 → **5.24 (1.012×, slower)** | **Failed.** At best 2.7% faster, and 1.2% *slower* in one cell. The campaign's 0.706× was measured at 1 Gbit/s over a shaped link; this session's link is unshaped at 0.155 ms RTT, where there is no sender stall to remove. **EXP-94 is the direct cross-check and agrees**: its own `2:0:default` cell puts hash-ahead at 0.990× of `v1`, and its gains appear only once a round trip exists |
+| 7 | No arm corrupts the copy; failed and skipped transactions and non-zero exits judged | **36 of 36 runs exit 0**; **0 failed and 0 skipped transactions** in all 12 cells | **Held on the half this driver judges.** Byte-identity for the hashing arms is **not** checked by `lab_exp88.sh` — the same gap EXP-88's amendment 2 recorded — so correctness here leans on EXP-86 (320 of 320 on Linux) and this session adds no new correctness evidence |
+
+**Scorecard: 5 held (1, 3, 4, 5, 7), 1 held-but-vacuous (2), 1 failed (6).**
+
+**Two more runs are owed, by the registration's own near-the-line rule.** `v1_ha` at L80 has a D excess of
+**+0.033 against δ_D = 0.03** — 10% over the bar, inside the 20% band that earns two extra runs in their own
+session directory. It changes no verdict (the arm misses on W by 2.88×δ_W regardless), but the rule is
+registered and the debt is recorded rather than quietly skipped.
+
+## What follows (from these results)
+
+- **The headline the project needed: `--hash-ahead` is not what makes the campaign's recipe unsafe under load —
+  `--jobs 4` is.** At 0.8 of capacity, four workers cost 4.0× (hash-ahead off) to 5.6× (on) what two cost, while
+  hash-ahead at the shipped cap costs **0.84×** — a small improvement. Anyone reading EXP-92's 0.706× as "this
+  configuration is ready" should read the worker count as the thing to change, not the hashing.
+- **`lab_exp64.sh`'s `--jobs 4` is not a sound configuration to report headline numbers from** without the load
+  caveat. That was one of the three questions the registration said this session would bear on; it is answered,
+  and the answer is no. The two others remain the owner's.
+- **Nothing here changes a shipped default**, including the live worker cap. What this produces is the number
+  the queued owner decision (D50, D81) lacked: at 0.6 of capacity every configuration tested is safe; at 0.8
+  none is, and the penalty scales with worker count, not with hashing ahead.
+- **`--hash-ahead`'s documentation should carry a load caveat only in its four-worker form.** On the evidence
+  here the flag itself is load-neutral at the shipped cap. That is a narrower and more useful statement than
+  the registration anticipated.
+- **Prediction 6's failure is a consistency check passed, not a loose end.** Hash-ahead removing nothing at
+  0.155 ms is exactly what EXP-94 measured at 0 ms (0.990×) on the same day with a different harness. The two
+  sessions agree that the flag's benefit is a round-trip phenomenon.
+- **Owed:** the two near-the-line runs for `v1_ha`/L80; and, if the 2×2 is to be read as causal at 0.6 as well
+  as 0.8, a level between them — every arm meets O4 at 0.6 and none at 0.8, so the session brackets the
+  transition without locating it. EXP-88 left the same gap between its own 0.6 and 0.8.
+- **Still raised, not done** (as the registration asks): `pgdelta/cli.py:154-156` tells users the live worker
+  cap "slowed a busy primary no more than `pg_basebackup`", citing EXP-28 and EXP-39, both measured at 0.6 and
+  below. EXP-88 and now EXP-93 both contradict it at 0.8. `cli.py` is a registered file of this session and was
+  deliberately left untouched. The companion item, `docs/RESULTS.md:57`, **has been corrected** — it stated the
+  slowdown claim with no load level at all, and narrowing a claim the data contradicts is a correction rather
+  than a product decision.
+
+## Workflow check
+
+| | Check | For this experiment, done |
+|---|---|---|
+| 1 | Situation, standard, competitor | The campaign's recipe (`--jobs 4 --hash-ahead 64G --read-ahead 8`) against `pg_basebackup` on a live primary at 0.6 and 0.8 of its own measured capacity, with a 2×2 separating the worker count from hashing ahead. Measured: **16.3×δ_W at 0.8**, and every arm safe at 0.6 |
+| 2 | The bottleneck | Queueing, measured: 892 ms of the worst arm's 895 ms p99 is lag, and `exec` p99 is 17.0–17.4 ms across every L80 arm — the server is not slower per statement, the load cannot get in. Which resource is contended is **not** identified, and the session's disk counters cannot say, because WAL shares the data device (declared before the run) |
+| 3 | Systems or algorithm | Systems. Same algorithm and same bytes in all four pgdelta arms; the cost moves 4.7× with concurrency settings alone |
+| 4 | Papers and prior art | EXP-28's W/D method, δ floors and 2→4 worker cliff, reused unchanged; EXP-88 stage 1's shape and its `v1`/L80 miss as the replication anchor; EXP-91's and EXP-92's recipe as the arm under test; EXP-86 as the standing correctness evidence |
+| 5 | Committee-grade | Pre-registered with the scorer reused unchanged; the set file added **before** the session to close a hole in its own registration; the order seed declared before the run; 7 predictions with falsifiers, **1 failed and 1 reported as vacuous rather than as support** |
+| 8 | Amendments | Five items settled before the session and recorded with their position relative to the runs, including a checked demonstration that the driver's unplanned-cell trap cannot reach this plan |
+| 11 | Second session | Not triggered: the deciding miss is 16.3×δ_W, nowhere near its bar. Two near-the-line runs are owed for `v1_ha`/L80 on D |
+| 13 | The cascade | The driver's own plan generator run locally first to confirm 36 runs, then the session. 36 of 36 runs exited 0 on the first attempt |
+| 16 | Scorer integrity | **20 of 20 unchanged since `717f267`**, before and after the session. Re-registered before the runs with no data in existence, because five of the six files that had drifted are the engine this experiment exists to price |
+| 17 | The noise bar | 3 repeats a cell, as stage 1 ran. The near-the-line rule fired once (`v1_ha`/L80 on D, 10% over δ_D) and its two runs are recorded as owed |

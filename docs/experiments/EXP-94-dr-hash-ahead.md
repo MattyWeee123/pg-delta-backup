@@ -1,7 +1,23 @@
 # EXP-94: Does the sender keeping its stream full remove v1's need for BBR at DR round trips?
 
-Status: **pre-registered November 5, 2026; not yet run.** Registered before any VM exists (rule 16). One fresh
-`n2-standard-8` pair, EXP-13's set (`infra/gcp/sets/exp13.sh`), about 105 minutes.
+Status: **done November 6, 2026 — 222 runs, every one passing. The deciding prediction held, and `--hash-ahead`
+reached BBR's DR verdict rows on plain cubic.** At 120 ms with tuned buffers it took uniform 1% from **30.0 s to
+6.3 s** (`R_fast` 2.851 → 0.599), against BBR's 8.4 s, and its 120 ms row is firmer than BBR's — BBR's is
+provisional under rule 11 and this one is not. It needs no host setting and takes nothing from other flows,
+which BBR does (EXP-26: 81–96% of a shared link).
+
+**Two predictions failed, and they undercut the stated mechanism rather than the result.** The arm is twice as
+fast in **hot** at the longer round trips, where the registered mechanism says there is nothing to run ahead of
+(P3), and it removes about **half** the idle leaf wait, not the predicted three-quarters (P6). The leading
+candidate is `--read-ahead 8`, which the registration dismissed as "documentation, not an extra variable" and
+which rides along with `--hash-ahead`; it is separable with a 12-run arm and no code change. So this session
+supports *"`--hash-ahead 64G --read-ahead 8` is the DR fix"* and does **not** support *"keeping the stream full
+is why"*. A **scorer defect** found in this session's own output is declared in [Results](#results); it moved
+four of the seven readings.
+
+Originally **pre-registered November 5, 2026**, before any VM existed (rule 16), and re-registered at
+`af27174` before the session with no run in existence. One fresh `n2-standard-8` pair, EXP-13's set
+(`infra/gcp/sets/exp13.sh`); it took about 105 minutes of scored runs and 2h 05m of VM time.
 
 This is EXP-20's and EXP-24's cells again, with one arm added on each congestion control: v1 with the sender
 hashing ahead of the file it is sending (`--hash-ahead`, EXP-91). It closes gap **G3** of the
@@ -287,4 +303,235 @@ WSL,** even though WSL is what drives `remote.py`.
 
 ## Results
 
-Not yet run.
+**Run November 6, 2026, on one fresh pair, with every arm in the same hour.** The deciding prediction held, and
+`--hash-ahead` reached BBR's DR verdict rows on **plain cubic** — at 120 ms with tuned buffers it is better than
+BBR's, because BBR's row there is provisional and this one is not. Two of the seven predictions failed in ways
+that bear directly on *why*, and they are not folded away: the arm gains where the registered mechanism says it
+should gain nothing, and it removes only about half the stall it was predicted to remove. **A scorer defect
+found while reading the session is declared below**; it changed four of the seven readings.
+
+### The session
+
+| | |
+|---|---|
+| **Pair** | `pgd-dr94-source` / `pgd-dr94-dest`, `n2-standard-8` ×2, 4 local NVMe in RAID 0, ext4 |
+| **Zone** | `us-central1-a` — EXP-13's set (`sets/dr94.sh` sources `sets/exp13.sh`), unchanged |
+| **Image** | `debian-12-bookworm-v20261102`, resolved from the `debian-12` family at session start and pinned with `IMAGE=` |
+| **Platform** | `Intel Cascade Lake` on both VMs, **read back from the live instances**, not assumed from the set file |
+| **Cost guard** | `maxRunDuration` 14,400 s with `instanceTerminationAction STOP`, also read back from both live instances |
+| **Created** | 06:21 UTC. Provisioned 06:24–06:26 (wal-g v3.0.9, SHA-256 matched its published `.sha256`), deployed 06:28:47, SSH set up 06:28:55 |
+| **Smoke** | 06:29:14–06:31:27, scale 5, hot, 1 repeat, `2:0:default` and `2:60:tuned`, order seed 939. **12 of 12 passed** |
+| **Scored runs** | 06:36:16–08:07:19, `done: pass`. **222 runs, every one `pass`**. Order seed 940 |
+| **Fetched** | 08:24:48, verified locally (222 summary rows, 222 per-run records, 186 source stats logs) |
+| **Torn down** | 08:26:11–08:26:42. Project checked afterwards: **0 instances, 0 disks** |
+
+**Total VM time about 2h 05m for the pair**, well inside the 4-hour cap the set imposes.
+
+**The prep step took, and is recorded as the registration asks.** On the source only:
+
+```
+net.ipv4.tcp_allowed_congestion_control = reno cubic bbr
+net.ipv4.tcp_congestion_control         = cubic
+```
+
+The host default stays cubic, so `pg_basebackup`, the parallel copies and every other connection are
+unaffected; only pgdelta's own data socket asks for BBR.
+
+**The emulation, measured in every scored run** (median `minrtt_ms`, and the one-stream link rate):
+
+| Condition | minrtt measured | Link rate |
+|---|---:|---:|
+| `2:0:default` | 0.044 ms | 1.9104 Gbit/s |
+| `2:20:default` | 20.057 ms | 1.9104 Gbit/s |
+| `2:60:default` | 60.056 ms | 1.9104 Gbit/s |
+| `2:60:tuned` | 60.000 ms | 1.9104 Gbit/s |
+| `2:120:default` | 120.059 ms | 1.9104 Gbit/s |
+| `2:120:tuned` | 120.057 ms | 1.9104 Gbit/s |
+
+1.9104 Gbit/s against a nominal 2, identically in all six cells.
+
+**The BBR gate passed, and it is the reason prediction 4 is readable at all: 72 of 72 runs that asked for BBR
+got it,** with no `setsockopt` error. The smoke had already shown 4 of 4 before the session spent an hour.
+
+**The data:** [data/exp94-cells.csv](data/exp94-cells.csv) (the predictions),
+[exp20-cellsexp94-cubic.csv](data/exp20-cellsexp94-cubic.csv) and the `-bbr`, `-ha`, `-bbr-ha` tags beside it
+(the DR verdict rows, one file per judged arm); the raw session in `results/exp04/sets/dr94/exp94` (38 MB, not
+in git).
+
+### Rule 16: a scorer defect, found in this session's own output and declared
+
+`analysis/integrity.py check EXP-94` exits 1 and reports:
+
+```
+CHANGED since af27174cf69c: analysis/exp94.py (1 file changed, 8 insertions(+), 2 deletions(-))
+CHANGED since af27174cf69c: tests/test_exp94_analysis.py (1 file changed, 49 insertions(+), 5 deletions(-))
+EXP-94: 30 of 32 files unchanged since af27174cf69c
+```
+
+**What was wrong.** `exp94.runs()` globbed `runs/*.json`. `run_exp04.py` writes `runs/<sweep>/<name>.json`, one
+level deeper. So against the real session it returned **0 of 222 records**, and because predictions 5, 6 and 7
+read those records — and prediction 1's deciding-cell selection is prediction 7's rule applied to them — the
+first scoring run printed:
+
+- P5, P6, P7: `(no cell has both arms passing)`;
+- and, worse because it looks like a finding rather than an absence, **`deciding cells for P1: none — cubic did
+  not enter the slow mode in any cell of this session`**. Cubic was in the slow mode in two cells. The scorer
+  had simply read nothing.
+
+**Why 48 passing tests said nothing about it.** `tests/test_exp94_analysis.py`'s fixture wrote the run records
+flat, under a docstring claiming it built "a sweep directory **as run_exp04 leaves one**". The fixture agreed
+with the bug, so the tests could only ever confirm it. This is the second instance of this exact failure mode
+in the project — EXP-88's amendment 4 recorded the first, and its wording fits here unchanged: *the test that
+asserted the old wording was itself encoding the bug.*
+
+**What was changed, and what it moved.** Three edits, all after the data existed, so all post-hoc and none of
+them re-registered:
+
+1. `analysis/exp94.py`: the glob reads `runs/*/*.json`.
+2. `tests/test_exp94_analysis.py`: the fixture writes the nested layout `run_exp04.py` actually writes, and a
+   new `RunRecordLayout` case asserts both directions — that records are read from the per-sweep directory, and
+   that a flat layout yields 0, which is the shape of the bug.
+3. `tests/test_exp94_analysis.py`: `test_the_scored_cells_go_where_out_says_not_into_docs` asserted
+   `docs/experiments/data/exp94-cells.csv` **does not exist**, which can only hold before this experiment is
+   ever scored. It now asserts the call did not create or rewrite that file, which is the property it was
+   written to protect. Without this it would fail for the one reason that is not a defect.
+
+**50 tests pass** after the change (48 before, plus the 2 new layout cases).
+
+| Reading | As the registered scorer printed it | Corrected |
+|---|---|---|
+| Records read | **0** | 222 |
+| P1's deciding cells | "none — cubic did not enter the slow mode" | **`2:20:default` and `2:120:tuned`** |
+| **P1 (deciding)** | nothing to decide; all cells reported | **held at both deciding cells** |
+| P5 | no cell | **held, 1.000 at all six** |
+| P6 | no cell | **failed at all six** |
+| P7 | no cell | **held, both halves** |
+| P2, P3, P4, BBR gate | unaffected — they read `summary.csv` and the source stats logs | identical |
+
+**The registration is deliberately not refreshed at the corrected commit.** Re-registering would record this
+data as scored by code written after it, and would erase the fact that the first reading of this session was
+wrong. The check exiting 1 with both files accounted for is the honest record. Every number below is the
+corrected scorer's, and the table above says exactly which ones the correction moved.
+
+### The DR verdict rows, by arm
+
+`analysis/exp20.py`, run once per v1 arm, unchanged from how EXP-20 and EXP-24 were scored. This is the
+headline table.
+
+| Arm | 20 ms | 60 ms | 120 ms |
+|---|---|---|---|
+| `v1`, cubic | 3. Local changes only | 2. Holds with tuned buffers | 3. Local changes only |
+| `v1`, BBR | **1. Holds as shipped** | 2. Holds with tuned buffers | 2. Holds with tuned buffers *(provisional: a deciding ratio within 20% of its threshold)* |
+| **`v1` + `--hash-ahead`, cubic** | **1. Holds as shipped** | 2. Holds with tuned buffers | **2. Holds with tuned buffers** |
+| `v1` + `--hash-ahead` + BBR | **1. Holds as shipped** | 2. Holds with tuned buffers | 2. Holds with tuned buffers |
+
+**`--hash-ahead` on plain cubic reaches every row BBR reaches, and its 120 ms row is firmer than BBR's.** BBR's
+is provisional under rule 11 — a deciding ratio within 20% of its threshold, which owes a second session.
+Hash-ahead's is not provisional. In all four arms the qualifier "v1 faster than one `pg_basebackup` stream on
+default hosts" is yes at 60 and 120 ms; at 20 ms it is no for cubic `v1` alone and yes for the other three.
+
+### Uniform 1%: what the arms cost, and `R_fast`
+
+Medians of 3 runs. `R_fast` is v1 against the faster of the parallel copies, EXP-20's own denominator.
+
+| Condition | `v1` cubic | `v1` BBR | **`_ha` cubic** | `_bbr_ha` | `full` | `R_fast` cubic → `_ha` |
+|---|---:|---:|---:|---:|---:|---|
+| `2:0:default` | 4.661 | 4.646 | 4.616 | 4.613 | 10.296 | 0.501 → 0.496 |
+| `2:20:default` | 15.828 | 6.722 | **6.673** | 6.471 | 16.117 | **1.636 → 0.690** |
+| `2:60:default` | 24.755 | 15.943 | **14.954** | 15.129 | 43.966 | **2.518 → 1.521** |
+| `2:120:default` | 37.455 | 31.823 | **27.546** | 28.764 | 87.003 | **3.312 → 2.436** |
+| `2:60:tuned` | 6.269 | 6.159 | **5.311** | 5.273 | 11.586 | 0.635 → 0.538 |
+| `2:120:tuned` | 30.015 | 8.433 | **6.311** | 6.421 | 13.248 | **2.851 → 0.599** |
+
+The largest single effect is `2:120:tuned`: **30.0 s → 6.3 s**, `R_fast` 2.851 → 0.599, a cell where cubic `v1`
+was 2.9× the parallel copy and hash-ahead puts it at 0.6×. BBR gets 8.4 s there; hash-ahead gets 6.3 s.
+
+![The arms at each condition](../figures/exp94-hash-ahead.svg)
+
+### The predictions
+
+| # | Prediction | Measured | Verdict |
+|---|---|---|---|
+| **1** | **(Deciding.)** uniform 1%: `_ha` ≤ **0.80×** `v1`, at the cells where cubic is in the slow mode in this session | Deciding cells, selected by prediction 7's registered rule: **`2:20:default` 0.422** and **`2:120:tuned` 0.210**. Reported elsewhere: 0.990 (`2:0`), 0.604 (`2:60:default`), 0.735 (`2:120:default`), 0.847 (`2:60:tuned`) | **Held, at both deciding cells, with room** — 0.422 and 0.210 against a 0.80 bar. EXP-21's own proposed fix works at DR round trips |
+| 2 | Rule 17's gate: this session's `full` within **1%** of EXP-24's in each shared cell | **9 of 12 held.** Failed: hot `2:60:default` 0.982, uniform `2:60:default` 0.982, hot `2:120:tuned` 1.014 | **Failed in 3 of 12 cells.** The registered consequence applies to those cells: **no cross-session claim is made at `2:60:default` or at hot `2:120:tuned`**, and EXP-20's and EXP-24's numbers there are history, not comparanda. It does **not** touch the arm-against-arm result: all seven arms ran in the same hour on the same pair, which is what prediction 1 compares |
+| 3 | Hot is the negative control: `_ha` within **1.03×** of `v1` at every condition | 1.006 (`2:0`, a tie inside the noise band), then **0.774, 0.544, 0.527, 0.696, 0.477.** In seconds, `2:120:tuned` hot: 6.123 → 2.919 | **Failed, and this is the most informative failure in the session.** Hash-ahead makes hot **twice as fast** at the longer round trips, where few pages change and the registered mechanism says there is nothing to run ahead of. Its own falsifier text applies: *"A gain in hot would mean the arm is measuring something other than the stall, and would call the deciding reading into question."* |
+| 4 | uniform 1%: `_bbr_ha` within **1.05×** of `_bbr` at every condition | 0.993 and 0.963 at `2:0` and `2:20` (held); **0.949, 0.904, 0.856, 0.761** at the four longer-RTT cells | **Held at the two short cells; a further gain at the four longer ones.** Reported as the registration asks — as a new finding, not folded into prediction 1: at 60 ms and beyond the two fixes address **different** stalls, and hash-ahead still has something to add on top of BBR |
+| 5 | In every `_ha` cell the source's disk read bytes over the timed phases within **1.05×** the matching `v1` cell | **1.000 at all six cells** | **Held, exactly.** EXP-91's cost — the source reading the pages it sends a second time, on 8 GB VMs with the planner 11–16 GB ahead — does not reappear at 2.1 GB on 32 GB. The page cache absorbs it, as predicted |
+| **6** | **The mechanism:** uniform median `leaf_wait_idle_s` of `_ha` ≤ **0.25×** `v1`'s at every condition | **2.462, 0.819, 0.512, 0.443, 0.422, 0.379** — failed at all six against the 0.25 bar | **Failed on magnitude, held in direction.** The absolutes matter: `v1`'s idle leaf wait scales with the round trip exactly as the stall model says (0.005 s at `2:0`, 0.271 at 20 ms, 0.836 at 60 ms, 1.914 at 120 ms, 2.237 at `2:120:tuned`), and `_ha` roughly **halves** it (0.848 s at `2:120:tuned`). The 2.462 at `2:0:default` is 0.0053 s against 0.0130 s — noise on a cell with no stall to remove, and it should not be read as a 2.5× regression. So hash-ahead does remove idle leaf wait, about half of it, not the three-quarters registered |
+| 7 | The slow mode by EXP-23's rule: `v1` slow in **≥2 of 3** uniform runs at `2:20:default`; `_ha` in **0 of 3** | `v1` **2 of 3** (exact 95% interval 9–99%); `_ha` **0 of 3** (0–71%). Both halves as predicted. Reported beyond the prediction: `v1` is also 2 of 3 slow at `2:120:tuned` and 1 of 3 at `2:60:tuned`; **every BBR arm and every `_ha` arm is 0 of 3 in all six cells** | **Held, both halves.** With 3 runs a cell the intervals are wide, which is stated rather than hidden |
+
+**Scorecard: 4 held (1, 5, 7, and 4 at its two short cells), 2 failed (3, 6), 1 failed in 3 of 12 cells (2),
+and 1 new finding (4 at the four longer cells).**
+
+## What the session does not settle (post hoc, not registered)
+
+**Predictions 3 and 6 together say the registered diagnosis is incomplete.** The arm is much faster; the
+reason given for why it would be faster is only partly what is happening. Taken together:
+
+- it gains in **hot**, where the leaf-digest stall has almost nothing to remove (P3);
+- it removes about **half** the idle leaf wait, not the predicted three-quarters (P6);
+- yet at the deciding cells it is **0.42× and 0.21×** `v1` (P1).
+
+**The leading candidate is the flag that rides along.** `pgdelta_direct_inplace_ha` sets exactly two things
+against `pgdelta_direct_inplace` — `hash_ahead: '64G'` and `read_ahead: 8` (`measure.py:304`) — and nothing on
+the receiver, so the arm is not confounded by `--fsync` or verify scope. But the registration dismissed
+`--read-ahead` as "not an independent choice ... naming it is documentation, not an extra variable", because
+`--hash-ahead` turns it on implicitly. That reasoning is fine for *running* the arm and wrong for *attributing*
+its gain: reading 8 files ahead should help whether or not many pages changed, which is exactly the shape of
+the hot result.
+
+**It is separable, cheaply, and the engine already allows it.** `cli.py:_read_ahead` returns an explicit
+`--read-ahead` whenever one is given, with or without `--hash-ahead`, so a `--read-ahead 8`-only arm is
+expressible today with no code change. One arm at `2:120:tuned` and `2:20:default`, hot and uniform, 3 repeats
+— 12 runs, well under an hour of one pair — would split the gain into the part that is hashing ahead and the
+part that is reading ahead. **Until that runs, this session supports "`--hash-ahead 64G --read-ahead 8` is the
+DR fix" and does not support "keeping the stream full is why".**
+
+Two smaller things worth recording:
+
+- **BBR and hash-ahead are not the same fix past 60 ms** (P4's four cells). If they addressed one stall, adding
+  hash-ahead to BBR would do nothing; it takes `2:120:tuned` from 8.433 s to 6.421 s. Whatever hash-ahead does,
+  BBR does not already do all of it.
+- **`full` at `2:60:default` and `2:120:default` is very slow** — 43.97 s and 87.00 s against 11.59 s and
+  13.25 s with tuned buffers. That is the known default-buffer behaviour of a single stream at a round trip,
+  and it is why `R_F0` and `R_fast` disagree so sharply in those cells. It is EXP-13's result, reproduced, not
+  a new one.
+
+## What follows (from these results)
+
+- **Prediction 1 held, so `--hash-ahead` is the DR fix for scattered changes — and it is the better-behaved of
+  the two.** It needs **no host setting** (BBR needs `tcp_allowed_congestion_control` changed on the source)
+  and it is fair to other flows, which BBR is not: EXP-26 measured BBR taking 81–96% of a shared bottleneck
+  from cubic flows. On plain cubic it reaches every DR row BBR reaches, and its 120 ms row is not provisional.
+- **It is a candidate default and this experiment does not make it one.** Rule 15 owes a held-out session
+  (H9–H12) before any default change, and prediction 3's unexplained hot gain should be resolved first — a
+  default justified by a mechanism that the data does not support is a default that will be wrong in some
+  condition nobody tested. **Proposed order: (1) the `--read-ahead 8`-only arm, 12 runs; (2) the held-out
+  session; (3) the owner's decision.**
+- **Prediction 2 failed in 3 of 12 cells, so G5 stays open for those cells.** EXP-20's and EXP-24's verdicts at
+  `2:60:default` remain attached to the engine they ran on. The 9 cells that held are comparable, and the gate
+  did its job: it told us which cells not to trust rather than letting a 1.8% drift pass as a result.
+- **EXP-21's "what follows" is borne out.** Its proposed fix — keeping the stream full between files — was the
+  project's standing explanation of the DR slowdown, and the arm built from it is decisively faster at DR round
+  trips. What is *not* borne out is that the stated mechanism is the whole of it (P3, P6).
+- **D29 ("hash 4 files ahead") now has its latency reading**, at 64 GiB rather than 4 files, and the idea
+  archive's `--hash-ahead` row gains its DR conditions: 1.9 Gbit/s, 20–120 ms, 2.1 GB, scattered 1% and hot.
+- **Raised, not done:** `pgdelta/cli.py:154-156` tells users the live worker cap "slowed a busy primary no more
+  than `pg_basebackup`", citing EXP-28 and EXP-39 — both measured at 0.6 of capacity and below, and EXP-88 now
+  contradicts it at 0.8. That is user-facing text about a shipped default, so it is the owner's; it is noted
+  here because `cli.py` is a registered file of this session and was deliberately left untouched.
+
+## Workflow check
+
+| | Check | For this experiment, done |
+|---|---|---|
+| 1 | Situation, standard, competitor | v1 with `--hash-ahead 64G --read-ahead 8` against v1 as shipped, v1 with BBR, one `pg_basebackup` stream and the 8- and 16-stream parallel copies, at 0–120 ms. Measured: **0.422× and 0.210× v1 at the two slow-mode cells**, and BBR's DR rows on plain cubic |
+| 2 | The bottleneck | Measured directly, not inferred: `leaf_wait_idle_s` — the sender blocked with an idle socket — scales 0.005 → 2.237 s with the round trip and is roughly halved by the arm. **Half, not the registered three-quarters**, and the hot gain says part of the benefit is not this stall at all |
+| 3 | Systems or algorithm | Systems: same bytes, same hash, same pages; only when the sender hashes and reads changes |
+| 4 | Papers and prior art | EXP-21's proposed fix, tested at last; EXP-23's slow-mode rule and exact interval reused unchanged; EXP-20's and EXP-24's conditions, arms and denominators reused; EXP-91's `hashA` window value kept because EXP-92 measured a smaller one as slower; EXP-26's fairness result is why cubic mattering is the point |
+| 5 | Committee-grade | Pre-registered with the scorer committed first and re-registered before the session with no run in existence; 7 predictions with falsifiers, **2 failed and reported as failures that undercut the stated mechanism**; the deciding cells chosen by a registered mechanical rule, not by outcome; a scorer defect found in the session's own output, declared with a before/after table rather than quietly fixed |
+| 11 | Second session | Not triggered for prediction 1 (0.422 and 0.210 against 0.80). Noted for BBR: its own 120 ms row is provisional under this rule, which is why hash-ahead's firmer row matters |
+| 13 | The cascade | 50 plan and analysis tests, then a 12-run smoke read before the session spent an hour, then 222 scored runs. The smoke caught nothing this time and would have caught a missing BBR setting, which is what it is for |
+| 15 | Held-out workloads | Owed before any default change: H9–H12, and now also the `--read-ahead`-only arm |
+| 16 | Scorer integrity | **Exits 1: 30 of 32 unchanged.** Both changes are this write-up's own declared post-hoc corrections — the record glob and the fixture that agreed with it. Registration deliberately left at `af27174`. The BBR gate is the other half of integrity here: **72 of 72** runs that asked for BBR got it, so prediction 4 is a comparison and not a tautology |
+| 17 | The noise bar | 3 repeats a cell. Rule 17's cross-session control is prediction 2, and it **failed in 3 of 12 cells**, which restricts the cross-session reading to the other 9 |

@@ -82,13 +82,19 @@ def cells(sweep) -> dict:
 
 
 def runs(sweep) -> list:
-    """Every passing run's record, from runs/*.json - what summary.csv does not carry as a column.
+    """Every passing run's record, from runs/<sweep>/<name>.json - what summary.csv does not carry as a column.
 
     The source's disk counters and the sender's protocol timers are in each record; only dest's disk bytes
     reach the CSV (measure.CSV_FIELDS), so predictions 5, 6 and 7 read the records.
+
+    CORRECTED AFTER THE SESSION, declared in the write-up (rule 16). This globbed `runs/*.json` and
+    run_exp04.py writes `runs/<sweep>/<name>.json`, one level deeper - so it returned **zero** records against
+    the real session, which silently emptied predictions 5, 6 and 7 and made prediction 1's deciding-cell
+    selection "no cell is in the slow mode" rather than naming the two cells that were. The registered tests
+    could not catch it: their fixture wrote the flat layout its docstring claimed run_exp04 leaves.
     """
     out = []
-    for path in sorted(glob.glob(str(Path(sweep) / 'runs' / '*.json'))):
+    for path in sorted(glob.glob(str(Path(sweep) / 'runs' / '*' / '*.json'))):
         with open(path, encoding='utf-8') as stream:
             record = json.load(stream)
         if record.get('status') != 'pass':

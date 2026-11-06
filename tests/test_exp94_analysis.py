@@ -21,12 +21,21 @@ import exp94  # noqa: E402
 
 V1, BBR = 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_bbr'
 HA, BBR_HA = 'pgdelta_direct_inplace_ha', 'pgdelta_direct_inplace_bbr_ha'
+# The per-sweep directory run_exp04.py groups run records under. Named like the real session's
+# (`00-hot-f0.01-s70`) so the fixture's layout is the layout the scorer has to read.
+SWEEP = '00-hot-f0.01-s70'
 
 
 def write_sweep(root: Path, records, link_gbit=2.0):
-    """A sweep directory as run_exp04 leaves one: summary.csv, runs/<name>.json and a trial with link tests."""
+    """A sweep directory as run_exp04 leaves one: summary.csv, runs/<sweep>/<name>.json, a trial with link tests.
+
+    The run records go one level deeper than this fixture first wrote them. run_exp04.py groups them by sweep
+    (`runs/00-hot-f0.01-s70/r0-...json`), and writing them flat here is what let `exp94.runs()` ship globbing
+    `runs/*.json`: the fixture agreed with the bug, so 48 passing tests said nothing about whether the scorer
+    could read a real session. It could not - it read zero records from EXP-94's own 222.
+    """
     root.mkdir(parents=True, exist_ok=True)
-    (root / 'runs').mkdir(exist_ok=True)
+    (root / 'runs' / SWEEP).mkdir(parents=True, exist_ok=True)
     (root / 'trials').mkdir(exist_ok=True)
     fields = ['run_name', 'pattern', 'speed', 'method', 'repeat', 'status', 'total_s']
     with open(root / 'summary.csv', 'w', newline='', encoding='utf-8') as stream:
@@ -44,7 +53,7 @@ def write_sweep(root: Path, records, link_gbit=2.0):
                               'leaf_wait_idle_s': record.get('leaf_wait_idle_s', 0.0)},
             'phases': {'transfer': {'disk': {'source': {'md0': {'read_bytes': record.get('source_read', 1 << 30)}}}}},
         }
-        (root / 'runs' / f"{record['run_name']}.json").write_text(json.dumps(run), encoding='utf-8')
+        (root / 'runs' / SWEEP / f"{record['run_name']}.json").write_text(json.dumps(run), encoding='utf-8')
     (root / 'trials' / 't.json').write_text(json.dumps({
         'visits': [{'condition': {'label': label}, 'link_tests': [{'steady_gbit': link_gbit}]}
                    for label in sorted({record['speed'] for record in records})]}), encoding='utf-8')
@@ -53,6 +62,33 @@ def write_sweep(root: Path, records, link_gbit=2.0):
 def record(pattern, speed, method, repeat, total_s, **extra):
     return {'run_name': f'{pattern}-{speed}-{method}-r{repeat}'.replace(':', '_'), 'pattern': pattern,
             'speed': speed, 'method': method, 'repeat': repeat, 'status': 'pass', 'total_s': total_s, **extra}
+
+
+class RunRecordLayout(unittest.TestCase):
+    """runs() has to read the layout run_exp04.py writes, and nothing here may assume a flatter one.
+
+    EXP-94's session is what this is for: the scorer globbed one level too shallow, read 0 of 222 records, and
+    reported predictions 5, 6 and 7 empty and prediction 1 undecidable - while 48 tests passed, because the
+    fixture wrote the shallow layout too. The assertion is therefore on the path, not only on the count.
+    """
+
+    def setUp(self):
+        self.tmp = Path(self.enterContext(__import__('tempfile').TemporaryDirectory()))
+        self.sweep = self.tmp / 'exp94'
+
+    def test_records_are_read_from_the_per_sweep_directory(self):
+        write_sweep(self.sweep, [record('uniform', '2:60:tuned', V1, k, 20.0) for k in range(3)])
+        self.assertTrue((self.sweep / 'runs' / SWEEP).is_dir(), 'the fixture must write the nested layout')
+        self.assertEqual([], list((self.sweep / 'runs').glob('*.json')), 'nothing may be written flat')
+        self.assertEqual(3, len(exp94.runs(self.sweep)))
+
+    def test_a_flat_layout_is_not_silently_read_as_an_empty_session(self):
+        """A sweep with records only in the old flat place yields 0, and that is the shape of the bug."""
+        write_sweep(self.sweep, [record('uniform', '2:60:tuned', V1, k, 20.0) for k in range(3)])
+        for path in (self.sweep / 'runs' / SWEEP).glob('*.json'):
+            path.rename(self.sweep / 'runs' / path.name)
+        (self.sweep / 'runs' / SWEEP).rmdir()
+        self.assertEqual([], exp94.runs(self.sweep))
 
 
 class Medians(unittest.TestCase):
@@ -239,7 +275,14 @@ class SlowMode(unittest.TestCase):
 
     def test_the_scored_cells_go_where_out_says_not_into_docs(self):
         """A smoke run over synthetic records wrote fake numbers into docs/experiments/data once; --out exists
-        so that cannot happen again."""
+        so that cannot happen again.
+
+        Asserted as "this call did not create or change the docs file", not as "the docs file is absent": once
+        EXP-94 is actually scored the file exists for good, and the absence form would then fail for the one
+        reason that is not a defect. The intent is unchanged - synthetic numbers must not reach docs.
+        """
+        docs = ROOT / 'docs' / 'experiments' / 'data' / 'exp94-cells.csv'
+        before = docs.read_bytes() if docs.exists() else None
         rows = [record('uniform', '2:60:tuned', V1, repeat, 25.0) for repeat in (1, 2, 3)]
         rows += [record('uniform', '2:60:tuned', HA, repeat, 20.0) for repeat in (1, 2, 3)]
         write_sweep(self.sweep, rows)
@@ -247,7 +290,8 @@ class SlowMode(unittest.TestCase):
         figdir.mkdir()
         self.assertEqual(exp94.main(['--sweep', str(self.sweep), '--out', str(out), '--figdir', str(figdir)]), 0)
         self.assertTrue(out.exists())
-        self.assertFalse((ROOT / 'docs' / 'experiments' / 'data' / 'exp94-cells.csv').exists())
+        after = docs.read_bytes() if docs.exists() else None
+        self.assertEqual(before, after, 'scoring with --out must not create or rewrite the docs CSV')
 
     def test_the_link_rates_are_read_the_same_way_exp23_reads_them(self):
         """The file reading is local (exp23.py leaves its trial files open), so it must agree with exp23's."""
