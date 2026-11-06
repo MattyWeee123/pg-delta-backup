@@ -486,7 +486,7 @@
   }
  },
  "EXP-94": {
-  "commit": "918c58ea4fc2",
+  "commit": "af27174cf69c",
   "files": {
    "analysis/exp20.py": "6697474e1f8d8522c20fc1803dbe58345e8886a1c7aba0fc5b3668a1a1e7cff0",
    "analysis/exp23.py": "5b43975346631ce1a2a2553cfec4d81ba1ee66fef02b4f15973817dffc7dbc4f",
@@ -501,7 +501,7 @@
    "experiments/network/run_exp04.py": "084139191fe4039ba64db10419aba14ee686d02d62ceefcced4154234073c198",
    "experiments/network/source_cluster.py": "e8f12011c6ca9fb24fc67c47f7e9ad6282749cc691c37e4ba7cafb5bc8a8e59a",
    "infra/gcp/config.sh": "4cc7670f13cc64318e5bb853c241941d5ca8d14c99dc5bd1dca8481f88e2a7b2",
-   "infra/gcp/create.sh": "79913b8615f32cd5be12ffd580b4b418315ed26fde3b21c973ac057e6ae1577e",
+   "infra/gcp/create.sh": "f5b2875fdbf4c0124f9e19f94d822d44258a7e72f0ea7cbdbf8dcd32aed60f9a",
    "infra/gcp/sets/dr94.sh": "d07e987c959379af83211da5edd75cab946f85bcae14be6652cd956643fef71c",
    "infra/gcp/sets/exp13.sh": "cde6a261a3826ba2f7d7b8573832d4aef0452c435826d57f32e0f04e4ccf3766",
    "infra/gcp/startup.sh": "b8c8d3426acaf050e31eb04b0f89df776e6cf3b1faab1afd59c4a69cb12d9491",

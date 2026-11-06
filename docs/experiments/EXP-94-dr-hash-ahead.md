@@ -265,6 +265,26 @@ files, so both are registered.
 `analysis/exp94.py` to the numbers written above: loosening a bar without the document disagreeing should not
 be possible, and a changed test hash is how that would show.
 
+### Re-registered at `af27174` before the session, with no scored data in existence (rule 16)
+
+The first registration recorded the 32 files at `918c58e`. One of them then changed: `infra/gcp/create.sh` at
+`6965d97`, "the self-termination guard could not create a local-SSD VM" — the bug that stopped this very
+session's pair from being created at all, since `dr94.sh` asks for four local NVMe SSDs *and* a 4-hour cap.
+`check` reported 31 of 32.
+
+Re-registering is legitimate here and only here: **no EXP-94 run exists**. The first attempt created a pair and
+provisioned it, but the gcloud credential expired before the smoke, the `MAX_RUN_HOURS=4` cap stopped the pair
+unattended at about 00:40 UTC on 6 November, and both VMs and their boot disks were deleted. Not one scored run
+was produced, so there is nothing for a re-registration to retrofit. `check EXP-94` now reports **32 of 32
+unchanged since `af27174`**, and that is the commit this session's data must be read against.
+
+**The test environment, recorded because it hid a false alarm.** `tests/test_exp94_plan.py` and
+`tests/test_exp94_analysis.py` are **48 tests, all passing** on Python 3.11 (the Debian 12 image the VMs run,
+and `tests/docker`). On Python 3.10 — which is what WSL's Ubuntu 22.04 has, and what drives the session from
+this laptop — 33 of the 48 fail in `setUp` on `TestCase.enterContext`, added in 3.11. That is the harness
+version, not the analysis. **Consequence for this session: the scoring runs in the Docker image, never in
+WSL,** even though WSL is what drives `remote.py`.
+
 ## Results
 
 Not yet run.
