@@ -1,6 +1,14 @@
 # EXP-88: On a loaded primary, at three load levels and beyond memory, does pgdelta still cost the load no more than `pg_basebackup` — and what does the WAL-summary fast path cost?
 
-Status: **pre-registered October 30, 2026, before any run and before any VM for it exists.** Three VMs per
+Status: **done November 6, 2026 — 77 runs over three stages, scored. The deciding prediction failed in every
+shape.** `v1` at the shipped two-worker default meets O4 at 0.3 and 0.6 of the source's measured capacity, and
+**misses it at 0.8** in all three cluster shapes, by 5× to 31× the registered tolerance. The worst cell is the
+one that looks easiest — 18 GB comfortably in page cache — where the refresh runs fastest and costs the load
+most. The registered consequence, a load-aware worker cap, is a product change and is the owner's. `v1_fast`
+never ran (amendment 1), so the fast path's cost to a live load is still unpriced, and prediction 7 turned out
+unrunnable as written. Full numbers in [Results](#results).
+
+Originally **pre-registered October 30, 2026, before any run and before any VM for it existed.** Three VMs per
 session (source, dest, client), three cluster shapes, about 9–12 hours of VM time in all. It serves the three
 slowdown gaps [RESULTS](../RESULTS.md) lists as open — a moderate load, a large dirty set, a source near
 saturation — and prices two things that have never been measured: the fast path's cost to a live load, and the
@@ -644,3 +652,302 @@ elsewhere. Treat them as the right order of magnitude, not a quotation.
 **Quota: nothing to raise.** In `us-east1`, checked October 30, 2026: `N2_CPUS` 200 free (every stage uses 20),
 `SSD_TOTAL_GB` 500 free (peak need now about 250 GB at 18 GB clusters, down from 450),
 `LOCAL_SSD_TOTAL_GB` unlimited (stage 1's data disk), `INSTANCES` 24 free, `IN_USE_ADDRESSES` 8 free.
+
+---
+
+## Results
+
+**The session, in three parts.** Every timestamp below is the union of the scored runs' own `[t0, t1]` windows,
+read from each run's `run.json`; the VM create and teardown times are not carried in the fetched results and are
+not reconstructed here.
+
+| Stage | Shape | Zone | Cluster | C (tps), measured | Runs | Scored window (UTC) |
+|---|---|---|---|---:|---:|---|
+| **1 pilot** | `n2-standard-8` ×2, 32 GB RAM, local NVMe ×4 | `us-east1-b` | ~2 GB, in cache | 31,152.5 | 39 | 2026-10-30 19:17 → 19:42 |
+| **1 extra** | the same pair, `RUNS=` re-invocation | `us-east1-b` | ~2 GB | 31,152.5 | 2 | 2026-11-02 15:15 |
+| **2 beyond memory** | `n2-highcpu-8` ×2, **8 GB** RAM, pd-balanced 150 GB | `us-east1-b` | 18 GB = 2.25× RAM | 32,933.2 | 18 | 2026-11-02 20:38 → 21:10 |
+| **3 page cache** | `n2-standard-8` ×2, **32 GB** RAM, pd-balanced 150 GB | `us-east1-b` | 18 GB, in cache | 32,164.7 | 18 | 2026-11-05 06:09 → 06:33 |
+
+**77 runs, 31 cells, every one judged.** Against the registration's 80: stage 1 lost `v1_fast`'s 9 runs to
+amendment 1 and gained 2 near-the-line runs (41 of 48), and stages 2 and 3 each ran 18 of 16 — the unplanned
+`v1_j4`/L60 cell of amendment 8, additive in both.
+
+- **Capacity** was measured before each stage's runs, three 30 s runs at 128 clients after a 30 s warm-up
+  (`rates.json`): stage 1 31,152.5 tps (runs 31,152.5 / 31,383.1 / 30,271.8), stage 2 32,933.2
+  (33,290.3 / 32,933.2 / 32,549.3), stage 3 32,164.7 (32,399.2 / 32,164.7 / 31,413.9). `L30`/`L60`/`L80` are
+  0.3/0.6/0.8 of that stage's own C, so each stage's levels are relative to its own saturation point.
+- **No link shaping in any stage,** as registered. Round-trip time 0.169 ms (stage 1), 0.212 ms (stage 2),
+  0.220 ms (stage 3). **These are same-zone numbers and no DR latency is present** — EXP-13's question, not
+  this one.
+- **Clock mapping:** chrony offsets at the start of each stage were under 9 µs on all three hosts
+  (largest: stage 2's client, 8.46 µs), so the client-to-dest mapping contributes nothing at 1-second buckets.
+- **Every run exited 0** on the sender, and every receiver that existed exited 0 (`none` and `none_nosum` have
+  no receiver).
+- **`v1` ran BLAKE2b in all 77 runs,** per amendment 3 — the pessimistic choice, matched to EXP-28. **No latency
+  below is the shipped `--hash auto` configuration's.**
+- **The data:** [data/exp88-cells-stage1.csv](data/exp88-cells-stage1.csv),
+  [stage 2](data/exp88-cells-stage2.csv), [stage 3](data/exp88-cells-stage3.csv); the raw logs and per-run
+  counters in `results/exp88/` (1.2 GB, not in git).
+  [data/exp88-cells.csv](data/exp88-cells.csv) is the scorer's **pooled** output across all three stages and is
+  published only for completeness: pooling mixes 2 GB with 18 GB and 8 GB of RAM with 32 GB, which moves the
+  `summarize_wal` ratio at `L60` from 1.241 to 1.497 for that reason alone. **No verdict here uses it.**
+
+### Rule 16: six registered files have changed, and none of them scored this data
+
+`analysis/integrity.py check EXP-88`, run against this document's commit, exits 1 and reports:
+
+```
+CHANGED since 6d97eaab9519: experiments/network/lab_exp88.sh (1 file changed, 27 insertions(+), 7 deletions(-))
+CHANGED since 6d97eaab9519: experiments/network/measure.py (1 file changed, 25 insertions(+), 4 deletions(-))
+CHANGED since 6d97eaab9519: infra/gcp/config.sh (1 file changed, 5 insertions(+))
+CHANGED since 6d97eaab9519: infra/gcp/create.sh (1 file changed, 21 insertions(+))
+CHANGED since 6d97eaab9519: pgdelta/cli.py (1 file changed, 49 insertions(+), 8 deletions(-))
+CHANGED since 6d97eaab9519: pgdelta/fastpath.py (1 file changed, 159 insertions(+), 6 deletions(-))
+EXP-88: 10 of 16 files unchanged since 6d97eaab9519
+```
+
+Amendment 8 reported three. Three more have appeared since it was written, and the reason is branch topology
+rather than any edit to the code that ran:
+
+| File | Arrived at | Relative to the runs | Why it changes no score |
+|---|---|---|---|
+| `pgdelta/cli.py` | `438d08a`, `bb38430` (Oct 30–31, on `main`) | **reached this branch at the merge `c77c203`, 5 November — after all three stages** | `8287300`, the commit stage 3 was deployed from, does **not** contain either; `git merge-base --is-ancestor` confirms it. All 77 runs used the `cli.py` recorded at `6d97eaa` |
+| `pgdelta/fastpath.py` | `438d08a`, `ed3c04b`, `91beef7`, `bb38430` (Oct 30–31, on `main`) | same — after all three stages | same; and `v1_fast` never ran (amendment 1), so no EXP-88 cell touched the fast path at all |
+| `experiments/network/measure.py` | `918c58e` (5 November, EXP-94's pre-registration) | after all three stages | the sender-side change EXP-21 proposed, made for EXP-94; EXP-88's measurement was already scored |
+| `experiments/network/lab_exp88.sh` | `051d681` (5 November) | after all three stages | as amendment 8: additive arm names, with byte-identical flags for every EXP-88 arm asserted by `tests/test_exp88_lab.py` |
+| `infra/gcp/config.sh` | `944e1bb` (5 November) | **before stage 3, after stage 2** | `MAX_RUN_HOURS`; governs how long a VM lives, nothing a run measures |
+| `infra/gcp/create.sh` | `944e1bb`, then `6965d97` (5 November) | `944e1bb` before stage 3; `6965d97` after every stage | self-termination flags, then the local-SSD fix. Provisioning only |
+
+**The registration stays at `6d97eaa` and is deliberately not refreshed.** Re-registering now would record this
+data as produced by code that did not exist when it ran. The check exiting 1 with six files accounted for is the
+honest record; a clean exit here would be the dishonest one.
+
+**One registered column is empty in all 31 cells, and it is a scorer defect.** `source_cpu_s` — "the source's
+VM-wide CPU-seconds (`/proc/stat`)" — is blank everywhere, because `analysis/exp88.py:389` reads `meta['cpu0']`
+and `meta['cpu1']` while the driver writes `source_cpu_before` and `source_cpu_after`. The raw `/proc/stat`
+snapshots are present in every run directory and in every `run.json`, so the number is recoverable; it is
+recovered **post hoc and outside the registered scorer** below, and labelled as such. The scorer is not patched
+here, because patching it after the data would be exactly the edit rule 16 exists to prevent.
+
+### Stage 1 — 2 GB, in cache, local NVMe
+
+`full` is the reference in every row; `×δ` is the excess over `full` as a multiple of that cell's own tolerance,
+so **any value above +1.00 is a miss at the registered floor**.
+
+| Level | Arm | Runs | Refresh (s) | W_net (s) | W over `full` | ×δ_W | D_net | D over `full` | ×δ_D | Meets O4 (½ / 1 / 2) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| L30 | `full` | 3 | 4.81 | 0.0019 | — | — | 0.0012 | — | — | *reference* |
+| L30 | `v1` | 3 | 5.09 | 0.0000 | −0.0019 | −0.04 | 0.0000 | −0.0012 | −0.04 | ✓ ✓ ✓ |
+| L60 | `full` | 3 | 5.83 | 0.0003 | — | — | 0.0003 | — | — | *reference* |
+| L60 | `v1` | 3 | 5.94 | 0.0015 | +0.0012 | +0.02 | 0.0002 | −0.0001 | −0.00 | ✓ ✓ ✓ |
+| L60 | `v1_j4` | **5** | 4.56 | 0.0339 | +0.0336 | +0.67 | 0.0303 | +0.0300 | **+1.00** | ✗ ✓ ✓ **near** |
+| L80 | `full` | 3 | 9.74 | 0.0004 | — | — | 0.0000 | — | — | *reference* |
+| L80 | `v1` | 3 | 6.98 | **0.2580** | +0.2576 | **+5.15** | **0.0768** | +0.0768 | **+2.56** | ✗ ✗ ✗ |
+
+`none_nosum` ran at all three levels (3 runs each) and is reported under prediction 7, not here: it is a control
+against `none`, never against `full`.
+
+### Stage 2 — 18 GB beyond memory (8 GB RAM)
+
+| Level | Arm | Runs | Refresh (s) | W_net (s) | W over `full` | ×δ_W | D_net | D over `full` | ×δ_D | Meets O4 (½ / 1 / 2) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| L60 | `full` | 2 | 97.29 | 0.1204 | — | — | 0.0972 | — | — | *reference* |
+| L60 | `v1` | 2 | 89.28 | 0.0412 | −0.0792 | −1.58 | 0.0186 | −0.0785 | −2.62 | ✓ ✓ ✓ |
+| L60 | `v1_j1` | 2 | 97.29 | 0.0132 | −0.1072 | −2.14 | 0.0000 | −0.0972 | −3.24 | ✓ ✓ ✓ |
+| L60 | `v1_j4` \* | 2 | 84.34 | 0.0537 | −0.0667 | −1.33 | 0.0103 | −0.0869 | −2.90 | ✓ ✓ ✓ |
+| L80 | `full` | 2 | 103.70 | 0.1235 | — | — | 0.0907 | — | — | *reference* |
+| L80 | `v1` | 2 | 92.08 | **0.7615** | +0.6380 | **+12.76** | **0.2040** | +0.1133 | **+3.78** | ✗ ✗ ✗ |
+| L80 | `v1_j1` | 2 | 98.45 | 0.1996 | +0.0760 | +1.52 | 0.0887 | −0.0020 | −0.07 | ✗ ✗ ✓ |
+
+\* the unregistered extra cell of amendment 8. No verdict rests on it.
+
+**Beyond memory at L60, `v1` costs the load less than `pg_basebackup` does** — W_net 0.0412 s against 0.1204 s,
+a third of it, and the worst one-second drop a fifth. `v1_j1` is better still. That is the clearest pass in the
+experiment, and it is in the hardest shape.
+
+### Stage 3 — the same 18 GB, in cache (32 GB RAM)
+
+Everything but RAM is held to stage 2: same zone, same image, same pinned CPU platform, same 8 vCPUs, same
+pd-balanced at 150 GB, same cluster, same arms, levels and seeds. `n2-highcpu-8` and `n2-standard-8` are both
+N2 at 8 vCPUs; GCP expresses the RAM difference through the machine-type name, and RAM is the only thing that
+differs.
+
+| Level | Arm | Runs | Refresh (s) | W_net (s) | W over `full` | ×δ_W | D_net | D over `full` | ×δ_D | Meets O4 (½ / 1 / 2) |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| L60 | `full` | 2 | 98.29 | 0.0385 | — | — | 0.0186 | — | — | *reference* |
+| L60 | `v1` | 2 | **32.38** | 0.0071 | −0.0314 | −0.63 | 0.0008 | −0.0179 | −0.60 | ✓ ✓ ✓ |
+| L60 | `v1_j1` | 2 | 55.55 | 0.1334 | +0.0949 | +1.90 | 0.1202 | +0.1016 | +3.39 | ✗ ✗ ✗ |
+| L60 | `v1_j4` \* | 2 | 18.42 | 0.0993 | +0.0608 | +1.22 | 0.0354 | +0.0167 | +0.56 | ✗ ✗ ✓ |
+| L80 | `full` | 2 | 103.32 | 0.1122 | — | — | 0.0743 | — | — | *reference* |
+| L80 | `v1` | 2 | **33.36** | **1.6486** | +1.5364 | **+30.73** | **0.3648** | +0.2905 | **+9.68** | ✗ ✗ ✗ |
+| L80 | `v1_j1` | 2 | 61.74 | 0.4508 | +0.3387 | +6.77 | 0.2079 | +0.1336 | +4.45 | ✗ ✗ ✗ |
+
+\* the unregistered extra cell of amendment 8.
+
+**The worst cell in the experiment is here:** `v1` at `L80` with the database comfortably in cache. It is also
+the **fastest** `v1` cell at 18 GB — 33.4 s against stage 2's 92.1 s, and against `pg_basebackup`'s 103.3 s in
+the same stage. It finished in a third of the time and cost the load thirty times its tolerance.
+
+![The two deciding numbers and time against loss, stage 1](../figures/exp88-slowdown-by-load-stage1.svg)
+
+![Stage 2, beyond memory](../figures/exp88-slowdown-by-load-stage2.svg)
+
+![Stage 3, the same data in cache](../figures/exp88-slowdown-by-load-stage3.svg)
+
+The third panel of each figure — refresh time against work lost — is where the inversion is visible: in stage 3
+the leftmost points (fastest) are the highest (most costly).
+
+### The latency the load saw
+
+Reported, not deciding. The percentage is the registered increase against the same cell's `none`. **BLAKE2b,
+not the shipped default.**
+
+| Stage | Level | Arm | p50 (ms) | p95 (ms) | p99 (ms) | p50 inc | p95 inc | p99 inc | TPS loss |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 1 | L80 | `none` | 1.27 | 3.50 | 5.58 | — | — | — | — |
+| 1 | L80 | `full` | 1.41 | 4.78 | 10.97 | +10.6% | +36.5% | +96.5% | −0.07% |
+| 1 | L80 | `v1` | 2.06 | 303.2 | 439.0 | +61.9% | +8,559% | +7,762% | +0.08% |
+| 2 | L80 | `none` | 1.85 | 9.34 | 16.68 | — | — | — | — |
+| 2 | L80 | `full` | 1.98 | 5.30 | 51.71 | +6.9% | −43.3% | +210% | +0.17% |
+| 2 | L80 | `v1` | 2.83 | 249.1 | 466.3 | +53.1% | +2,567% | +2,695% | +0.20% |
+| 2 | L80 | `v1_j1` | 2.43 | 13.80 | 62.28 | +31.4% | +47.8% | +273% | +0.17% |
+| 3 | L80 | `none` | 1.68 | 3.11 | 4.82 | — | — | — | — |
+| 3 | L80 | `full` | 1.80 | 4.46 | 42.37 | +7.4% | +43.4% | +779% | −0.13% |
+| 3 | L80 | `v1` | **470.5** | **1,660.1** | **2,086.4** | +27,945% | +53,297% | +43,191% | −0.02% |
+| 3 | L80 | `v1_j1` | 2.56 | 190.9 | 263.7 | +52.8% | +6,041% | +5,372% | −0.11% |
+
+**Throughput is not where this shows up.** TPS loss stays inside ±0.25% in every cell, including the one where
+the median transaction took 470 ms. pgbench was running at a fixed rate, so the transactions were not lost —
+they were queued. This is precisely why O4 is written in W and D rather than in throughput, and why a
+throughput-only dashboard would have shown stage 3's `L80` cell as healthy.
+
+The split of `v1`'s stage 3 `L80` latency confirms the queueing: of the 470 ms median, **465.7 ms is `lag`**
+(the transaction waiting its turn) and **3.2 ms is `exec`**. The server was not slow per statement; the load
+could not get in.
+
+### The predictions
+
+| # | Prediction | Measured | Verdict |
+|---|---|---|---|
+| 1 | `full` costs little at L30/L60 (W_net < 0.1 s) **and measurably more at L80** | W_net 0.0019 / 0.0003 / 0.0004 s. L80 is not larger — it is below L30 | **Failed**, on its second half. `pg_basebackup` costs **nothing measurable at any of the three levels**, so the registered consequence applies: the bar every arm is judged against is "nothing measurable" |
+| 2 | `v1` at the two-worker default meets O4 at L30 and L60 in shape P | L30 −0.04×δ_W, L60 +0.02×δ_W; both inside at half the floors | **Held.** EXP-28's two-worker cell reproduces, and the gate opens |
+| 2b | `v1_j4` at L60 misses O4, or meets it only at twice the tolerances | Meets at ×1 and ×2, **misses at ×0.5**; D excess **+0.0300 against δ_D = 0.03**, exactly on the bar, which triggered the two extra runs (5 in all) | **Ambiguous, and reported as ambiguous — not a pass.** EXP-28 recorded that this miss "did not repeat identically"; landing on the bar to four decimal places is a third variant, not a resolution. The instrument is neither confirmed nor refuted |
+| **3** | **Deciding: `v1` meets O4 at L80 in every shape** | Misses in **all three**: 5.15×δ_W (2 GB cached), 12.76×δ_W (18 GB beyond memory), **30.73×δ_W** (18 GB cached). Misses on D too: 2.56× / 3.78× / 9.68× | **Failed, decisively and in every shape tested.** Not near any bar, at any multiple. The registered consequence follows: the shipped default is not safe on a source near saturation |
+| 4 | Beyond cache, `v1`'s work lost is ≥ 2× its cached value at the same level | **L60: 5.773×** (0.0412 / 0.0071). **L80: 0.462×** (0.7615 / 1.6486) | **Held at L60, failed at L80 — and failed inverted.** At 0.8 of capacity the cached configuration cost **2.16× more** than the beyond-memory one. Its own falsifier is "differ by less than 1.5×"; 0.462 is past that in the opposite direction |
+| 5 | `v1_fast` costs the load less than `v1` at 50 GB | **Never ran** | **Not run.** Deferred before any VM existed by amendment 1, for two structural blockers in `fastpath.py`. No fast-path cell exists in any stage |
+| 6 | In shape P the fast path's window is under 1 s, so W and D are not judged there | **Never ran** | **Not run**, same cause |
+| 7 | `summarize_wal`'s penalty reproduces with no backup and does not grow when one runs | **Unrunnable as registered.** The prediction names "stage 2's `none` vs `none_nosum` pair", and the design's own *Cells and runs* section drops `none_nosum` from stages 2 and 3. No beyond-memory pair was ever planned. In stage 1 (in memory), where EXP-83's expectation is **no measurable difference**, p99(on)÷p99(off) = **1.004 (L30), 1.241 (L60), 1.170 (L80)** | **Not judged, and what can be read contradicts the expectation.** Two of three in-memory levels show a difference, and both land inside EXP-83d's *beyond-memory* interval [1.10, 1.35]. The registration's own instruction for that outcome is to stop and explain rather than publish, and that is what happens here: **no `summarize_wal` claim leaves this experiment** |
+| 8a | No failed or skipped transactions attributable to an arm; every run exits 0 | **0 failed and 0 skipped across all 77 runs** and all 31 cells; sender exit 0 in 77 of 77, receiver exit 0 in every run that had one | **Held** |
+| 8b | Copy correctness | Not in this driver, as amendment 2 recorded before any run | **Not judged here.** It leans on EXP-86 (320 of 320 on Linux) and adds nothing to it. Under amendment 2's own rule, **no slowdown claim from this experiment may be published until 8b has run** |
+
+**Scorecard: 2 held (2, 8a), 3 failed (1, 3, and 4 at L80), 1 ambiguous (2b), 3 not judged (5, 6, 7), 1 deferred
+(8b).**
+
+## Where the cost went (post hoc, not registered)
+
+Everything in this section was computed after the data existed. None of it is a verdict, and the registered
+scorer was not changed to produce it.
+
+**The counters say what stage 3 stopped doing.** Disk bytes besides WAL, per cell, median over runs:
+
+| Stage | Level | Arm | Refresh (s) | Source read | Source write | Dest read | Dest write |
+|---|---|---|---:|---:|---:|---:|---:|
+| 2 (8 GB RAM) | L80 | `full` | 103.70 | 16.52 GB | 2.89 GB | 0.00 GB | 20.08 GB |
+| 2 | L80 | `v1` | 92.08 | **17.23 GB** | 2.61 GB | 14.37 GB | 1.16 GB |
+| 3 (32 GB RAM) | L80 | `full` | 103.32 | 0.00 GB | 2.97 GB | 0.00 GB | 19.78 GB |
+| 3 | L80 | `v1` | 33.36 | **0.00 GB** | 1.02 GB | 0.00 GB | 0.56 GB |
+
+Beyond memory, `v1` pulls 17.2 GB off the source's disk. With 32 GB of RAM it pulls **zero** — the whole 18 GB
+is served from page cache — and the refresh finishes in 36% of the time. The page-cache contrast stage 3 was
+built to make did work: the re-read moved entirely into memory, exactly as EXP-48's model says it should.
+
+**And the source's CPU-seconds, recovered from the `/proc/stat` snapshots the empty `source_cpu_s` column should
+have held** (median per cell, net of the same cell's `none`; the snapshots bracket the whole run rather than
+`[t0, t1]`, so these are run-scope totals and **not** a utilisation rate):
+
+| Stage | Level | Arm | Refresh (s) | Source CPU-s, net of `none` |
+|---|---|---|---:|---:|
+| 2 | L80 | `full` | 103.70 | +670.2 |
+| 2 | L80 | `v1` | 92.08 | +618.9 |
+| 3 | L80 | `full` | 103.32 | +659.4 |
+| 3 | L80 | `v1` | 33.36 | **+204.2** |
+
+So cached `v1` spends **a third of the CPU** and **zero disk reads**, finishes in **a third of the time**, and
+costs the load **2.16× more work lost** and **1.79× the worst-second drop**. It is not doing more work. It is
+doing the same work faster, into a source that has 20% of its measured capacity left by construction.
+
+**What this does not establish.** The experiment does not identify which resource is contended in the cached
+case, and this write-up declines to pick one. Three candidates survive the data:
+
+1. **Concentration.** W is an integral of per-second shortfall. The same interference compressed from 92 s into
+   33 s raises the per-second peak even at constant total cost — and D, a maximum, is raised directly.
+2. **Memory bandwidth and cache displacement.** The cached refresh reads 18 GB through the page cache in 33 s,
+   competing for bandwidth and for the cache the load's own working set occupies. This is EXP-83d's unresolved
+   displacement mechanism, which stage 3 was chosen as the right instrument for.
+3. **Scheduling.** 465.7 ms of the 470 ms median is `lag`, not `exec`. Something is keeping the load's work off
+   the CPU rather than slowing each statement.
+
+These are separable, and not by this data: (1) predicts the damage scales with intensity, so **throttling `v1`
+to stage 2's pace in the cached shape should reproduce stage 2's cost** — a one-cell test; (2) predicts it
+tracks bytes-through-cache and should show in the load's own read counters; (3) predicts it tracks runnable
+threads and should show in `/proc/schedstat` or run-queue depth, which this driver does not sample.
+
+**Two corroborations worth recording, and one anomaly.**
+
+- **The pattern is not unique to `v1`.** `v1_j1` inverts as well — stage 2 ÷ stage 3 ratios of 0.099 at L60 and
+  0.443 at L80. Whatever stage 3 does, it does to one worker as well as two.
+- **Size and cache residency both matter, in opposite directions.** `v1`'s W_net at L80 orders
+  2 GB-cached 0.258 < 18 GB-beyond-memory 0.762 < 18 GB-cached 1.649. More data is worse; more cache for the
+  same data is worse still.
+- **The anomaly: `v1_j1` at L60 in stage 3 misses O4 (1.90×δ_W) where `v1` passes (−0.63×).** One worker
+  costing more than two, in the one cell where two is comfortable, has no mechanism offered here. It rests on
+  **2 runs**, and it is reported rather than explained.
+
+**The honest limit on all of it: stages 2 and 3 have 2 runs per cell.** Rule 11's second-session trigger is a
+deciding ratio within 0.05 of its bar, and nothing here is close to a bar — prediction 3 misses by 5× to 31×,
+and prediction 4's inversion is 0.462 against a 1.5 floor. The *direction* of both is not in doubt at 2 runs.
+The *magnitudes* are, and the 30.73× in particular should be read as "far past the bar", not as a calibrated
+number.
+
+## What follows (from these results)
+
+- **Prediction 3 failed, so its registered consequence is live: the default worker count becomes load-aware,
+  and the cap is reported with the time it costs. That is a product change, and it is the owner's.** This
+  write-up stops at the finding. What the data supports, if it helps the decision: at 0.6 of capacity the
+  shipped two workers are safe in all three shapes; at 0.8 they are not, in any. One worker is a partial
+  mitigation beyond memory (meets O4 at twice the tolerances, 1.52×δ_W at the floor) and **not** a mitigation
+  in cache (6.77×δ_W). **No worker count tested is safe at 0.8 of capacity with the data in cache.**
+- **RESULTS' "within `pg_basebackup`'s" row does not widen.** It cannot: the condition it would have gained is
+  0.3–0.8 of capacity, and 0.8 fails. What this session does support adding is the opposite — a stated ceiling:
+  **at or below 0.6 of the source's measured capacity**, `v1` met O4 in 2 GB cached, 18 GB beyond memory and
+  18 GB cached, and beyond memory cost the load **a third of what `pg_basebackup` cost**.
+- **Nothing is published until 8b runs.** Amendment 2's rule, not a new one.
+- **Prediction 4 held at L60 and inverted at L80, so EXP-48's model carries only below saturation.** The HA/DR
+  guidance cannot say "v1's cost to a loaded source rises once B stops fitting in cache" — at 0.8 of capacity
+  it falls. What is supported is a statement about load, not size: the cost is governed by the source's
+  remaining headroom first, and by cache residency second and with the opposite sign.
+- **Prediction 7 is a registration defect to fix, not a result.** The prediction and the design contradicted
+  each other before any VM existed: one asks for a stage-2 `none_nosum`, the other drops the arm. Pricing
+  `summarize_wal` beyond memory is still unanswered, and the in-memory numbers (1.241 and 1.170 at L60 and L80)
+  now disagree with EXP-83's in-memory finding. That needs its own session, with the pair actually planned,
+  before any `summarize_wal` number from this project is quoted beyond EXP-83's own.
+- **`v1_fast` is unmeasured under load.** Predictions 5 and 6 are open, and amendment 1 says what it costs to
+  close them: a freshly taken base backup as B before each fast-path run, never following a `none_nosum` block.
+- **Proposed next, in order:** (1) the one-cell throttle test — cached `v1` held to stage 2's pace — which
+  separates concentration from bandwidth for about a dollar; (2) the load-aware cap, if the owner takes it,
+  with its time cost measured; (3) `summarize_wal` beyond memory, with `none_nosum` in the plan.
+
+## Workflow check
+
+| | Check | For this experiment, done |
+|---|---|---|
+| 1 | Situation, standard, competitor | `v1` against `pg_basebackup` on a live primary at 0.3/0.6/0.8 of its own measured capacity, at 2 GB and 18 GB, in cache and beyond it. Measured: meets O4 at 0.6 everywhere, **misses at 0.8 in all three shapes** |
+| 2 | The bottleneck | Beyond memory, named and measured: 17.2 GB of source disk reads. In cache, **not identified** — three candidates listed, each with a separating test. What is measured is where it is *not*: throughput (±0.25%) and execution time (3.2 ms of a 470 ms median) |
+| 3 | Systems or algorithm | Systems. Same algorithm, same bytes; the cost moves by a factor of 30 with RAM and load level alone |
+| 4 | Papers and prior art | EXP-48's beyond-memory model (held at L60, inverted at L80); EXP-83d's displacement mechanism (stage 3 chosen as its instrument; the in-memory control now disagrees with EXP-83); EXP-28's W/D method and δ floors, reused unchanged |
+| 5 | Committee-grade | Pre-registered with the scorer committed first; 8 predictions with falsifiers, 3 failed and reported as failed; the deciding one failed in 3 of 3 shapes; an ambiguous result reported as ambiguous; a registration self-contradiction (P7) reported rather than resolved after the fact |
+| 8 | Amendments | 8, each dated against the runs: 1–4 before any VM, 5 and 7 before the runs they affect, 6 and 8 declared with their position relative to the data |
+| 11 | Second session | Not triggered: no deciding ratio is within 0.05 of its bar. The 2-runs-per-cell limit on stages 2 and 3 is stated instead of being spent |
+| 13 | The cascade | Tests, then the 2 GB pilot, then 18 GB beyond memory, then the page-cache control. Each stage gated the next, and stage 1's failure of prediction 3 is what made stages 2 and 3 worth running |
+| 16 | Scorer integrity | **Exits 1: 10 of 16 unchanged, 6 accounted for** — 4 arrived after every stage (2 of them only via a branch merge), 2 govern provisioning. Registration deliberately left at `6d97eaa`. One registered column (`source_cpu_s`) empty through a key-name defect, recovered post hoc outside the scorer and labelled |
+| 17 | The noise bar | Stage 1 ran 3 repeats; stages 2 and 3 ran 2, with the near-the-line rule firing once (`v1_j4`/L60, exactly on δ_D, 2 extra runs) |
