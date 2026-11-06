@@ -142,6 +142,58 @@ matters:
 `analysis/exp88.py` is reused unchanged: the new arms are arm names, and it nets per level against that level's
 own null already.
 
+### Settled before the session, with no run in existence (added November 6, before any VM)
+
+Both declarations above are **done**, and three more things are fixed here rather than left to the session.
+
+3. **Item 2 is complete and needs no further edit.** `lab_exp88.sh` gained the arm names at `051d681`: a
+   `*_ha` case adds `--hash-ahead $HASH_AHEAD --read-ahead $READ_AHEAD` on the sender and
+   `--fsync worker --verify-scope as-written` on the receiver, and `v1_j*` strips a trailing `_ha` before
+   reading the worker count, so `v1_j4_ha` resolves to 4 rather than to `4_ha`. The receiver's fixed
+   `--jobs 4` is unchanged and is the same on every arm, so it cannot move the 2x2.
+4. **The unplanned-cell trap that hit EXP-88 stages 2 and 3 does not reach this session, and that is checked
+   rather than assumed.** Those stages each gained a `v1_j4`/L60 cell nobody asked for, because the driver's
+   `${L60_ONLY:-v1_j4}` substitutes its default when the variable is empty *as well as* unset (EXP-88
+   amendment 8). EXP-93 is immune for a different reason than the one amendment 8 proposed fixing: the
+   diagnostic is only added `if ... arm not in arms` (`lab_exp88.sh:239`), and `v1_j4` is one of EXP-93's six
+   arms. Running the driver's own plan generator with this session's arms and levels produces **exactly the
+   registered 36 runs** - 6 arms x 2 levels x 3 repeats, no extra cell - and the same generator reproduces
+   stages 2 and 3's extra cell when `v1_j4` is left out of `ARMS`, which independently confirms amendment 8's
+   account of that deviation. **So the driver is not edited for this session.** The `${VAR:-default}` form is
+   still the wrong one and is still the next change to make, but making it now would be an undeclared edit to a
+   registered file that changes nothing this session does.
+5. **The order seed is `930`,** declared here before the run. `lab_exp88.sh`'s default is `880`, EXP-88's;
+   using a different seed is the point (a session that re-ran EXP-88's shuffle would confound run order with
+   the arms), and naming it here rather than at the shell is what makes the shuffle reproducible.
+6. **`infra/gcp/sets/exp93.sh` is added and registered,** which closes a hole in the registration above: the
+   18 registered files included no set file at all, so EXP-93's central hardware claim - "EXP-88 stage 1's
+   exact shape" - was not hash-covered, and a change to the shape would not have shown in `check`. The new set
+   sources `exp88.sh` rather than restating it (the `dr94.sh` pattern), adds this session's own VM names so
+   teardown deletes only its three, and caps the VMs at `MAX_RUN_HOURS=3` server-side. Both `exp93.sh` and the
+   `exp88.sh` it sources are registered, since the claim rests on both files.
+
+**Re-registered before the session.** `check EXP-93` against `051d681` reported **12 of 18**: `measure.py`,
+`cli.py`, `fastpath.py`, `receiver.py` and `sender.py` had changed, along with `create.sh`. Five of those six
+are the engine, and that is not a problem to explain away - **it is this experiment's subject**. EXP-93 exists
+to price the configuration EXP-91 and EXP-92 measured, and those sessions' engine arrived on this branch at the
+`c77c203` merge, after `051d681` was recorded. Registering against a commit that predates the code under test
+would make the check meaningless. There is no EXP-93 run in existence, so there is nothing a re-registration
+could retrofit. The commit this session's data must be read against is recorded below with its file count.
+
+**The run line:**
+
+```sh
+# on dest, after create/provision/deploy/setup-ssh for the exp93 set
+REPEATS=3 ARMS='none full v1 v1_j4 v1_ha v1_j4_ha' LEVELS='L60 L80' \
+  setsid nohup bash experiments/network/lab_exp88.sh SOURCE_IP CLIENT_IP 3 930 full \
+    > /data/exp04-results/exp93-lab.log 2>&1 < /dev/null &
+```
+
+`SCALE` is left at the driver's default of 70, which is EXP-28's and stage 1's ~2 GB cluster, and `HASH` at
+`blake2b` for the same reason stage 1 pinned it (amendment 3 there): it is the pessimistic hash, so a cell that
+meets O4 on BLAKE2b meets it on the shipped `--hash auto`. `HASH_AHEAD=64G` and `READ_AHEAD=8` are the driver's
+defaults and are the campaign's own values.
+
 ## Predictions
 
 Committed before any VM exists. Each says what would falsify it.
