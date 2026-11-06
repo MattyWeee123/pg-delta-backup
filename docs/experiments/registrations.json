@@ -463,7 +463,7 @@
   }
  },
  "EXP-93": {
-  "commit": "051d68178482",
+  "commit": "717f2676e2cd",
   "files": {
    "analysis/exp28.py": "88bbe89551463c227a0180e1d9ac269037ea6b2ba126ea37b8e4294e3d3d8e4e",
    "analysis/exp88.py": "00178365ca0252cecab89dbdcffbc92e3c33c0cc72a19218b0f375cae61b25e7",
@@ -471,18 +471,20 @@
    "experiments/network/lab_exp88.sh": "f4c0496ea6104e607f3123f8aa2316812badbe905d5c9251cdd4b866abb581ba",
    "experiments/network/load/abort.sql": "1c17a4e57ea37cadac31afb4dce514cc25c43bbb18136605bfad3b6c09049c2a",
    "experiments/network/load/commit.sql": "1130bf602c609ddf31013ddc752b8637d73f2170b30bac70582c0a2f386f01d0",
-   "experiments/network/measure.py": "4f3e3199a25af4edc9d52f96715258df802ca77f23bfeab965e1b1156e1243c3",
+   "experiments/network/measure.py": "37712180ddd9eea90ffa79a4d96de22b469ddedd88cc33cc75f9b8be39d807b5",
    "experiments/network/source_cluster.py": "e8f12011c6ca9fb24fc67c47f7e9ad6282749cc691c37e4ba7cafb5bc8a8e59a",
    "infra/gcp/config.sh": "4cc7670f13cc64318e5bb853c241941d5ca8d14c99dc5bd1dca8481f88e2a7b2",
-   "infra/gcp/create.sh": "79913b8615f32cd5be12ffd580b4b418315ed26fde3b21c973ac057e6ae1577e",
+   "infra/gcp/create.sh": "f5b2875fdbf4c0124f9e19f94d822d44258a7e72f0ea7cbdbf8dcd32aed60f9a",
+   "infra/gcp/sets/exp88.sh": "7c7d6a744ff51ad64d136615a9bd3a6a9484bafae84cd3355b6dfec79627b638",
+   "infra/gcp/sets/exp93.sh": "76218d1b3eb3f3978c17f0ef4cf31e39a9719423bfda0df74183a441700f59db",
    "infra/gcp/teardown.sh": "4371413529a1edf69da350382126a2f3bb4d7988a744384b31a150cc65631469",
-   "pgdelta/cli.py": "f364d8665af06245f7ef9e3a94e301d1f636cafab4939b1c0d9f45447220683a",
-   "pgdelta/fastpath.py": "2688d833cfe132e1fce4ab53c91f345e7ac86a9525803fbc947aa88f771bb73f",
+   "pgdelta/cli.py": "5dbb7ad5abd6efad9fd289678e6e0ad831b007340dac99f3ae4af525edf46c59",
+   "pgdelta/fastpath.py": "6951892e8f86229c14154403f450dd0d1e29f1a9b381345c0f17d58eeafff2e6",
    "pgdelta/hashing.py": "4dbeccf63bc8dedbe6bc2032352098efe58be420b9a6c734e68f8247fe26b9a6",
    "pgdelta/inplace.py": "4a25d21b4c1d7f0772f98781abc6a620def2d0251e44951612d73ae203b69fe2",
    "pgdelta/live.py": "42f94aa72c5ab80252f819638909d9386629e9172ea3ee50c0bdcc4f05e07419",
-   "pgdelta/receiver.py": "8f4ac65d16d316c4a5b013b8ae190ea4943c3f70d19b23500308d60e9dcaa9fa",
-   "pgdelta/sender.py": "9ff803fe7bc4e7a1ec2a0a4888862853323d07bacdd3556c086085122c5921a4"
+   "pgdelta/receiver.py": "b44d71628b091643e7c314a92b41f3fa83ca68b23e798d83ce114013a4d24ed6",
+   "pgdelta/sender.py": "8843763f6031cdb45f2decde3d591b656abb684dbdb1b3719bfc0640002c7648"
   }
  },
  "EXP-94": {

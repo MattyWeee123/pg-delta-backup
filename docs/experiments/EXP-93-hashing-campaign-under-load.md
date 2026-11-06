@@ -178,7 +178,10 @@ are the engine, and that is not a problem to explain away - **it is this experim
 to price the configuration EXP-91 and EXP-92 measured, and those sessions' engine arrived on this branch at the
 `c77c203` merge, after `051d681` was recorded. Registering against a commit that predates the code under test
 would make the check meaningless. There is no EXP-93 run in existence, so there is nothing a re-registration
-could retrofit. The commit this session's data must be read against is recorded below with its file count.
+could retrofit.
+
+**`check EXP-93` now reports 20 of 20 files unchanged since `717f267`,** and that is the commit this session's
+data must be read against. 20, not 18: the two set files above are the additions.
 
 **The run line:**
 
