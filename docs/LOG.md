@@ -4,6 +4,96 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-06: EXP-88 closed, EXP-93 and EXP-94 run and closed; the hashing campaign's speed priced, and its own flag found to be the DR fix
+
+- **What ran.** Two GCP sessions in one morning, in two regions, both from pre-registrations that were
+  re-registered beforehand with no scored run in existence. **EXP-93**: three VMs in `us-east1-b` 06:36–07:16
+  UTC, 36 runs, a 26-minute session. **EXP-94**: a pair in `us-central1-a` 06:21–08:26 UTC, a 12-run smoke
+  then **222 scored runs**, every one passing. Both sets were deleted after their data was fetched and checked
+  locally; the project then held **0 instances, 0 disks, 0 snapshots and 0 custom images**. EXP-88's three
+  stages had already run (30 October – 5 November) and were scored and written up today.
+- **EXP-88's deciding prediction failed in all three shapes.** The shipped two-worker default meets O4 at 0.3
+  and 0.6 of the source's measured capacity and **misses at 0.8** by 5.15×, 12.76× and **30.73×** the
+  work-lost tolerance. Prediction 4 **inverted**: at 0.8 the cached 18 GB cell cost **2.16×** the
+  beyond-memory one while finishing in a third of the time, reading **zero** source disk bytes against 17.2 GB
+  and spending a third of the CPU. No mechanism is claimed — three candidates are listed with a separating
+  test each. Prediction 7 turned out **unrunnable as registered**: it names a stage-2 `none_nosum` pair that
+  the design's own cells section drops, so no `summarize_wal` claim leaves that experiment.
+- **EXP-93 answered which ingredient of the campaign's recipe is dangerous, and it is not the one the campaign
+  was named after.** `v1_j4_ha` misses O4 at 0.8 by **16.3×δ_W** (0.816 s work lost net) against the shipped
+  default's 3.4× (0.172 s). The 2×2: going 2→4 workers costs **4.0× (hash-ahead off) to 5.6× (on)**, while
+  turning hash-ahead on at the shipped cap costs **0.84×** — slightly protective. At 0.6, **all four** pgdelta
+  arms meet O4 at half the tolerances. The replication gate held: `v1` reproduced EXP-88 stage 1's miss on
+  another pair in another region. Prediction 6 failed — no window shortening under load (0.973–1.012×).
+- **EXP-94 vindicated EXP-21, at last, and on plain cubic.** The deciding prediction held at both cells where
+  cubic was in its slow mode by the registered mechanical rule: uniform 1% `--hash-ahead`/`v1` **0.422×** at
+  20 ms and **0.210×** at 120 ms tuned, against a 0.80 bar. At 120 ms tuned that is **30.0 s → 6.3 s**,
+  `R_fast` 2.851 → 0.599, where BBR gets 8.4 s. It reaches **every DR verdict row BBR reaches**, needs no host
+  setting, and takes nothing from other flows — and its 120 ms row is firmer than BBR's, whose row is
+  provisional under rule 11. P5 held exactly (1.000: EXP-91's second-read cost does not reappear at 2.1 GB on
+  32 GB), P7 held both halves, and P4 showed **a further gain past 60 ms**, so the two fixes are not one fix.
+- **But EXP-94's two failures undercut its own stated mechanism, and that is recorded rather than smoothed.**
+  The arm is about **twice as fast in hot**, where the registered mechanism says nothing should be gained, and
+  it removes about **half** the idle leaf wait rather than the predicted three-quarters (bar 0.25×, best
+  0.379× — though the stall is real and scales 0.005 s → 2.237 s with the round trip, and the one apparent
+  regression is 5 ms against 13 ms on a cell with no stall to remove). The untested co-variable is
+  `--read-ahead 8`, which the registration dismissed as "documentation, not an extra variable" — fine for
+  running the arm, wrong for attributing its gain. **So the sessions support "`--hash-ahead 64G
+  --read-ahead 8` is the DR fix" and do not support "keeping the stream full is why."**
+- **A defect in a registered scorer was found in EXP-94's own output and declared post-hoc.**
+  `analysis/exp94.py`'s `runs()` globbed `runs/*.json` while `run_exp04.py` writes
+  `runs/<sweep>/<name>.json`, so it read **0 of 222 records**. The symptom was not an error but a plausible
+  finding — *"cubic did not enter the slow mode in any cell"* — when two cells were in it and the deciding
+  prediction was decidable. It moved four of seven readings. Fixed with a before/after table in the write-up;
+  **the registration was deliberately left at `af27174`**, so `check EXP-94` still exits 1 at 30 of 32 rather
+  than hiding the change. **48 tests had passed over it** because the fixture wrote the flat layout its own
+  docstring attributed to `run_exp04` — the second time this project has recorded a fixture agreeing with the
+  bug it should have caught (EXP-88 amendment 4 was the first). Two new cases now assert both directions, and
+  a third test was corrected: it asserted `docs/experiments/data/exp94-cells.csv` *does not exist*, which can
+  only hold before the experiment is ever scored.
+- **Two smaller registration holes closed before their sessions ran.** EXP-93's registration listed **no set
+  file at all**, leaving its central claim — "EXP-88 stage 1's exact shape" — uncovered by any hash;
+  `infra/gcp/sets/exp93.sh` was written (sourcing `exp88.sh`, the `dr94.sh` pattern) and both files
+  registered, 20 of 20. And EXP-94's first registration predated `6965d97`, the `create.sh` fix for the bug
+  that had stopped this very session's local-SSD pair from being created, so it was re-registered at
+  `af27174`, 32 of 32.
+- **Owed, and deliberately not spent.** (1) **Two extra runs for `v1_ha`/L80** in EXP-93: its D excess lands
+  10% over δ_D, inside the 20% band that earns two repeats. They cannot change the verdict — the cell misses
+  on W by 2.88×δ_W regardless — so the debt is recorded rather than paid with a whole session. (2) **The
+  12-run arm that separates `--read-ahead` from `--hash-ahead`**, the highest-value next run; `cli.py`'s
+  `_read_ahead` already honours an explicit `--read-ahead` without `--hash-ahead`, so it needs no code change,
+  but it does need its predictions registered before a VM exists. (3) **EXP-88's one-cell throttle test** —
+  cached `v1` held to stage 2's pace — which separates concentration from bandwidth for about a dollar.
+- **Raised, not done.** `pgdelta/cli.py:154-156` still tells users the live worker cap "slowed a busy primary
+  no more than pg_basebackup", citing EXP-28 and EXP-39, both measured at 0.6 of capacity and below; EXP-88
+  and EXP-93 now both contradict it at 0.8. It is a claim about a shipped default and `cli.py` is a registered
+  file of both of today's sessions, so it was left untouched for the owner. The companion item **was**
+  corrected, because it narrows a claim rather than deciding a product question: `docs/RESULTS.md:57` stated
+  the slowdown guarantee with no load level attached and now says up to where it holds.
+- **The load-aware worker cap stays the owner's call.** It is EXP-88's registered consequence. What these three
+  sessions produced is the number that decision lacked: at 0.6 of capacity every configuration tested is safe;
+  at 0.8 none is; and the penalty tracks **worker count**, not hashing ahead.
+- **The full suite, run in the Docker image afterwards: 1,830 tests, 1,784 passing, 20 skipped, 2 failures —
+  both the `pg_rewind` statistics-page issue already characterised on 5 November, and the characterisation now
+  extends to a second scenario.** That entry recorded it in **S2c**; today it also failed
+  `test_pg_rewind_repairs_s1_and_s2` in **S2**, with the same relation, the same block and the same cause:
+  `base/5/2840` block 2, content — `pg_toast.pg_toast_2619`, the TOAST table of `pg_statistic`. In both runs
+  `pg_rewind` exited 0, `diverged_before_recovery` listed **no** diverged page, `logical_match` was true and
+  `pg_amcheck` passed; the page only diverges after bring-up, which is what autovacuum or `ANALYZE` writing
+  optimizer statistics during promotion looks like. **Still not a data-loss bug and still left alone**, for the
+  reason given on 5 November: changing what that comparison counts would move the correctness numbers EXP-86
+  and EXP-89b published, so it is a scoring decision owing its own registration. The only update is its scope
+  — two scenarios, not one.
+- **Nothing in today's work touches those tests.** `tests/test_incumbents.py` was last changed on 23 October;
+  today's commits touch `analysis/exp94.py`, `tests/test_exp94_analysis.py`, three experiment documents, the
+  experiment index, `docs/RESULTS.md` and the scored CSVs and figures. The `analysis/exp94.py` and
+  `tests/test_exp94_plan.py`/`test_exp94_analysis.py` set is green: **50 of 50**.
+- **Also recorded for the next session that drives these harnesses from Windows.** Two quoting traps cost real
+  time today: `pgrep -f lab_exp88.sh` sent through `remote.py ssh` **matches its own command line**, so a wait
+  loop built on it never exits (`[l]ab_exp88.sh` is the fix); and a nested `$(...)` inside that command's
+  double quotes expands to nothing without error, which made a complete 36-run session look as though it had
+  written no output. Both were operator errors, not harness defects, and both are silent.
+
 ## 2026-11-05: EXP-94 pre-registered: whether keeping the sender's stream full removes v1's need for BBR at DR round trips
 
 - **Why now:** the [November 5 survey](research/2026-11-05-codebase-and-latency-survey.md) found that
