@@ -54,7 +54,7 @@ pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the li
 | Question | Answer |
 |---|---|
 | Is BBR fair to other traffic? | **No: it stays opt-in.** On a shared bottleneck it took 81–96% of the link from cubic flows when the queue held a round trip or less (EXP-26) |
-| Slowdown of the source's load? | Within `pg_basebackup`'s, at live mode's default of one source worker per 4 CPUs (EXP-28, -30, -39) |
+| Slowdown of the source's load? | **Only up to 0.6 of the source's capacity.** Within `pg_basebackup`'s at live mode's default of one source worker per 4 CPUs (EXP-28, -30, -39), and EXP-88 confirms that at 0.3 and 0.6 of the source's measured capacity in three cluster shapes — beyond memory it cost a third of what `pg_basebackup` cost. **At 0.8 of capacity the same default misses O4 in all three shapes**, by 5× to 31× the tolerance, worst with the data in page cache (EXP-88). No worker count tested is safe there. A load-aware cap is the registered consequence and is not yet decided |
 
 ## What's left on the table
 
