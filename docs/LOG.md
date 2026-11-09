@@ -4,6 +4,12 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-09 (21:30 UTC): The code freeze stays November 30
+
+- **Why:** the team's shared notes still give the code freeze as November 13, with the demo to AlloyDB leadership in late November to December 4. K9 (October 25) had moved it to November 30, but that change never reached the shared notes. The owner confirmed November 30 today.
+- **Changed:** `README.md` and the summary at the top of `PLAN.md` still gave November 13 as current; both now say November 30. K9, PLAN's schedule to the presentation and FIRMNESS's `C-freeze` row already did. The archived plans keep their dates.
+- **Not changed:** the shared notes. They belong to the sponsor's team, so any change there is the owner's to make.
+
 ## 2026-11-09 (21:00 UTC): A teammate's exact-cutoff check for native backups merged (PR #14)
 
 - **What it adds:** `benchmarks/native_oracle.py` and changes to `benchmarks/native_baseline.py`.

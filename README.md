@@ -77,7 +77,7 @@ Our niche is the copy whose history is lost: a standby whose WAL was recycled, a
    - [Decision ledger](docs/DECISIONS.md): every design decision graded by its evidence, and the experiments that would settle the gray areas.
 3. [Design of pgdelta v0](docs/DESIGN.md) and [how to run it](pgdelta/README.md).
 4. [Project log](docs/LOG.md): what was done, when, and why.
-5. [Plan](docs/PLAN.md): workstreams, dependencies, schedule to the November 13 freeze.
+5. [Plan](docs/PLAN.md): workstreams, dependencies, schedule to the November 30 freeze.
 6. [Specification](docs/SPEC.md): architecture, design decisions, correctness gates.
 7. [Correctness contract](docs/CORRECTNESS.md): what "no data loss" means and how we test it.
 8. [Questions for Ben and Sumaithri](docs/BEN-QUESTIONS.md): decisions taken, our assumptions, and non-blocking questions.

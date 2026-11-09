@@ -1,7 +1,7 @@
 # Team plan
 
 Proposed October 22, 2026, for the team to confirm at the October 23 sync.
-Code freeze is about November 13; the sponsor demo is late November or the first week of December.
+As proposed, the code freeze was about November 13; it is now **November 30** (see the revision below), and the sponsor demo is late November or the first week of December.
 
 *Revised October 25, 2026: the code freeze moves to **November 30**, and the presentation is in the first week of December (the owner's decision K9 in the [ledger](DECISIONS.md#decisions-of-october-24-2026-night-after-the-rule-11-audit)). The [schedule to the presentation](#schedule-to-the-presentation-october-25-2026) replaces the week-by-week schedule below.*
 The [September 30 plan](archive/2026-09-30-plan.md) is archived.
