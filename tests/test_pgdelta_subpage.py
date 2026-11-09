@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from pgdelta import protocol, sender as sender_module, subpage
+from pgdelta import compress as compression, protocol, sender as sender_module, subpage
 from pgdelta.errors import ProtocolError, VerificationError
 from pgdelta.inplace import CONTROL_FILE
 
@@ -71,6 +71,7 @@ class SubpageTests(unittest.TestCase):
         self.assertIn('PAGE_DELTA', delta.sender['bytes_source_to_dest']['by_message_type'])
         self.assertIn('BLOCK_DIGESTS', delta.sender['bytes_dest_to_source']['by_message_type'])
 
+    @unittest.skipUnless(compression.usable('zstd'), 'neither compression.zstd nor zstandard is available')
     def test_with_zstd_on_worker_processes(self):
         sent, received = self.check(transfer(self.source, self.basis, self.output, subpage=True, compress='zstd',
                                              jobs=2, receiver_jobs=2), self.output)
