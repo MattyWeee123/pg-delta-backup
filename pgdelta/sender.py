@@ -20,17 +20,15 @@ inventory (APPEND) after pg_backup_stop.
 from __future__ import annotations
 
 import base64
-import json
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
-import queue
 import threading
 import time
 
-from pgdelta import __version__, datadir, fastpath, live, matching, protocol, selector, subpage, transport, waits
+from pgdelta import __version__, datadir, live, matching, protocol, subpage, transport, waits
 from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
@@ -50,7 +48,11 @@ DEFAULT_WINDOW = 4
 # thread, `window` files ahead, as before.
 DEFAULT_HASH_AHEAD = 0
 RUN_BYTES = 1 << 20
-# --read-ahead (EXP-64b): how far the fast path's reader threads may read ahead of the sending thread.
+# --read-ahead's default with --hash-ahead: reader threads for the pages each file sends. 8 threads reached a balanced
+# persistent disk's operation rate on scattered reads and 16 added nothing (EXP-64b, EXP-68, measured for the archived
+# fast path); EXP-91 kept 8 for --hash-ahead.
+DEFAULT_READ_AHEAD = 8
+# --read-ahead: how far its reader threads may read ahead of the sending thread.
 READ_AHEAD_BYTES = 64 << 20
 JOIN_SECONDS = 10.0
 
@@ -72,8 +74,6 @@ class Inbox:
         self.accept = self.complete = self.error = None
         self.basis, self.leaves, self.blocks = {}, {}, {}
         self.subpage = False  # set once ACCEPT took the subpage_offer: BLOCK_DIGESTS may arrive
-        # --diverged-basis: set once FORK_POINT was sent, so one BASIS_WAL may arrive; then its reply.
-        self.basis_wal_expected, self.basis_wal = False, None
         self.closed = False
         # The sender's protocol timers (pgdelta.waits.WaitTimers); without them waits aren't timed.
         self.timers = timers
@@ -159,8 +159,6 @@ class Inbox:
             index, entries = protocol.decode_block_digests(payload)
             for node, blob in entries:
                 self.blocks[(index, node)] = blob
-        elif code == protocol.BASIS_WAL and self.basis_wal_expected and self.basis_wal is None:
-            self.basis_wal = fastpath.check_basis_wal(protocol.decode_json(payload, 'BASIS_WAL'))
         elif code == protocol.COMPLETE:
             self.complete = protocol.decode_json(payload, 'COMPLETE')
         else:
@@ -293,10 +291,10 @@ class _Job:
 
 
 class _ReadAhead:
-    """--read-ahead (EXP-64b): the fast path's chosen runs, read on `threads` threads in sending order, up to
-    READ_AHEAD_BYTES ahead of the sending thread, so that the source's scattered reads overlap the sending and the
-    receiver's writes instead of alternating with them (EXP-64: 99 s of reads one at a time while the receiver
-    waited 105 s). `runs` lists (file index, entry, first page, page count, bytes) in the order they are sent."""
+    """--read-ahead (with --hash-ahead): the runs a file sends, read on `threads` threads in sending order, up to
+    READ_AHEAD_BYTES ahead of the sending thread, so that the source's reads overlap the sending and the receiver's
+    writes instead of alternating with them (EXP-64b, EXP-91). `runs` lists (file index, entry, first page, page
+    count, bytes) in the order they are sent."""
 
     def __init__(self, reader, runs, threads, window, block):
         self.reader, self.runs, self.block, self.window = reader, iter(runs), block, window
@@ -352,6 +350,16 @@ class _ReadAhead:
         for handle in self.handles.values():
             handle.close()
         self.handles.clear()
+
+
+def check_ahead(read_ahead, hash_ahead):
+    """Refuse a --read-ahead or --hash-ahead that is not a whole number, and --read-ahead without --hash-ahead."""
+    if type(read_ahead) is not int or read_ahead < 0:
+        raise InvalidInput(f'read-ahead must be a whole number of threads, not {read_ahead!r}')
+    if type(hash_ahead) is not int or hash_ahead < 0:
+        raise InvalidInput(f'hash-ahead must be a whole number of bytes, not {hash_ahead!r}')
+    if read_ahead and not hash_ahead:
+        raise InvalidInput('--read-ahead reads the pages hashing chose with --hash-ahead, so it needs --hash-ahead')
 
 
 def _parse_accept(accept, file_count):
@@ -481,36 +489,16 @@ class _Sender:
                  window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                  busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                  hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-                 fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False, selector=None,
-                 lsn_single_read=False, hash_ahead=DEFAULT_HASH_AHEAD):
+                 read_ahead=0, hash_ahead=DEFAULT_HASH_AHEAD):
         self.started = time.perf_counter()
         # --hash-ahead (EXP-91): the planner thread of the files being hashed (None without it, or between
         # _send_files calls); what all its planners did.
         self.hash_ahead, self.planner = hash_ahead, None
         self.hash_ahead_counts = {'bytes': hash_ahead, 'room_wait_seconds': 0.0, 'plan_wait_seconds': 0.0,
                                   'most_ahead_bytes': 0, 'read_ahead_reads': 0, 'read_ahead_wait_seconds': 0.0}
-        # --read-ahead (EXP-64b): the fast path's chosen pages read on this many threads ahead of sending (0: one run
-        # at a time in the sending thread, as in EXP-64); and what the reading did.
-        self.read_ahead, self.ahead = read_ahead, None
-        # --plan-out (EXP-68): where the fast path's plan is written, once the guard let it run.
-        self.plan_out = plan_out
-        # --fill-gaps (EXP-70): clean gaps of at most this many pages between chosen pages are sent too; how many.
-        self.fill_gaps, self.pages_filled = fill_gaps, 0
-        # --diverged-basis (idea 1): offered in HELLO; for an old primary past the fork, what B's WAL added.
-        self.diverged_basis, self.diverged_counts = diverged_basis, None
-        # --selector (EXP-74): the disks' limits (pgdelta.selector.Disks) it predicts with; what it chose.
-        self.selector, self.selector_counts = selector, None
-        # --lsn-single-read (EXP-85): page-lsn sends each chosen page from its scan's read, never reading it again.
-        self.lsn_single_read = lsn_single_read
-        # --fast-path summaries (pgdelta.fastpath): offered in HELLO; `fast` is the summaries' block plan once the
-        # guard let it run, and the listed files then go by fast_path's rules, B unread.
-        self.fast_path, self.fast = fast_path, None
-        self.fast_counts = {'used': False, 'reasons': [], 'summaries': 0, 'summary_rows': 0, 'relations': 0,
-                            'files_chosen': 0, 'files_whole': 0, 'pages_chosen': 0, 'guard_seconds': 0.0,
-                            'summarizer_wait_seconds': None, 'summarized_lsn': None,
-                            # Wall-clock times (time.time()), to place the guard and the sending on a timeline of
-                            # the disks (EXP-76): the guard's start, and the first and last listed file sent.
-                            'guard_started_utc': None, 'sending_started_utc': None, 'sending_ended_utc': None}
+        # --read-ahead: with --hash-ahead, the pages each file sends are read on this many threads ahead of sending (0:
+        # one run at a time in the sending thread).
+        self.read_ahead = read_ahead
         self.hash_algorithm = hash_algorithm
         # --compress zstd: offered in HELLO; the codec exists once the receiver accepted it (pgdelta.compress).
         self.compress, self.codec = compress, None
@@ -646,9 +634,7 @@ class _Sender:
         return self.block
 
     def _run(self):
-        fastpath.check_mode(self.fast_path, self.source_kind, self.subpage, self.read_ahead, self.plan_out,
-                            self.fill_gaps, self.diverged_basis, self.selector, self.lsn_single_read,
-                            self.hash_ahead)
+        check_ahead(self.read_ahead, self.hash_ahead)
         if self.source_kind not in datadir.SOURCE_KINDS:
             raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
                                f'not {self.source_kind!r}')
@@ -710,10 +696,6 @@ class _Sender:
             hello['compress_offer'] = [self.compress]
         if self.subpage:
             hello['subpage_offer'] = SUB_BLOCK
-        if self.fast_path:
-            hello['summary_offer'] = True
-            if self.diverged_basis:
-                hello['diverged_offer'] = True  # FORK_POINT may follow ACCEPT
         self._send_json(protocol.HELLO, hello)
         accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
         if offered is not None:
@@ -747,14 +729,7 @@ class _Sender:
         self.mode = 'reuse' if self.reuse else 'full'
         self.max_run = max(1, RUN_BYTES // self.block)
         self.max_request = protocol.max_nodes_per_request(self.node_blocks)
-        if 'summary' in accept or 'summary_refused' in accept:
-            if not self.fast_path:
-                raise ProtocolError('ACCEPT summary without a summary_offer')
-            self._decide_fast_path(accept)
-        if self.fast is not None:
-            self._send_fast(inventory.files)
-        else:
-            self._send_files(inventory.files, 0)
+        self._send_files(inventory.files, 0)
         if self.live is not None:
             # Every listed file has been sent: end backup mode, then send the WAL it needs and its backup_label.
             self._end_live(len(inventory.files))
@@ -776,345 +751,6 @@ class _Sender:
         receiver = final.get('receiver')
         self.receiver_stats = receiver if isinstance(receiver, dict) else None
         return self.stats('complete', 0, None)
-
-    def _decide_fast_path(self, accept):
-        """--fast-path summaries: the guard (pgdelta.fastpath.guard) on what the receiver proved of B and on the
-        server's summaries, then SUMMARY_DECISION. A receiver that proved nothing ("summary_refused") waits for no
-        decision, and the session hashes both copies."""
-        counts, facts = self.fast_counts, accept.get('summary')
-        if facts is None:
-            refused = accept.get('summary_refused')
-            counts['reasons'] = [refused if isinstance(refused, str) else 'the receiver declined the fast path']
-            return
-        if not isinstance(facts, dict):
-            raise ProtocolError('ACCEPT summary must be an object')
-        started = time.perf_counter()
-        counts['guard_started_utc'] = time.time()
-        source = dict(self.live.summary_source(), identity=self.identity)
-        counts['summarizer_wait_seconds'] = source['summarizer_wait_seconds']
-        counts['summarized_lsn'] = (None if source['summarized_lsn'] is None
-                                    else fastpath.format_lsn(source['summarized_lsn']))
-        page = self.fast_path == fastpath.PAGE_LSN
-        ok, reasons = fastpath.guard(facts, source, summaries=not page)
-        common = None
-        fork = fastpath.diverged_fork(facts, source) if not ok and self.diverged_basis and not page else None
-        if fork is not None and accept.get('diverged') is True:
-            common, ok, reasons = self._basis_wal(facts, source, fork)
-        if ok and page:
-            # page-lsn: no plan before sending; each main-fork file is scanned on the server as it comes (_send_lsn).
-            self.fast, self.lsn_threshold = {}, fastpath.parse_lsn(facts['redo'])
-            counts.update(lsn_threshold=facts['redo'], files_scanned=0, pages_scanned=0, scan_seconds=0.0,
-                          lsn_single_read=self.lsn_single_read, reread_bytes=0, held_bytes_peak=0)
-        elif ok:
-            redo = common['redo'] if common is not None else facts['redo']
-            spans = fastpath.ranges(fastpath.history_path(source['history'], source['timeline']),
-                                    fastpath.parse_lsn(redo), source['start_lsn'])
-            chosen = [(tli, start, end) for tli, start, end in source['summaries']
-                      if any(tli == t and start < hi and end > lo for t, lo, hi in spans)]
-            # One query, grouped per relation fork on the server (EXP-73b); the same plan as block_plan of every row.
-            rows, groups = self.live.summary_blocks(chosen)
-            self.fast = fastpath.grouped_plan(groups)
-            if common is not None:
-                fastpath.merge_basis_blocks(self.fast, common['blocks'])
-            counts['summaries'], counts['summary_rows'], counts['relations'] = len(chosen), rows, len(self.fast)
-        counts['used'], counts['reasons'] = ok, reasons
-        counts['guard_seconds'] = time.perf_counter() - started
-        self._send_json(protocol.SUMMARY_DECISION, {'use': ok, 'reasons': reasons})
-
-    def _basis_wal(self, facts, source, fork):
-        """--diverged-basis: FORK_POINT, the receiver's BASIS_WAL, and the guard on it: (reply, ok, reasons)."""
-        self.inbox.basis_wal_expected = True
-        self._send_json(protocol.FORK_POINT, {'timeline': int(facts['timeline']), 'fork': fastpath.format_lsn(fork)})
-        reply = self.inbox.wait(lambda: self.inbox.basis_wal, 'BASIS_WAL', 'accept')  # part of the handshake
-        counts = self.diverged_counts = {'fork': fastpath.format_lsn(fork)}
-        if 'refused' in reply:
-            counts['refused'] = reply['refused']
-            return None, False, [reply['refused']]
-        ok, reasons = fastpath.guard(facts, source, common=reply)
-        counts.update({key: reply[key] for key in ('checkpoint', 'redo', 'records', 'wal_log_hints')},
-                      relations=len(reply['blocks']), blocks=sum(n for runs in reply['blocks'].values() for _, n in runs),
-                      receiver_seconds=reply['seconds'])
-        return reply, ok, reasons
-
-    def _send_fast(self, entries):
-        """--fast-path summaries: each listed file in order. Where the summaries chose its pages, only those go, read
-        now, then FILE_DONE_WRITTEN with the digest of what was sent; any other file goes whole by the usual path.
-        With --read-ahead, the chosen runs are read on reader threads ahead of the sending thread (_ReadAhead)."""
-        if self.fast_path == fastpath.PAGE_LSN:
-            return self._send_lsn(entries)
-        blocks_per_segment = (self.identity or {}).get('blocks_per_segment') or (1 << 30) // self.block
-        counts = self.fast_counts
-        plans = []
-        for index, entry in enumerate(entries):
-            basis_size = self.basis_sizes.get(index) if self.reuse else None
-            unlogged = self.selection is not None and self.selection.source_path(entry.path) != entry.path
-            pages, whole = fastpath.pages_to_send(entry.path, entry.size, basis_size, self.fast, self.block,
-                                                  blocks_per_segment, whole=unlogged)
-            plans.append((index, entry, basis_size, pages, whole))
-        if self.selector is not None:
-            self._select(plans)
-        if self.fill_gaps:
-            for i, (index, entry, basis_size, pages, whole) in enumerate(plans):
-                if not whole:
-                    filled = fastpath.fill_gaps(pages, self.fill_gaps)
-                    self.pages_filled += len(filled) - len(pages)
-                    plans[i] = (index, entry, basis_size, filled, whole)
-        if self.plan_out is not None:
-            _write_plan(self.plan_out, self.block, plans, self.max_run)
-        if self.read_ahead:
-            runs = [(index, entry, first, count, min(count * self.block, entry.size - first * self.block))
-                    for index, entry, _, pages, whole in plans if not whole
-                    for first, count in matching.runs(pages, self.max_run)]
-            self.ahead = _ReadAhead(self.reader, runs, self.read_ahead, READ_AHEAD_BYTES, self.block)
-        counts['sending_started_utc'] = time.time()
-        try:
-            for plan in plans:
-                self._send_fast_file(*plan)
-        finally:
-            if self.ahead is not None:
-                self.ahead.close()
-        counts['sending_ended_utc'] = time.time()
-
-    def _send_lsn(self, entries):
-        """--fast-path page-lsn: each listed file in order, as _send_fast sends it, its pages chosen by a scan of the
-        server's copy (pgdelta.fastpath.lsn_pages). A scanner thread runs up to fastpath.LSN_LOOKAHEAD files ahead
-        of the sending thread, so the chosen pages are read again from the page cache; --read-ahead is not used.
-        With --lsn-single-read (EXP-85) the scanner hands over the chosen pages' bytes as it reads them
-        (fastpath.lsn_held_runs), up to about fastpath.LSN_HELD_BYTES ahead, and nothing is read twice."""
-        if self.lsn_single_read:
-            return self._send_lsn_held(entries)
-        counts, work, stop = self.fast_counts, queue.Queue(maxsize=fastpath.LSN_LOOKAHEAD), threading.Event()
-
-        def scan():
-            try:
-                for index, entry in enumerate(entries):
-                    if stop.is_set():
-                        return
-                    basis_size = self.basis_sizes.get(index) if self.reuse else None
-                    unlogged = self.selection is not None and self.selection.source_path(entry.path) != entry.path
-
-                    def read_pages(entry=entry):
-                        started, handle = time.perf_counter(), self.reader.open(entry)
-                        try:
-                            return fastpath.lsn_scan(handle.read, entry.size, self.block, self.lsn_threshold)
-                        finally:
-                            handle.close()
-                            counts['files_scanned'] += 1
-                            counts['pages_scanned'] += entry.size // self.block
-                            counts['scan_seconds'] += time.perf_counter() - started
-
-                    pages, whole = fastpath.lsn_pages(entry.path, entry.size, basis_size, read_pages, self.block,
-                                                      whole=unlogged)
-                    work.put((index, entry, basis_size, pages, whole))
-                work.put(None)
-            except BaseException as exc:  # handed to the sending thread
-                work.put(exc)
-
-        thread = threading.Thread(target=scan, name='pgdelta-lsn-scan', daemon=True)
-        counts['sending_started_utc'] = time.time()
-        thread.start()
-        try:
-            while (item := work.get()) is not None:
-                if isinstance(item, BaseException):
-                    if isinstance(item, OSError):
-                        raise TransferError(f'cannot read a source file to choose its pages: {item}') from item
-                    raise item
-                index, entry, basis_size, pages, whole = item
-                if self.fill_gaps and not whole:
-                    filled = fastpath.fill_gaps(pages, self.fill_gaps)
-                    self.pages_filled += len(filled) - len(pages)
-                    pages = filled
-                self._send_fast_file(index, entry, basis_size, pages, whole)
-        finally:
-            stop.set()
-            while thread.is_alive():  # let a blocked put return
-                try:
-                    work.get(timeout=0.1)
-                except queue.Empty:
-                    pass
-            thread.join()
-        counts['sending_ended_utc'] = time.time()
-
-    def _send_lsn_held(self, entries):
-        """--lsn-single-read (EXP-85): _send_lsn with each scanned file's runs sent from the scanner's own reads. The
-        scanner puts ('whole', index, entry), or ('begin', index, entry, basis_size), each chunk's ('runs', [(first,
-        bytes)]) and ('end', chosen, filled); the queue holds at most LSN_HELD_BYTES // LSN_SCAN_BYTES items."""
-        counts, stop, lock = self.fast_counts, threading.Event(), threading.Lock()
-        work = queue.Queue(maxsize=max(2, fastpath.LSN_HELD_BYTES // fastpath.LSN_SCAN_BYTES))
-        held = [0]
-
-        def put(item, size=0):
-            with lock:
-                held[0] += size
-                counts['held_bytes_peak'] = max(counts['held_bytes_peak'], held[0])
-            work.put(item)
-
-        def scan():
-            try:
-                for index, entry in enumerate(entries):
-                    if stop.is_set():
-                        return
-                    basis_size = self.basis_sizes.get(index) if self.reuse else None
-                    unlogged = self.selection is not None and self.selection.source_path(entry.path) != entry.path
-                    if not fastpath.lsn_scanned(entry.path, entry.size, basis_size, self.block, whole=unlogged):
-                        put(('whole', index, entry))
-                        continue
-                    put(('begin', index, entry, basis_size))
-                    started, handle = time.perf_counter(), self.reader.open(entry)
-                    tally = {'chosen': 0, 'filled': 0}
-                    try:
-                        for runs in fastpath.lsn_held_runs(handle.read, entry.size, self.block, self.lsn_threshold,
-                                                           basis_size // self.block, self.fill_gaps, self.max_run,
-                                                           tally):
-                            if stop.is_set():
-                                return
-                            put(('runs', runs), sum(len(data) for _, data in runs))
-                    finally:
-                        handle.close()
-                        counts['files_scanned'] += 1
-                        counts['pages_scanned'] += entry.size // self.block
-                        counts['scan_seconds'] += time.perf_counter() - started
-                    put(('end', tally['chosen'], tally['filled']))
-                work.put(None)
-            except BaseException as exc:  # handed to the sending thread
-                work.put(exc)
-
-        def take():
-            item = work.get()
-            if isinstance(item, BaseException):
-                if isinstance(item, OSError):
-                    raise TransferError(f'cannot read a source file to choose its pages: {item}') from item
-                raise item
-            if item is not None and item[0] == 'runs':
-                with lock:
-                    held[0] -= sum(len(data) for _, data in item[1])
-            return item
-
-        thread = threading.Thread(target=scan, name='pgdelta-lsn-scan', daemon=True)
-        counts['sending_started_utc'] = time.time()
-        thread.start()
-        try:
-            while (item := take()) is not None:
-                if item[0] == 'whole':
-                    self._send_fast_file(item[1], item[2], None, None, True)
-                    continue
-                _, index, entry, basis_size = item
-                counts['files_chosen'] += 1
-                sent, leaves, pages = 0, [], 0
-                started = time.perf_counter()
-                while (item := take())[0] == 'runs':
-                    for first, data in item[1]:
-                        view, count = memoryview(data), len(data) // self.block
-                        leaves += [(page, self.hasher.leaf(view[(page - first) * self.block:
-                                                                (page - first + 1) * self.block]))
-                                   for page in range(first, first + count)]
-                        self.inbox.check()
-                        self._send_run(index, first, data)
-                        sent, pages = sent + len(data), pages + count
-                self._drain_runs()
-                self.hash_source += time.perf_counter() - started
-                self.pages_filled += item[2]
-                counts['pages_chosen'] += pages
-                self._file_written(index, entry, basis_size, pages, sent, leaves)
-        finally:
-            stop.set()
-            while thread.is_alive():  # let a blocked put return
-                try:
-                    work.get(timeout=0.1)
-                except queue.Empty:
-                    pass
-            thread.join()
-        counts['sending_ended_utc'] = time.time()
-
-    def _select(self, plans):
-        """--selector (pgdelta.selector, EXP-74): each fill's time, predicted from the unfilled plan, the guard's time
-        and the disks' limits; the fastest sets the fill. pg_basebackup's predicted time is recorded beside them, and
-        whether it is faster: a recommendation, since pgdelta's own full copy can't beat its fill 0."""
-        started = time.perf_counter()
-        options, fill = selector.choose([pages for *_, pages, whole in plans if not whole],
-                                        sum(entry.size for _, entry, _, _, whole in plans if whole),
-                                        sum(entry.size for _, entry, *_ in plans), self.fast_counts['guard_seconds'],
-                                        self.block, self.max_run, self.selector)
-        self.fill_gaps = fill
-        self.selector_counts = {'choice': f'fill{fill}',
-                                'predicted_seconds': {name: round(s, 2) for name, s in options.items()},
-                                'full_copy_predicted_faster': options[selector.FULL] < options[f'fill{fill}'],
-                                'seconds': round(time.perf_counter() - started, 6),
-                                'disks': asdict(self.selector)}
-
-    def _send_fast_file(self, index, entry, basis_size, pages, whole):
-        """One listed file in fast mode (_send_fast): whole by the usual path, or its chosen pages and FILE_DONE_WRITTEN."""
-        counts = self.fast_counts
-        self.inbox.check()
-        if whole:
-            counts['files_whole'] += 1
-            self._finish(self._whole_job(index, entry))
-            return
-        counts['files_chosen'] += 1
-        counts['pages_chosen'] += len(pages)
-        sent, leaves = 0, []
-        started = time.perf_counter()
-        try:
-            handle = None if self.ahead is not None else self.reader.open(entry)
-        except OSError as exc:
-            raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
-        try:
-            for first, count in matching.runs(pages, self.max_run):
-                offset = first * self.block
-                length = min(count * self.block, entry.size - offset)
-                try:
-                    data = (self.ahead.next(index, first) if self.ahead is not None
-                            else handle.read(offset, length))
-                except OSError as exc:
-                    raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
-                if self.fast_path == fastpath.PAGE_LSN:
-                    counts['reread_bytes'] += len(data)  # read again after the scan (EXP-85's measure)
-                view = memoryview(data)
-                leaves += [(page, self.hasher.leaf(view[(page - first) * self.block:(page - first + 1) * self.block]))
-                           for page in range(first, first + count)]
-                self.inbox.check()
-                self._send_run(index, first, data)
-                sent += length
-            self._drain_runs()
-            if self.ahead is not None:
-                self.ahead.done(index)
-        finally:
-            if handle is not None:
-                handle.close()
-        self.hash_source += time.perf_counter() - started
-        self._file_written(index, entry, basis_size, len(pages), sent, leaves)
-
-    def _file_written(self, index, entry, basis_size, pages, sent, leaves):
-        """A fast-path file's end: FILE_DONE_WRITTEN with the digest of the `pages` pages sent (`sent` bytes, their
-        `leaves`), and the session's file and page counts."""
-        digest = fastpath.written_digest(self.hasher, entry.size, leaves)
-        self._send(protocol.FILE_DONE_WRITTEN, protocol.encode_file_done(index, entry.size, digest))
-        self.files_digest.add(entry.path, entry.size, digest)
-        total = -(-entry.size // self.block)
-        self.files['total'] += 1
-        if basis_size != entry.size:
-            self.files['size_mismatch'] += 1
-        self.files['unchanged' if not pages and basis_size == entry.size else 'changed'] += 1
-        self.pages['total'] += total
-        self.pages['sent'] += pages
-        self.pages['reused'] += total - pages
-        self.pages['sent_bytes'] += sent
-
-    def _whole_job(self, index, entry):
-        """A listed file sent whole in fast mode: hashed as read (pg_control pinned), every page sent, its digest
-        that of the whole file; B's copy of it is never read."""
-        started = time.perf_counter()
-        try:
-            tree = self.reader.hash(entry)
-        except OSError as exc:
-            raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
-        self.hash_source += time.perf_counter() - started
-        if tree.size != entry.size:
-            raise VerificationError(f'source file {entry.path} changed size during the run ({entry.size} -> '
-                                    f'{tree.size} bytes)')
-        job = _Job(index, entry.path, tree, None, entry=entry)
-        job.plan.whole = list(range(tree.node_count))
-        return job
 
     def _start_hashing(self, key):
         """The session's hasher and hash pool, and a live source's reader, for self.hash_algorithm."""
@@ -1584,34 +1220,7 @@ class _Sender:
             **({'subpage': {'requested': True, 'used': self.subpage_used,
                             **{k: round(v, 6) if isinstance(v, float) else v for k, v in self.subpage_counts.items()}}}
                if self.subpage else {}),
-            # --fast-path: whether the guard let it run and why not, and what the summaries chose; absent without it.
-            **({'fast_path': {'requested': self.fast_path,
-                              **{k: round(v, 6) if isinstance(v, float) else v for k, v in self.fast_counts.items()},
-                              'read_ahead': {'threads': self.read_ahead, 'window_bytes': READ_AHEAD_BYTES,
-                                             'reads': None if self.ahead is None else self.ahead.reads,
-                                             'wait_seconds': None if self.ahead is None
-                                             else round(self.ahead.wait_seconds, 6)},
-                              # --fill-gaps: pages_chosen counts the pages filled too; absent without it.
-                              **({'fill_gaps': {'gap_pages': self.fill_gaps, 'pages_filled': self.pages_filled}}
-                                 if self.fill_gaps else {}),
-                              # --diverged-basis: offered; for a B past the fork, what its own WAL added.
-                              **({'diverged_basis': self.diverged_counts or {}} if self.diverged_basis else {}),
-                              # --selector: what it predicted and chose, where the fast path ran; absent without it.
-                              **({'selector': self.selector_counts} if self.selector is not None else {})}}
-               if self.fast_path else {}),
         }
-
-
-def _write_plan(path, block, plans, max_run):
-    """--plan-out (EXP-68): the fast path's plan as JSON, for modelling its I/O. Per listed file, in sending order:
-    its path and size, whether it goes whole, and otherwise its chosen pages as the [first, count] runs sent."""
-    files = [{'path': str(entry.path), 'size': entry.size, 'whole': whole,
-              'runs': [] if whole else [[first, count] for first, count in matching.runs(pages, max_run)]}
-             for _, entry, _, pages, whole in plans]
-    try:
-        Path(path).write_text(json.dumps({'block': block, 'files': files}, separators=(',', ':')))
-    except OSError as exc:
-        raise InvalidInput(f'cannot write the plan to {path}: {exc}') from exc
 
 
 def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_BLOCKS,
@@ -1619,8 +1228,7 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
                hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
                busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
                hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
-               fast_path=None, read_ahead=0, plan_out=None, fill_gaps=0, diverged_basis=False, selector=None,
-               lsn_single_read=False, hash_ahead=DEFAULT_HASH_AHEAD):
+               read_ahead=0, hash_ahead=DEFAULT_HASH_AHEAD):
     """Run one session as the sender and return the statistics dict.
 
     On failure the raised PgDeltaError carries partial statistics in
@@ -1651,24 +1259,11 @@ def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_B
     `checkpoint` ("fast" or "spread") is pg_backup_start's for a live source.
     `subpage` offers sub-page deltas (pgdelta.subpage): with them accepted, each page sent carries only its
     512-byte blocks that differ from B's.
-    `fast_path` "summaries" (pgdelta.fastpath, a live source only) offers to send only the blocks the server's WAL
-    summaries list since B's redo point, without reading B; the receiver proves B's lineage, the guard here
-    decides, and otherwise the session is as without it. `read_ahead` threads read the fast path's chosen pages ahead
-    of the sending thread (0: one run at a time in it). `plan_out`, a path, receives the fast path's plan as JSON
-    where it runs (_write_plan). `fill_gaps` pages: clean gaps of at most that many pages between the fast path's
-    chosen pages are sent too (fastpath.fill_gaps), so fewer, larger reads and writes carry them.
-    `diverged_basis` extends the fast path to a B that kept writing after the server's timeline left its own (an old
-    primary after a failover): the blocks B's own WAL names since the checkpoint before the fork are sent too.
-    `selector`, a pgdelta.selector.Disks, has the fast path choose its fill once the guard has run: the fastest by
-    EXP-74's model of the plan on those disks (the fill given is then replaced). The statistics also say whether
-    pg_basebackup is predicted faster.
-    `lsn_single_read`, with fast_path "page-lsn", sends each chosen page from its scan's read instead of reading it
-    again (EXP-85).
     `hash_ahead` bytes (EXP-91): S's files are hashed on a thread of their own, up to that many bytes of files ahead
     of the one being sent, so S is read while a send blocks (_Planner); `read_ahead` threads then read the pages
     each file sends. 0 hashes on the sending thread, `window` files ahead. Only the order of the frames changes.
     """
     return _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
                    window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
-                   pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, fast_path,
-                   read_ahead, plan_out, fill_gaps, diverged_basis, selector, lsn_single_read, hash_ahead).run()
+                   pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, read_ahead,
+                   hash_ahead).run()

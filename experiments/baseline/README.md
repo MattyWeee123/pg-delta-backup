@@ -20,9 +20,10 @@
 | `full` | `pg_basebackup` into a new directory: the standard re-clone |
 | `hash` | pgdelta hashing both copies: works on any old copy |
 | `hashw` | the same, with the receiver's file syncs on a background thread (`--fsync worker`) |
-| `fast8wf2` | pgdelta's WAL-summary fast path, with its defaults |
 | `hashA`, `hashV`, `hashAVw`, `hashA2GVw`, ... | hashing with EXP-91's options: `A` hashes ahead on its own thread (`--hash-ahead 64G`, or the size after it: `A2G` is 2 GiB), `V` verifies each run as written (`--verify-scope as-written`), `w` syncs on the worker |
 | `X_1g` | arm X on a link shaped to 1 Gbit/s on both VMs (`infra/gcp/throttle.sh`) |
+
+The default arms are `full`, `hash` and `hashw`, each also as `_1g`. The WAL-summary fast path's arm, `fast8wf2`, went when the fast path was archived on November 9, 2026; its code is on branch `archive/fast-path` (tag `fast-path-archived`).
 
 Every pgdelta copy is started and compared with the source (row count and the sum of balances).
 
@@ -63,7 +64,7 @@ That runs a smoke only: a 0.3 GB database, every arm once, about 40 minutes. Run
 experiments/baseline/run.sh
 ```
 
-That runs the full baseline: 16 runs at 18 GB, about 2.5 hours.
+That runs the full baseline: 12 runs at 18 GB, about 2.5 hours.
 
 **Settings, by environment variable:**
 

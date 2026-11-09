@@ -17,6 +17,8 @@ Every idea tried or proposed, with where it won, where it lost, and what should 
 
 ## The fast path (labels from WAL summaries)
 
+**Archived November 9, 2026 (the owner's decision K19).** Every idea in this section is on branch `archive/fast-path` (tag `fast-path-archived`), not on `main`; the statuses below are as they stood then. Two stayed on `main` because hashing uses them: the receiver's syncs on a worker (`--fsync worker`, EXP-92) and reader threads (`--read-ahead`, on with `--hash-ahead`). **Revisit when:** the team's mentor or the sponsor asks for the fast path, or a target's old copies have a provable history with WAL summaries on, and reading all of B binds hashing there. Restoring it means merging the branch into a `main` that has moved on, so expect conflicts in `sender.py`, `receiver.py` and `cli.py`.
+
 | Idea | Family | Status | Evidence | Won where / lost where | Revisit when |
 |---|---|---|---|---|---|
 | Labels from WAL summaries instead of hashing B | algorithm | opt-in (`--fast-path`) | EXP-61–64, -79b | Beyond memory: 0.022 of a full copy for local changes, wins up to about 91% of pages / past 91% `pg_basebackup` wins (same bytes) | `summarize_wal` becomes common enough to make it the default |

@@ -238,6 +238,14 @@ Still open: K11 (D13's key design), and the sponsor's answers for K7 and K8.
 
 The O4 question (which number governs when the worst second and the work lost disagree on a large dirty set, EXP-57) was explained to the owner on October 27 and awaits an answer; fast stays the default meanwhile, by EXP-57's registered rule.
 
+## Decisions of November 9, 2026
+
+| # | Question | The owner's answer | What follows |
+|---|---|---|---|
+| K17 | The team's shared notes still give a November 13 code freeze; does K9's November 30 stand? | **Yes: the freeze is November 30.** | README and PLAN's summary corrected. The shared notes are the sponsor team's to change. |
+| K18 | Merge a teammate's exact-cutoff check for native backups (PR #14)? | **Yes, merge it.** | Merged with a merge commit after its CI passed on a merged branch. PR #15, stacked on it, waits for two changes (its timings marked as a correctness check, its GCP steps pointed at `experiments/baseline/`). |
+| K19 | Freeze the WAL-summary fast path in place, or archive it to a branch? | **Archive it to a branch ("box it up").** | Branch `archive/fast-path` and tag `fast-path-archived` hold it as of 7cb2ef1. `main` drops `pgdelta/fastpath.py`, `pgdelta/selector.py`, the fast path's options, protocol messages 15–18 (numbers reserved), and its tests, harnesses and scorers. Its write-ups, data and figures stay. K11, K15 and K16 now apply only on the branch. `--fsync worker` and `--read-ahead`, which began with the fast path, stay: hashing uses them. |
+
 ## What T3, T8a and T11 settled (October 24, 2026)
 
 Three experiments ran on two new `n2-standard-8` VMs in `us-central1-a`: 552 timed runs and 48 correctness runs, all verified. Each write-up was rechecked independently against the raw data, EXP-10's XFS arm and write-back rerun in a second recheck, and the corrections are in them.

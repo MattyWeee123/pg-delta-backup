@@ -11,7 +11,7 @@ from unittest import mock
 
 import types
 
-from pgdelta import cli, fastpath, receiver as receiver_module, sender as sender_module
+from pgdelta import cli, receiver as receiver_module, sender as sender_module
 from pgdelta.errors import InvalidInput, TransferError, VerificationError
 from pgdelta.inplace import CONTROL_FILE, MARKER
 
@@ -127,12 +127,14 @@ class HashAheadTests(InPlaceTestCase):
         self.assertTrue(os.path.lexists(self.basis / MARKER) or snapshot(self.basis) != snapshot(self.source))
         settle(self)
 
-    def test_read_ahead_needs_the_fast_path_or_hash_ahead(self):
-        with self.assertRaisesRegex(InvalidInput, 'needs --fast-path or --hash-ahead'):
-            fastpath.check_mode(None, 'live', False, 4)
-        fastpath.check_mode(None, 'live', False, 4, hash_ahead=1 << 20)
+    def test_read_ahead_needs_hash_ahead(self):
+        with self.assertRaisesRegex(InvalidInput, 'needs --hash-ahead'):
+            sender_module.check_ahead(4, 0)
+        sender_module.check_ahead(4, 1 << 20)
         with self.assertRaisesRegex(InvalidInput, 'hash-ahead must be a whole number of bytes'):
-            fastpath.check_mode(None, 'live', False, 0, hash_ahead=-1)
+            sender_module.check_ahead(0, -1)
+        with self.assertRaisesRegex(InvalidInput, 'read-ahead must be a whole number of threads'):
+            sender_module.check_ahead(-1, 1 << 20)
 
     def test_the_command_line(self):
         self.assertEqual([cli._byte_size(text) for text in ('0', '512', '64K', '256m', '32G', '1T')],
@@ -143,7 +145,8 @@ class HashAheadTests(InPlaceTestCase):
         parser = cli.build_parser()
         args = parser.parse_args(['send', '--source', 'S', '--connect', 'h:1', '--hash-ahead', '32G'])
         self.assertEqual(cli._sender_kwargs(args, None)['hash_ahead'], 32 << 30)
-        self.assertEqual(cli._read_ahead(args), fastpath.DEFAULT_READ_AHEAD)
+        self.assertEqual(cli._read_ahead(args), sender_module.DEFAULT_READ_AHEAD)
+        self.assertEqual(sender_module.DEFAULT_READ_AHEAD, 8)  # as before the fast path was archived (EXP-91)
         args = parser.parse_args(['send', '--source', 'S', '--connect', 'h:1'])
         self.assertEqual((cli._sender_kwargs(args, None)['hash_ahead'], cli._read_ahead(args)), (0, 0))
 

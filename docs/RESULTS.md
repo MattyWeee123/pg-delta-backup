@@ -2,6 +2,8 @@
 
 A one-page summary of the questions pgdelta's pitch rests on: the answer, how firm it is, and the figure behind it. Every answer links to its experiment, which was pre-registered, analysed by a committed script, and reports its failed predictions as failed. The full ledger is [DECISIONS.md](DECISIONS.md), and the day-by-day record [LOG.md](LOG.md).
 
+*November 9, 2026: the WAL-summary fast path this page mentions was archived from `main` (decision K19); its code is on branch `archive/fast-path`. The results stand as recorded.*
+
 pgdelta refreshes an older physical copy of a PostgreSQL cluster (B) from the live server (S). It hashes both, sends only the pages that differ, patches B in place, and verifies the result. v1 is that path reading the running server in backup mode.
 
 ## Is it correct?

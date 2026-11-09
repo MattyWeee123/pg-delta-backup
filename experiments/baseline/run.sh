@@ -1,9 +1,8 @@
 #!/bin/bash
 # The team's baseline (EXP-90; how to use it: experiments/baseline/README.md). Two VMs on GCP like an HA pair beyond
 # memory: an 18 GB database on 8 GB VMs with balanced persistent disks. pg_basebackup against pgdelta (hashing both
-# copies, the same with its syncs on a worker, and the WAL-summary fast path), on the full link and on one shaped to
-# 1 Gbit/s, after a hot and a scattered change, with each VM's link, disk and CPU sampled every 0.1 s. Then the
-# figures. The VMs are deleted at the end (KEEP=1 keeps them).
+# copies, and the same with its syncs on a worker), on the full link and on one shaped to 1 Gbit/s, after a hot and
+# a scattered change, with each VM's link, disk and CPU sampled every 0.1 s. Then the figures. The VMs are deleted at the end (KEEP=1 keeps them).
 #     experiments/baseline/run.sh                  # the full baseline, about 2.5 hours
 #     SMOKE_ONLY=1 experiments/baseline/run.sh     # a 0.3 GB smoke only, about 40 minutes
 # Settings (environment): PAIR (the VM set's name, default bl- and your user name), NAME, RESULTS (default
@@ -19,7 +18,7 @@ NAME=${NAME:-baseline-$(date -u +%Y%m%d-%H%M)}
 RESULTS=${RESULTS:-results/baseline/$NAME}
 SCALE=${SCALE:-600}
 PATTERNS=${PATTERNS:-hot uniform}
-ARMS=${ARMS:-full hash hashw fast8wf2 full_1g hash_1g hashw_1g fast8wf2_1g}
+ARMS=${ARMS:-full hash hashw full_1g hash_1g hashw_1g}
 REPEATS=${REPEATS:-1}
 SEED=${SEED:-900}
 ZONES=${ZONES:-us-west1-b:us-west1-c us-west1-a:us-west1-b us-central1-a:us-central1-b us-central1-c:us-central1-f us-east4-a:us-east4-b}

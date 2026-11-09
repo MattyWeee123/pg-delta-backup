@@ -78,7 +78,7 @@ import tempfile
 import threading
 import time
 
-from pgdelta import __version__, fastpath, flush, inplace, placement, protocol, subpage
+from pgdelta import __version__, flush, inplace, placement, protocol, subpage
 from pgdelta import compress as compression
 from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
                             ProtocolError, TransferError, VerificationError)
@@ -89,7 +89,7 @@ from pgdelta.identity import gate, read_identity, reuse_policy
 from pgdelta.inventory import MODE_MASK, parse_entries, require_plain, scan
 from pgdelta.protocol import ChannelClosed
 from pgdelta.tree import (BACKENDS, DEFAULT_BACKEND, DEFAULT_JOBS, HashPool, _SizeChanged, hash_file,
-                          node_count, open_regular, page_count, pread_exact, written_records)
+                          node_count, open_regular, page_count, pread_exact)
 
 STAGING_INFIX = '.pgdelta-staging-'
 RECEIPT_SUFFIX = '.pgdelta-receipt.json'
@@ -119,8 +119,7 @@ HELLO_KEYS = frozenset(('protocol_version', 'block', 'node_blocks', 'key', 'sour
 # Only a live source's HELLO has it (pgdelta.live): files follow in one APPEND before COMPLETE.
 # hash: the digest algorithm, absent for BLAKE2b (EXP-29); hash_offer: what a sender with --hash auto can use,
 # preferred first, of which this receiver picks the first it can use and names it in ACCEPT.
-HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer', 'compress_offer', 'subpage_offer', 'summary_offer',
-                                 'diverged_offer'))
+HELLO_OPTIONAL_KEYS = frozenset(('appends', 'hash', 'hash_offer', 'compress_offer', 'subpage_offer'))
 _CREATE_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_CLOEXEC', 0)
                  | getattr(os, 'O_NOFOLLOW', 0))
 _KERNEL_COPY = sys.platform.startswith('linux') and hasattr(os, 'copy_file_range')
@@ -249,8 +248,6 @@ class ReceiverSetup:
     in_place: bool = False
     marker: object = None
     lock: object = None
-    # B's pg_controldata, for the fast path's lineage facts (pgdelta.fastpath.basis_facts).
-    pg_controldata: object = None
 
     def release(self):
         """Let go of B (in place); the receiver does so when its run ends. Safe to repeat."""
@@ -332,7 +329,7 @@ def _prepare_in_place(basis, identity, pg_controldata, reuse_any_basis, local_so
         lock.release()
         raise
     return ReceiverSetup(basis, basis, inventory, identity, reuse_any_basis, protected, in_place=True,
-                         marker=marker, lock=lock, pg_controldata=pg_controldata)
+                         marker=marker, lock=lock)
 
 
 @dataclass
@@ -385,8 +382,7 @@ class _Counts:
 
 
 class _Verifier:
-    """Re-hashes finished output files on the pool, in order, while the main loop writes the next file; in the fast
-    path, re-reads each file's written pages and checks their digest (EXP-77).
+    """Re-hashes finished output files on the pool, in order, while the main loop writes the next file.
 
     The first failure is kept in `error` and reported to the sender at
     once; the main loop raises it at its next check. finish() waits for
@@ -402,10 +398,9 @@ class _Verifier:
         self.thread = threading.Thread(target=self._run, name='pgdelta-verify', daemon=True)
         self.thread.start()
 
-    def submit(self, entry, size, digest, written=None, fast_runs=None):
-        """`written`: --verify-scope written's (index, runs, B's node digests, B's leaf digests) for this file.
-        `fast_runs`: the fast path's written runs of this file, whose pages are re-read and checked instead."""
-        self.queue.put((entry, size, digest, written, fast_runs))
+    def submit(self, entry, size, digest, written=None):
+        """`written`: --verify-scope written's (index, runs, B's node digests, B's leaf digests) for this file."""
+        self.queue.put((entry, size, digest, written))
 
     def finish(self):
         self.queue.put(None)
@@ -423,10 +418,8 @@ class _Verifier:
                 if item is None or receiver.stop.is_set():
                     return
                 started = time.perf_counter()
-                entry, size, digest, written, fast_runs = item
-                if fast_runs is not None:
-                    receiver._check_written(entry, size, digest, fast_runs)
-                elif written is not None:
+                entry, size, digest, written = item
+                if written is not None:
                     index, runs, nodes_b, leaves_b, read_back = written
                     receiver._verify_written(index, entry, size, digest, runs, nodes_b, leaves_b, read_back)
                 else:
@@ -444,11 +437,8 @@ class _Verifier:
 class _Receiver:
     def __init__(self, channel, setup, jobs, hash_backend=DEFAULT_BACKEND, rebuild=DEFAULT_REBUILD,
                  verify=DEFAULT_VERIFY, prefetch=None, fsync=DEFAULT_FSYNC, launched=None, listening=None,
-                 verify_scope=DEFAULT_VERIFY_SCOPE, crashed_standby=False, crashed_primary=False):
+                 verify_scope=DEFAULT_VERIFY_SCOPE):
         self.channel, self.setup = channel, setup
-        # --crashed-standby (EXP-80): a standby left in recovery by a crash may take the fast path; --crashed-primary
-        # (research loop 4): so may a primary left "in production" by a crash, by the end of its own WAL.
-        self.crashed_standby, self.crashed_primary = crashed_standby, crashed_primary
         # --verify-scope written: B's node digests from the basis thread and the leaf digests it answered leaf
         # requests with, by file index, kept until the file is verified; and what the verification did.
         self.verify_scope = verify_scope
@@ -470,18 +460,6 @@ class _Receiver:
         self.subpage_offer, self.subpage = None, False
         self.subpage_counts = {'pages_partial': 0, 'pages_whole': 0, 'pages_same': 0, 'blocks_received': 0,
                                'block_digest_bytes': 0, 'hash_seconds': 0.0}
-        # --fast-path summaries (pgdelta.fastpath): the HELLO's offer; B's lineage facts or why there are none; while
-        # the sender's SUMMARY_DECISION is awaited, B is not read; once it said so, B is never read (fast_mode), and
-        # each file the summaries chose is checked by the pages written (FILE_DONE_WRITTEN).
-        self.summary_offer, self.summary_facts, self.summary_refused = False, None, None
-        self.summary_pending = self.fast_mode = False
-        # reread_seconds: the time re-reading and checking the written pages took, on the verifier when there is
-        # one (EXP-77), else in the main loop.
-        self.fast_counts = {'files_written_checked': 0, 'pages_reread': 0, 'reread_seconds': 0.0, 'reasons': []}
-        # --diverged-basis: the HELLO's offer; whether ACCEPT took it (B stopped cleanly, so its end is proven) with
-        # B's wal_log_hints, read then; and what this end found in B's WAL when FORK_POINT came (None until then).
-        self.diverged_offer = self.diverged = False
-        self.diverged_hints, self.diverged_counts = None, None
         # EXP-13's protocol timers, on the time.perf_counter() clock: publish_s counts from `launched` (the
         # receive command's start) and hello_wait_s from `listening` (its listener's), each else from here.
         started = time.perf_counter()
@@ -496,7 +474,7 @@ class _Receiver:
         self.verifier, self.copier = None, _Copier()
         # fsync placement (pgdelta.flush): the mode asked for, the one in effect (known once the run
         # starts, for "writeback"), and the worker if any.
-        self.fsync, self.syncer, self.fsync_auto = fsync, None, False
+        self.fsync, self.syncer = fsync, None
         self.fsync_effective = None if fsync in ('writeback', 'worker-writeback') else fsync
         self.writeback = False
         self.writeback_calls, self.writeback_seconds, self.fsync_wait_seconds = 0, 0.0, 0.0
@@ -652,13 +630,10 @@ class _Receiver:
             self.verifier = _Verifier(self)
 
     def _start_fsync(self):
-        """Writeback where the platform has it (else as "main"); a worker thread for "worker"; for "auto", the
-        worker when the fast path is offered and B's lineage facts were read (EXP-68), else main."""
+        """Writeback where the platform has it (else as "main"); a worker thread for "worker"; "auto" is "main"."""
         if self.fsync == 'auto':
-            # Reported as the mode it resolved to, so a session without the fast path keeps its COMPLETE frame's
-            # bytes; fast_path.fsync_auto says it was chosen.
-            self.fsync_auto = True
-            self.fsync = self.fsync_effective = 'worker' if self.summary_facts is not None else 'main'
+            # Reported as the mode it resolved to: the statistics, and so the COMPLETE frame's bytes, are --fsync main's.
+            self.fsync = self.fsync_effective = 'main'
         mode = self.fsync
         if mode == 'writeback':
             self.writeback = flush.writeback_available()
@@ -721,25 +696,6 @@ class _Receiver:
                         and (self.in_place or self.rebuild == 'copy-patch'))
         if self.subpage:
             accept['subpage'] = SUB_BLOCK
-        if self.summary_offer:
-            # B's lineage is read now: in place, its pg_control is renamed once B is blocked, after ACCEPT.
-            if not (self.in_place and self.reuse):
-                self.summary_refused = ('the fast path refreshes B in place only (--in-place), and B must pass the '
-                                        'identity check')
-            else:
-                self.summary_facts, self.summary_refused = fastpath.basis_facts(
-                    self.setup.basis, self.setup.pg_controldata, self.setup.marker, self.crashed_standby,
-                    self.crashed_primary)
-            if self.summary_facts is not None:
-                accept['summary'] = self.summary_facts
-                self.summary_pending = True  # B is read only if the sender's guard says no
-                if self.diverged_offer and (self.summary_facts['proof'].startswith('clean shutdown')
-                                            or self.summary_facts['proof'] == 'crashed primary'):
-                    # B's own WAL may stand in for its changes after a fork: read only if FORK_POINT comes.
-                    self.diverged_hints = fastpath.wal_log_hints(self.setup.basis, self.setup.pg_controldata)
-                    self.diverged = accept['diverged'] = True
-            else:
-                accept['summary_refused'] = self.summary_refused
         self.channel.send_json(protocol.ACCEPT, accept)
         self._start_pool()
         self._start_fsync()
@@ -747,11 +703,9 @@ class _Receiver:
             self._begin_in_place()
         else:
             self._create_staging()
-        if not self.summary_pending:
-            self._start_basis_thread()
+        self._start_basis_thread()
         handlers = {protocol.LEAF_REQUEST: self._leaf_request, protocol.PAGE_DATA: self._page_data,
-                    protocol.FILE_DONE: self._file_done, protocol.SUMMARY_DECISION: self._summary_decision,
-                    protocol.FILE_DONE_WRITTEN: self._file_done_written}
+                    protocol.FILE_DONE: self._file_done}
         if self.subpage:
             handlers[protocol.PAGE_DELTA] = self._page_delta
         if getattr(self, 'codec', None) is not None:
@@ -771,11 +725,6 @@ class _Receiver:
                                                                        protocol.LEAF_REQUEST):
                 # Plain pages, a file's end, an append and the end: every queued run is written first.
                 self._drain_decompressed()
-            if code == protocol.FORK_POINT:
-                self._fork_point(payload)
-                continue
-            if self.summary_pending and code != protocol.SUMMARY_DECISION:
-                raise ProtocolError(f'{protocol.name(code)} arrived before SUMMARY_DECISION')
             if code == protocol.COMPLETE:
                 return self._complete(payload)
             if code not in handlers:
@@ -788,37 +737,6 @@ class _Receiver:
             self.basis_thread = threading.Thread(target=self._hash_basis, name='pgdelta-basis',
                                                  daemon=True)
             self.basis_thread.start()
-
-    def _fork_point(self, payload):
-        """--diverged-basis: the server's history leaves B's timeline where B kept writing. Answer with the
-        checkpoint before the fork in B's own WAL and the blocks B's WAL names since (fastpath.basis_wal_blocks)."""
-        if not (self.diverged and self.summary_pending) or self.diverged_counts is not None:
-            raise ProtocolError('FORK_POINT without an accepted diverged_offer before SUMMARY_DECISION, or a second one')
-        timeline, fork = fastpath.check_fork_point(protocol.decode_json(payload, 'FORK_POINT'))
-        if timeline != self.summary_facts['timeline']:
-            raise ProtocolError(f'FORK_POINT names timeline {timeline}, B is on {self.summary_facts["timeline"]}')
-        reply, refused = fastpath.basis_wal_blocks(self.setup.basis, self.setup.pg_controldata, self.summary_facts,
-                                                   fork, (self.setup.identity or {}).get('wal_segment_size') or 16 << 20)
-        if reply is None:
-            reply = {'refused': refused}
-            self.diverged_counts = {'fork': fastpath.format_lsn(fork), 'refused': refused}
-        else:
-            reply['wal_log_hints'] = self.diverged_hints
-            self.diverged_counts = {'fork': fastpath.format_lsn(fork), 'checkpoint': reply['checkpoint'],
-                                    'redo': reply['redo'], 'records': reply['records'], 'seconds': reply['seconds'],
-                                    'relations': len(reply['blocks']),
-                                    'blocks': sum(n for runs in reply['blocks'].values() for _, n in runs)}
-        self.channel.send_json(protocol.BASIS_WAL, reply)
-
-    def _summary_decision(self, payload):
-        """The sender's guard: the fast path runs, and B is never read; or it does not, and B is hashed as usual."""
-        if not self.summary_pending:
-            raise ProtocolError('SUMMARY_DECISION without B\'s lineage facts in ACCEPT, or a second one')
-        use, reasons = fastpath.check_decision(protocol.decode_json(payload, 'SUMMARY_DECISION'))
-        self.summary_pending, self.fast_mode = False, use
-        self.fast_counts['reasons'] = reasons
-        if not use:
-            self._start_basis_thread()
 
     def _read_hello(self):
         code, payload = self._recv()
@@ -865,14 +783,6 @@ class _Receiver:
         # Accepted only where this end can decompress; otherwise the sender sends plain PAGE_DATA.
         self.codec = compression.Codec() if offer and compression.usable(offer[0]) else None
         self.compress_offer = offer
-        summary_offer = hello.get('summary_offer', False)
-        if type(summary_offer) is not bool:
-            raise ProtocolError('HELLO summary_offer must be true or false')
-        self.summary_offer = summary_offer
-        diverged_offer = hello.get('diverged_offer', False)
-        if type(diverged_offer) is not bool or (diverged_offer and not summary_offer):
-            raise ProtocolError('HELLO diverged_offer must be true or false, and true only with summary_offer')
-        self.diverged_offer = diverged_offer
         sub_offer = hello.get('subpage_offer')
         if sub_offer is not None and type(sub_offer) is not int:
             raise ProtocolError('HELLO subpage_offer must be an integer')
@@ -1061,7 +971,7 @@ class _Receiver:
         leaf requests in stream order, so B's file is never written before it
         was hashed. This guard keeps a misbehaving sender from breaking that.
         """
-        if self.reuse and index in self.basis_files and index >= self.basis_hashed and not self.fast_mode:
+        if self.reuse and index in self.basis_files and index >= self.basis_hashed:
             raise ProtocolError(f'data for {entry.path} arrived before the basis digests of it were sent; '
                                 f'in place, a file of B is written only after it was hashed')
         try:
@@ -1306,7 +1216,7 @@ class _Receiver:
         output.copied = max(output.copied, end)
         self._wrote(output, offset, length)
         self.rebuild_seconds += time.perf_counter() - started
-        if self.verify_scope == 'as-written' and not self.fast_mode:  # the fast path checks its own runs
+        if self.verify_scope == 'as-written':
             self._read_back(output, entry, first, offset, length)
         if output.runs and output.runs[-1][0] + output.runs[-1][1] == first:
             output.runs[-1] = (output.runs[-1][0], output.runs[-1][1] + count)
@@ -1384,7 +1294,7 @@ class _Receiver:
         written = None
         if self.verify_scope in WRITTEN_SCOPES:
             written = (index, list(output.runs), self.basis_nodes.pop(index, None), self.basis_leaves.pop(index, {}),
-                       output.read_back if self.verify_scope == 'as-written' and not self.fast_mode else None)
+                       output.read_back if self.verify_scope == 'as-written' else None)
         if self.verifier is not None:
             self._accept_file(entry, size, digest)
             self.verifier.submit(entry, size, digest, written)
@@ -1402,73 +1312,6 @@ class _Receiver:
             self.verify_seconds += elapsed
             self.verify_wait_seconds += elapsed
             self._accept_file(entry, size, digest)
-
-    def _file_done_written(self, payload):
-        """--fast-path summaries: a file of which only the pages the summaries chose were sent, in place. The pages
-        left are B's, unread; the pages written are re-read and their digest compared with that of what was sent
-        (pgdelta.fastpath.written_digest). With the pipelined verifier the re-reading runs there, on the pool, while
-        this loop takes the next file (EXP-77: in this loop it stalled the transfer at every file's end); COMPLETE
-        waits for it before anything is published."""
-        if not self.fast_mode:
-            raise ProtocolError('FILE_DONE_WRITTEN outside the fast path')
-        index, size, digest = protocol.decode_file_done(payload)
-        if index >= len(self.files):
-            raise ProtocolError(f'FILE_DONE_WRITTEN for unknown file {index}')
-        output, entry = self._open(index), self.files[index]
-        if size != entry.size:
-            raise ProtocolError(f'FILE_DONE_WRITTEN size for {entry.path} differs from the inventory')
-        started = time.perf_counter()
-        basis_size = self.basis_files.get(index)
-        gaps = output.gaps()
-        self._check_gaps(entry, gaps, basis_size)
-        for start, stop in gaps:
-            self.counts.pages_copied += stop - start
-            self.counts.bytes_copied += min(stop * self.block, size) - start * self.block
-        if os.fstat(output.fd).st_size > size:
-            os.ftruncate(output.fd, size)
-        if os.fstat(output.fd).st_size != size:
-            raise ProtocolError(f'{entry.path} was rebuilt with the wrong length')
-        runs = list(output.runs)
-        synced = time.perf_counter()
-        if self.syncer is not None:
-            fd, self.current = output.fd, None
-            self.fsync_wait_seconds += self.syncer.submit(fd, entry.path)
-        else:
-            os.fsync(output.fd)
-            self.fsync_seconds += time.perf_counter() - synced
-            os.close(output.fd)
-            self.current = None
-        self.rebuild_seconds += time.perf_counter() - started
-        os.chmod(self._output_path(entry.path), entry.mode)
-        self.counts.files_verified += 1
-        self.fast_counts['files_written_checked'] += 1
-        self._accept_file(entry, size, digest)
-        if self.verifier is not None:
-            self.verifier.submit(entry, size, digest, fast_runs=runs)
-        else:
-            verified = time.perf_counter()
-            self._check_written(entry, size, digest, runs)
-            elapsed = time.perf_counter() - verified
-            self.verify_seconds += elapsed
-            self.verify_wait_seconds += elapsed
-
-    def _check_written(self, entry, size, digest, runs):
-        """The fast path's check of a file: its written pages re-read from the output (one read per run, on the pool's
-        workers where it has them) and their digest compared with that of what the source sent."""
-        started = time.perf_counter()
-        path = self._output_path(entry.path)
-        fd = open_regular(path)
-        try:
-            if self.pool is not None:
-                records = self.pool.written_records(path, fd, size, self.hasher, self.block, runs, stop=self.stop)
-            else:
-                records = written_records(fd, size, self.hasher, self.block, runs)
-        finally:
-            os.close(fd)
-        self.fast_counts['pages_reread'] += sum(count for _, count in runs)
-        self.fast_counts['reread_seconds'] += time.perf_counter() - started
-        if fastpath.records_digest(self.hasher, size, records) != digest:
-            raise VerificationError(f'{entry.path}: the pages written do not match what the source sent')
 
     def _append(self, payload):
         """A live source's APPEND: the files that follow the listed ones (its WAL and backup_label).
@@ -1917,12 +1760,6 @@ class _Receiver:
             stats['subpage'] = {'offered': self.subpage_offer, 'accepted': self.subpage,
                                 **{key: round(value, 6) if isinstance(value, float) else value
                                    for key, value in self.subpage_counts.items()}}
-        if self.summary_offer:
-            # Only when offered, so a session without --fast-path keeps its COMPLETE frame's bytes.
-            stats['fast_path'] = {'offered': True, 'facts': self.summary_facts, 'refused': self.summary_refused,
-                                  'used': self.fast_mode, 'fsync_auto': self.fsync_auto, **self.fast_counts}
-            if self.diverged_offer:  # only when offered, so other sessions' bytes are unchanged
-                stats['fast_path']['diverged_basis'] = {'accepted': self.diverged, **(self.diverged_counts or {})}
         if self.misplaced_write is not None:
             stats['test_misplaced_write'] = self.misplaced_write
         return stats
@@ -1935,8 +1772,7 @@ def _rounded(seconds):
 def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None, pg_controldata=None,
                  reuse_any_basis=False, local_source=None, jobs=DEFAULT_JOBS, hash_backend=DEFAULT_BACKEND,
                  rebuild=DEFAULT_REBUILD, verify=DEFAULT_VERIFY, prefetch=None, in_place=False,
-                 fsync=DEFAULT_FSYNC, launched=None, listening=None, verify_scope=DEFAULT_VERIFY_SCOPE,
-                 crashed_standby=False, crashed_primary=False):
+                 fsync=DEFAULT_FSYNC, launched=None, listening=None, verify_scope=DEFAULT_VERIFY_SCOPE):
     """Run one session as the receiver and return its statistics dict.
 
     Pass a ReceiverSetup from prepare_receiver(), or basis and output to run
@@ -1958,9 +1794,6 @@ def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None,
     receive command started and when its listener started listening; the
     protocol timers publish_s and hello_wait_s count from them, or, when
     they are None, from the session's start after the local checks (EXP-13).
-    `crashed_standby` lets the fast path take a standby that crashed in recovery, by its minimum recovery point
-    (pgdelta.fastpath.basis_facts; EXP-80). `crashed_primary` lets it take a primary that crashed, by the end of its
-    own WAL (pgdelta.fastpath.crashed_wal_end; research loop 4).
     """
     if setup is None:
         try:
@@ -1974,4 +1807,4 @@ def run_receiver(channel, basis=None, output=None, *, setup=None, identity=None,
                 pass
             raise
     return _Receiver(channel, setup, jobs, hash_backend, rebuild, verify, prefetch, fsync, launched,
-                     listening, verify_scope, crashed_standby, crashed_primary).run()
+                     listening, verify_scope).run()

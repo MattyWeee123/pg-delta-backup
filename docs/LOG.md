@@ -4,6 +4,29 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-09 (23:30 UTC): The WAL-summary fast path archived to a branch (K19)
+
+- **Why:** the owner found the project running down two diverging paths. The fast path (EXP-61 to EXP-89, October 26–30) needs a provable history and WAL summaries, the case the niche (D01) leaves to PostgreSQL's own tools. The mentor has seen only plain page LSNs, which the October 23 notes call "a bit flimsy", and the work since October 30 is on hashing. The owner chose to box the fast path up rather than keep it frozen on `main`.
+- **Where it is:** branch `archive/fast-path` and tag `fast-path-archived`, both at 7cb2ef1, pushed before anything was removed.
+- **Removed from `main`** (56 files deleted, 19 edited; 10,033 lines out, 239 in):
+  - `pgdelta/fastpath.py` and `pgdelta/selector.py`, and the fast-path code in `sender.py`, `receiver.py`, `cli.py`, `live.py`, `tree.py` and `transport.py`. The tool is 8,498 lines, down from 10,352;
+  - the options `--fast-path`, `--fill-gaps`, `--plan-out`, `--lsn-single-read`, `--diverged-basis`, `--crashed-standby`, `--crashed-primary` and `--selector` with its three disk options;
+  - protocol messages 15–18 and the HELLO and ACCEPT fields that offered them. The numbers stay reserved, and a hashing session sends the same bytes as before;
+  - the fast path's tests (69), its harnesses (`experiments/fastpath_crashed/`, `fastpath_fixed_costs/`, `summaries_off/`, `crashed_primary/`, `summarize_cost/`, `linux_campaign/`, two VM lab scripts) and 32 of its scorers in `analysis/`;
+  - the `fast8wf2` arms from the team script's defaults (`experiments/baseline/`), which now runs 12 cells. No arm was added.
+- **Kept, because hashing uses them:**
+  - `--fsync worker`; `--fsync auto` now always means `main`, as it already did outside the fast path;
+  - `--read-ahead`, on with `--hash-ahead`; its default of 8 threads moved to `sender.py`;
+  - `--hash-ahead`, `--verify-scope`, the live source in backup mode, and everything else on the hashing path.
+  - Also kept: the offline WAL-summary scorers wired into EXP-03's harness, and the VM lab's server settings (`summarize_wal` on), so that new hashing sessions stay comparable with EXP-90 to EXP-92.
+- **Checked before merging:**
+  - the full suite passed on Python 3.14 and 3.13 (1,643 tests; the 69 fewer are the deleted files);
+  - `python -m pgdelta local --help` lists none of the removed options;
+  - every changed condition in the receiver and sender is the same for a hashing session (each removed clause was `and not self.fast_mode`, or a branch taken only with `--fast-path`);
+  - the hashing statistics keep their fields, since the `fast_path` key was only ever written for fast-path runs;
+  - EXP-91's local lab, moved into `experiments/network/exp91_local.py`, ran 8 refreshes at scale 2, every copy matching its source and passing `pg_amcheck`.
+- **What stays as the record:** every write-up, data file and figure in `docs/experiments/`, with the README's October 28 status and the decisions K11, K15 and K16. Those decisions now apply only on the branch. `registrations.json` still lists the deleted files' hashes for the old registrations, so `analysis/integrity.py check` reports them as missing there. Restore them from the tag.
+
 ## 2026-11-09 (21:30 UTC): The code freeze stays November 30
 
 - **Why:** the team's shared notes still give the code freeze as November 13, with the demo to AlloyDB leadership in late November to December 4. K9 (October 25) had moved it to November 30, but that change never reached the shared notes. The owner confirmed November 30 today.

@@ -11,8 +11,7 @@ import tempfile
 import time
 import traceback
 
-from pgdelta import (datadir, fastpath, flush, inplace, live, placement, prefetch, receiver, selector, sender,
-                     transport)
+from pgdelta import datadir, flush, inplace, live, placement, prefetch, receiver, sender, transport
 from pgdelta.errors import EXIT_TRANSFER_FAILURE, InvalidInput, PgDeltaError, TransferError
 from pgdelta.hashing import ALGORITHMS, DEFAULT_ALGORITHM, NODE_BLOCKS
 from pgdelta.identity import read_identity
@@ -182,17 +181,6 @@ def _non_negative_int(text):
     return value
 
 
-
-def _positive_float(text):
-    try:
-        value = float(text)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f'expected a number, got {text!r}') from None
-    if not 0 < value < float('inf'):
-        raise argparse.ArgumentTypeError('must be a positive number')
-    return value
-
-
 def _compress_option(parser):
     parser.add_argument('--compress', choices=('off', 'zstd'), default='off',
                         help='compress the pages sent with zstd (level 3), where the receiver can decompress; '
@@ -209,64 +197,11 @@ def _compress_option(parser):
                              'measurement (EXP-54, EXP-55), but as built it was slower than zstd alone at 0.5 and '
                              '1 Gbit/s on 8-vCPU VMs, its block hashing costing more than the link time saved '
                              '(EXP-56). Leave it off')
-    parser.add_argument('--fast-path', choices=fastpath.MODES, default=None,
-                        help='with --source-kind live and an in-place refresh: send only the blocks the server\'s '
-                             'WAL summaries (summarize_wal = on, PostgreSQL 17.11, 18.6 or later) list since B\'s '
-                             'redo point, reading no other page of either copy, where B\'s lineage is provable: '
-                             'B stopped cleanly or a base backup with its manifest, on the server\'s timeline '
-                             'history, no interrupted refresh, the summaries covering the gap (guard v2, EXP-61, '
-                             'EXP-62). Otherwise the session hashes both copies as without it. Pages left unsent '
-                             'are not verified; the pages written are. The session\'s role needs EXECUTE on '
-                             'pg_get_wal_summarizer_state, pg_available_wal_summaries and pg_wal_summary_contents. '
-                             '"page-lsn" (summaries off, or not covering B; research loop 3) runs the same guard '
-                             'without its summary conditions and chooses each main-fork page whose LSN is at or '
-                             'past B\'s redo point, as WAL-G\'s catch-up and pg_probackup DELTA do: it reads all '
-                             'of the server\'s copy and none of B; the visibility and free-space maps go whole')
     parser.add_argument('--read-ahead', type=_non_negative_int, default=None, metavar='THREADS',
-                        help='with --fast-path: read the chosen pages on THREADS threads, in sending order and up to '
-                             '64 MiB ahead of the sending thread, so the source\'s scattered reads overlap the '
-                             'sending and the receiver\'s writes; 0 reads one run at a time in the sending thread '
-                             f'(EXP-64b, EXP-68) (default: {fastpath.DEFAULT_READ_AHEAD} with --fast-path)')
-    parser.add_argument('--fill-gaps', type=_non_negative_int, default=None, metavar='PAGES',
-                        help='with --fast-path: also send each clean gap of at most PAGES pages between two chosen '
-                             'pages, so the two runs are read and written as one. Scattered changes are bound by '
-                             'the disks\' operation rates (EXP-68), and a balanced persistent disk counts a write of '
-                             'up to 32 KiB as one operation (EXP-66, EXP-70) '
-                             f'(default: {fastpath.DEFAULT_FILL_GAPS} with --fast-path)')
-    parser.add_argument('--diverged-basis', action=argparse.BooleanOptionalAction, default=None,
-                        help='with --fast-path: also refresh an old primary that kept writing after the server\'s '
-                             'timeline left its own (a failover), as pg_rewind would accept it. The receiver lists '
-                             'the blocks B\'s own WAL names from the checkpoint before the fork through B\'s end, '
-                             'and these go with the summaries\' blocks since that checkpoint. B must have been '
-                             'stopped cleanly, keep that WAL, and have data checksums or wal_log_hints (idea 1, '
-                             'EXP-69, EXP-69b, EXP-71) (default: on with --fast-path)')
-    parser.add_argument('--lsn-single-read', action=argparse.BooleanOptionalAction, default=None,
-                        help='with --fast-path page-lsn: send each chosen page from the scan\'s own read of it, '
-                             'never reading it again. The scanner holds at most about 256 MiB of chosen pages ahead '
-                             'of sending. With --no-lsn-single-read each chosen page is read again after the scan; at '
-                             '4.5x memory those second reads missed the page cache and page-lsn took 1.12x '
-                             'pg_basebackup (EXP-84), against 0.98x with one read (EXP-85, EXP-87) '
-                             f'(default: {"on" if fastpath.DEFAULT_LSN_SINGLE_READ else "off"} with --fast-path page-lsn)')
-    parser.add_argument('--selector', action='store_true',
-                        help='with --fast-path, where the guard lets it run: predict its time from its plan at each '
-                             'fill (0, 1, 2 and 4 pages), from the disks\' limits below, and take the fastest fill '
-                             '(replaces --fill-gaps). Where pg_basebackup is predicted faster, the log and the '
-                             'statistics say so. In EXP-74 the model put every fast arm within 2.6%% of its time and '
-                             'picked the fastest arm measured in both cells; as built here it is not yet timed '
-                             '(off by default)')
-    parser.add_argument('--selector-read-ops', type=_positive_float, default=selector.Disks.read_ops, metavar='N',
-                        help='with --selector: the source disk\'s reads per second at its cap '
-                             '(default: %(default)g, EXP-74\'s 150 GiB balanced persistent disk)')
-    parser.add_argument('--selector-write-ops', type=_positive_float, default=selector.Disks.write_ops, metavar='N',
-                        help='with --selector: the destination disk\'s writes per second at its cap '
-                             '(default: %(default)g)')
-    parser.add_argument('--selector-mb-per-second', type=_positive_float,
-                        default=selector.Disks.bytes_per_second / 1e6, metavar='MB',
-                        help='with --selector: either disk\'s megabytes per second (default: %(default)g)')
-    parser.add_argument('--plan-out', type=Path, default=None, metavar='PATH',
-                        help='with --fast-path, where the guard lets it run: write its plan to PATH as JSON, each '
-                             'listed file with its size, whether it goes whole, and its chosen pages as [first, '
-                             'count] runs. For modelling the fast path\'s I/O (EXP-68)')
+                        help='with --hash-ahead: read the pages each file sends on THREADS threads, in sending order '
+                             'and up to 64 MiB ahead of the sending thread, since hashing ran ahead and they may have '
+                             'left the page cache; 0 reads one run at a time in the sending thread (EXP-91) '
+                             f'(default: {sender.DEFAULT_READ_AHEAD} with --hash-ahead)')
 
 
 def _hash_option(parser):
@@ -297,21 +232,6 @@ def _rebuild_options(parser):
                              'sequential right after writing it. Either way every file is verified '
                              'before O is published; with --jobs 1 it is always sequential '
                              '(default: %(default)s)')
-    parser.add_argument('--crashed-standby', action=argparse.BooleanOptionalAction, default=None,
-                        help='with the fast path offered and in place: also take a B that is a standby left in '
-                             'recovery by a crash or a kill ("in archive recovery"), its end proven by its minimum '
-                             'recovery point, as for a cleanly stopped standby. A primary that crashed stays refused '
-                             '(EXP-62). Remove a killed server\'s stale postmaster.pid first. 100 of 100 randomized '
-                             'crashed standbys came out correct, and it held on every held-out setting (EXP-80, '
-                             'EXP-80b, EXP-84). Without the fast path it changes nothing '
-                             f'(default: {"on" if fastpath.DEFAULT_CRASHED_STANDBY else "off"})')
-    parser.add_argument('--crashed-primary', action='store_true',
-                        help='with the fast path offered and in place: also take a B that is a primary left "in '
-                             'production" by a crash. Its end is proven by its own WAL, read from its redo point to '
-                             'where it stops, and only where the stop looks like a crash\'s end: inside a whole '
-                             'segment file, with no WAL of the same generation past it. WAL lost or damaged past a '
-                             'point is refused (EXP-62, EXP-80). After a failover it needs --diverged-basis too. '
-                             'Opt-in until its experiments (research loop 4)')
     parser.add_argument('--verify-scope', choices=('auto', *receiver.VERIFY_SCOPES), default='auto',
                         help='what is re-read to verify each file: all of it, or (in place) only the pages this run '
                              'wrote, every other part checked by the digests of B computed before anything was '
@@ -326,9 +246,8 @@ def _rebuild_options(parser):
                              'next file; writeback, the same, after starting write-back every 8 MiB written '
                              '(Linux sync_file_range; elsewhere as main); worker, on a background thread '
                              'while the main loop goes on; worker-writeback, worker after starting write-back '
-                             'the same way (elsewhere as worker); auto, worker when the fast path is offered and main '
-                             'otherwise (EXP-68). Every fsync completes before publication or commit either way '
-                             '(default: %(default)s)')
+                             'the same way (elsewhere as worker); auto, main. Every fsync completes before publication '
+                             'or commit either way (default: %(default)s)')
 
 
 def _target_options(parser):
@@ -464,7 +383,7 @@ def _sender_options(parser):
                         help='hash S on a thread of its own, up to SIZE bytes of files (K, M, G or T: binary) ahead '
                              'of the file being sent, so S is read while a send waits for the receiver, instead of '
                              '--window; the pages each file sends are then read on --read-ahead threads (default '
-                             f'{fastpath.DEFAULT_READ_AHEAD} with it). It changes the order of the frames on the wire, '
+                             f'{sender.DEFAULT_READ_AHEAD} with it). It changes the order of the frames on the wire, '
                              'not what is sent. 0 is off (EXP-91; default: off)')
 
 
@@ -628,15 +547,7 @@ def _receive(args):
 
 def _receiver_engine(args):
     return {'jobs': args.jobs, 'hash_backend': args.hash_backend, 'rebuild': args.rebuild,
-            'verify': args.verify, 'fsync': args.fsync, 'verify_scope': _verify_scope(args),
-            'crashed_standby': _crashed_standby(args), 'crashed_primary': getattr(args, 'crashed_primary', False)}
-
-
-def _crashed_standby(args):
-    """--crashed-standby or --no-crashed-standby as given, else fastpath.DEFAULT_CRASHED_STANDBY. It changes only the
-    fast path's decision, which the sender offers, so the receiver needs no --fast-path of its own."""
-    on = getattr(args, 'crashed_standby', None)
-    return fastpath.DEFAULT_CRASHED_STANDBY if on is None else on
+            'verify': args.verify, 'fsync': args.fsync, 'verify_scope': _verify_scope(args)}
 
 
 def _verify_scope(args):
@@ -662,54 +573,16 @@ def _sender_kwargs(args, identity):
             'live_timeout': args.live_timeout, 'hash_algorithm': args.hash,
             'compress': None if getattr(args, 'compress', 'off') == 'off' else args.compress,
             'checkpoint': args.checkpoint or live.DEFAULT_CHECKPOINT,
-            'subpage': getattr(args, 'subpage', False), 'fast_path': getattr(args, 'fast_path', None),
-            'read_ahead': _read_ahead(args), 'plan_out': getattr(args, 'plan_out', None),
-            'hash_ahead': getattr(args, 'hash_ahead', 0),
-            'fill_gaps': _fill_gaps(args), 'diverged_basis': _diverged_basis(args), 'selector': _selector(args),
-            'lsn_single_read': _lsn_single_read(args)}
+            'subpage': getattr(args, 'subpage', False), 'read_ahead': _read_ahead(args),
+            'hash_ahead': getattr(args, 'hash_ahead', 0)}
 
 
 def _read_ahead(args):
-    """--read-ahead as given, else fastpath.DEFAULT_READ_AHEAD with --fast-path or --hash-ahead and 0 without."""
+    """--read-ahead as given, else sender.DEFAULT_READ_AHEAD with --hash-ahead and 0 without."""
     threads = getattr(args, 'read_ahead', None)
     if threads is None:
-        return fastpath.DEFAULT_READ_AHEAD if getattr(args, 'fast_path', None) or getattr(args, 'hash_ahead', 0) else 0
+        return sender.DEFAULT_READ_AHEAD if getattr(args, 'hash_ahead', 0) else 0
     return threads
-
-
-def _fill_gaps(args):
-    """--fill-gaps as given, else fastpath.DEFAULT_FILL_GAPS with --fast-path and 0 without."""
-    pages = getattr(args, 'fill_gaps', None)
-    if pages is None:
-        return fastpath.DEFAULT_FILL_GAPS if getattr(args, 'fast_path', None) else 0
-    return pages
-
-
-def _selector(args):
-    """--selector's disks (pgdelta.selector.Disks), or None without it. It replaces --fill-gaps, so not both."""
-    if not getattr(args, 'selector', False):
-        return None
-    if getattr(args, 'fill_gaps', None) is not None:
-        raise InvalidInput('--selector chooses the fill itself, so it does not take --fill-gaps')
-    return selector.Disks(args.selector_read_ops, args.selector_write_ops, args.selector_mb_per_second * 1e6)
-
-
-def _lsn_single_read(args):
-    """--lsn-single-read or --no-lsn-single-read as given, else fastpath.DEFAULT_LSN_SINGLE_READ with --fast-path
-    page-lsn and off otherwise (it is page-lsn's own option: check_mode refuses it elsewhere)."""
-    on = getattr(args, 'lsn_single_read', None)
-    if on is None:
-        return fastpath.DEFAULT_LSN_SINGLE_READ and getattr(args, 'fast_path', None) == fastpath.PAGE_LSN
-    return on
-
-
-def _diverged_basis(args):
-    """--diverged-basis or --no-diverged-basis as given, else fastpath.DEFAULT_DIVERGED_BASIS with --fast-path and
-    off without."""
-    on = getattr(args, 'diverged_basis', None)
-    if on is None:
-        return fastpath.DEFAULT_DIVERGED_BASIS if getattr(args, 'fast_path', None) else False
-    return on
 
 
 def _source_identity(args):
@@ -771,11 +644,6 @@ def _run_sender_command(args, run, protected):
         f'{stats["gate_reason"]}): {pages["sent"]} of {pages["total"]} '
         f'pages sent; {up["total"]} bytes to the destination, {down["total"]} bytes back; '
         f'{stats["timings_seconds"]["total"]:.3f} s')
-    chosen = (stats.get('fast_path') or {}).get('selector') or {}
-    if chosen.get('full_copy_predicted_faster'):
-        predicted = chosen['predicted_seconds']
-        log(f'note: on the given disks\' limits, pg_basebackup is predicted faster than the fast path here '
-            f'({predicted["full"]} s against {predicted[chosen["choice"]]} s at {chosen["choice"]})')
     return 0
 
 
