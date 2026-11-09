@@ -4,6 +4,26 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-09 (21:00 UTC): A teammate's exact-cutoff check for native backups merged (PR #14)
+
+- **What it adds:** `benchmarks/native_oracle.py` and changes to `benchmarks/native_baseline.py`.
+  - A backup taken under load is restored with only its own WAL, to the end point its manifest records (`WAL-Ranges[0].End-LSN`).
+  - It is compared at that exact point with a separate restore of the older copy plus archived WAL.
+  - Before, the check was only that the copy started and the total balance held, so a lost transfer that also lost its ledger row passed.
+  - Per the PR, its tests include deliberate failures it must catch: that lost transfer, a reference stopped at the wrong point, and missing WAL.
+- **Why it was merged:** it checks the correctness of the competitors' copies (`pg_basebackup` full and `--incremental`). Rule 16 asks for such a check on every comparison.
+- **The evidence before merging:**
+  - it merged cleanly with main (69 commits behind);
+  - the full suite passed on the merged tree, with and without zstd. A few of our timing tests failed only while four suites ran at once; each passed alone, 3 runs × 2 Python versions;
+  - the native-baseline check passed on a temporary branch of main merged with this PR and the next, then deleted. Every real backup and restore trial passed, and every restore under load matched at its exact end point.
+- **What it changes for our results:** nothing scored.
+  - No experiment imports the code it changes.
+  - Native results it writes from now on use result schema v4. Their workload adds a rolled-back insert after each transfer and a transaction held open, so they aren't pooled with earlier native runs.
+- **Fixed first (19f4c10):** `test_with_zstd_on_worker_processes` now skips where zstd is missing, as the compress tests do. The native-baseline check's Python 3.12 has no zstd, so the test had failed that check on every pull request that touched `tests/`.
+- **Not merged: PR #15, stacked on #14.** It adds pgdelta's live mode to the same harness. On the merged branch, pgdelta's live copies (both arms, under load, today's defaults) restored to exactly the stop position pgdelta reported, and matched the reference. Two changes are needed first:
+  - its timings (one host, a 14 MB database, about 1 s) need marking as a correctness check, not a benchmark;
+  - its GCP steps should point to `experiments/baseline/`.
+
 ## 2026-11-01 (01:45 UTC): Several TCP connections added to the idea archive
 
 - **Why:** the team's industry mentor asked on October 30 about more than one connection. pgdelta sends everything over one (D36), and rule 14 says every idea is archived with its evidence, which this one wasn't.
