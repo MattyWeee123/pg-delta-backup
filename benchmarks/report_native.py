@@ -42,17 +42,17 @@ def render(data):
               'Verified time includes capture, incremental-input verification and combination or the staged transfer where applicable, normal synchronization, and output verification. Common B0 setup and method preparation (such as copying B0 for rsync) are excluded. Restore testing is additional.', '',
               'The staged methods are not timed on the same terms. rsync_staged copies B0 into the output as untimed preparation and its timer covers only the in-place update, while pg_delta_staged builds the output from B0 and the new capture inside its timed transfer. The last column adds recorded preparation time to method time (capture through transfer, before verification) and is the like-for-like comparison of the two. It is unavailable for trials that did not record method time.', '',
               '## Correctness', '',
-              'Quiescent trials compare full ordered data exports and supported schema against the source after writes are fenced. Active trials test package-only startup and a conservation invariant, then exact logical equivalence at a named recovery target using additional archived WAL. The latter is explicitly PITR-assisted.', '',
-              'The exact logical oracle at the active package’s own capture cutoff is not implemented. Do not read an active PASS as proof of that stronger guarantee.', '',
-              '| Trial | Status | Package logical comparison | PITR logical comparison |',
-              '|---|---|---|---|']
+              'Quiescent trials compare full ordered data exports and supported schema against the source after writes are fenced. New active trials recover the package using only bundled WAL to its manifest end LSN and compare against an independent B0 plus archived-WAL restore at that exact boundary. They also reconcile external transaction IDs and check rollback/in-flight/post-capture exclusions. Reference recovery uses additional WAL; candidate recovery cannot. A separate later named-target comparison remains PITR-assisted.', '',
+              'Only an explicit exact-cutoff verdict of pass establishes that check. Historical active PASS records without it establish package startup/invariants and later PITR agreement only.', '',
+              '| Trial | Status | Package logical comparison | Exact active cutoff | PITR logical comparison |',
+              '|---|---|---|---|---|']
     for row in trials:
-        lines.append(f"| {row['run_id']} | {row['status']} | {row.get('self_contained_restore', {}).get('logical_match', 'not applicable')} | {row.get('pitr_restore', {}).get('logical_match', 'not applicable')} |")
+        lines.append(f"| {row['run_id']} | {row['status']} | {row.get('self_contained_restore', {}).get('logical_match', 'not applicable')} | {row.get('active_package_exact_cutoff_oracle', 'not checked')} | {row.get('pitr_restore', {}).get('logical_match', 'not applicable')} |")
     lines += ['', '## Limits and reproduction', '',
               '- Tiny synthetic database, fresh cluster per trial, uncontrolled host cache and shared CI hardware when run in Actions.',
               '- Fixed low offered transaction rate checks active capture; it is not a calibrated application-capacity experiment.',
               '- Per-transaction logs preserve scheduled latency, failures and lag. Very short backup windows do not support strong p99 conclusions.',
-              '- No source/destination CPU, peak-memory, device-I/O or wire-byte measurements yet.',
+              '- Where present, resource samples measure process CPU, I/O and summed RSS; device-level I/O and wire bytes remain unavailable in this local suite.',
               ('- Staged methods ran on one host: their transfer bytes are the tools\' own stream counters, not wire bytes.'
                if any(not name.startswith('pg_basebackup_') for name in names)
                else '- No rsync/custom-engine comparison yet.'),

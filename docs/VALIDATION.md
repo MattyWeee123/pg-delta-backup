@@ -1,6 +1,41 @@
 # Validation performed
 
-Latest update: October 17, 2026. The controlled performance baseline remains incomplete.
+Latest update: October 29, 2026. The controlled performance baseline remains incomplete.
+
+## Native active-cutoff oracle, October 29, 2026
+
+The native runner now checks active packages at the manifest's exact end LSN
+against an independent B0 plus archived-WAL reference. Candidate replay has
+archive fetching and upstream streaming disabled. Both replay positions and
+full supported logical states must match. External pgbench operation IDs,
+rollback probes, an in-flight transaction and a post-capture marker supplement
+the comparison. New bundles use schema v4; historical results are not upgraded.
+See [NATIVE.md](../benchmarks/NATIVE.md) for the endpoint semantics and commands.
+
+Validated locally with PostgreSQL 17.11 (built from the official source in a
+temporary directory), Python 3.14.8, Linux, as an unprivileged user:
+
+- Five default-matrix trials at 20,000 account rows, one repetition, 8 seconds,
+  100 offered scripts/second: active and quiescent full/incremental backups and
+  the active no-backup control all passed. Both active exact-cutoff verdicts
+  passed. This is correctness smoke evidence, not a performance baseline.
+- The real recovery regression test passed for full and incremental backups.
+  It rejected a fault-injected lost transfer and ledger entry that preserved
+  total balance, a later-state reference at the wrong cutoff, and missing
+  candidate WAL despite the reference archive still being available.
+- The public CLI smoke passed both full/incremental restores and still
+  rejected an unchecksummed incremental basis before capture. Its success
+  contract remains `PASS_MANIFEST_ONLY`.
+- Endpoint/log validation, reporting compatibility, resource instrumentation
+  and benchmark CLI unit tests passed. The endpoint tests require exact replay
+  equality and reject malformed ranges, wrong identities and unsupported
+  multi-timeline manifests. Historical reports retain a missing/unchecked
+  exact-cutoff verdict.
+
+The active workload now includes rollback probes, so timings must not be pooled
+with older workloads. Only the deterministic fixture's logged tables and
+supported schema are covered; both restores trust PostgreSQL recovery. No
+cloud, HammerDB, arbitrary-schema or production validation is implied.
 
 ## HammerDB degradation driver, October 17, 2026
 
