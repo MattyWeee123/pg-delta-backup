@@ -303,6 +303,15 @@ PGDELTA_ENGINES.update({
     'pgdelta_direct_inplace_ha': {**_V1_ENGINE, 'hash_ahead': '64G', 'read_ahead': 8},
     'pgdelta_direct_inplace_bbr_ha': {**_V1_ENGINE, 'congestion_control': 'bbr', 'hash_ahead': '64G',
                                       'read_ahead': 8},
+    # EXP-95: reading ahead WITHOUT hashing ahead, which is the half of `_ha` nobody has measured alone.
+    # EXP-94 registered `--read-ahead 8` as "not an independent choice ... documentation, not an extra
+    # variable", because `--hash-ahead` turns it on implicitly. That is true of how the arm is *run* and false
+    # of how its gain is *attributed*: EXP-94's `_ha` also went about 2x faster in hot, where few pages change
+    # and there is nothing for a planner to run ahead of, and it removed only about half the idle leaf wait it
+    # was predicted to remove. Reading 8 files ahead would help whatever the change pattern, which is the shape
+    # of that hot result. `cli.py:_read_ahead` returns an explicit --read-ahead whether or not --hash-ahead is
+    # given, so this arm needs no engine change - only a name.
+    'pgdelta_direct_inplace_ra': {**_V1_ENGINE, 'read_ahead': 8},
 })
 del _V1_ENGINE
 
