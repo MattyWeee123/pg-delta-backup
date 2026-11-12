@@ -22,6 +22,44 @@ RA = 'pgdelta_direct_inplace_ra'
 HA = 'pgdelta_direct_inplace_ha'
 
 
+class ArmIsKnownToTheOrchestrator(unittest.TestCase):
+    """The arm needs a NAME as well as an engine, and this is what EXP-95's own smoke caught.
+
+    Giving `pgdelta_direct_inplace_ra` an entry in PGDELTA_ENGINES is not enough: `run_exp04.py` validates
+    `--methods` against `measure.ALL_METHODS`, which is built from the arms tuples. The first attempt added the
+    engine and not the name, so a provisioned pair refused the session with "--methods must be distinct names
+    from ..." after the VMs were already up. Six flag tests passed throughout, because none of them asked the
+    question the orchestrator asks.
+    """
+
+    def test_the_arm_is_in_all_methods(self):
+        self.assertIn(RA, measure.ALL_METHODS)
+
+    def test_the_arm_is_treated_as_one_of_v1s_direct_paths(self):
+        """It reads the stopped source's data directory like every other v1 arm, so it must be here or the
+        harness dispatches it down the wrong path."""
+        self.assertIn(RA, measure.PGDELTA_DIRECT_METHODS)
+        self.assertIn(RA, measure.PGDELTA_METHODS)
+
+    def test_every_arm_this_session_runs_is_accepted(self):
+        for arm in ('full', V1, RA, HA):
+            with self.subTest(arm=arm):
+                self.assertIn(arm, measure.ALL_METHODS)
+
+    def test_reading_ahead_is_not_folded_into_the_hash_ahead_arms(self):
+        """RA_V1_ARMS is separate on purpose: this arm asks for no hashing ahead, so listing it among the
+        hash-ahead arms would make the name lie about what runs."""
+        self.assertNotIn(RA, measure.HA_V1_ARMS)
+        self.assertEqual(measure.RA_V1_ARMS, (RA,))
+
+    def test_every_engine_name_is_also_a_known_method(self):
+        """The general form of the defect: an engine nobody can select is dead weight, and an engine whose
+        name the orchestrator rejects fails only once a pair is already running."""
+        for name in measure.PGDELTA_ENGINES:
+            with self.subTest(engine=name):
+                self.assertIn(name, measure.ALL_METHODS)
+
+
 class ArmFlags(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

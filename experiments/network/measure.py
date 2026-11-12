@@ -74,6 +74,11 @@ NATIVE_TLS_V1_ARMS = ('pgdelta_direct_inplace_bbr_b3_tls',)
 # --hash-ahead does that, and was never measured at a round trip. The pair is what separates the sender-side fix
 # from the transport fix EXP-24 measured.
 HA_V1_ARMS = ('pgdelta_direct_inplace_ha', 'pgdelta_direct_inplace_bbr_ha')
+# EXP-95: reading ahead alone, which is the half of the pair above nobody has measured by itself. It is kept
+# out of HA_V1_ARMS deliberately - it asks for no hashing ahead at all, so folding it in there would make the
+# name lie about what the arm does. An arm must be named here as well as given an engine below: this tuple
+# feeds PGDELTA_DIRECT_METHODS and so ALL_METHODS, which is what run_exp04.py validates --methods against.
+RA_V1_ARMS = ('pgdelta_direct_inplace_ra',)
 # EXP-31: v1 verifying only what it wrote (--verify-scope written), without the second pass over B.
 VS_V1_ARMS = ('pgdelta_direct_inplace_vw',)
 TLS_METHODS = ('pgdelta_direct_inplace_tls',)
@@ -83,7 +88,7 @@ TLS_METHODS = ('pgdelta_direct_inplace_tls',)
 # T12's side arms are v1's path too.
 PGDELTA_DIRECT_METHODS = ('pgdelta_direct', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8',
                           *V1PROXY_METHODS, *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS,
-                          *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS, *HA_V1_ARMS)
+                          *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS, *HA_V1_ARMS, *RA_V1_ARMS)
 # T11: pgBackRest restore --delta from a repository on the source, its backup counted as paid.
 PGBACKREST_METHODS = ('pgbackrest_zst', 'pgbackrest_none', 'pgbackrest_block', 'pgbackrest_zst_async')
 # T3 (d): incremental, combined with pg_combinebackup --copy-file-range instead of --copy. On

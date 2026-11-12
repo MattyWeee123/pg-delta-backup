@@ -408,6 +408,13 @@ them re-registered:
 | P7 | no cell | **held, both halves** |
 | P2, P3, P4, BBR gate | unaffected — they read `summary.csv` and the source stats logs | identical |
 
+**Added 12 November: `experiments/network/measure.py` has since changed too, so the check now reports 29 of
+32.** [EXP-95](EXP-95-read-ahead-or-hash-ahead.md) gave it the `pgdelta_direct_inplace_ra` arm — reading ahead
+with no hashing ahead — to settle the attribution that predictions 3 and 6 below leave open. The change is
+**purely additive**: one name in a new `RA_V1_ARMS` tuple and one entry in `PGDELTA_ENGINES`, with
+`tests/test_exp95_arm.py` asserting that this session's own arms are untouched, and EXP-94's 14 plan tests
+still passing over it. **It changes no number in this document.**
+
 **The registration is deliberately not refreshed at the corrected commit.** Re-registering would record this
 data as scored by code written after it, and would erase the fact that the first reading of this session was
 wrong. The check exiting 1 with both files accounted for is the honest record. Every number below is the
