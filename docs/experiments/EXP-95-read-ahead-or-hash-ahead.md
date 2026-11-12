@@ -1,12 +1,92 @@
 # EXP-95: Is EXP-94's DR win hashing ahead, or just reading ahead?
 
-Status: **pre-registered November 12, 2026, before any run and before any VM for it exists.** One fresh
-`n2-standard-8` pair, EXP-13's set under its own name (`infra/gcp/sets/exp95.sh`), **48 scored runs**, about
-25 minutes of runs and under an hour of VM time.
+Status: **WITHDRAWN November 12, 2026, before a single scored run — because its deciding arm turned out not to
+exist.** pgdelta refuses `--read-ahead` without `--hash-ahead` or `--fast-path`, deliberately, and the
+registration below was built on the belief that it does not. **The premise was mine and it was wrong; EXP-94's
+registration was right.** Nothing was scored, the pair was deleted after about 29 minutes, and the finding that
+replaced the experiment is in [Withdrawn](#withdrawn-before-any-scored-run-and-what-it-settled-anyway) — it
+answers more of EXP-94's open question than the 48 runs would have.
 
-This is the 12-run follow-up EXP-94's own write-up asked for, widened to 48 so its controls run in the same
-session rather than across one. It settles an attribution, not a verdict: EXP-94 already established **that**
-`--hash-ahead 64G --read-ahead 8` is the DR fix. This asks **which half of it** is doing the work.
+Originally **pre-registered November 12, 2026**, before any run and before any VM for it existed: one fresh
+`n2-standard-8` pair, EXP-13's set under its own name (`infra/gcp/sets/exp95.sh`), **48 scored runs**, about
+25 minutes of runs. It was the 12-run follow-up EXP-94's own write-up asked for, widened to 48 so its controls
+ran in the same session. The design and predictions are kept below **unaltered and void**, as the record of what
+was registered.
+
+## Withdrawn before any scored run, and what it settled anyway
+
+**The deciding arm cannot be built.** `pgdelta_direct_inplace_ra` asks for `--read-ahead 8` and no hashing
+ahead. The sender refuses it:
+
+```
+pgdelta: error: sender: --read-ahead reads the fast path's chosen pages, or the pages hashing chose
+with --hash-ahead, so it needs --fast-path or --hash-ahead
+```
+
+That is not a bug and not an oversight. `fastpath.check_mode` (`pgdelta/fastpath.py:869-871`) raises
+`InvalidInput` for `read_ahead and not hash_ahead` when no fast-path mode is set, and the message states the
+architecture: **read-ahead is the reader for a selection some other step made.** With neither the fast path
+nor hashing ahead, no selection exists, so there is nothing to read ahead of. Reading ahead is a *component*
+of hashing ahead, not a flag that rides along beside it.
+
+**So EXP-94's registration was right and this experiment's criticism of it was wrong.** EXP-94 recorded
+`--read-ahead 8` as *"not an independent choice ... naming it is documentation, not an extra variable"*. The
+registration below calls that *"sound for running the arm and wrong for attributing its gain"*. On the
+engine's own terms that is backwards: the two flags are architecturally coupled, so **there is no
+read-ahead-alone gain to attribute**, and the co-variable this experiment was built to isolate does not exist.
+
+**Why the mistake survived 29 tests.** `cli._read_ahead` resolves an explicit `--read-ahead` to 8 whether or
+not `--hash-ahead` is given, and `tests/test_exp95_arm.py` asserted exactly that. It is true — and it is the
+wrong layer. Parsing is not acceptance: the refusal happens later, in `check_mode`, at send time. A test that
+stops at the parser proves a flag is spelled correctly, not that the engine will run it. Two tests now drive
+`check_mode` directly: one asserts v1 and `_ha` are accepted, and one asserts `_ra` is **refused** with that
+message, so if the engine ever allows the combination the arm becomes expressible and this question can be
+asked again.
+
+### What this means for EXP-94's two failed predictions
+
+EXP-94's prediction 3 failed because its arm was about twice as fast in **hot**, and its falsifier reasoned
+that hot has *"nothing to run ahead of"*. **That premise is now the thing to doubt**, and the engine's own
+description of read-ahead is why.
+
+Hashing ahead parallelises the **digest scan** — and in hot, every page still has to be examined to discover
+that few of them changed. The scan is the work being run ahead of, and its size is set by the database, not by
+the change pattern. So a gain in hot is exactly what hashing ahead should produce, and prediction 3's
+expectation of none was mistaken rather than its measurement being contaminated. That also sits comfortably
+with prediction 6: the idle leaf wait is only part of what hashing ahead removes, so removing half of it while
+going twice as fast is not a contradiction.
+
+**This is a hypothesis, stated as one.** It explains both failures with one mechanism and needs no co-variable,
+which the read-ahead story required and could not have. It is not measured here.
+
+### What would actually test it, and what is owed
+
+- **Vary the change fraction, hold the database size.** If the gain comes from the scan, `_ha`'s advantage
+  should track the **pages examined** (near-constant across fractions) rather than the **pages sent** (which
+  varies by orders of magnitude). EXP-94 already has two points — hot and uniform 1% — and they are consistent
+  with it; a registered sweep over three or four fractions at one condition would decide it in well under an
+  hour.
+- **Or instrument the scan directly.** The sender already reports `leaf_wait_busy_s` beside
+  `leaf_wait_idle_s`; the scan hypothesis predicts the *busy* component moves with `--hash-ahead` where the
+  idle one only partly does. That is a re-read of EXP-94's existing records, not a new session.
+- **EXP-94's write-up has been corrected** where it named `--read-ahead` as the separable candidate and said
+  the engine allows it alone. It does not.
+
+### Cost, and what the guards caught
+
+Three false starts on a provisioned pair, all before any scored run, all stopped by the smoke gate rather
+than by inspection:
+
+| Attempt | What was wrong | How it surfaced |
+|---|---|---|
+| 1 | the arm had an engine but no **name**, so `run_exp04.py` refused the method against `ALL_METHODS` | 0 runs; gate aborted |
+| 2 | the name was missing from `IN_PLACE_METHODS`, so the harness passed `--output` while the engine passed `--in-place` | 6 of 8 smoke runs passed, the 2 `_ra` runs errored; gate aborted |
+| 3 | reused the smoke's output directory, which `run_exp04.py` correctly refuses, so the driver never ran and the gate read the **previous** attempt's summary | gate aborted on stale rows — conservatively by luck, which is itself a defect now fixed with per-attempt names |
+| 4 | the engine refuses the arm outright: the finding above | 2 runs errored on both ends; experiment withdrawn |
+
+**Total spend: one pair for about 29 minutes, no scored run, and the VMs deleted** (project verified empty
+afterwards: 0 instances, 0 disks). Attempts 1–3 were my defects, and the gate is the only reason each cost a
+provisioning cycle instead of a 48-run session published from untested code.
 
 ## Why this experiment
 

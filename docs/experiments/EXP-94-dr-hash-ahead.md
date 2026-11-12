@@ -8,12 +8,20 @@ which BBR does (EXP-26: 81–96% of a shared link).
 
 **Two predictions failed, and they undercut the stated mechanism rather than the result.** The arm is twice as
 fast in **hot** at the longer round trips, where the registered mechanism says there is nothing to run ahead of
-(P3), and it removes about **half** the idle leaf wait, not the predicted three-quarters (P6). The leading
-candidate is `--read-ahead 8`, which the registration dismissed as "documentation, not an extra variable" and
-which rides along with `--hash-ahead`; it is separable with a 12-run arm and no code change. So this session
-supports *"`--hash-ahead 64G --read-ahead 8` is the DR fix"* and does **not** support *"keeping the stream full
-is why"*. A **scorer defect** found in this session's own output is declared in [Results](#results); it moved
-four of the seven readings.
+(P3), and it removes about **half** the idle leaf wait, not the predicted three-quarters (P6). So this session
+supports *"`--hash-ahead 64G --read-ahead 8` is the DR fix"* and does **not** establish why. A **scorer
+defect** found in this session's own output is declared in [Results](#results); it moved four of the seven
+readings.
+
+**Corrected 12 November.** This status first named `--read-ahead 8` as the leading candidate and called it
+"separable with a 12-run arm and no code change". **The engine refuses that arm** — read-ahead reads the pages
+a selection step chose, so it needs `--fast-path` or `--hash-ahead` (`fastpath.py:869-871`), which
+[EXP-95](EXP-95-read-ahead-or-hash-ahead.md) established and was withdrawn for before any scored run. Reading
+ahead is a component of hashing ahead, not a co-variable, and this document's own registration was right to
+call it "documentation, not an extra variable". The better hypothesis for the hot gain is now that hashing
+ahead parallelises the **digest scan**, which happens in hot too because every page is examined to discover
+that few changed — making P3's premise the mistaken part. See the correction in
+[What the session does not settle](#what-the-session-does-not-settle-post-hoc-not-registered).
 
 Originally **pre-registered November 5, 2026**, before any VM existed (rule 16), and re-registered at
 `af27174` before the session with no run in existence. One fresh `n2-standard-8` pair, EXP-13's set
@@ -487,12 +495,29 @@ the receiver, so the arm is not confounded by `--fsync` or verify scope. But the
 its gain: reading 8 files ahead should help whether or not many pages changed, which is exactly the shape of
 the hot result.
 
-**It is separable, cheaply, and the engine already allows it.** `cli.py:_read_ahead` returns an explicit
+**CORRECTED 12 November — the paragraph that stood here was wrong, and so was the proposal built on it.** It
+read: *"It is separable, cheaply, and the engine already allows it. `cli.py:_read_ahead` returns an explicit
 `--read-ahead` whenever one is given, with or without `--hash-ahead`, so a `--read-ahead 8`-only arm is
-expressible today with no code change. One arm at `2:120:tuned` and `2:20:default`, hot and uniform, 3 repeats
-— 12 runs, well under an hour of one pair — would split the gain into the part that is hashing ahead and the
-part that is reading ahead. **Until that runs, this session supports "`--hash-ahead 64G --read-ahead 8` is the
-DR fix" and does not support "keeping the stream full is why".**
+expressible today with no code change"* — and proposed 12 runs to split the gain.
+
+**The engine refuses that arm.** [EXP-95](EXP-95-read-ahead-or-hash-ahead.md) was registered to run it and
+withdrawn before a single scored run when the sender rejected it:
+`--read-ahead reads the fast path's chosen pages, or the pages hashing chose with --hash-ahead, so it needs
+--fast-path or --hash-ahead` (`fastpath.check_mode`, `pgdelta/fastpath.py:869-871`). `cli._read_ahead`
+*parses* the flag alone; `check_mode` *refuses* it at send time, because read-ahead is the reader for a
+selection some other step made, and with neither the fast path nor hashing ahead there is no selection.
+
+**So reading ahead is a component of hashing ahead, not a co-variable — and this document's own registration
+was right to call `--read-ahead` "documentation, not an extra variable".** The criticism above was mine and
+it does not survive contact with the engine.
+
+**What remains open, restated.** The hot gain still needs explaining, and the better hypothesis is that
+hashing ahead parallelises the **digest scan**: in hot every page is still examined to discover that few
+changed, so the work being run ahead of is set by the database size, not the change pattern. That would make
+prediction 3's premise — "nothing to run ahead of in hot" — the mistaken part, rather than the measurement.
+EXP-95 records what would test it: a registered sweep over three or four change fractions at one condition, or
+a re-read of this session's own `leaf_wait_busy_s` beside `leaf_wait_idle_s`. **Until one of those runs, this
+session supports "`--hash-ahead 64G --read-ahead 8` is the DR fix" and does not establish why.**
 
 Two smaller things worth recording:
 
@@ -513,8 +538,9 @@ Two smaller things worth recording:
 - **It is a candidate default and this experiment does not make it one.** Rule 15 owes a held-out session
   (H9–H12) before any default change, and prediction 3's unexplained hot gain should be resolved first — a
   default justified by a mechanism that the data does not support is a default that will be wrong in some
-  condition nobody tested. **Proposed order: (1) the `--read-ahead 8`-only arm, 12 runs; (2) the held-out
-  session; (3) the owner's decision.**
+  condition nobody tested. **Proposed order, corrected 12 November: (1) the change-fraction sweep, or the
+  re-read of this session's own busy/idle leaf waits — not the `--read-ahead 8`-only arm, which the engine
+  refuses (see the correction above and EXP-95); (2) the held-out session; (3) the owner's decision.**
 - **Prediction 2 failed in 3 of 12 cells, so G5 stays open for those cells.** EXP-20's and EXP-24's verdicts at
   `2:60:default` remain attached to the engine they ran on. The 9 cells that held are comparable, and the gate
   did its job: it told us which cells not to trust rather than letting a 1.8% drift pass as a result.

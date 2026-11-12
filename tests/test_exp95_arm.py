@@ -108,6 +108,38 @@ class ArmFlags(unittest.TestCase):
         self.assertEqual(parsed.read_ahead, 8)
         self.assertFalse(parsed.hash_ahead, 'the _ra arm must not hash ahead; that is the whole contrast')
 
+    def test_the_engine_accepts_each_arm_and_not_only_the_parser(self):
+        """The check that would have caught EXP-95's premise in one second instead of on a provisioned pair.
+
+        `cli._read_ahead` resolving to 8 proves the flag *parses*. Whether the engine *accepts* it is decided
+        later, by `fastpath.check_mode`, which raises `InvalidInput` for `--read-ahead` with no `--hash-ahead`
+        and no `--fast-path`: read-ahead reads the pages a selection step chose, so without one there is
+        nothing to read ahead of (`fastpath.py:869-871`). A test that stops at the parser tests the wrong
+        layer, which is exactly the mistake this file made at first.
+        """
+        from pgdelta import cli, fastpath
+        for arm in (V1, HA):
+            with self.subTest(arm=arm):
+                parsed = self.parse_send(arm)
+                fastpath.check_mode(parsed.fast_path, parsed.source_kind, getattr(parsed, 'subpage', False),
+                                    read_ahead=cli._read_ahead(parsed),
+                                    hash_ahead=getattr(parsed, 'hash_ahead', 0) or 0)
+
+    def test_reading_ahead_alone_is_refused_by_the_engine_by_design(self):
+        """EXP-95's deciding arm is not expressible, and this records why rather than leaving it to a VM.
+
+        This is the finding that withdrew the experiment: `--read-ahead` is not an independent variable, so
+        EXP-94's registration was right to call it 'documentation, not an extra variable'. If this ever stops
+        raising, the arm becomes expressible and the attribution question can be asked directly again.
+        """
+        from pgdelta import cli, fastpath
+        parsed = self.parse_send(RA)
+        with self.assertRaises(fastpath.InvalidInput) as refusal:
+            fastpath.check_mode(parsed.fast_path, parsed.source_kind, getattr(parsed, 'subpage', False),
+                                read_ahead=cli._read_ahead(parsed),
+                                hash_ahead=getattr(parsed, 'hash_ahead', 0) or 0)
+        self.assertIn('needs --fast-path or --hash-ahead', str(refusal.exception))
+
     def test_read_ahead_survives_without_hash_ahead(self):
         """The resolution rule the experiment depends on, asserted where it actually happens.
 

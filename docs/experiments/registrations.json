@@ -523,5 +523,41 @@
    "tests/test_exp94_analysis.py": "a36838b77cc7893b6a250bdf1cabf91085fafd57ac3c6ccd6982a480bf615352",
    "tests/test_exp94_plan.py": "8ee433af9f549df6a7218bff1bd3d0fc502d7b466e0cb64cbf3e9711a22a9e15"
   }
+ },
+ "EXP-95": {
+  "commit": "d11436850770",
+  "files": {
+   "analysis/exp20.py": "6697474e1f8d8522c20fc1803dbe58345e8886a1c7aba0fc5b3668a1a1e7cff0",
+   "analysis/exp23.py": "5b43975346631ce1a2a2553cfec4d81ba1ee66fef02b4f15973817dffc7dbc4f",
+   "analysis/exp94.py": "a710f516d6d9645dcd23b3a1397ba0e39f4595589c4912d226e893fdb3b17970",
+   "analysis/exp95.py": "1d1a67ed7e60211fd418dd4c8cb00347c3d426446b648eaf55b167c2b32a07de",
+   "analysis/noise_floor.py": "031863e70ac30aa5ad1ef92668a6a7b3a1d5d5005d076b1df273d541b79674d0",
+   "analysis/plotting.py": "e632c22f7edcba13e1434416442b78821b3813e365cb3ede4ffdbdc7e16f0017",
+   "experiments/change_patterns/run_study.py": "b9efd66f20cd724777e3c8791a2277cf2e9ea64f758948f2212ab08541e7ff46",
+   "experiments/network/agent.py": "2e4638a83ae94f5bac8ac339dc7e329c4ba723b7b3dcd040fcbd369f7daebbd5",
+   "experiments/network/measure.py": "1dc8559bca2f1bbdbe99ac743c376f434525fd3c5e95c996665f96c42f2870d3",
+   "experiments/network/remote.py": "9400f18a88293db24ccc3d57d0eb2f98c6da8314a5b306ac2cef5538ed6f0356",
+   "experiments/network/run_exp04.py": "084139191fe4039ba64db10419aba14ee686d02d62ceefcced4154234073c198",
+   "experiments/network/source_cluster.py": "e8f12011c6ca9fb24fc67c47f7e9ad6282749cc691c37e4ba7cafb5bc8a8e59a",
+   "infra/gcp/config.sh": "4cc7670f13cc64318e5bb853c241941d5ca8d14c99dc5bd1dca8481f88e2a7b2",
+   "infra/gcp/create.sh": "f5b2875fdbf4c0124f9e19f94d822d44258a7e72f0ea7cbdbf8dcd32aed60f9a",
+   "infra/gcp/sets/exp13.sh": "cde6a261a3826ba2f7d7b8573832d4aef0452c435826d57f32e0f04e4ccf3766",
+   "infra/gcp/sets/exp95.sh": "3f86accaface7e167ba200b0c82815e77638eb9eb43a390491b318cd32dcdec2",
+   "infra/gcp/startup.sh": "b8c8d3426acaf050e31eb04b0f89df776e6cf3b1faab1afd59c4a69cb12d9491",
+   "infra/gcp/teardown.sh": "4371413529a1edf69da350382126a2f3bb4d7988a744384b31a150cc65631469",
+   "infra/gcp/throttle.sh": "e4badc3efeae28e1203437560209690f865f33bfb82405d5455d32177050cb76",
+   "infra/gcp/vmset.sh": "99c52f333c7028445a359a4374e7d473cf80b84f9522c916ec06d26085b5c107",
+   "infra/gcp/wan.sh": "0c05a7b2e92f89eaa700a5f4a9eb31d42b4477ac3fa1b059072bf7643cfc85a2",
+   "pgdelta/cli.py": "5dbb7ad5abd6efad9fd289678e6e0ad831b007340dac99f3ae4af525edf46c59",
+   "pgdelta/datadir.py": "e7538c842f2a5416bf49fa50e480981c4200ee040f69b8b23bcdf69c1b7e12ee",
+   "pgdelta/hashing.py": "4dbeccf63bc8dedbe6bc2032352098efe58be420b9a6c734e68f8247fe26b9a6",
+   "pgdelta/inplace.py": "4a25d21b4c1d7f0772f98781abc6a620def2d0251e44951612d73ae203b69fe2",
+   "pgdelta/receiver.py": "b44d71628b091643e7c314a92b41f3fa83ca68b23e798d83ce114013a4d24ed6",
+   "pgdelta/sender.py": "8843763f6031cdb45f2decde3d591b656abb684dbdb1b3719bfc0640002c7648",
+   "pgdelta/transport.py": "7a852b019d22684ff79f027c887d688d4750760c46c971e36d82c2ab60f0bb6c",
+   "pgdelta/waits.py": "e53724256e21529c18953c8e82cca834658b1ca996459393a8fc40d94cdc89bf",
+   "tests/test_exp95_analysis.py": "58685567741f60d8b341a837183bc47bc645654d5917145fe317d4d34bb53644",
+   "tests/test_exp95_arm.py": "25383cabfab39c2bf9090292ddda3e7d1e44b32190ec7ac9025b7ad70c128d4a"
+  }
  }
 }
