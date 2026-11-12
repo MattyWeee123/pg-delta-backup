@@ -133,7 +133,7 @@ T2_METHODS = ('full_nosync', 'full_syncfs', 'full_wb', *PROBACKUP_METHODS, 'parc
               'pgdelta_direct_inplace_j8')
 # The arms EXP-13 (T12) adds; its runs need --conditions (the emulated WAN) and CRC32C manifests.
 T12_METHODS = (*T12_V1_ARMS, *CC_V1_ARMS, *ZSTD_V1_ARMS, *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS, *HA_V1_ARMS,
-               'parcopy16')
+               *RA_V1_ARMS, 'parcopy16')
 # T10a (EXP-12), the source's slowdown under a fixed-rate load (run_exp04 --load). none: an empty timed
 # phase of --none-window-s, the null's own windows; capture: the staged capture alone, a local
 # pg_basebackup of S on the source; bracket: pg_backup_start and pg_backup_stop in one session.
@@ -159,7 +159,7 @@ STAGED_METHODS = PGDELTA_STAGED_METHODS + RSYNC_METHODS
 # pgdelta refreshing B itself (--in-place) rather than writing a new copy O.
 IN_PLACE_METHODS = ('pgdelta_inplace', 'pgdelta_direct_inplace', 'pgdelta_direct_inplace_j8', *V1PROXY_METHODS,
                     *T12_V1_ARMS, *CC_V1_ARMS, *VS_V1_ARMS, *ZSTD_V1_ARMS, *HASH_V1_ARMS, *NATIVE_TLS_V1_ARMS,
-                    *HA_V1_ARMS)
+                    *HA_V1_ARMS, *RA_V1_ARMS)
 # Methods that patch B, a copy of B0 made before the cache drop and not timed: in a real
 # refresh B already exists. The copy keeps B0 itself unchanged for the next method.
 BASIS_COPY_METHODS = IN_PLACE_METHODS + PGBACKREST_METHODS
@@ -217,7 +217,8 @@ TIERS = {'full': 'omni_today', 'full_nosync': 'diagnostic', 'full_syncfs': 'rele
          # EXP-58's: the same as _b3, inside pgdelta's own TLS.
          'pgdelta_direct_inplace_bbr_b3_tls': 'protocol',
          # EXP-94's: v1 with the sender hashing ahead, cubic and with BBR.
-         'pgdelta_direct_inplace_ha': 'protocol', 'pgdelta_direct_inplace_bbr_ha': 'protocol'}
+         'pgdelta_direct_inplace_ha': 'protocol', 'pgdelta_direct_inplace_bbr_ha': 'protocol',
+         'pgdelta_direct_inplace_ra': 'protocol'}
 # The engine each pgdelta method runs, named by its flags, so that no change of pgdelta's
 # defaults can change what a method measures (as compare_methods pins EXP-02's):
 # - pgdelta: EXP-06's choice, which is also the command line's default on these 8-vCPU

@@ -59,6 +59,35 @@ class ArmIsKnownToTheOrchestrator(unittest.TestCase):
             with self.subTest(engine=name):
                 self.assertIn(name, measure.ALL_METHODS)
 
+    def test_the_new_arm_sits_in_every_set_its_sibling_sits_in(self):
+        """The check that would have caught both of this session's false starts, and the next one.
+
+        An arm's behaviour is decided by *name membership* scattered across many containers in measure.py, not
+        by its engine dict. Two separate crashes on an already-provisioned pair came from that: missing from
+        ALL_METHODS the orchestrator refused the method outright, and missing from IN_PLACE_METHODS the
+        harness passed `--output` while the engine passed `--in-place`, so the receiver exited 2 on
+        "not allowed with argument --output". Both are invisible to a flag test.
+
+        `_ra` and `_ha` differ in one flag, so they must differ in exactly one pair of containers - the arms
+        tuples that name them - and agree everywhere else. Asserted by walking the module rather than by
+        listing containers, so a container added later is covered without anyone remembering to come back.
+        """
+        allowed = {'HA_V1_ARMS', 'RA_V1_ARMS'}
+        mismatched = []
+        for name in dir(measure):
+            container = getattr(measure, name)
+            if not isinstance(container, (tuple, list, set, frozenset, dict)) or name in allowed:
+                continue
+            try:
+                has_ha, has_ra = HA in container, RA in container
+            except TypeError:                      # unhashable members, not a name collection
+                continue
+            if has_ha != has_ra:
+                mismatched.append(f'{name}: _ha={has_ha} _ra={has_ra}')
+        self.assertEqual([], mismatched,
+                         'the _ra arm must appear wherever _ha does, except in the arms tuples: '
+                         + '; '.join(mismatched))
+
 
 class ArmFlags(unittest.TestCase):
     @classmethod
