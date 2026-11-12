@@ -4,6 +4,49 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-12: EXP-95 pre-registered: is EXP-94's DR win hashing ahead, or just reading ahead?
+
+- **Why now:** [EXP-94](experiments/EXP-94-dr-hash-ahead.md) held its deciding prediction and its stated
+  mechanism failed, in the same session. Uniform 1% went to **0.422x** v1 at 20 ms and **0.210x** at 120 ms
+  tuned, reaching every DR verdict row BBR reaches on plain cubic. But its prediction 3 failed - the arm was
+  about **twice as fast in hot**, where few pages change and there is nothing for a planner to run ahead of -
+  and its prediction 6 failed, removing about **half** the idle leaf wait against a registered bar of
+  three-quarters. EXP-94's own falsifier text for 3 reads: *"A gain in hot would mean the arm is measuring
+  something other than the stall, and would call the deciding reading into question."*
+- **The suspect is the flag that rides along.** EXP-94 registered `--read-ahead 8` as *"not an independent
+  choice ... naming it is documentation, not an extra variable"*, because `--hash-ahead` turns it on
+  implicitly. That is sound for **running** the arm and wrong for **attributing** its gain: reading 8 files
+  ahead should help whatever the change pattern, which is the shape of the hot result. `--hash-ahead` is a
+  candidate default, and a default justified by a mechanism the data does not support is a default that will
+  be wrong in some condition nobody tested.
+- **What is registered:** [EXP-95](experiments/EXP-95-read-ahead-or-hash-ahead.md). One new arm,
+  `pgdelta_direct_inplace_ra` - `--read-ahead 8` and **no** hashing ahead - against v1, EXP-94's `_ha`, and
+  `full`, at EXP-94's **two slow-mode cells only** (`2:20:default`, `2:120:tuned`), hot and uniform 1%, 3
+  repeats: **48 runs**, about 25 minutes and roughly a dollar. The cells were selected by EXP-23's mechanical
+  rule applied to EXP-94's own runs, not by outcome, and `parcopy8`/`parcopy16` are dropped because this
+  session reports arm-against-arm ratios rather than EXP-20's verdict rows - 24 runs saved that would decide
+  nothing.
+- **No engine change was needed, and that is the point.** `cli.py:_read_ahead` already returns an explicit
+  `--read-ahead` with or without `--hash-ahead`, so the arm is one line in `measure.py`. What it needed was
+  guards, because the failure mode is silent: if that resolution rule ever changed, `_ra` would quietly become
+  v1 and nothing would error. `tests/test_exp95_arm.py` (6 tests) pins the contrast through pgdelta's own
+  parser, including that the `_ra` and `_ha` engines differ in `hash_ahead` **and nothing else**, and that
+  `_ra` still resolves to 8 threads.
+- **The deciding prediction is falsifiable in both directions,** which matters because it grades the previous
+  session's conclusion. The share of `_ha`'s gain that `_ra` delivers alone,
+  `(1 - _ra/v1) / (1 - _ha/v1)`, **below 0.35** means hashing ahead carries the gain and EXP-94's attribution
+  stands; **above 0.65** means reading ahead carries it and that attribution was mistaken - a larger finding
+  than EXP-94's own, since read-ahead is the cheaper and simpler flag; **0.35-0.65** is a split supporting
+  neither. `analysis/exp95.py` is committed before any run and `tests/test_exp95_analysis.py` (18 tests)
+  fixes all five bars in code, so none can be loosened without this document disagreeing.
+- **Rule 16:** 31 files registered at `347df00`, `check` clean at 31 of 31 before the pair existed. The set
+  file sources `exp13.sh` so the hardware cannot drift from EXP-94's - predictions 4 and 5 compare directly
+  with that session - and pins the image EXP-94 ran. `MAX_RUN_HOURS=2`, enforced server-side.
+- **A live risk, stated before the data:** EXP-94's own rule-17 gate failed in 3 of 12 cells, so prediction 5
+  (this session's `full` within 1% of EXP-94's) may well fail. If it does, the comparison of absolute seconds
+  with EXP-94 goes and every other prediction survives, because they are all within-session ratios.
+- **No default changes either way,** and rule 15 still owes a held-out session before one could.
+
 ## 2026-11-06: EXP-88 closed, EXP-93 and EXP-94 run and closed; the hashing campaign's speed priced, and its own flag found to be the DR fix
 
 - **What ran.** Two GCP sessions in one morning, in two regions, both from pre-registrations that were
