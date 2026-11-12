@@ -6,22 +6,33 @@ reached BBR's DR verdict rows on plain cubic.** At 120 ms with tuned buffers it 
 provisional under rule 11 and this one is not. It needs no host setting and takes nothing from other flows,
 which BBR does (EXP-26: 81–96% of a shared link).
 
-**Two predictions failed, and they undercut the stated mechanism rather than the result.** The arm is twice as
-fast in **hot** at the longer round trips, where the registered mechanism says there is nothing to run ahead of
-(P3), and it removes about **half** the idle leaf wait, not the predicted three-quarters (P6). So this session
-supports *"`--hash-ahead 64G --read-ahead 8` is the DR fix"* and does **not** establish why. A **scorer
-defect** found in this session's own output is declared in [Results](#results); it moved four of the seven
-readings.
+**Two predictions failed (P3, P6), and both failed because they were pointed at the wrong observable — not
+because the mechanism is wrong.** Settled post hoc on 12 November from this session's own records, in
+[Where the gain actually comes from](#where-the-gain-actually-comes-from-post-hoc-12-november-from-this-sessions-own-records):
 
-**Corrected 12 November.** This status first named `--read-ahead 8` as the leading candidate and called it
+- **`leaf_requests` is 19 in every cell, hot and uniform alike.** The sender stalls once per **file**, not per
+  changed page, so hot has exactly as many round-trip stalls to remove. P3's falsifier assumed hot had
+  *"nothing to run ahead of"*; it confused pages-to-send with files-to-wait-on. The measurement was right and
+  the expectation was wrong.
+- **The time saved is in `page_send_s`, not in the waits** — 79–93% of it in uniform's four real cells, against
+  1–11% from the four protocol waits combined. The idle leaf wait P6 measured is the *trigger*; the cost is
+  what cubic's window does once the socket has drained, and that lands in the sending. A 0.25× bar on the idle
+  wait was the wrong instrument for the registered hypothesis.
+
+**So EXP-21's diagnosis is confirmed on its own terms** — keeping the stream full between files stops cubic
+losing its window — with P7 as independent corroboration, since EXP-23's slow-mode rule is itself a
+`page_send_s` test and `--hash-ahead` took cubic from 2 of 3 runs slow to 0 of 3. The honest limit: in **hot**
+sending and waits together account for only 44–70% of a small saving, and the remainder is left unexplained.
+
+**Also corrected 12 November.** This status first named `--read-ahead 8` as the leading candidate and called it
 "separable with a 12-run arm and no code change". **The engine refuses that arm** — read-ahead reads the pages
 a selection step chose, so it needs `--fast-path` or `--hash-ahead` (`fastpath.py:869-871`), which
 [EXP-95](EXP-95-read-ahead-or-hash-ahead.md) established and was withdrawn for before any scored run. Reading
 ahead is a component of hashing ahead, not a co-variable, and this document's own registration was right to
-call it "documentation, not an extra variable". The better hypothesis for the hot gain is now that hashing
-ahead parallelises the **digest scan**, which happens in hot too because every page is examined to discover
-that few changed — making P3's premise the mistaken part. See the correction in
-[What the session does not settle](#what-the-session-does-not-settle-post-hoc-not-registered).
+call it "documentation, not an extra variable".
+
+A **scorer defect** found in this session's own output is declared in [Results](#results); it moved four of the
+seven readings.
 
 Originally **pre-registered November 5, 2026**, before any VM existed (rule 16), and re-registered at
 `af27174` before the session with no run in existence. One fresh `n2-standard-8` pair, EXP-13's set
@@ -511,13 +522,14 @@ selection some other step made, and with neither the fast path nor hashing ahead
 was right to call `--read-ahead` "documentation, not an extra variable".** The criticism above was mine and
 it does not survive contact with the engine.
 
-**What remains open, restated.** The hot gain still needs explaining, and the better hypothesis is that
-hashing ahead parallelises the **digest scan**: in hot every page is still examined to discover that few
-changed, so the work being run ahead of is set by the database size, not the change pattern. That would make
-prediction 3's premise — "nothing to run ahead of in hot" — the mistaken part, rather than the measurement.
-EXP-95 records what would test it: a registered sweep over three or four change fractions at one condition, or
-a re-read of this session's own `leaf_wait_busy_s` beside `leaf_wait_idle_s`. **Until one of those runs, this
-session supports "`--hash-ahead 64G --read-ahead 8` is the DR fix" and does not establish why.**
+**What this left open has since been settled, by the second of the two routes named here.** The re-read of
+this session's own records was done on 12 November and is in
+[Where the gain actually comes from](#where-the-gain-actually-comes-from-post-hoc-12-november-from-this-sessions-own-records).
+In short: the sender stalls once per **file** (19 requests in every cell, hot and uniform alike), so hot had as
+much to gain as uniform and prediction 3's premise was false; and the saving is in **`page_send_s`** rather
+than in the waits, so prediction 6 was measuring the trigger instead of the cost. The registered mechanism —
+EXP-21's "keeping its stream full between files" — stands, and no new session was needed to establish it. What
+remains unexplained is 30–56% of hot's (small) saving.
 
 Two smaller things worth recording:
 
@@ -528,6 +540,69 @@ Two smaller things worth recording:
   13.25 s with tuned buffers. That is the known default-buffer behaviour of a single stream at a round trip,
   and it is why `R_F0` and `R_fast` disagree so sharply in those cells. It is EXP-13's result, reproduced, not
   a new one.
+
+## Where the gain actually comes from (post hoc, 12 November, from this session's own records)
+
+**Added after publication, on data that already existed, and it changes no verdict.** Predictions 3 and 6
+failed against their registered bars and still do. What it changes is the *reason* — the thing this document
+left open and [EXP-95](EXP-95-read-ahead-or-hash-ahead.md) failed to settle with a new arm that turned out not
+to exist. `analysis/exp94_posthoc.py` produces it; the table is
+[data/exp94-posthoc-waits.csv](data/exp94-posthoc-waits.csv).
+
+**Fact one: the sender's stalls are per file, not per changed page.** `leaf_requests` is **19 in every cell of
+this session**, hot and uniform alike — the same database, the same files. The sender waits on the receiver
+once per file (`pgdelta/waits.py`: ACCEPT, BASIS_NODES, LEAF_DIGESTS, COMPLETE), and 19 × a 120 ms round trip
+is 2.3 s of stall available to remove whether 1% of pages changed or none of them did.
+
+**So prediction 3's falsifier was built on a false premise.** It reasoned that hot has *"nothing to run ahead
+of"*. Hot has exactly as many file boundaries as uniform, and therefore exactly as many places for the stream
+to drain. A gain in hot is not evidence that the arm measures something other than the stall — it is what the
+stall predicts. The measurement was right and the expectation was wrong.
+
+**Fact two: the time saved is in the sending, not in the waits.** Seconds, medians of 3 runs:
+
+| Pattern | Condition | `v1` | `_ha` | Saved | of which `page_send_s` | of which the four waits |
+|---|---|---:|---:|---:|---:|---:|
+| uniform | `2:20:default` | 15.83 | 6.67 | 9.15 | **8.53 (93.2%)** | 0.07 (0.8%) |
+| uniform | `2:60:default` | 24.75 | 14.95 | 9.80 | **8.84 (90.2%)** | 0.40 (4.1%) |
+| uniform | `2:120:default` | 37.45 | 27.55 | 9.91 | **7.88 (79.5%)** | 1.13 (11.4%) |
+| uniform | `2:120:tuned` | 30.02 | 6.31 | **23.70** | **21.75 (91.8%)** | 1.31 (5.5%) |
+| uniform | `2:60:tuned` | 6.27 | 5.31 | 0.96 | −0.05 (−5.3%) | 0.24 (25.2%) |
+| uniform | `2:0:default` | 4.66 | 4.62 | 0.04 | −0.30 | 0.00 |
+| hot | `2:120:tuned` | 6.12 | 2.92 | 3.20 | 1.44 (45.1%) | 0.78 (24.2%) |
+| hot | `2:120:default` | 6.41 | 3.38 | 3.03 | 0.97 (31.9%) | 0.87 (28.6%) |
+| hot | `2:60:default` | 4.89 | 2.66 | 2.23 | 1.19 (53.3%) | 0.35 (15.5%) |
+| hot | `2:20:default` | 2.93 | 2.26 | 0.66 | 0.36 (53.9%) | 0.04 (5.5%) |
+| hot | `2:60:tuned` | 3.39 | 2.36 | 1.03 | 0.06 (5.5%) | 0.40 (38.8%) |
+| hot | `2:0:default` | 2.09 | 2.10 | −0.01 | −0.01 | 0.05 |
+
+**So prediction 6 measured the trigger and not the cost.** `leaf_wait_idle_s` is where the socket drains; the
+expense is what the congestion window does *afterwards*, and that lands in `page_send_s` — the time `send()`
+spends blocked on page data. Cutting idle leaf wait by only half is perfectly compatible with going 4.8× faster,
+because the half-second of wait removed is not what the half-minute of saving was made of. **A 0.25× bar on the
+idle wait was the wrong instrument for the registered hypothesis, not a refutation of it.**
+
+**This confirms EXP-21's diagnosis on its own terms, and prediction 7 corroborates it independently.** EXP-21
+traced the DR slowdown to cubic losing its window on a short, bursty stream and wrote that pgdelta *"can avoid
+needing [BBR] by keeping its stream full between files"*. Keeping it full is what `--hash-ahead` does; the
+window stays open; `send()` stops blocking. And EXP-23's slow-mode rule — which prediction 7 applied unchanged
+— **is itself a `page_send_s` test**, so the finding that `--hash-ahead` took cubic from 2 of 3 runs slow to
+**0 of 3** at `2:20:default` is the same mechanism counted a different way, by a rule registered before any of
+this data existed.
+
+**Three limits, stated.**
+
+- **In hot the decomposition is incomplete.** Sending and waits together account for 44–70% of hot's saving,
+  against 80–98% in uniform's four real cells. Hot's absolute savings are small (0.66–3.20 s), and the
+  remainder is not captured by these timers — plausibly the local scan overlapping work that no timer here
+  isolates. It is left unexplained rather than attributed.
+- **`2:60:tuned` is the exception in both patterns** (5.5% and −5.3% from sending). It is also the cell where
+  `v1` was never in trouble — `R_fast` 0.635 — so there is little to win and tuned buffers already keep the
+  window open. Consistent, but it is the cell this account explains least.
+- **At `2:0:default` there is no gain at all** in either pattern (0.990 and 1.006), and sending is marginally
+  *worse*. The mechanism needs a round trip to exist, which is the cleanest confirmation available that this is
+  a transport effect and not a local one — and it is why EXP-93, on an unshaped 0.155 ms link, measured no
+  window shortening from the same flag.
 
 ## What follows (from these results)
 
