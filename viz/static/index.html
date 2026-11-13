@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pgdelta race</title>
+<style>
+:root { --bg: #f5f6f9; --card: #ffffff; --ink: #1b2130; --muted: #5a6375; --rule: #d9dde5;
+  --data: #2459c4; --data-soft: #dce6f9; --ask: #8a93a6; --ok: #2c7a4c; --hot: #c0392b; --fill: #e7ecf5;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", sans-serif; }
+@media (prefers-color-scheme: dark) { :root { --bg: #10131a; --card: #181c25; --ink: #e4e8ef; --muted: #9aa3b3;
+  --rule: #2a313d; --data: #74a2ff; --data-soft: #1c2b48; --ask: #6b7385; --ok: #62c78e; --hot: #f0786c; --fill: #222a38; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); padding: 20px 16px 48px; }
+main { max-width: 980px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+h1 { font-size: 1.35rem; margin: 0; flex: 1 1 260px; }
+select, button { font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--rule); border-radius: 8px; padding: 6px 10px; cursor: pointer; }
+button.primary { background: var(--data); color: #fff; border-color: var(--data); }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 12px var(--mono); padding: 3px 8px; border-radius: 6px; background: var(--card); border: 1px solid var(--rule); color: var(--muted); }
+.live { background: var(--hot); color: #fff; border-color: var(--hot); }
+.lane { background: var(--card); border: 1px solid var(--rule); border-radius: 12px; padding: 14px 16px; display: grid; gap: 8px; }
+.lane-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.lane-head h2 { font-size: 1.02rem; margin: 0; flex: 1 1 240px; }
+.timer { font: 600 1.9rem/1 var(--mono); font-variant-numeric: tabular-nums; }
+.status { font: 12px var(--mono); color: var(--muted); min-width: 6em; }
+.badge { font: 600 12px var(--mono); padding: 3px 8px; border-radius: 6px; background: var(--data-soft); color: var(--data); }
+.badge.win { background: var(--ok); color: #fff; }
+svg { width: 100%; height: auto; display: block; }
+.box { fill: var(--card); stroke: var(--ink); stroke-width: 1.4; }
+.boxfill { fill: var(--data-soft); }
+.pipe { fill: var(--fill); stroke: var(--rule); }
+.lbl { font: 600 13px var(--sans); fill: var(--ink); }
+.sub { font: 11px var(--mono); fill: var(--muted); }
+.stats { font: 13px var(--mono); color: var(--muted); }
+.gauges { display: grid; gap: 4px; }
+.g { display: grid; grid-template-columns: 11.5em 1fr 6.5em; gap: 8px; align-items: center; font: 12px var(--mono); color: var(--muted); }
+.bar { position: relative; height: 12px; background: var(--fill); border-radius: 4px; overflow: hidden; }
+.bar i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--data); border-radius: 4px; }
+.bar b { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--hot); }
+.g.at { color: var(--hot); font-weight: 600; }
+.g.at .bar i { background: var(--hot); }
+.legend { font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 18px; }
+.empty { color: var(--muted); padding: 30px; text-align: center; background: var(--card); border: 1px dashed var(--rule); border-radius: 12px; }
+@media (max-width: 560px) { .g { grid-template-columns: 8.5em 1fr 5.5em; } .timer { font-size: 1.5rem; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1 id="title">pgdelta race</h1>
+    <select id="runs" aria-label="Run"></select>
+    <button id="play" class="primary">Play</button>
+    <button id="restart">Restart</button>
+    <select id="speed" aria-label="Speed">
+      <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option>
+      <option value="2">2×</option><option value="5">5×</option><option value="10">10×</option>
+    </select>
+  </header>
+  <div class="chips" id="chips"></div>
+  <div id="lanes"></div>
+  <div class="legend">
+    <span><svg width="22" height="10"><rect width="18" height="8" y="1" rx="2" fill="var(--data)"/></svg> data sent across</span>
+    <span><svg width="14" height="10"><circle cx="5" cy="5" r="3" fill="var(--ask)"/></svg> a hash question (one round trip)</span>
+    <span>Each lane's clock starts at zero, so recorded lanes race side by side.</span>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const fmtT = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); return `${m}:${(s - 60 * m).toFixed(1).padStart(4, '0')}`; };
+const fmtB = (b) => { if (b == null) return '–'; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (b >= 1000 && i < 4) { b /= 1000; i++; } return `${b.toFixed(b < 10 && i ? 1 : 0)} ${u[i]}`; };
+const num = (n) => (n || 0).toLocaleString('en-US');
+const W = 760, PIPE_X0 = 168, PIPE_X1 = 592;
+
+let run = null, lanes = [], clock = 0, playing = false, speed = 1, lastFrame = 0, poller = null;
+let bytesPerParticle = 1, qPerDot = 1;
+
+function laneSvg(i) {
+  return `<svg viewBox="0 0 ${W} 150" role="img" aria-label="source and destination">
+    <rect class="box" x="10" y="20" width="148" height="110" rx="10"/><rect class="boxfill" id="sf${i}" x="11" y="129" width="146" height="0" rx="9"/>
+    <text class="lbl" x="84" y="48" text-anchor="middle">S · source</text><text class="sub" x="84" y="66" text-anchor="middle" id="sl${i}"></text>
+    <rect class="pipe" x="${PIPE_X0}" y="62" width="${PIPE_X1 - PIPE_X0}" height="26" rx="13"/>
+    <g id="pp${i}"></g>
+    <rect class="box" x="602" y="20" width="148" height="110" rx="10"/><rect class="boxfill" id="df${i}" x="603" y="129" width="146" height="0" rx="9"/>
+    <text class="lbl" x="676" y="48" text-anchor="middle">B → O · destination</text><text class="sub" x="676" y="66" text-anchor="middle" id="dl${i}"></text>
+  </svg>`;
+}
+
+function build() {
+  const box = $('lanes'); box.innerHTML = '';
+  if (!run) { box.innerHTML = '<div class="empty">No runs yet. Try <code>python -m viz race</code>.</div>'; return; }
+  const meta = run.meta; $('title').textContent = meta.title || meta.name;
+  const chips = [];
+  if (typeof meta.setup === 'string') { if (meta.setup) chips.push(meta.setup); }
+  else for (const [k, v] of Object.entries(meta.setup || {})) chips.push(`${k}: ${v}`);
+  for (const [k, v] of Object.entries(meta.limits || {})) chips.push(`${k} limit: ${v} MB/s`);
+  if (meta.verify) chips.push(`copy check: ${meta.verify.match ? 'MATCH' : 'MISMATCH'}`);
+  $('chips').innerHTML = (meta.finished ? '' : '<span class="chip live">LIVE</span>') + chips.map((c) => `<span class="chip">${c}</span>`).join('');
+  lanes = meta.lanes.map((l, i) => ({ id: l.id, label: l.label, i, events: run.lanes[l.id] || [], particles: [], acc: 0, qacc: 0, seen: 0, seenWall: 0 }));
+  box.innerHTML = lanes.map((l, i) => `<section class="lane" id="lane${i}">
+    <div class="lane-head"><h2>${l.label}</h2><span class="badge" id="bd${i}" hidden></span><span class="status" id="st${i}">waiting</span><span class="timer" id="tm${i}">0:00.0</span></div>
+    ${laneSvg(i)}<div class="stats" id="sx${i}"></div><div class="gauges" id="gg${i}"></div></section>`).join('');
+  calibrate();
+}
+
+function calibrate() {  // particles per byte and dots per round trip, scaled to the busiest lane
+  let maxB = 1, maxQ = 1;
+  for (const l of lanes) {
+    const p = l.events.filter((e) => e.kind === 'progress');
+    for (let k = 1; k < p.length; k++) {
+      const dt = p[k].t - p[k - 1].t; if (dt <= 0) continue;
+      maxB = Math.max(maxB, ((p[k].bytes_sent || 0) - (p[k - 1].bytes_sent || 0)) / dt);
+      maxQ = Math.max(maxQ, ((p[k].round_trips || 0) - (p[k - 1].round_trips || 0)) / dt);
+    }
+  }
+  bytesPerParticle = maxB / 45; qPerDot = maxQ / 28;
+}
+
+const endOf = (l) => { const d = l.events.find((e) => e.kind === 'done'); return d ? d.t : null; };
+const startOf = (l) => l.events.find((e) => e.kind === 'start');
+
+function laneTime(l) {
+  const end = endOf(l);
+  if (run.meta.finished) return end != null ? Math.min(clock, end) : clock;
+  if (end != null) return end;     // live: a finished lane shows its final time
+  if (!l.events.length) return 0;  // live and not started
+  const last = l.events[l.events.length - 1].t;
+  return last + (performance.now() - l.seenWall) / 1000;
+}
+
+function stateAt(l, t) {  // the last progress values at or before t, interpolated toward the next ones
+  const ev = l.events; let a = null, b = null, g = null;
+  for (const e of ev) {
+    if (e.t <= t) { if (e.kind === 'progress' || e.kind === 'done') a = e; if (e.kind === 'gauges') g = e; }
+    else if (e.kind === 'progress' || e.kind === 'done') { b = e; break; }
+  }
+  const s = { ...(a || {}) }; let rateB = 0, rateQ = 0;
+  if (a && b && b.t > a.t) {
+    const f = (t - a.t) / (b.t - a.t);
+    for (const k of ['bytes_read', 'bytes_sent', 'round_trips', 'chunks_same', 'chunks_changed', 'chunks_new'])
+      if (typeof a[k] === 'number' && typeof b[k] === 'number') s[k] = a[k] + f * (b[k] - a[k]);
+    rateB = ((b.bytes_sent || 0) - (a.bytes_sent || 0)) / (b.t - a.t);
+    rateQ = ((b.round_trips || 0) - (a.round_trips || 0)) / (b.t - a.t);
+  } else if (a && !b) {  // live: no next event yet, so use the rate between the last two
+    const p = ev.filter((e) => e.kind === 'progress' && e.t <= a.t).slice(-2);
+    if (p.length === 2 && p[1].t > p[0].t) {
+      rateB = ((p[1].bytes_sent || 0) - (p[0].bytes_sent || 0)) / (p[1].t - p[0].t);
+      rateQ = ((p[1].round_trips || 0) - (p[0].round_trips || 0)) / (p[1].t - p[0].t);
+    }
+  }
+  return { s, g, rateB, rateQ };
+}
+
+function render(dtWall) {
+  if (!run) return;
+  const ends = lanes.map(endOf).filter((x) => x != null);
+  const allDone = run.meta.finished && ends.length === lanes.length;
+  lanes.forEach((l) => {
+    const i = l.i, end = endOf(l), t = laneTime(l), st = startOf(l);
+    const started = st && t >= 0 && l.events.length > 0;
+    const done = end != null && t >= end;
+    $('tm' + i).textContent = fmtT(started ? t : 0);
+    $('st' + i).textContent = !started ? 'waiting' : done ? 'done' : 'running';
+    const { s, g, rateB, rateQ } = stateAt(l, t);
+    const total = (st && st.total_bytes) || s.total_bytes || 0;
+    const read = s.bytes_read != null ? s.bytes_read : s.bytes_sent || 0;
+    const fracS = total ? Math.min(1, read / total) : done ? 1 : 0;
+    const fracD = done ? 1 : fracS;
+    for (const [id, f] of [['sf' + i, fracS], ['df' + i, fracD]]) { const h = 108 * f; const r = $(id); r.setAttribute('height', h); r.setAttribute('y', 129 - h); }
+    $('sl' + i).textContent = total ? `${fmtB(read)} of ${fmtB(total)} read` : '';
+    $('dl' + i).textContent = done ? 'published' : started ? 'building' : '';
+    // particles
+    if (started && !done && (playing || !run.meta.finished)) {
+      l.acc += Math.min(60, rateB / bytesPerParticle) * dtWall;
+      l.qacc += Math.min(30, rateQ / qPerDot) * dtWall;
+      while (l.acc >= 1) { l.particles.push({ x: 0, k: 'd', y: 66 + Math.random() * 16 }); l.acc -= 1; }
+      while (l.qacc >= 1) { l.particles.push({ x: 0, k: 'q', y: 70 + Math.random() * 10 }); l.qacc -= 1; }
+    }
+    if (playing || !run.meta.finished) for (const p of l.particles) p.x += dtWall / 0.9;
+    l.particles = l.particles.filter((p) => p.x < 1);
+    $('pp' + i).innerHTML = l.particles.map((p) => {
+      const x = PIPE_X0 + 10 + p.x * (PIPE_X1 - PIPE_X0 - 30);
+      return p.k === 'd' ? `<rect x="${x.toFixed(1)}" y="${(p.y - 4).toFixed(1)}" width="16" height="8" rx="2" fill="var(--data)"/>`
+                         : `<circle cx="${x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="3" fill="var(--ask)"/>`;
+    }).join('');
+    // stats
+    const parts = [];
+    if (s.bytes_sent != null) parts.push(`${fmtB(s.bytes_sent)} sent` + (total ? ` (${(100 * s.bytes_sent / total).toFixed(1)}% of ${fmtB(total)})` : ''));
+    if (s.round_trips != null) parts.push(`${num(Math.round(s.chunks_changed))} changed · ${num(Math.round(s.chunks_same))} unchanged · ${num(Math.round(s.chunks_new))} new · ${num(Math.round(s.round_trips))} round trips`);
+    $('sx' + i).textContent = parts.join(' · ');
+    // gauges
+    const lim = run.meta.limits || {};
+    if (g) {
+      const rows = [['link (source sends)', g.link_MBps, lim.link], ['source disk read', g.src_read_MBps, lim.disk],
+                    ['dest disk read', g.dst_read_MBps, lim.disk], ['dest disk write', g.dst_write_MBps, lim.disk]];
+      const top = Math.max(lim.link || 0, lim.disk || 0, ...rows.map((r) => r[1] || 0)) * 1.1 || 1;
+      $('gg' + i).innerHTML = rows.map(([name, v, limit]) => {
+        const at = limit && v >= 0.9 * limit;
+        return `<div class="g${at ? ' at' : ''}"><span>${name}</span><span class="bar"><i style="width:${(100 * (v || 0) / top).toFixed(1)}%"></i>${limit ? `<b style="left:${(100 * limit / top).toFixed(1)}%"></b>` : ''}</span><span>${(v || 0).toFixed(0)} MB/s${at ? ' ◀' : ''}</span></div>`;
+      }).join('');
+    } else $('gg' + i).innerHTML = '';
+  });
+  // badges once every lane has finished
+  lanes.forEach((l) => { const b = $('bd' + l.i); b.hidden = true; });
+  if (allDone && clock >= Math.max(...ends)) {
+    const base = endOf(lanes[0]); const best = Math.min(...ends);
+    lanes.forEach((l) => { const e = endOf(l), b = $('bd' + l.i); b.hidden = false;
+      b.className = 'badge' + (e === best ? ' win' : ''); b.textContent = (e === best ? 'fastest · ' : '') + (l.i === 0 ? 'baseline' : `${(e / base).toFixed(2)}× of lane 1`); });
+  }
+  if (allDone && playing && clock >= Math.max(...ends) + 0.5) { playing = false; $('play').textContent = 'Play'; }
+}
+
+function frame(now) {
+  const dt = lastFrame ? Math.min(0.1, (now - lastFrame) / 1000) : 0; lastFrame = now;
+  if (playing) clock += dt * speed;
+  render(dt * (run && run.meta.finished ? speed : 1));
+  requestAnimationFrame(frame);
+}
+
+async function loadRun(name, keepClock) {
+  const r = await fetch(`/api/run/${encodeURIComponent(name)}`); if (!r.ok) return;
+  const data = await r.json();
+  const firstLoad = !run || run.meta.name !== data.meta.name;
+  if (!firstLoad) {  // live update: keep particles, note when new events arrived
+    for (const l of lanes) { const ev = data.lanes[l.id] || []; if (ev.length > l.events.length) { l.events = ev; l.seenWall = performance.now(); } }
+    calibrate();
+    const wasLive = !run.meta.finished; run.meta = data.meta;
+    if (wasLive && data.meta.finished) { build(); clock = 0; playing = false; $('play').textContent = 'Replay as race'; }
+    return;
+  }
+  run = data; build(); clock = keepClock ? clock : 0;
+  lanes.forEach((l) => { l.seenWall = performance.now(); });
+  if (poller) clearInterval(poller);
+  if (!data.meta.finished) { poller = setInterval(() => loadRun(name, true), 400); playing = false; }
+  else { playing = true; $('play').textContent = 'Pause'; }
+}
+
+async function refreshList() {
+  const list = await (await fetch('/api/runs')).json();
+  const current = $('runs').value;
+  $('runs').innerHTML = list.map((r) => `<option value="${r.name}">${r.example ? '★ ' : ''}${r.title}${r.finished ? '' : ' (live)'}</option>`).join('');
+  if (current) $('runs').value = current;
+  return list;
+}
+
+async function init() {
+  const list = await refreshList();
+  setInterval(refreshList, 3000);
+  const want = decodeURIComponent(location.hash.slice(1)) || (list[0] && list[0].name);
+  if (want) { $('runs').value = want; await loadRun(want); } else build();
+  requestAnimationFrame(frame);
+}
+
+$('runs').onchange = () => { location.hash = $('runs').value; loadRun($('runs').value); };
+$('play').onclick = () => { if (!run || !run.meta.finished) return; const ends = lanes.map(endOf).filter((x) => x != null);
+  if (!playing && ends.length && clock >= Math.max(...ends)) clock = 0; playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play'; };
+$('restart').onclick = () => { clock = 0; lanes.forEach((l) => { l.particles = []; }); if (run && run.meta.finished) { playing = true; $('play').textContent = 'Pause'; } };
+$('speed').onchange = () => { speed = parseFloat($('speed').value); };
+window.addEventListener('hashchange', () => { const n = decodeURIComponent(location.hash.slice(1)); if (n && (!run || n !== run.meta.name)) { $('runs').value = n; loadRun(n); } });
+init();
+</script>
+</body>
+</html>
