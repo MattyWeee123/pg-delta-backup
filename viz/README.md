@@ -9,11 +9,19 @@ python -m viz race           # a laptop race, watched live at the URL it prints
 
 ## Launching runs from the page
 
-**New run →** (at http://localhost:8765/launch) is a form:
+**New run →** (at http://localhost:8765/launch) is a form, with a line under each option saying what it does:
 - **What to run:** laptop or Google Cloud, methods, database size, change pattern, repeats; for the cloud, also machine type, disk, link cap and zones.
-- **Check & estimate:** shows the cost, the quota and anything that would stop the run. **Launch** stays disabled until the check passes.
-- **The run itself** goes through `python -m bench run` (see [bench/README.md](../bench/README.md)). Watch it live on the main page.
-- **Publishing:** with the checkbox on, the run is committed and a pull request opened when it finishes. The page lists the runs started from it, with their logs and pull request links.
+- **Launch:** checks first (the cloud's quota and one run at a time, or PostgreSQL on the laptop) and shows anything that stops the run. Otherwise the run starts and the page switches to the live view. A cloud run expected to cost more than $1 asks once before creating anything.
+- **The run itself** goes through `python -m bench run` (see [bench/README.md](../bench/README.md)).
+- **Publishing:** with the checkbox on (the default), the run is committed and a pull request opened when it finishes. The launcher lists the runs started from it, with their step, logs and pull request links.
+
+## Progress and the ETA
+
+Above the lanes, a run started by `bench` shows its steps as a bar (setup, each lane, the copy check, deleting the VMs, publishing), the time left, the time it should finish, and for cloud runs what the VMs have cost so far. Each step has an expected duration in `steps.json` (see `bench/steps.py`):
+- **from history:** the latest finished run of the same kind (on this computer, or on the same cloud machine type), scaled to the database size;
+- **else a rule of thumb** measured on one laptop and one cloud run, which can be 2× off on other machines.
+
+While the run goes, a finished step counts its real time; the current lane extrapolates from how much of the database it has read; a step still to come takes as long as the same step took earlier in the run (a repeat), or its expectation. Each step's line says which of these its number came from. A finished run shows how long it took against what was expected.
 
 One run at a time. The page only accepts requests from itself.
 

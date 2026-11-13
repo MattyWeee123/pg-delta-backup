@@ -6,7 +6,7 @@ pg_basebackup, then the source changes 1% of the rows. Each lane runs with both 
 the link capped if asked (infra/gcp/throttle.sh on both), and the 0.1-second sampler
 (experiments/network/util_series.py) on both VMs; its link and disk rates become the lane's gauges.
 
-Guardrails: an estimate is shown before anything is created; quota is checked; a run refuses to start
+Guardrails: quota is checked before anything is created, and an unusually expensive run asks first; a run refuses to start
 while another benchmark's VMs exist; every VM is labelled purpose=pg-delta-benchmark with an expiry time
 (`python -m bench cleanup` deletes expired ones); and the VMs are deleted when the run ends, whatever happens.
 """
@@ -26,6 +26,7 @@ from pathlib import Path
 from bench import cost
 from bench.config import RunConfig
 from bench.lanes import copy_events, merge_gauges, pump_pg_basebackup
+from bench.steps import no_steps
 from pgdelta.events import EventLog
 from viz import sampler
 
@@ -61,7 +62,8 @@ def active_benchmarks() -> list[dict]:
 
 def preflight(cfg: RunConfig) -> dict:
     """Everything to know before creating VMs: the estimate, problems that block the run, warnings."""
-    report = {'estimate': cost.estimate(cfg), 'problems': [], 'warnings': [], 'quota': {}}
+    from viz.runs import DEFAULT_ROOTS
+    report = {'estimate': cost.estimate(cfg, root=DEFAULT_ROOTS[0]), 'problems': [], 'warnings': [], 'quota': {}}
     try:
         account = gcloud('config', 'get-value', 'account').stdout.strip()
         project = gcloud('config', 'get-value', 'project').stdout.strip()
@@ -156,7 +158,8 @@ mkdir -p ~/pgd && tar -xzf ~/code.tgz -C ~/pgd
 """
 
 
-def run_gcp(cfg: RunConfig, run_dir: Path, log=print, keep: bool = False) -> dict:
+def run_gcp(cfg: RunConfig, run_dir: Path, log=print, keep: bool = False, steps=None) -> dict:
+    step = steps.step if steps else no_steps
     tag = (re.sub(r'[^a-z0-9]', '', cfg.name.lower())[-10:] or 'run') + secrets.token_hex(2)
     expires = int(time.time() + cfg.ttl_minutes * 60)
     labels = f'{BASE_LABELS},pgd-bench={tag},pgd-expires={expires}'
@@ -178,79 +181,85 @@ def run_gcp(cfg: RunConfig, run_dir: Path, log=print, keep: bool = False) -> dic
 
     try:
         log(f'creating {src.name} ({src.zone}) and {dst.name} ({dst.zone}), {cfg.machine} …')
-        with ThreadPoolExecutor(2) as pool:
-            list(pool.map(create, (src, dst)))
-        for vm in (src, dst):
-            for _ in range(40):
-                if subprocess.run(vm.ssh_argv('true'), capture_output=True).returncode == 0:
-                    break
-                time.sleep(5)
-            else:
-                raise RuntimeError(f'{vm.name}: ssh never became ready')
+        with step('vms'):
+            with ThreadPoolExecutor(2) as pool:
+                list(pool.map(create, (src, dst)))
+            for vm in (src, dst):
+                for _ in range(40):
+                    if subprocess.run(vm.ssh_argv('true'), capture_output=True).returncode == 0:
+                        break
+                    time.sleep(5)
+                else:
+                    raise RuntimeError(f'{vm.name}: ssh never became ready')
         log('installing PostgreSQL 17 and the code on both VMs …')
-        tarball = run_dir / 'code.tgz'
-        _code_tarball(tarball)
-        with ThreadPoolExecutor(2) as pool:
-            versions = list(pool.map(lambda vm: (vm.scp_to(tarball, 'code.tgz'), vm.ssh(PROVISION))[1], (src, dst)))
-        tarball.unlink()
-        found = re.search(r'\d+\.\d+', versions[0])
-        facts['postgres'] = found.group(0) if found else 'unknown'
-        facts['rtt_ms'] = _rtt(src, dst)
+        with step('install'):
+            tarball = run_dir / 'code.tgz'
+            _code_tarball(tarball)
+            with ThreadPoolExecutor(2) as pool:
+                versions = list(pool.map(lambda vm: (vm.scp_to(tarball, 'code.tgz'), vm.ssh(PROVISION))[1], (src, dst)))
+            tarball.unlink()
+            found = re.search(r'\d+\.\d+', versions[0])
+            facts['postgres'] = found.group(0) if found else 'unknown'
+            facts['rtt_ms'] = _rtt(src, dst)
 
         rows = cfg.scale * 100_000
         where = 'aid % 100 = 0' if cfg.change == 'uniform' else f'aid <= {rows // 100}'
         psql = f'{PGBIN}/psql -h /tmp -U postgres -qAt postgres'
         log(f'building the database (scale {cfg.scale}) and the old copy …')
-        src.ssh(f"""set -e
+        with step('build'):
+            src.ssh(f"""set -e
 {PGBIN}/initdb -D /data/S -U postgres --data-checksums -A trust -E UTF8 --locale=C.UTF-8 > /dev/null
 echo "listen_addresses = '*'" >> /data/S/postgresql.conf
 printf 'host all all {dst.ip}/32 trust\\nhost replication all {dst.ip}/32 trust\\n' >> /data/S/pg_hba.conf
 {PGBIN}/pg_ctl -D /data/S -l /data/S.log -w start -o '-p 5432 -c unix_socket_directories=/tmp' > /dev/null
 {PGBIN}/pgbench -i -s {cfg.scale} -h /tmp -U postgres postgres > /dev/null 2>&1""")
-        dst.ssh(f'{PGBIN}/pg_basebackup -h {src.ip} -U postgres -D /data/B -X stream -c fast')
-        src.ssh(f'{psql} -c "UPDATE pgbench_accounts SET abalance = abalance + 7 WHERE {where}" -c CHECKPOINT')
-        expect = src.ssh(f'{psql} -c "SELECT count(*), sum(abalance) FROM pgbench_accounts"').strip()
-        facts['database_bytes'] = int(src.ssh('du -sb /data/S | cut -f1').split()[0])
+        with step('copy'):
+            dst.ssh(f'{PGBIN}/pg_basebackup -h {src.ip} -U postgres -D /data/B -X stream -c fast')
+            src.ssh(f'{psql} -c "UPDATE pgbench_accounts SET abalance = abalance + 7 WHERE {where}" -c CHECKPOINT')
+            expect = src.ssh(f'{psql} -c "SELECT count(*), sum(abalance) FROM pgbench_accounts"').strip()
+            facts['database_bytes'] = int(src.ssh('du -sb /data/S | cut -f1').split()[0])
 
         running = True
         raw = run_dir / 'raw'
         for lane in cfg.lanes():
-            lane_id, path = lane['id'], run_dir / f"events-{lane['id']}.jsonl"
-            if lane['method'] == 'pg_basebackup' and not running:
-                src.ssh(f"{PGBIN}/pg_ctl -D /data/S -l /data/S.log -w start -o '-p 5432 -c unix_socket_directories=/tmp' > /dev/null")
-                running = True
-            if lane['method'] == 'pgdelta' and running:
-                src.ssh(f'{PGBIN}/pg_ctl -D /data/S -m fast -w stop > /dev/null')
-                running = False
-            log(f'lane {lane_id} …')
-            for vm in (src, dst):
-                vm.ssh(f'sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null; '
-                       f'nohup python3 ~/pgd/experiments/network/util_series.py > /data/util.txt 2> /dev/null '
-                       f'< /dev/null & echo $! > /data/util.pid')
-                if cfg.link != 'full':
-                    vm.ssh(f'sudo bash ~/pgd/infra/gcp/throttle.sh {cfg.link} > /dev/null')
-            time.sleep(0.5)
-            if lane['method'] == 'pg_basebackup':
-                times, result = _lane_pg_basebackup(src, dst, path, lane_id)
-            else:
-                times, result = _lane_pgdelta(src, dst, path, lane_id, cfg.chunk_size, run_dir)
-            lane_raw = raw / lane_id
-            lane_raw.mkdir(parents=True, exist_ok=True)
-            for vm, side in ((src, 'source'), (dst, 'dest')):
-                if cfg.link != 'full':
-                    vm.ssh('sudo bash ~/pgd/infra/gcp/throttle.sh off > /dev/null', check=False)
-                vm.ssh('kill $(cat /data/util.pid); sleep 0.4', check=False)
-                vm.scp_from('/data/util.txt', lane_raw / f'util-{side}.txt')
-            (lane_raw / 'meta.json').write_text(json.dumps({**times, 'status': 0 if result.get('ok') else 1,
-                                                            'arm': lane_id}))
-            gauges = [e | {'method': lane_id} for e in sampler.lane_events(lane_raw) if e['kind'] == 'gauges']
-            merge_gauges(path, gauges)
-            facts['lanes'][lane_id] = result
+            with step('lane:' + lane['id']):
+                lane_id, path = lane['id'], run_dir / f"events-{lane['id']}.jsonl"
+                if lane['method'] == 'pg_basebackup' and not running:
+                    src.ssh(f"{PGBIN}/pg_ctl -D /data/S -l /data/S.log -w start -o '-p 5432 -c unix_socket_directories=/tmp' > /dev/null")
+                    running = True
+                if lane['method'] == 'pgdelta' and running:
+                    src.ssh(f'{PGBIN}/pg_ctl -D /data/S -m fast -w stop > /dev/null')
+                    running = False
+                log(f'lane {lane_id} …')
+                for vm in (src, dst):
+                    vm.ssh(f'sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null; '
+                           f'nohup python3 ~/pgd/experiments/network/util_series.py > /data/util.txt 2> /dev/null '
+                           f'< /dev/null & echo $! > /data/util.pid')
+                    if cfg.link != 'full':
+                        vm.ssh(f'sudo bash ~/pgd/infra/gcp/throttle.sh {cfg.link} > /dev/null')
+                time.sleep(0.5)
+                if lane['method'] == 'pg_basebackup':
+                    times, result = _lane_pg_basebackup(src, dst, path, lane_id)
+                else:
+                    times, result = _lane_pgdelta(src, dst, path, lane_id, cfg.chunk_size, run_dir)
+                lane_raw = raw / lane_id
+                lane_raw.mkdir(parents=True, exist_ok=True)
+                for vm, side in ((src, 'source'), (dst, 'dest')):
+                    if cfg.link != 'full':
+                        vm.ssh('sudo bash ~/pgd/infra/gcp/throttle.sh off > /dev/null', check=False)
+                    vm.ssh('kill $(cat /data/util.pid); sleep 0.4', check=False)
+                    vm.scp_from('/data/util.txt', lane_raw / f'util-{side}.txt')
+                (lane_raw / 'meta.json').write_text(json.dumps({**times, 'status': 0 if result.get('ok') else 1,
+                                                                'arm': lane_id}))
+                gauges = [e | {'method': lane_id} for e in sampler.lane_events(lane_raw) if e['kind'] == 'gauges']
+                merge_gauges(path, gauges)
+                facts['lanes'][lane_id] = result
         if running:
             src.ssh(f'{PGBIN}/pg_ctl -D /data/S -m fast -w stop > /dev/null', check=False)
         got = None
         if 'pgdelta' in cfg.methods:
-            got = dst.ssh(f"""set -e
+            with step('check'):
+                got = dst.ssh(f"""set -e
 {PGBIN}/pg_ctl -D /data/O -l /data/O.log -w start -o '-p 5433 -c listen_addresses= -c unix_socket_directories=/tmp' > /dev/null
 {PGBIN}/psql -h /tmp -p 5433 -U postgres -qAt postgres -c "SELECT count(*), sum(abalance) FROM pgbench_accounts"
 {PGBIN}/pg_ctl -D /data/O -m fast -w stop > /dev/null""").strip()
@@ -261,10 +270,12 @@ printf 'host all all {dst.ip}/32 trust\\nhost replication all {dst.ip}/32 trust\
     finally:
         if created and not keep:
             log('deleting the VMs …')
-            with ThreadPoolExecutor(2) as pool:
+            with step('delete'), ThreadPoolExecutor(2) as pool:
                 list(pool.map(lambda vm: gcloud('compute', 'instances', 'delete', vm.name, '--zone', vm.zone,
                                                 '--quiet', check=False), created))
             facts['vms']['deleted'] = True
+        elif steps:
+            steps.skip('delete')
 
 
 def _rtt(src: VM, dst: VM) -> float | None:

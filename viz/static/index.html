@@ -43,6 +43,26 @@ svg { width: 100%; height: auto; display: block; }
 .g.at .bar i { background: var(--hot); }
 .legend { font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 18px; }
 .empty { color: var(--muted); padding: 30px; text-align: center; background: var(--card); border: 1px dashed var(--rule); border-radius: 12px; }
+.prog { background: var(--card); border: 1px solid var(--rule); border-radius: 12px; padding: 14px 16px; display: grid; gap: 10px; }
+.prog[hidden] { display: none; }
+.prog-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 18px; }
+.eta { font: 600 1.7rem/1.1 var(--mono); font-variant-numeric: tabular-nums; }
+.eta-sub { font: 13px var(--mono); color: var(--muted); }
+.segs { display: flex; gap: 3px; height: 18px; }
+.seg { position: relative; background: var(--fill); border-radius: 4px; overflow: hidden; min-width: 8px; }
+.seg i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--data); }
+.seg.done i { width: 100%; background: var(--ok); }
+.seg.failed i { width: 100%; background: var(--hot); }
+.seg.current { outline: 2px solid var(--data); outline-offset: 1px; }
+.seg.current i { background-image: linear-gradient(90deg, transparent 0 40%, rgba(255,255,255,.35) 50%, transparent 60% 100%); background-size: 200% 100%; animation: shine 1.4s linear infinite; }
+@keyframes shine { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .seg.current i { animation: none; } }
+.steps { display: grid; gap: 3px; font: 12px var(--mono); margin-top: 6px; }
+.steprow { display: grid; grid-template-columns: 1.3em minmax(0, 1fr) auto; gap: 8px; color: var(--muted); }
+.steprow.current { color: var(--ink); font-weight: 600; }
+.steprow.failed { color: var(--hot); }
+.steprow .how { grid-column: 2 / 4; font-size: 11px; margin-top: -2px; }
+summary { cursor: pointer; }
 @media (max-width: 560px) { .g { grid-template-columns: 8.5em 1fr 5.5em; } .timer { font-size: 1.5rem; } }
 </style>
 </head>
@@ -60,6 +80,11 @@ svg { width: 100%; height: auto; display: block; }
     </select>
   </header>
   <div class="chips" id="chips"></div>
+  <section class="prog" id="prog" hidden aria-live="off">
+    <div class="prog-head"><span class="eta" id="eta"></span><span class="eta-sub" id="eta-sub"></span><span class="eta-sub" id="eta-cost"></span></div>
+    <div class="segs" id="segs" role="img" aria-label="the run's steps"></div>
+    <details id="steps-box" open><summary class="eta-sub" id="steps-sum">steps</summary><div class="steps" id="steps"></div></details>
+  </section>
   <div id="lanes"></div>
   <div class="legend">
     <span><svg width="22" height="10"><rect width="18" height="8" y="1" rx="2" fill="var(--data)"/></svg> data sent across</span>
@@ -72,7 +97,12 @@ const $ = (id) => document.getElementById(id);
 const fmtT = (s) => { s = Math.max(0, s); const m = Math.floor(s / 60); return `${m}:${(s - 60 * m).toFixed(1).padStart(4, '0')}`; };
 const fmtB = (b) => { if (b == null) return '–'; const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (b >= 1000 && i < 4) { b /= 1000; i++; } return `${b.toFixed(b < 10 && i ? 1 : 0)} ${u[i]}`; };
 const num = (n) => (n || 0).toLocaleString('en-US');
+const fmtD = (s) => { s = Math.max(0, Math.round(s)); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), x = s % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(x).padStart(2, '0')}` : `${m}:${String(x).padStart(2, '0')}`; };
+const escH = (v) => String(v ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const W = 760, PIPE_X0 = 168, PIPE_X1 = 592;
+let clockOffset = 0, lastProgress = 0;  // the server's clock minus this browser's, in seconds
+const nowS = () => Date.now() / 1000 + clockOffset;
 
 let run = null, lanes = [], clock = 0, playing = false, speed = 1, lastFrame = 0, poller = null;
 let bytesPerParticle = 1, qPerDot = 1;
@@ -90,8 +120,8 @@ function laneSvg(i) {
 
 function build() {
   const box = $('lanes'); box.innerHTML = '';
-  if (!run) { box.innerHTML = '<div class="empty">No runs yet. Try <code>python -m viz race</code>.</div>'; return; }
-  const meta = run.meta; $('title').textContent = meta.title || meta.name;
+  if (!run) { box.innerHTML = '<div class="empty">No runs yet. Start one with <a href="/launch">New run →</a></div>'; return; }
+  const meta = run.meta; $('title').textContent = meta.title || meta.name; document.title = 'pgdelta race';
   const chips = [];
   if (typeof meta.setup === 'string') { if (meta.setup) chips.push(meta.setup); }
   else for (const [k, v] of Object.entries(meta.setup || {})) chips.push(`${k}: ${v}`);
@@ -214,22 +244,123 @@ function render(dtWall) {
   if (allDone && playing && clock >= Math.max(...ends) + 0.5) { playing = false; $('play').textContent = 'Play'; }
 }
 
+function laneFraction(id) {  // how much of a lane's data has been read, 0..1, or null before it says
+  const l = lanes.find((x) => x.id === id); if (!l || !l.events.length) return null;
+  const { s } = stateAt(l, laneTime(l)), st = startOf(l);
+  const total = (st && st.total_bytes) || s.total_bytes || 0;
+  const read = s.bytes_read != null ? s.bytes_read : s.bytes_sent || 0;
+  return total ? Math.min(1, read / total) : null;
+}
+
+// The ETA. Each step of the run (bench/steps.py) has an expected duration: measured in an earlier run of
+// the same kind, or a rule of thumb. While the run goes:
+// - a finished step counts what it actually took;
+// - the current step, if it is a lane, extrapolates from how much of the database it has read so far
+//   (blended with the expectation until a quarter is done, so the first noisy seconds don't swing it);
+//   a step without progress counts down from its expectation, and past it assumes a little longer;
+// - a step still to come takes as long as the same kind of step took earlier in this run (a repeat),
+//   or else its expectation.
+// Time left = the current step's remainder + every step to come.
+function eta() {
+  const P = run && run.steps; if (!P || !Array.isArray(P.steps)) return null;
+  const now = nowS(), took = {};
+  for (const s of P.steps) if (s.started && s.finished && !s.failed) (took[s.kind] = took[s.kind] || []).push(s.finished - s.started);
+  let left = 0;
+  const rows = P.steps.map((s) => {
+    const r = { s, state: s.skipped ? 'skipped' : s.failed ? 'failed' : s.finished ? 'done' : s.started ? 'current' : 'pending' };
+    if (r.state === 'done' || r.state === 'failed') r.dur = s.finished - s.started;
+    else if (r.state === 'current' && !run.meta.finished) {
+      const el = now - s.started, f = s.lane ? laneFraction(s.lane) : null;
+      let rem = s.expect - el, how = `expected ${fmtD(s.expect)} (${s.basis})`;
+      if (rem < 0) { rem = Math.min(0.15 * el, s.expect); how = `taking longer than the ${fmtD(s.expect)} expected`; }
+      if (f != null && f > 0.02 && el > 1) {
+        const w = Math.min(1, f / 0.25); rem = w * (el * (1 - f) / f) + (1 - w) * Math.max(rem, 0);
+        how = `${Math.round(100 * f)}% of the database read; the rest at the same rate`;
+      }
+      Object.assign(r, { el, left: rem, frac: el / Math.max(el + rem, 0.001), how, dur: el + rem }); left += rem;
+    } else if (r.state === 'pending' && !run.meta.finished) {
+      const prev = took[s.kind];
+      r.left = prev ? prev.reduce((a, b) => a + b, 0) / prev.length : s.expect;
+      r.how = prev ? 'as long as the same step took earlier in this run' : s.basis;
+      r.dur = r.left; left += r.left;
+    }
+    return r;
+  });
+  const ends = P.steps.filter((s) => s.finished).map((s) => s.finished);
+  const elapsed = (run.meta.finished ? Math.max(P.created, ...ends) : now) - P.created;
+  const planned = P.steps.filter((s) => !s.skipped).reduce((a, s) => a + s.expect, 0);
+  let cost = null;
+  const vms = P.steps.find((s) => s.id === 'vms'), del = P.steps.find((s) => s.id === 'delete');
+  if (P.dollars_per_hour && vms && vms.started) {
+    const until = del && del.finished ? del.finished : run.meta.finished ? Math.max(...ends) : now;
+    const so = P.dollars_per_hour * (until - vms.started) / 3600;
+    cost = { so, all: so + (run.meta.finished ? 0 : P.dollars_per_hour * left / 3600) };
+  }
+  return { rows, left, elapsed, planned, cost };
+}
+
+function renderProgress() {
+  const box = $('prog'), m = eta();
+  if (!m) { box.hidden = true; return; }
+  box.hidden = false;
+  const failedRow = m.rows.find((r) => r.state === 'failed');
+  if (run.meta.failed) {
+    $('eta').innerHTML = '<span style="color:var(--hot)">Failed</span>';
+    $('eta-sub').textContent = `${failedRow ? 'at “' + failedRow.s.label + '” ' : ''}after ${fmtD(m.elapsed)}`;
+  } else if (run.meta.finished) {
+    $('eta').textContent = `Took ${fmtD(m.elapsed)}`;
+    $('eta-sub').textContent = `expected ${fmtD(m.planned)} when it started`;
+  } else {
+    const at = new Date((nowS() + m.left - clockOffset) * 1000);
+    $('eta').textContent = `${fmtD(m.left)} left`;
+    $('eta-sub').textContent = `${fmtD(m.elapsed)} elapsed · done around ${at.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+    document.title = `${fmtD(m.left)} left · ${run.meta.title || run.meta.name}`;
+  }
+  const usd = (d) => '$' + d.toFixed(d < 0.1 ? 3 : 2);
+  $('eta-cost').textContent = m.cost ? `VMs: ${usd(m.cost.so)} so far${run.meta.finished ? '' : ` · ≈ ${usd(m.cost.all)} in all`}` : '';
+  $('segs').innerHTML = m.rows.filter((r) => r.state !== 'skipped').map((r) => {
+    const fill = r.state === 'current' ? `<i style="width:${(100 * r.frac).toFixed(1)}%"></i>` : '<i></i>';
+    return `<div class="seg ${r.state}" style="flex:${Math.max(r.dur || r.s.expect, 0.5).toFixed(2)} 1 0" title="${escH(r.s.label)}">${fill}</div>`;
+  }).join('');
+  const nDone = m.rows.filter((r) => r.state === 'done').length;
+  $('steps-sum').textContent = `${nDone} of ${m.rows.filter((r) => r.state !== 'skipped').length} steps done`;
+  $('steps').innerHTML = m.rows.map((r) => {
+    const icon = { done: '✓', failed: '✗', current: '▶', pending: '·', skipped: '–' }[r.state];
+    let right = '', how = '';
+    if (r.state === 'done') right = `${fmtD(r.dur)} (expected ${fmtD(r.s.expect)})`;
+    else if (r.state === 'failed') right = `failed after ${fmtD(r.dur)}`;
+    else if (r.state === 'skipped') right = 'skipped';
+    else if (r.state === 'current') { right = run.meta.finished ? 'stopped' : `${fmtD(r.el)} · ≈ ${fmtD(r.left)} left`; how = r.how || ''; }
+    else { right = run.meta.finished ? 'not run' : `≈ ${fmtD(r.left)}`; how = r.how || ''; }
+    return `<div class="steprow ${r.state}"><span>${icon}</span><span>${escH(r.s.label)}</span><span>${right}</span>${how ? `<span class="how">${escH(how)}</span>` : ''}</div>`;
+  }).join('');
+}
+
 function frame(now) {
   const dt = lastFrame ? Math.min(0.1, (now - lastFrame) / 1000) : 0; lastFrame = now;
   if (playing) clock += dt * speed;
   render(dt * (run && run.meta.finished ? speed : 1));
+  if (now - lastProgress > 250) { lastProgress = now; if (run) renderProgress(); }
   requestAnimationFrame(frame);
 }
 
 async function loadRun(name, keepClock) {
-  const r = await fetch(`/api/run/${encodeURIComponent(name)}`); if (!r.ok) return;
+  const r = await fetch(`/api/run/${encodeURIComponent(name)}`);
+  if (r.status === 404 && !keepClock && (!run || run.meta.name !== name)) {  // just launched: its folder isn't there yet
+    $('lanes').innerHTML = '<div class="empty">Starting the run …</div>';
+    if (decodeURIComponent(location.hash.slice(1)) === name) setTimeout(() => loadRun(name), 500);
+    return;
+  }
+  if (!r.ok) return;
   const data = await r.json();
+  if (typeof data.now === 'number') clockOffset = data.now - Date.now() / 1000;
   const firstLoad = !run || run.meta.name !== data.meta.name;
   if (!firstLoad) {  // live update: keep particles, note when new events arrived
     for (const l of lanes) { const ev = data.lanes[l.id] || []; if (ev.length > l.events.length) { l.events = ev; l.seenWall = performance.now(); } }
     calibrate();
+    run.steps = data.steps;
     const wasLive = !run.meta.finished; run.meta = data.meta;
-    if (wasLive && data.meta.finished) { build(); clock = 0; playing = false; $('play').textContent = 'Replay as race'; }
+    if (wasLive && data.meta.finished) { build(); clock = 0; playing = false; $('play').textContent = 'Replay as race'; document.title = 'pgdelta race'; }
     return;
   }
   run = data; build(); clock = keepClock ? clock : 0;

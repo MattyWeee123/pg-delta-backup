@@ -6,6 +6,7 @@ import traceback
 from pathlib import Path
 
 from bench import report, scrub
+from bench.steps import Steps
 from bench.config import RunConfig
 from viz import runs
 
@@ -23,14 +24,15 @@ def execute(cfg: RunConfig, root: Path = runs.DEFAULT_ROOTS[0], *, work: Path = 
     run_dir = runs.new_run(root, cfg.name, title_of(cfg), lanes, setup=_setup_line(cfg), config=cfg.to_json(),
                            estimate=estimate)
     (run_dir / 'config.json').write_text(json.dumps(cfg.to_json(), indent=2) + '\n')
+    steps = Steps(run_dir, cfg, publish=publish, root=root)  # the plan the viewer's progress bar and ETA follow
     meta = json.loads((run_dir / 'meta.json').read_text())
     try:
         if cfg.where == 'laptop':
             from bench.laptop import pg_bin, run_laptop
-            facts = run_laptop(cfg, run_dir, work, pg_bin(pgbin), log=log)
+            facts = run_laptop(cfg, run_dir, work, pg_bin(pgbin), log=log, steps=steps)
         else:
             from bench.gcp import run_gcp
-            facts = run_gcp(cfg, run_dir, log=log, keep=keep_vms)
+            facts = run_gcp(cfg, run_dir, log=log, keep=keep_vms, steps=steps)
         markdown = report.write(run_dir, cfg, facts, estimate)
         meta.update(finished=True, facts=facts, verify=facts.get('verify'))
         runs.write_meta(run_dir, meta)
@@ -38,7 +40,8 @@ def execute(cfg: RunConfig, root: Path = runs.DEFAULT_ROOTS[0], *, work: Path = 
         if masked:
             log(f'masked before publishing: {masked}')
         if publish:
-            result = _publish(run_dir, cfg, markdown, log)
+            with steps.step('publish'):
+                result = _publish(run_dir, cfg, markdown, log)
             meta.update(publish=result)
             runs.write_meta(run_dir, meta)
         return run_dir
