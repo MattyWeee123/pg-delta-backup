@@ -53,6 +53,7 @@ svg { width: 100%; height: auto; display: block; }
     <select id="runs" aria-label="Run"></select>
     <button id="play" class="primary">Play</button>
     <button id="restart">Restart</button>
+    <a href="/launch" style="color:var(--data);font-weight:600">New run →</a>
     <select id="speed" aria-label="Speed">
       <option value="0.25">0.25×</option><option value="0.5">0.5×</option><option value="1" selected>1×</option>
       <option value="2">2×</option><option value="5">5×</option><option value="10">10×</option>
@@ -95,8 +96,10 @@ function build() {
   if (typeof meta.setup === 'string') { if (meta.setup) chips.push(meta.setup); }
   else for (const [k, v] of Object.entries(meta.setup || {})) chips.push(`${k}: ${v}`);
   for (const [k, v] of Object.entries(meta.limits || {})) chips.push(`${k} limit: ${v} MB/s`);
-  if (meta.verify) chips.push(`copy check: ${meta.verify.match ? 'MATCH' : 'MISMATCH'}`);
-  $('chips').innerHTML = (meta.finished ? '' : '<span class="chip live">LIVE</span>') + chips.map((c) => `<span class="chip">${c}</span>`).join('');
+  if (meta.verify && meta.verify.checked !== false) chips.push(`copy check: ${meta.verify.match ? 'MATCH' : 'MISMATCH'}`);
+  if (meta.failed) chips.push(`failed: ${meta.failed}`);
+  const pr = meta.publish && meta.publish.url ? `<a class="chip" href="${meta.publish.url}" target="_blank" rel="noopener">pull request ↗</a>` : '';
+  $('chips').innerHTML = (meta.finished ? '' : '<span class="chip live">LIVE</span>') + chips.map((c) => `<span class="chip">${c}</span>`).join('') + pr;
   lanes = meta.lanes.map((l, i) => ({ id: l.id, label: l.label, i, events: run.lanes[l.id] || [], particles: [], acc: 0, qacc: 0, seen: 0, seenWall: 0 }));
   box.innerHTML = lanes.map((l, i) => `<section class="lane" id="lane${i}">
     <div class="lane-head"><h2>${l.label}</h2><span class="badge" id="bd${i}" hidden></span><span class="status" id="st${i}">waiting</span><span class="timer" id="tm${i}">0:00.0</span></div>

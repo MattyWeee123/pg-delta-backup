@@ -49,7 +49,8 @@ The [open issues](https://github.com/MattyWeee123/pg-delta-backup/issues) are th
 pgdelta/              the tool (naive v0): protocol, sender, receiver, command line
 tests/                unit tests: python -m unittest discover -s tests
 examples/             local_demo.sh, the two-minute quick start
-viz/                  watch a run live or replay one in a browser: python -m viz race / serve
+viz/                  watch a run live or replay one in a browser, and launch new runs: python -m viz serve
+bench/                run a benchmark (laptop or Google Cloud), record it, publish it as a PR: python -m bench run
 benchmarks/           the team's measurement harness: pg_basebackup, native incremental, rsync and pgdelta,
                       a Docker fixture, HammerDB load, and backup verification
 infra/gcp/            create, throttle and delete benchmark VMs on Google Cloud
@@ -61,7 +62,7 @@ docs/                 research summary, past results, correctness notes
 ## Working on it
 
 - **One branch per issue,** and a pull request with the tests passing. The pull request template asks for the evidence.
-- **Measure before and after.** An improvement counts when a benchmark shows it, on the same setup as the run it improves on.
+- **Measure before and after.** An improvement counts when a benchmark shows it, on the same setup as the run it improves on. `python -m bench run --publish` (or the launcher at `python -m viz serve` → **New run**) records a run and opens a pull request with its report; see [bench/README.md](bench/README.md).
 - **This repository is public.** Never commit IP addresses, email addresses, billing IDs, keys or tokens.
 
 Some older documents (in `benchmarks/`, `infra/` and `docs/`) link to files that now live only in the archive.
