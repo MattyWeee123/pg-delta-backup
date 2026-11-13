@@ -183,6 +183,15 @@ def fake_gcloud(quotas, instances):
     return run
 
 
+class Login(unittest.TestCase):
+    def test_vms_are_reached_as_the_system_account_whatever_logname_says(self):
+        with mock.patch.dict(gcp.os.environ, {'LOGNAME': 'root', 'USER': 'root'}), \
+                mock.patch.object(gcp.pwd, 'getpwuid', return_value=mock.Mock(pw_name='Some.One')):
+            self.assertEqual(gcp.VM('pgd-x', 'us-central1-a').ssh_argv('true')[3], 'someone@pgd-x')
+        with mock.patch.object(gcp.pwd, 'getpwuid', return_value=mock.Mock(pw_name='root')):
+            self.assertEqual(gcp.login(), 'pgdbench')
+
+
 class Preflight(unittest.TestCase):
     def test_quota_and_one_run_at_a_time(self):
         cfg = config.load({'where': 'gcp'}, preset='baseline')  # 2 x 8 N2D vCPUs, 2 x 150 GB SSD

@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import pwd
 import re
 import secrets
 import subprocess
@@ -114,12 +116,20 @@ def cleanup(all_benchmarks: bool = False, now: float | None = None) -> list[str]
     return deleted
 
 
+def login() -> str:
+    """The user to log in to the VMs as: this computer's account name, from the system rather than $LOGNAME
+    or $USER, which gcloud would otherwise use and which some launchers set to root (refused by the VMs)."""
+    name = re.sub(r'[^a-z0-9_-]', '', pwd.getpwuid(os.getuid()).pw_name.lower())
+    return name if name and name != 'root' else 'pgdbench'
+
+
 class VM:
     def __init__(self, name: str, zone: str):
         self.name, self.zone, self.ip = name, zone, None
+        self.target = f'{login()}@{name}'
 
     def ssh_argv(self, command: str) -> list[str]:
-        return ['gcloud', 'compute', 'ssh', self.name, '--zone', self.zone, '--quiet',
+        return ['gcloud', 'compute', 'ssh', self.target, '--zone', self.zone, '--quiet',
                 '--ssh-flag=-oServerAliveInterval=30', '--ssh-flag=-oStrictHostKeyChecking=no', '--command', command]
 
     def ssh(self, command: str, check=True, timeout=None) -> str:
@@ -132,11 +142,11 @@ class VM:
         return subprocess.Popen(self.ssh_argv(command), **kw)
 
     def scp_to(self, local: Path, remote: str) -> None:
-        subprocess.run(['gcloud', 'compute', 'scp', '--zone', self.zone, '--quiet', str(local), f'{self.name}:{remote}'],
+        subprocess.run(['gcloud', 'compute', 'scp', '--zone', self.zone, '--quiet', str(local), f'{self.target}:{remote}'],
                        check=True, capture_output=True)
 
     def scp_from(self, remote: str, local: Path) -> None:
-        subprocess.run(['gcloud', 'compute', 'scp', '--zone', self.zone, '--quiet', f'{self.name}:{remote}', str(local)],
+        subprocess.run(['gcloud', 'compute', 'scp', '--zone', self.zone, '--quiet', f'{self.target}:{remote}', str(local)],
                        check=True, capture_output=True)
 
 
@@ -186,11 +196,12 @@ def run_gcp(cfg: RunConfig, run_dir: Path, log=print, keep: bool = False, steps=
                 list(pool.map(create, (src, dst)))
             for vm in (src, dst):
                 for _ in range(40):
-                    if subprocess.run(vm.ssh_argv('true'), capture_output=True).returncode == 0:
+                    attempt = subprocess.run(vm.ssh_argv('true'), capture_output=True, text=True)
+                    if attempt.returncode == 0:
                         break
                     time.sleep(5)
                 else:
-                    raise RuntimeError(f'{vm.name}: ssh never became ready')
+                    raise RuntimeError(f'{vm.name}: ssh never became ready: {attempt.stderr.strip()[-300:]}')
         log('installing PostgreSQL 17 and the code on both VMs …')
         with step('install'):
             tarball = run_dir / 'code.tgz'
