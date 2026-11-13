@@ -19,6 +19,7 @@ from pgdelta import protocol
 from pgdelta.hashing import Hasher, new_key
 from pgdelta.protocol import (CHUNK_DATA, CHUNK_DATA_HEAD, CHUNK_HASH, CHUNK_HASH_BODY, COMPLETE, FILE_DONE,
                               FILE_DONE_BODY, HELLO, RESULT, SAME, VERDICT, VERDICT_BODY, Channel)
+from pgdelta.events import EventLog
 from pgdelta.stats import Stats
 from pgdelta.tree import scan
 
@@ -26,8 +27,11 @@ DEFAULT_CHUNK_SIZE = 8192  # one PostgreSQL page
 MIN_CHUNK_SIZE, MAX_CHUNK_SIZE = 512, 16 << 20
 
 
-def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_SIZE) -> dict:
-    """Send S to the receiver at the other end of `channel`. Returns this side's report, with the receiver's."""
+def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_SIZE, events: EventLog | None = None) -> dict:
+    """Send S to the receiver at the other end of `channel`. Returns this side's report, with the receiver's.
+
+    `events`, if given, gets a start event, progress about every 0.1 s, and a done event (pgdelta.events)."""
+    events = events or EventLog(None)
     if not MIN_CHUNK_SIZE <= chunk_size <= MAX_CHUNK_SIZE:
         raise ValueError(f'chunk size must be between {MIN_CHUNK_SIZE} and {MAX_CHUNK_SIZE} bytes')
     source = Path(source)
@@ -42,6 +46,14 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
                                   'entries': [entry.to_json() for entry in entries]})
         accept = json.loads(channel.expect(protocol.ACCEPT))
         basis_sizes = {int(index): int(size) for index, size in accept['basis_sizes']}
+        events.emit('start', total_bytes=sum(e.size for e in entries if e.kind == 'file'),
+                    files=sum(e.kind == 'file' for e in entries), chunk_size=chunk_size)
+
+        def progress(path: str) -> None:
+            c = stats.counts
+            events.emit('progress', bytes_read=c['bytes_read'], bytes_sent=sum(channel.sent.values()),
+                        chunks_same=c['chunks_same'], chunks_changed=c['chunks_changed'],
+                        chunks_new=c['chunks_new'], round_trips=c['round_trips'], file=path)
 
         for index, entry in enumerate(entries):
             if entry.kind != 'file':
@@ -81,6 +93,8 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
                             channel.send(CHUNK_DATA, CHUNK_DATA_HEAD.pack(index, chunk) + data)
                     offset += want
                     chunk += 1
+                    if events.due():
+                        progress(entry.path)
                 if f.read(1):
                     raise RuntimeError(f'{entry.path} grew while it was read; S must not change')
             with stats.timed('send'):
@@ -100,4 +114,8 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
     report['ok'] = bool(result.get('ok'))
     report['chunk_size'] = chunk_size
     report['receiver'] = result.get('stats')
+    c = stats.counts
+    events.emit('done', ok=report['ok'], elapsed=report['elapsed_seconds'], bytes_read=c['bytes_read'],
+                bytes_sent=report['bytes_sent_total'], chunks_same=c['chunks_same'],
+                chunks_changed=c['chunks_changed'], chunks_new=c['chunks_new'], round_trips=c['round_trips'])
     return report

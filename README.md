@@ -37,6 +37,8 @@ For every 8 KiB chunk of every file, the sender hashes its chunk and asks the re
 
 It is slow on purpose: every wait in it is a step on the roadmap.
 
+To see it, run `python -m viz race`: a live laptop race against `pg_basebackup` in your browser (see [viz/README.md](viz/README.md)).
+
 ## The roadmap
 
 The [open issues](https://github.com/MattyWeee123/pg-delta-backup/issues) are the plan, in order. Each is one improvement and its benchmark: pipelining, then parallelism, then the tooling that makes benchmarking easy. Pick one, open a branch, and send a pull request.
@@ -47,6 +49,7 @@ The [open issues](https://github.com/MattyWeee123/pg-delta-backup/issues) are th
 pgdelta/              the tool (naive v0): protocol, sender, receiver, command line
 tests/                unit tests: python -m unittest discover -s tests
 examples/             local_demo.sh, the two-minute quick start
+viz/                  watch a run live or replay one in a browser: python -m viz race / serve
 benchmarks/           the team's measurement harness: pg_basebackup, native incremental, rsync and pgdelta,
                       a Docker fixture, HammerDB load, and backup verification
 infra/gcp/            create, throttle and delete benchmark VMs on Google Cloud

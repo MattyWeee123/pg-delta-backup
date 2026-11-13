@@ -17,6 +17,7 @@ import threading
 from pathlib import Path
 
 from pgdelta import __version__
+from pgdelta.events import EventLog
 from pgdelta.protocol import Channel, tune
 from pgdelta.receiver import run_receiver
 from pgdelta.sender import DEFAULT_CHUNK_SIZE, run_sender
@@ -35,12 +36,14 @@ def main(argv=None) -> int:
                        help='bytes compared per question (default: %(default)s, one PostgreSQL page)')
     local.add_argument('--stats-json', type=Path, help='write both sides\' statistics here')
     local.add_argument('--pg-controldata', type=Path, help=argparse.SUPPRESS)  # passed by the benchmark harness; unused
+    local.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
 
     send = commands.add_parser('send', help='the source side: connect to a receiver and send S')
     send.add_argument('--source', type=Path, required=True)
     send.add_argument('--connect', required=True, metavar='HOST:PORT')
     send.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE)
     send.add_argument('--stats-json', type=Path)
+    send.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
 
     receive = commands.add_parser('receive', help='the destination side: wait for a sender, build O from B')
     receive.add_argument('--basis', type=Path, required=True)
@@ -54,7 +57,11 @@ def main(argv=None) -> int:
             report = _local(args)
         elif args.command == 'send':
             with socket.create_connection(_address(args.connect)) as sock:
-                report = run_sender(Channel(tune(sock)), args.source, args.chunk_size)
+                events = EventLog(args.events)
+                try:
+                    report = run_sender(Channel(tune(sock)), args.source, args.chunk_size, events)
+                finally:
+                    events.close()
         else:
             with socket.create_server(_address(args.listen)) as server:
                 print(f'pgdelta: listening on {args.listen}', file=sys.stderr, flush=True)
@@ -86,7 +93,11 @@ def _local(args) -> dict:
     thread = threading.Thread(target=receive, name='pgdelta-receiver')
     thread.start()
     try:
-        report = run_sender(Channel(ours), args.source, args.chunk_size)
+        events = EventLog(getattr(args, 'events', None))
+        try:
+            report = run_sender(Channel(ours), args.source, args.chunk_size, events)
+        finally:
+            events.close()
     except BaseException:
         ours.close()
         thread.join()
