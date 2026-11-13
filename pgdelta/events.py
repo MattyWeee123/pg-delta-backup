@@ -10,13 +10,16 @@ Progress is written at most every `interval` seconds, so the cost is one clock r
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 
 
 class EventLog:
     def __init__(self, path: Path | None, method: str = 'pgdelta', interval: float = 0.1):
-        self.file = open(path, 'w') if path else None
+        # '-' writes to standard output (the cloud runner streams it back over ssh)
+        self._owned = bool(path) and str(path) != '-'
+        self.file = (sys.stdout if str(path) == '-' else open(path, 'w')) if path else None
         self.method = method
         self.interval = interval
         self.started = time.perf_counter()
@@ -40,6 +43,6 @@ class EventLog:
         return True
 
     def close(self) -> None:
-        if self.file is not None:
+        if self.file is not None and self._owned:
             self.file.close()
-            self.file = None
+        self.file = None

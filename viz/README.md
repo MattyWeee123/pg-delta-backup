@@ -7,6 +7,16 @@ python -m viz serve          # then open http://localhost:8765 and pick a run
 python -m viz race           # a laptop race, watched live at the URL it prints
 ```
 
+## Launching runs from the page
+
+**New run →** (at http://localhost:8765/launch) is a form:
+- **What to run:** laptop or Google Cloud, methods, database size, change pattern, repeats; for the cloud, also machine type, disk, link cap and zones.
+- **Check & estimate:** shows the cost, the quota and anything that would stop the run. **Launch** stays disabled until the check passes.
+- **The run itself** goes through `python -m bench run` (see [bench/README.md](../bench/README.md)). Watch it live on the main page.
+- **Publishing:** with the checkbox on, the run is committed and a pull request opened when it finishes. The page lists the runs started from it, with their logs and pull request links.
+
+One run at a time. The page only accepts requests from itself.
+
 ## The laptop race
 
 `python -m viz race [--scale 50] [--change hot|uniform]` builds a PostgreSQL database (PostgreSQL 17 or 18), copies it as the old copy, and changes 1% of the rows. Then it runs two lanes one after the other, so they don't compete for the laptop's disk:

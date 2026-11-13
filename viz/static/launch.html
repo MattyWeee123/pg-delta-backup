@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>New benchmark run</title>
+<style>
+:root { --bg: #f5f6f9; --card: #ffffff; --ink: #1b2130; --muted: #5a6375; --rule: #d9dde5;
+  --data: #2459c4; --data-soft: #dce6f9; --ok: #2c7a4c; --ok-soft: #dcefe3; --hot: #c0392b; --hot-soft: #f6dedc; --warn: #b5600c;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; --sans: system-ui, -apple-system, "Segoe UI", sans-serif; }
+@media (prefers-color-scheme: dark) { :root { --bg: #10131a; --card: #181c25; --ink: #e4e8ef; --muted: #9aa3b3;
+  --rule: #2a313d; --data: #74a2ff; --data-soft: #1c2b48; --ok: #62c78e; --ok-soft: #16301f; --hot: #f0786c; --hot-soft: #3a1b19; --warn: #efa556; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); padding: 20px 16px 48px; }
+main { max-width: 900px; margin: 0 auto; display: grid; gap: 16px; }
+header { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+h1 { font-size: 1.35rem; margin: 0; flex: 1; }
+a { color: var(--data); }
+.card { background: var(--card); border: 1px solid var(--rule); border-radius: 12px; padding: 16px; display: grid; gap: 12px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 200px), 1fr)); gap: 12px; }
+label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+input, select, textarea { font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--rule); border-radius: 8px; padding: 7px 9px; width: 100%; }
+fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 14px; flex-wrap: wrap; }
+fieldset label { display: flex; gap: 6px; align-items: center; color: var(--ink); font-size: 14px; }
+fieldset input { width: auto; }
+.cloud[hidden] { display: none; }
+button { font: inherit; border-radius: 8px; padding: 8px 14px; border: 1px solid var(--rule); background: var(--card); color: var(--ink); cursor: pointer; }
+button.primary { background: var(--data); border-color: var(--data); color: #fff; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.check { border-radius: 10px; padding: 12px 14px; font-size: 14px; display: grid; gap: 6px; }
+.check.good { background: var(--ok-soft); } .check.bad { background: var(--hot-soft); }
+.big { font: 600 1.15rem var(--mono); }
+table { border-collapse: collapse; font: 12px var(--mono); }
+td, th { padding: 3px 10px 3px 0; text-align: left; }
+.job { border-top: 1px solid var(--rule); padding-top: 10px; display: grid; gap: 6px; }
+.job:first-child { border-top: 0; padding-top: 0; }
+.pill { font: 600 11px var(--mono); padding: 2px 7px; border-radius: 5px; text-transform: uppercase; }
+.running { background: var(--data-soft); color: var(--data); } .done { background: var(--ok-soft); color: var(--ok); } .failed { background: var(--hot-soft); color: var(--hot); }
+pre { margin: 0; font: 12px/1.45 var(--mono); color: var(--muted); white-space: pre-wrap; max-height: 12em; overflow: auto; background: var(--bg); padding: 8px; border-radius: 8px; }
+.muted { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>New benchmark run</h1><a href="/">← all runs</a></header>
+
+  <section class="card" aria-labelledby="where-h">
+    <strong id="where-h">Where and what</strong>
+    <fieldset>
+      <label><input type="radio" name="where" value="laptop" checked> This laptop (free, about a minute)</label>
+      <label><input type="radio" name="where" value="gcp"> Google Cloud (two VMs, created and deleted for the run)</label>
+    </fieldset>
+    <fieldset aria-label="Methods">
+      <label><input type="checkbox" id="m-pg_basebackup" checked> pg_basebackup (copies everything)</label>
+      <label><input type="checkbox" id="m-pgdelta" checked> pgdelta (sends what differs)</label>
+    </fieldset>
+    <div class="grid">
+      <label>Database size (pgbench scale; ≈15 MB each)<input id="scale" type="number" min="1" max="20000" value="50"></label>
+      <label>Change (1% of rows)<select id="change"><option value="hot">hot: one range, few pages</option><option value="uniform">uniform: every 100th row, most pages</option></select></label>
+      <label>Repeats<input id="repeats" type="number" min="1" max="10" value="1"></label>
+      <label>Chunk size (bytes)<input id="chunk_size" type="number" min="512" value="8192"></label>
+      <label>Name (optional)<input id="name" placeholder="generated if empty"></label>
+    </div>
+  </section>
+
+  <section class="card cloud" id="cloud" hidden aria-labelledby="cloud-h">
+    <strong id="cloud-h">Cloud setup</strong>
+    <div class="grid">
+      <label>Preset<select id="preset"><option value="quick">quick: 2× n2-standard-4, 50 GB disks</option><option value="baseline">baseline: EXP-92's setup, 18 GB database</option></select></label>
+      <label>Machine type<select id="machine">
+        <option>n2-standard-4</option><option>n2-standard-8</option><option>n2d-highcpu-8</option><option>n2d-standard-4</option>
+        <option>n2d-standard-8</option><option>e2-standard-4</option><option>e2-standard-8</option></select></label>
+      <label>Data disk<select id="disk_type"><option>pd-balanced</option><option>pd-ssd</option><option>pd-standard</option></select></label>
+      <label>Disk size (GB)<input id="disk_gb" type="number" min="10" max="2000" value="50"></label>
+      <label>Link<select id="link"><option value="full">full speed (same region)</option><option value="1gbit">capped at 1 Gbit/s</option><option value="500mbit">capped at 500 Mbit/s</option><option value="100mbit">capped at 100 Mbit/s</option></select></label>
+      <label>Source zone<select id="zone0"><option>us-central1-a</option><option>us-central1-b</option><option>us-central1-c</option><option>us-central1-f</option></select></label>
+      <label>Destination zone<select id="zone1"><option>us-central1-b</option><option>us-central1-a</option><option>us-central1-c</option><option>us-central1-f</option></select></label>
+    </div>
+  </section>
+
+  <section class="card" aria-labelledby="go-h">
+    <strong id="go-h">Check, then launch</strong>
+    <label>Notes for the report (optional)<textarea id="notes" rows="2" placeholder="what you're testing and why"></textarea></label>
+    <fieldset><label><input type="checkbox" id="publish" checked> Commit the run and open a pull request when it finishes</label></fieldset>
+    <div class="row"><button id="estimate">Check &amp; estimate</button><button id="launch" class="primary" disabled>Launch</button><span class="muted" id="hint">Check first: it shows the cost and anything that would stop the run.</span></div>
+    <div id="result"></div>
+  </section>
+
+  <section class="card" aria-labelledby="jobs-h">
+    <strong id="jobs-h">Runs started here</strong>
+    <div id="jobs" class="muted">None yet.</div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const where = () => document.querySelector('input[name=where]:checked').value;
+let checked = null;
+
+function body() {
+  const cfg = { where: where(), methods: ['pg_basebackup', 'pgdelta'].filter((m) => $('m-' + m).checked),
+    scale: +$('scale').value, change: $('change').value, repeats: +$('repeats').value, chunk_size: +$('chunk_size').value,
+    notes: $('notes').value };
+  if ($('name').value.trim()) cfg.name = $('name').value.trim();
+  if (cfg.where === 'gcp') Object.assign(cfg, { machine: $('machine').value, disk_type: $('disk_type').value,
+    disk_gb: +$('disk_gb').value, link: $('link').value, zones: [$('zone0').value, $('zone1').value] });
+  return { config: cfg, preset: cfg.where === 'gcp' ? $('preset').value : null, publish: $('publish').checked };
+}
+
+async function post(path, payload) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Viz': '1' }, body: JSON.stringify(payload) });
+  return { ok: r.ok, data: await r.json() };
+}
+
+function invalidate() { checked = null; $('launch').disabled = true; $('result').innerHTML = ''; }
+document.querySelectorAll('input, select, textarea').forEach((el) => el.addEventListener('change', invalidate));
+document.querySelectorAll('input[name=where]').forEach((el) => el.addEventListener('change', () => { $('cloud').hidden = where() !== 'gcp'; }));
+$('preset').addEventListener('change', () => {
+  const p = { quick: ['n2-standard-4', 50, 50], baseline: ['n2d-highcpu-8', 150, 600] }[$('preset').value];
+  [$('machine').value, $('disk_gb').value, $('scale').value] = p;
+});
+
+$('estimate').onclick = async () => {
+  $('result').innerHTML = '<p class="muted">Checking…</p>';
+  const { ok, data } = await post('/api/estimate', body());
+  if (!ok) { $('result').innerHTML = `<div class="check bad">${esc(data.error)}</div>`; return; }
+  const c = data.check, e = c.estimate, bad = c.problems.length > 0;
+  const quota = Object.entries(c.quota || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.used} used of ${v.limit}</td><td>this run: ${v.need}</td></tr>`).join('');
+  $('result').innerHTML = `<div class="check ${bad ? 'bad' : 'good'}">
+    <div class="big">≈ ${e.minutes} min · ${e.dollars ? '$' + e.dollars : 'free'}</div>
+    <div class="muted">${esc(e.note)}${data.config.where === 'gcp' ? ` · run name ${esc(data.config.name)}` : ''}</div>
+    ${quota ? `<table>${quota}</table>` : ''}
+    ${c.problems.map((p) => `<div>✗ ${esc(p)}</div>`).join('')}${c.warnings.map((w) => `<div style="color:var(--warn)">! ${esc(w)}</div>`).join('')}
+    ${bad ? '' : '<div>✓ Ready to launch.</div>'}</div>`;
+  checked = bad ? null : data.config;
+  $('launch').disabled = bad;
+  if (!bad && !$('name').value.trim()) $('name').value = data.config.name;  // launch the run that was checked
+};
+
+$('launch').onclick = async () => {
+  if (!checked) return;
+  $('launch').disabled = true;
+  const { ok, data } = await post('/api/launch', body());
+  if (!ok) { $('result').innerHTML = `<div class="check bad">${esc(data.error)}${(data.problems || []).map((p) => `<div>✗ ${esc(p)}</div>`).join('')}</div>`; return; }
+  $('result').innerHTML = `<div class="check good"><div>Started <strong>${esc(data.name)}</strong>. <a href="/#${encodeURIComponent(data.name)}">Watch it live →</a></div></div>`;
+  $('name').value = ''; checked = null; refresh();
+};
+
+async function refresh() {
+  const jobs = await (await fetch('/api/jobs')).json();
+  if (!jobs.length) return;
+  $('jobs').className = '';
+  $('jobs').innerHTML = jobs.map((j) => `<div class="job">
+    <div class="row"><span class="pill ${j.status}">${j.status}</span><strong>${esc(j.name)}</strong><span class="muted">${esc(j.where)} · started ${new Date(j.started * 1000).toLocaleTimeString()}</span>
+    <a href="/#${encodeURIComponent(j.name)}">watch</a>${j.pr ? `<a href="${esc(j.pr)}" target="_blank" rel="noopener">pull request</a>` : ''}</div>
+    ${j.failed ? `<div style="color:var(--hot)">${esc(j.failed)}</div>` : ''}<pre>${esc(j.log.join('\n'))}</pre></div>`).join('');
+}
+setInterval(refresh, 2000); refresh();
+</script>
+</body>
+</html>
