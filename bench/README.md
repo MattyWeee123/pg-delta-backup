@@ -15,6 +15,7 @@ Everything goes to `runs/<name>/`, which isn't committed, until you publish:
 - `config.json`: every setting, so `python -m bench run --config runs/<name>/config.json` repeats the run;
 - `events-<lane>.jsonl`: one per method and repeat, which `python -m viz serve` shows live or replays;
 - `stats-<lane>.json`: pgdelta's full statistics;
+- `steps.json`: every step with its expected duration and when it started and finished, for the viewer's progress bar and ETA, and to predict the next run's (see `bench/steps.py`);
 - `raw/<lane>/`, for cloud runs: the 0.1-second link, disk and CPU samples from both VMs;
 - `report.md` and `charts/`: a results table (time, bytes, share of S, round trips, ratio to `pg_basebackup`), the correctness check, link and disk over time, the cost estimate and how to reproduce.
 
@@ -35,7 +36,7 @@ Flags or a JSON config; anything left out comes from the preset.
 | `zones` | `us-central1-a`, `-b` | cloud: source zone, destination zone |
 
 **Presets:**
-- **`quick`:** two `n2-standard-4` VMs with 50 GB balanced disks, scale 50 (750 MB). About 12 minutes and $0.10.
+- **`quick`:** two `n2-standard-4` VMs with 50 GB balanced disks, scale 50 (750 MB). About 7 minutes and $0.05.
 - **`baseline`:** the first phase's EXP-90 to EXP-92 setup. Two `n2d-highcpu-8` VMs (8 GB memory) with 150 GB balanced disks, and scale 600 (18 GB, bigger than memory), so results compare with that phase's.
 
 ## How a cloud run works
@@ -47,7 +48,7 @@ Flags or a JSON config; anything left out comes from the preset.
 5. **The VMs are deleted,** whatever happens.
 
 **Guardrails:**
-- **Before anything is created:** an estimate and a quota check.
+- **Before anything is created:** a quota check, and a cost estimate (the VMs' hourly price times the expected duration from `bench/steps.py`). The launcher asks before a run over $1.
 - **One run at a time:** a run refuses to start while other benchmark VMs exist.
 - **Expiry:** every VM is labelled `purpose=pg-delta-benchmark` with an expiry time, and `bench cleanup` deletes expired ones.
 - **Prices:** the dollar figures are rough list prices, a guide, not billing.

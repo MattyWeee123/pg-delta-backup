@@ -1,4 +1,5 @@
-"""bench: configs, estimates, reports, scrubbing, publishing, the cloud preflight (gcloud faked), the launcher."""
+"""bench: configs, estimates, step plans and ETAs, reports, scrubbing, publishing, the cloud preflight (gcloud
+faked), the launcher."""
 from __future__ import annotations
 
 import json
@@ -15,7 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bench import config, cost, gcp, publish, report, scrub  # noqa: E402
+from bench import config, cost, gcp, publish, report, scrub, steps  # noqa: E402
 from viz import server  # noqa: E402
 
 
@@ -38,6 +39,53 @@ class Config(unittest.TestCase):
         self.assertEqual([lane['id'] for lane in cfg.lanes()],
                          ['pg_basebackup-r1', 'pg_basebackup-r2', 'pgdelta-r1', 'pgdelta-r2'])
         self.assertEqual([lane['id'] for lane in config.load({}).lanes()], ['pg_basebackup', 'pgdelta'])
+
+
+class Steps(unittest.TestCase):
+    def test_plans_list_every_step_in_order(self):
+        laptop = [s['id'] for s in steps.plan(config.load({'repeats': 2}), publish=True)]
+        self.assertEqual(laptop, ['build', 'copy', 'lane:pg_basebackup-r1', 'lane:pg_basebackup-r2', 'lane:pgdelta-r1',
+                                  'lane:pgdelta-r2', 'check', 'publish'])
+        cloud = steps.plan(config.load({'where': 'gcp', 'methods': ['pg_basebackup']}))
+        self.assertEqual([s['id'] for s in cloud], ['vms', 'install', 'build', 'copy', 'lane:pg_basebackup', 'delete'])
+        self.assertTrue(all(s['expect'] > 0 and s['basis'] == 'rule of thumb' for s in cloud))
+
+    def write_past(self, root, cfg, host, seconds):
+        run = root / cfg.name
+        run.mkdir(parents=True)
+        plan = steps.plan(cfg)
+        for s in plan:
+            s['started'], s['finished'] = 1000.0, 1000.0 + seconds
+        (run / 'steps.json').write_text(json.dumps({'created': 1.0, 'host': host, 'config': cfg.to_json(),
+                                                    'steps': plan}))
+
+    def test_expectations_learn_from_earlier_runs_of_the_same_kind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_past(root, config.load({'name': 'old', 'scale': 20}), steps.host_id(), 4.0)
+            plan = {s['id']: s for s in steps.plan(config.load({'scale': 40}), root=root)}
+            self.assertEqual((plan['build']['expect'], plan['build']['basis']), (8.0, 'measured in old'))  # size x2
+            self.assertEqual(plan['check']['expect'], 4.0)                                                # fixed
+            other = config.load({'scale': 40, 'chunk_size': 4096})
+            self.assertEqual({s['id']: s for s in steps.plan(other, root=root)}['lane:pgdelta']['basis'], 'rule of thumb')
+
+    def test_a_laptop_run_only_learns_from_the_same_computer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write_past(root, config.load({'name': 'theirs'}), 'someone-else', 4.0)
+            self.assertTrue(all(s['basis'] == 'rule of thumb' for s in steps.plan(config.load({}), root=root)))
+
+    def test_steps_are_stamped_and_failures_marked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tracker = steps.Steps(Path(tmp), config.load({'methods': ['pg_basebackup']}))
+            with tracker.step('build'):
+                pass
+            with self.assertRaises(RuntimeError), tracker.step('copy'):
+                raise RuntimeError('boom')
+            saved = {s['id']: s for s in json.loads((Path(tmp) / 'steps.json').read_text())['steps']}
+            self.assertLessEqual(saved['build']['started'], saved['build']['finished'])
+            self.assertTrue(saved['copy']['failed'])
+            self.assertNotIn('started', saved['lane:pg_basebackup'])
 
 
 class Cost(unittest.TestCase):
@@ -135,6 +183,15 @@ def fake_gcloud(quotas, instances):
     return run
 
 
+class Login(unittest.TestCase):
+    def test_vms_are_reached_as_the_system_account_whatever_logname_says(self):
+        with mock.patch.dict(gcp.os.environ, {'LOGNAME': 'root', 'USER': 'root'}), \
+                mock.patch.object(gcp.pwd, 'getpwuid', return_value=mock.Mock(pw_name='Some.One')):
+            self.assertEqual(gcp.VM('pgd-x', 'us-central1-a').ssh_argv('true')[3], 'someone@pgd-x')
+        with mock.patch.object(gcp.pwd, 'getpwuid', return_value=mock.Mock(pw_name='root')):
+            self.assertEqual(gcp.login(), 'pgdbench')
+
+
 class Preflight(unittest.TestCase):
     def test_quota_and_one_run_at_a_time(self):
         cfg = config.load({'where': 'gcp'}, preset='baseline')  # 2 x 8 N2D vCPUs, 2 x 150 GB SSD
@@ -163,20 +220,34 @@ class Launcher(unittest.TestCase):
                                      headers={'Content-Type': 'application/json', **({'X-Viz': '1'} if header else {})})
         return json.loads(urllib.request.urlopen(req).read())
 
-    def test_page_estimate_and_header_check(self):
+    def test_page_header_check_and_bad_config(self):
         self.assertIn(b'New benchmark run', urllib.request.urlopen(self.base + '/launch').read())
-        result = self.post('/api/estimate', {'config': {'where': 'laptop', 'scale': 20}})
-        self.assertEqual(result['config']['scale'], 20)
-        self.assertEqual(result['check']['estimate']['dollars'], 0)
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            self.post('/api/launch', {'config': {'where': 'laptop'}}, header=False)
-        self.assertEqual(caught.exception.code, 403)
-        caught.exception.close()
-        with self.assertRaises(urllib.error.HTTPError) as caught:
-            self.post('/api/estimate', {'config': {'where': 'moon'}})
+        for body, header, code in (({'config': {'where': 'laptop'}}, False, 403),
+                                   ({'config': {'where': 'moon'}}, True, 400)):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.post('/api/launch', body, header=header)
+            self.assertEqual(caught.exception.code, code)
+            caught.exception.close()
+        self.assertEqual(json.loads(urllib.request.urlopen(self.base + '/api/jobs').read()), [])
+
+    def test_launch_checks_first_and_asks_only_before_an_expensive_run(self):
+        launched = []
+        fake_jobs = mock.Mock(launch=lambda cfg, publish: launched.append(cfg.name) or cfg.name, status=lambda: [])
+        self.httpd.RequestHandlerClass = server.make_handler([Path(self.tmp.name)], fake_jobs)
+        check = {'estimate': {'minutes': 90, 'dollars': 3.0, 'note': 'n'}, 'problems': [], 'warnings': []}
+        with mock.patch.object(server, '_check', return_value=check):
+            asked = self.post('/api/launch', {'config': {'where': 'gcp', 'name': 'big'}})
+            self.assertEqual((asked['confirm']['dollars'], launched), (3.0, []))
+            self.assertEqual(self.post('/api/launch', {'config': {'where': 'gcp', 'name': 'big'}, 'confirm': True})['name'], 'big')
+        cheap = dict(check, estimate={'minutes': 1, 'dollars': 0, 'note': 'n'})
+        with mock.patch.object(server, '_check', return_value=cheap):
+            self.assertEqual(self.post('/api/launch', {'config': {'name': 'small'}})['name'], 'small')
+        blocked = dict(check, problems=['quota'])
+        with mock.patch.object(server, '_check', return_value=blocked), self.assertRaises(urllib.error.HTTPError) as caught:
+            self.post('/api/launch', {'config': {'name': 'nope'}})
         self.assertEqual(caught.exception.code, 400)
         caught.exception.close()
-        self.assertEqual(json.loads(urllib.request.urlopen(self.base + '/api/jobs').read()), [])
+        self.assertEqual(launched, ['big', 'small'])
 
 
 if __name__ == '__main__':

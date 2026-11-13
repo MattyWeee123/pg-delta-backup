@@ -16,6 +16,7 @@ from pathlib import Path
 
 from bench.config import RunConfig
 from bench.lanes import pump_pg_basebackup
+from bench.steps import no_steps
 from pgdelta.events import EventLog
 
 REPO = Path(__file__).resolve().parents[1]
@@ -35,8 +36,9 @@ def where_clause(cfg: RunConfig) -> str:
     return 'aid % 100 = 0' if cfg.change == 'uniform' else f'aid <= {rows // 100}'
 
 
-def run_laptop(cfg: RunConfig, run_dir: Path, work: Path, pgbin: Path, log=print) -> dict:
+def run_laptop(cfg: RunConfig, run_dir: Path, work: Path, pgbin: Path, log=print, steps=None) -> dict:
     """Run every lane of `cfg`, writing events into run_dir. Returns facts for the report."""
+    step = steps.step if steps else no_steps
     env = {**os.environ, 'LC_ALL': os.environ.get('LC_ALL', 'en_US.UTF-8'), 'LANG': os.environ.get('LANG', 'en_US.UTF-8')}
 
     def run(*argv, **kw):
@@ -62,55 +64,60 @@ def run_laptop(cfg: RunConfig, run_dir: Path, work: Path, pgbin: Path, log=print
     facts = {'postgres': found.group(0) if found else 'unknown', 'machine': os.uname().machine,
              'cpus': os.cpu_count(), 'lanes': {}}
     log(f'building the database (scale {cfg.scale}, PostgreSQL {facts["postgres"]}) …')
-    run(pgbin / 'initdb', '-D', work / 'S', '-U', 'postgres', '--data-checksums', '-A', 'trust', stdout=subprocess.DEVNULL)
     try:
-        ctl('start', work / 'S', 55432)
-        run(pgbin / 'pgbench', '-i', '-s', cfg.scale, '-h', '127.0.0.1', '-p', 55432, '-U', 'postgres', 'postgres',
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        ctl('stop', work / 'S')
-        shutil.copytree(work / 'S', work / 'B', symlinks=True)
-        ctl('start', work / 'S', 55432)
-        sql(55432, f'UPDATE pgbench_accounts SET abalance = abalance + 7 WHERE {where_clause(cfg)}', 'CHECKPOINT')
-        expect = sql(55432, 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
-        facts['database_bytes'] = sum(f.stat().st_size for f in (work / 'S').rglob('*') if f.is_file())
+        with step('build'):
+            run(pgbin / 'initdb', '-D', work / 'S', '-U', 'postgres', '--data-checksums', '-A', 'trust',
+                stdout=subprocess.DEVNULL)
+            ctl('start', work / 'S', 55432)
+            run(pgbin / 'pgbench', '-i', '-s', cfg.scale, '-h', '127.0.0.1', '-p', 55432, '-U', 'postgres', 'postgres',
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            ctl('stop', work / 'S')
+        with step('copy'):
+            shutil.copytree(work / 'S', work / 'B', symlinks=True)
+            ctl('start', work / 'S', 55432)
+            sql(55432, f'UPDATE pgbench_accounts SET abalance = abalance + 7 WHERE {where_clause(cfg)}', 'CHECKPOINT')
+            expect = sql(55432, 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
+            facts['database_bytes'] = sum(f.stat().st_size for f in (work / 'S').rglob('*') if f.is_file())
         running = True
         for lane in cfg.lanes():
             path = run_dir / f"events-{lane['id']}.jsonl"
             log(f"lane {lane['id']} …")
-            if lane['method'] == 'pg_basebackup':
-                if not running:
-                    ctl('start', work / 'S', 55432)
-                    running = True
-                shutil.rmtree(work / 'full', ignore_errors=True)
-                events = EventLog(path, method=lane['id'])
-                events.emit('start')
-                proc = subprocess.Popen([str(pgbin / 'pg_basebackup'), '-h', '127.0.0.1', '-p', '55432', '-U',
-                                         'postgres', '-D', str(work / 'full'), '-X', 'stream', '-c', 'fast', '-P'],
-                                        stderr=subprocess.PIPE, env=env)
-                total = pump_pg_basebackup(proc.stderr, events)
-                if proc.wait():
-                    raise RuntimeError('pg_basebackup failed')
-                elapsed = round(time.perf_counter() - events.started, 4)
-                events.emit('done', ok=True, elapsed=elapsed, bytes_sent=total, total_bytes=total)
-                events.close()
-                facts['lanes'][lane['id']] = {'elapsed': elapsed, 'bytes_sent': total, 'total_bytes': total}
-            else:
-                if running:
-                    ctl('stop', work / 'S')
-                    running = False
-                shutil.rmtree(work / 'O', ignore_errors=True)
-                stats = run_dir / f"stats-{lane['id']}.json"
-                run(sys.executable, '-m', 'pgdelta', 'local', '--source', work / 'S', '--basis', work / 'B',
-                    '--output', work / 'O', '--chunk-size', cfg.chunk_size, '--events', path, '--stats-json', stats,
-                    cwd=REPO, stderr=subprocess.DEVNULL)
-                facts['lanes'][lane['id']] = _pgdelta_facts(stats)
+            with step('lane:' + lane['id']):
+                if lane['method'] == 'pg_basebackup':
+                    if not running:
+                        ctl('start', work / 'S', 55432)
+                        running = True
+                    shutil.rmtree(work / 'full', ignore_errors=True)
+                    events = EventLog(path, method=lane['id'])
+                    events.emit('start')
+                    proc = subprocess.Popen([str(pgbin / 'pg_basebackup'), '-h', '127.0.0.1', '-p', '55432', '-U',
+                                             'postgres', '-D', str(work / 'full'), '-X', 'stream', '-c', 'fast', '-P'],
+                                            stderr=subprocess.PIPE, env=env)
+                    total = pump_pg_basebackup(proc.stderr, events)
+                    if proc.wait():
+                        raise RuntimeError('pg_basebackup failed')
+                    elapsed = round(time.perf_counter() - events.started, 4)
+                    events.emit('done', ok=True, elapsed=elapsed, bytes_sent=total, total_bytes=total)
+                    events.close()
+                    facts['lanes'][lane['id']] = {'elapsed': elapsed, 'bytes_sent': total, 'total_bytes': total}
+                else:
+                    if running:
+                        ctl('stop', work / 'S')
+                        running = False
+                    shutil.rmtree(work / 'O', ignore_errors=True)
+                    stats = run_dir / f"stats-{lane['id']}.json"
+                    run(sys.executable, '-m', 'pgdelta', 'local', '--source', work / 'S', '--basis', work / 'B',
+                        '--output', work / 'O', '--chunk-size', cfg.chunk_size, '--events', path, '--stats-json', stats,
+                        cwd=REPO, stderr=subprocess.DEVNULL)
+                    facts['lanes'][lane['id']] = _pgdelta_facts(stats)
         if running:
             ctl('stop', work / 'S')
         got = None
         if 'pgdelta' in cfg.methods:
-            ctl('start', work / 'O', 55433)
-            got = sql(55433, 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
-            ctl('stop', work / 'O')
+            with step('check'):
+                ctl('start', work / 'O', 55433)
+                got = sql(55433, 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
+                ctl('stop', work / 'O')
     finally:
         for d in ('S', 'O'):
             if (work / d / 'postmaster.pid').exists():

@@ -1,4 +1,4 @@
-"""A rough cost and duration estimate for a cloud run, shown before anything is created.
+"""A rough cost for a cloud run: what its VMs cost per hour, and in all for its expected duration.
 
 Prices are approximate on-demand list prices for us-central1 in US dollars, kept here by hand. They are
 for deciding "is this a few cents or a few dollars?", not billing. Check the console for exact numbers.
@@ -31,24 +31,19 @@ def link_mbps(link: str) -> float:
     return number * (125.0 if link.endswith('gbit') else 0.125)
 
 
-def estimate(cfg: RunConfig) -> dict:
-    """Minutes and dollars, with the reasoning, for a cloud run of `cfg`."""
-    size_mb = cfg.database_bytes / 1e6
-    disk = DISK_MBPS.get(cfg.disk_type, 200)
-    setup_min = 8 + size_mb / disk / 60 * 3  # VMs, packages, build the database, take the old copy, change it
-    per_lane = {}
-    if 'pg_basebackup' in cfg.methods:
-        per_lane['pg_basebackup'] = size_mb / min(disk, link_mbps(cfg.link)) / 60 + 0.3
-    if 'pgdelta' in cfg.methods:
-        round_trips = cfg.database_bytes / cfg.chunk_size
-        per_lane['pgdelta'] = (round_trips * 0.0004 + 2 * size_mb / disk) / 60 + 0.3  # ~0.4 ms per round trip in a region
-    lanes_min = sum(per_lane.values()) * cfg.repeats * 1.3  # caches dropped, samplers, throttling between lanes
-    minutes = setup_min + lanes_min + 3                    # and deletion
-    hourly = MACHINE_HOURLY.get(cfg.machine)
-    vms = 2 * (hourly if hourly is not None else 0.30) * minutes / 60
-    disks = 2 * ((cfg.disk_gb * DISK_MONTHLY.get(cfg.disk_type, 0.10)) + BOOT_GB * 0.10) / HOURS_PER_MONTH * minutes / 60
-    return {'minutes': round(minutes, 1), 'dollars': round(vms + disks, 2),
-            'vcpus': 2 * VCPUS.get(cfg.machine, 8),
-            'lane_minutes': {k: round(v, 1) for k, v in per_lane.items()},
-            'machine_known': hourly is not None,
+def hourly(cfg: RunConfig) -> float:
+    """Dollars per hour while the run's two VMs exist: the machines, their data disks and boot disks."""
+    machine = MACHINE_HOURLY.get(cfg.machine, 0.30)
+    disks = (cfg.disk_gb * DISK_MONTHLY.get(cfg.disk_type, 0.10) + BOOT_GB * 0.10) / HOURS_PER_MONTH
+    return round(2 * (machine + disks), 4)
+
+
+def estimate(cfg: RunConfig, root=None) -> dict:
+    """Minutes and dollars for a cloud run of `cfg`. The minutes are the sum of the run's planned steps
+    (bench/steps.py: measured in an earlier run under `root` where there is one, else rules of thumb)."""
+    from bench import steps
+    seconds = sum(step['expect'] for step in steps.plan(cfg, publish=False, root=root))
+    minutes = seconds / 60
+    return {'minutes': round(minutes, 1), 'dollars': round(hourly(cfg) * minutes / 60, 2),
+            'vcpus': 2 * VCPUS.get(cfg.machine, 8), 'machine_known': cfg.machine in MACHINE_HOURLY,
             'note': 'approximate list prices for us-central1; a guide, not billing'}

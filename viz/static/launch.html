@@ -39,6 +39,10 @@ td, th { padding: 3px 10px 3px 0; text-align: left; }
 .running { background: var(--data-soft); color: var(--data); } .done { background: var(--ok-soft); color: var(--ok); } .failed { background: var(--hot-soft); color: var(--hot); }
 pre { margin: 0; font: 12px/1.45 var(--mono); color: var(--muted); white-space: pre-wrap; max-height: 12em; overflow: auto; background: var(--bg); padding: 8px; border-radius: 8px; }
 .muted { color: var(--muted); font-size: 13px; }
+.hint { font-size: 12px; color: var(--muted); line-height: 1.35; }
+label .hint { font-weight: 400; }
+.mini { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; flex: 1 1 120px; max-width: 220px; }
+.mini i { display: block; height: 100%; background: var(--data); }
 </style>
 </head>
 <body>
@@ -48,42 +52,45 @@ pre { margin: 0; font: 12px/1.45 var(--mono); color: var(--muted); white-space: 
   <section class="card" aria-labelledby="where-h">
     <strong id="where-h">Where and what</strong>
     <fieldset>
-      <label><input type="radio" name="where" value="laptop" checked> This laptop (free, about a minute)</label>
+      <label><input type="radio" name="where" value="laptop" checked> This laptop (free, under a minute)</label>
       <label><input type="radio" name="where" value="gcp"> Google Cloud (two VMs, created and deleted for the run)</label>
     </fieldset>
+    <div class="hint">Laptop: a real PostgreSQL on this computer; both copies share one disk and there is no network, so it shows the protocol working, not network speed. Cloud: source and destination are separate VMs in different zones, so the network and disks are real; the VMs are deleted when the run ends.</div>
     <fieldset aria-label="Methods">
       <label><input type="checkbox" id="m-pg_basebackup" checked> pg_basebackup (copies everything)</label>
       <label><input type="checkbox" id="m-pgdelta" checked> pgdelta (sends what differs)</label>
     </fieldset>
+    <div class="hint">Which tools race. pg_basebackup is the baseline: PostgreSQL's own full copy. pgdelta refreshes the old copy by sending only the chunks that changed.</div>
     <div class="grid">
-      <label>Database size (pgbench scale; ≈15 MB each)<input id="scale" type="number" min="1" max="20000" value="50"></label>
-      <label>Change (1% of rows)<select id="change"><option value="hot">hot: one range, few pages</option><option value="uniform">uniform: every 100th row, most pages</option></select></label>
-      <label>Repeats<input id="repeats" type="number" min="1" max="10" value="1"></label>
-      <label>Chunk size (bytes)<input id="chunk_size" type="number" min="512" value="8192"></label>
-      <label>Name (optional)<input id="name" placeholder="generated if empty"></label>
+      <label>Database size (pgbench scale)<input id="scale" type="number" min="1" max="20000" value="50"><span class="hint" id="size-hint">about 750 MB</span></label>
+      <label>Change (1% of rows)<select id="change"><option value="hot">hot: one range, few pages</option><option value="uniform">uniform: every 100th row, most pages</option></select><span class="hint">What changes between the old copy and now. Hot is pgdelta's good case; uniform touches nearly every 8 KiB page, its hard case.</span></label>
+      <label>Repeats<input id="repeats" type="number" min="1" max="10" value="1"><span class="hint">Runs each method this many times. Use 3 or more when a result will be compared or quoted.</span></label>
+      <label>Chunk size (bytes)<input id="chunk_size" type="number" min="512" value="8192"><span class="hint">How much pgdelta compares at once. 8192 is one PostgreSQL page. Smaller means more round trips; larger resends more around each change.</span></label>
+      <label>Name (optional)<input id="name" placeholder="generated if empty"><span class="hint">The run's folder name and pull-request branch.</span></label>
     </div>
   </section>
 
   <section class="card cloud" id="cloud" hidden aria-labelledby="cloud-h">
     <strong id="cloud-h">Cloud setup</strong>
     <div class="grid">
-      <label>Preset<select id="preset"><option value="quick">quick: 2× n2-standard-4, 50 GB disks</option><option value="baseline">baseline: EXP-92's setup, 18 GB database</option></select></label>
+      <label>Preset<select id="preset"><option value="quick">quick: 2× n2-standard-4, 50 GB disks, scale 50</option><option value="baseline">baseline: the first phase's setup, scale 600</option></select><span class="hint">Fills in the machine, disk and size below. Quick checks that things work; baseline matches the first phase's numbers (a database bigger than the VMs' memory).</span></label>
       <label>Machine type<select id="machine">
         <option>n2-standard-4</option><option>n2-standard-8</option><option>n2d-highcpu-8</option><option>n2d-standard-4</option>
-        <option>n2d-standard-8</option><option>e2-standard-4</option><option>e2-standard-8</option></select></label>
-      <label>Data disk<select id="disk_type"><option>pd-balanced</option><option>pd-ssd</option><option>pd-standard</option></select></label>
-      <label>Disk size (GB)<input id="disk_gb" type="number" min="10" max="2000" value="50"></label>
-      <label>Link<select id="link"><option value="full">full speed (same region)</option><option value="1gbit">capped at 1 Gbit/s</option><option value="500mbit">capped at 500 Mbit/s</option><option value="100mbit">capped at 100 Mbit/s</option></select></label>
-      <label>Source zone<select id="zone0"><option>us-central1-a</option><option>us-central1-b</option><option>us-central1-c</option><option>us-central1-f</option></select></label>
-      <label>Destination zone<select id="zone1"><option>us-central1-b</option><option>us-central1-a</option><option>us-central1-c</option><option>us-central1-f</option></select></label>
+        <option>n2d-standard-8</option><option>e2-standard-4</option><option>e2-standard-8</option></select><span class="hint">The VMs' size: the last number is vCPUs. Memory decides whether the database fits in cache.</span></label>
+      <label>Data disk<select id="disk_type"><option>pd-balanced</option><option>pd-ssd</option><option>pd-standard</option></select><span class="hint">pd-balanced is the usual choice; pd-ssd is faster and costs more; pd-standard is slow spinning-disk speed.</span></label>
+      <label>Disk size (GB)<input id="disk_gb" type="number" min="10" max="2000" value="50"><span class="hint">Must hold the database three times. On Google Cloud a bigger disk is also a faster disk.</span></label>
+      <label>Link<select id="link"><option value="full">full speed (same region)</option><option value="1gbit">capped at 1 Gbit/s</option><option value="500mbit">capped at 500 Mbit/s</option><option value="100mbit">capped at 100 Mbit/s</option></select><span class="hint">Caps the network between the VMs to imitate a slower link, where sending less matters more.</span></label>
+      <label>Source zone<select id="zone0"><option>us-central1-a</option><option>us-central1-b</option><option>us-central1-c</option><option>us-central1-f</option></select><span class="hint">Different zones put a real network hop (about 1 ms) between the two.</span></label>
+      <label>Destination zone<select id="zone1"><option>us-central1-b</option><option>us-central1-a</option><option>us-central1-c</option><option>us-central1-f</option></select><span class="hint">If a zone is out of machines, pick another.</span></label>
     </div>
   </section>
 
   <section class="card" aria-labelledby="go-h">
-    <strong id="go-h">Check, then launch</strong>
+    <strong id="go-h">Launch</strong>
     <label>Notes for the report (optional)<textarea id="notes" rows="2" placeholder="what you're testing and why"></textarea></label>
     <fieldset><label><input type="checkbox" id="publish" checked> Commit the run and open a pull request when it finishes</label></fieldset>
-    <div class="row"><button id="estimate">Check &amp; estimate</button><button id="launch" class="primary" disabled>Launch</button><span class="muted" id="hint">Check first: it shows the cost and anything that would stop the run.</span></div>
+    <div class="hint">The results, charts and report go to a pull request, so every run is kept. Untick it for practice runs.</div>
+    <div class="row"><button id="launch" class="primary">Launch</button><span class="muted">Opens the live view: a progress bar with a countdown that corrects itself as the run goes.</span></div>
     <div id="result"></div>
   </section>
 
@@ -96,7 +103,6 @@ pre { margin: 0; font: 12px/1.45 var(--mono); color: var(--muted); white-space: 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const where = () => document.querySelector('input[name=where]:checked').value;
-let checked = null;
 
 function body() {
   const cfg = { where: where(), methods: ['pg_basebackup', 'pgdelta'].filter((m) => $('m-' + m).checked),
@@ -113,39 +119,34 @@ async function post(path, payload) {
   return { ok: r.ok, data: await r.json() };
 }
 
-function invalidate() { checked = null; $('launch').disabled = true; $('result').innerHTML = ''; }
-document.querySelectorAll('input, select, textarea').forEach((el) => el.addEventListener('change', invalidate));
+function sizeHint() {
+  const mb = +$('scale').value * 15;
+  $('size-hint').textContent = `about ${mb >= 1000 ? (mb / 1000).toFixed(1) + ' GB' : mb + ' MB'}; 15 MB per unit of scale`;
+}
+$('scale').addEventListener('input', sizeHint); sizeHint();
 document.querySelectorAll('input[name=where]').forEach((el) => el.addEventListener('change', () => { $('cloud').hidden = where() !== 'gcp'; }));
 $('preset').addEventListener('change', () => {
   const p = { quick: ['n2-standard-4', 50, 50], baseline: ['n2d-highcpu-8', 150, 600] }[$('preset').value];
-  [$('machine').value, $('disk_gb').value, $('scale').value] = p;
+  [$('machine').value, $('disk_gb').value, $('scale').value] = p; sizeHint();
 });
 
-$('estimate').onclick = async () => {
-  $('result').innerHTML = '<p class="muted">Checking…</p>';
-  const { ok, data } = await post('/api/estimate', body());
-  if (!ok) { $('result').innerHTML = `<div class="check bad">${esc(data.error)}</div>`; return; }
-  const c = data.check, e = c.estimate, bad = c.problems.length > 0;
-  const quota = Object.entries(c.quota || {}).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v.used} used of ${v.limit}</td><td>this run: ${v.need}</td></tr>`).join('');
-  $('result').innerHTML = `<div class="check ${bad ? 'bad' : 'good'}">
-    <div class="big">≈ ${e.minutes} min · ${e.dollars ? '$' + e.dollars : 'free'}</div>
-    <div class="muted">${esc(e.note)}${data.config.where === 'gcp' ? ` · run name ${esc(data.config.name)}` : ''}</div>
-    ${quota ? `<table>${quota}</table>` : ''}
-    ${c.problems.map((p) => `<div>✗ ${esc(p)}</div>`).join('')}${c.warnings.map((w) => `<div style="color:var(--warn)">! ${esc(w)}</div>`).join('')}
-    ${bad ? '' : '<div>✓ Ready to launch.</div>'}</div>`;
-  checked = bad ? null : data.config;
-  $('launch').disabled = bad;
-  if (!bad && !$('name').value.trim()) $('name').value = data.config.name;  // launch the run that was checked
-};
-
-$('launch').onclick = async () => {
-  if (!checked) return;
+async function launch(confirm) {
   $('launch').disabled = true;
-  const { ok, data } = await post('/api/launch', body());
+  $('result').innerHTML = `<p class="muted">${where() === 'gcp' ? 'Checking quota …' : 'Starting …'}</p>`;
+  const payload = body(); if (confirm) payload.confirm = true;
+  const { ok, data } = await post('/api/launch', payload);
+  $('launch').disabled = false;
   if (!ok) { $('result').innerHTML = `<div class="check bad">${esc(data.error)}${(data.problems || []).map((p) => `<div>✗ ${esc(p)}</div>`).join('')}</div>`; return; }
-  $('result').innerHTML = `<div class="check good"><div>Started <strong>${esc(data.name)}</strong>. <a href="/#${encodeURIComponent(data.name)}">Watch it live →</a></div></div>`;
-  $('name').value = ''; checked = null; refresh();
-};
+  if (data.confirm) {
+    $('result').innerHTML = `<div class="check bad"><div class="big">≈ $${data.confirm.dollars} · ≈ ${data.confirm.minutes} min</div>
+      <div>This cloud run costs more than usual. ${esc(data.confirm.note)}.</div>
+      <div class="row"><button class="primary" id="anyway">Launch anyway</button></div></div>`;
+    $('anyway').onclick = () => launch(true);
+    return;
+  }
+  location.href = '/#' + encodeURIComponent(data.name);
+}
+$('launch').onclick = () => launch(false);
 
 async function refresh() {
   const jobs = await (await fetch('/api/jobs')).json();
@@ -154,6 +155,7 @@ async function refresh() {
   $('jobs').innerHTML = jobs.map((j) => `<div class="job">
     <div class="row"><span class="pill ${j.status}">${j.status}</span><strong>${esc(j.name)}</strong><span class="muted">${esc(j.where)} · started ${new Date(j.started * 1000).toLocaleTimeString()}</span>
     <a href="/#${encodeURIComponent(j.name)}">watch</a>${j.pr ? `<a href="${esc(j.pr)}" target="_blank" rel="noopener">pull request</a>` : ''}</div>
+    ${j.steps ? `<div class="row"><span class="mini"><i style="width:${(100 * j.steps_done / j.steps).toFixed(0)}%"></i></span><span class="muted">step ${Math.min(j.steps_done + 1, j.steps)} of ${j.steps}${j.step ? ': ' + esc(j.step) : ''}</span></div>` : ''}
     ${j.failed ? `<div style="color:var(--hot)">${esc(j.failed)}</div>` : ''}<pre>${esc(j.log.join('\n'))}</pre></div>`).join('');
 }
 setInterval(refresh, 2000); refresh();

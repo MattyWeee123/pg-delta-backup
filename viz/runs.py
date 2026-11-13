@@ -63,7 +63,8 @@ def list_runs(roots) -> list[dict]:
 
 
 def load(run_dir: Path) -> dict:
-    """meta.json and every lane's events so far (a lane still being written may end mid-line)."""
+    """meta.json, every lane's events so far (a lane still being written may end mid-line), and the
+    run's steps (bench/steps.py) if it has them."""
     meta = json.loads((run_dir / 'meta.json').read_text())
     lanes = {}
     for lane in meta.get('lanes', []):
@@ -76,4 +77,10 @@ def load(run_dir: Path) -> dict:
                 except ValueError:
                     break  # a line still being written
         lanes[lane['id']] = events
-    return {'meta': meta, 'lanes': lanes}
+    steps = None
+    if (run_dir / 'steps.json').is_file():
+        try:
+            steps = json.loads((run_dir / 'steps.json').read_text())
+        except ValueError:
+            pass  # being replaced; the next poll gets it
+    return {'meta': meta, 'lanes': lanes, 'steps': steps}
