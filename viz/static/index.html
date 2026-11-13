@@ -244,12 +244,12 @@ function render(dtWall) {
   if (allDone && playing && clock >= Math.max(...ends) + 0.5) { playing = false; $('play').textContent = 'Play'; }
 }
 
-function laneFraction(id) {  // how much of a lane's data has been read, 0..1, or null before it says
+function laneFraction(id) {  // how much of a lane's data has been read (0..1) and in how long, or null
   const l = lanes.find((x) => x.id === id); if (!l || !l.events.length) return null;
-  const { s } = stateAt(l, laneTime(l)), st = startOf(l);
+  const t = laneTime(l), { s } = stateAt(l, t), st = startOf(l);
   const total = (st && st.total_bytes) || s.total_bytes || 0;
   const read = s.bytes_read != null ? s.bytes_read : s.bytes_sent || 0;
-  return total ? Math.min(1, read / total) : null;
+  return total ? { f: Math.min(1, read / total), t } : null;
 }
 
 // The ETA. Each step of the run (bench/steps.py) has an expected duration: measured in an earlier run of
@@ -270,11 +270,11 @@ function eta() {
     const r = { s, state: s.skipped ? 'skipped' : s.failed ? 'failed' : s.finished ? 'done' : s.started ? 'current' : 'pending' };
     if (r.state === 'done' || r.state === 'failed') r.dur = s.finished - s.started;
     else if (r.state === 'current' && !run.meta.finished) {
-      const el = now - s.started, f = s.lane ? laneFraction(s.lane) : null;
+      const el = now - s.started, lane = s.lane ? laneFraction(s.lane) : null;
       let rem = s.expect - el, how = `expected ${fmtD(s.expect)} (${s.basis})`;
       if (rem < 0) { rem = Math.min(0.15 * el, s.expect); how = `taking longer than the ${fmtD(s.expect)} expected`; }
-      if (f != null && f > 0.02 && el > 1) {
-        const w = Math.min(1, f / 0.25); rem = w * (el * (1 - f) / f) + (1 - w) * Math.max(rem, 0);
+      if (lane && lane.f > 0.02 && lane.t > 1) {  // the lane's own clock: a cloud step spends seconds on setup first
+        const f = lane.f, w = Math.min(1, f / 0.25); rem = w * (lane.t * (1 - f) / f) + (1 - w) * Math.max(rem, 0);
         how = `${Math.round(100 * f)}% of the database read; the rest at the same rate`;
       }
       Object.assign(r, { el, left: rem, frac: el / Math.max(el + rem, 0.001), how, dur: el + rem }); left += rem;
