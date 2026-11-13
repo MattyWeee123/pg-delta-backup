@@ -440,5 +440,11 @@
    "tests/test_pgdelta_exp91.py": "f9a21ade7fca027d78439a20423b8ecfc8cdb62b2324a0b24c72dcd538f862dc",
    "tests/test_pgdelta_exp92.py": "dde8b826e248c0e28821faa38f7ff7f2122702489464d91350b0093e2c97d05c"
   }
+ },
+ "EXP-93": {
+  "commit": "bb11c7689b12",
+  "files": {
+   "experiments/network/hashbench.py": "24b17f34f55a3d2979ac4b466c1b835e82721d61f43f76be5ec62545a3c74d3a"
+  }
  }
 }
