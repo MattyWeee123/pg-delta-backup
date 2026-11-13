@@ -1,0 +1,1892 @@
+{
+  "schema_version": 2,
+  "status": "pass",
+  "scope": "native baseline smoke",
+  "performance_claim": "descriptive local measurements; not a controlled cross-host performance baseline",
+  "postgres_version": "postgres (PostgreSQL) 17.11 (Debian 17.11-1.pgdg13+2)",
+  "python_version": "3.13.5",
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.41",
+  "cpu_count": 4,
+  "commit": "5afd894848ee22164ebd6a5dedcfd36148569e15",
+  "image_digest": "public.ecr.aws/docker/library/postgres@sha256:2d2b8998d31037bf721cfdf764d76ba74171b4fab3431b7f72c27c56ddbdf9e3",
+  "config": {
+    "output": "/results/run",
+    "bin_dir": null,
+    "rows": 20000,
+    "change_fraction": 0.01,
+    "repeats": 3,
+    "duration": 8,
+    "rate": 100,
+    "seed": 20261009
+  },
+  "units": {
+    "duration": "seconds",
+    "size": "bytes",
+    "latency": "milliseconds"
+  },
+  "cache_policy": "uncontrolled OS cache; fresh cluster per trial; no cold-cache claim",
+  "warmup_policy": "active workload ready after >=10 commits; no excluded backup warmup",
+  "trials": [
+    {
+      "run_id": "00-full-active-r0",
+      "repeat": 0,
+      "method": "full",
+      "mode": "active",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784541718282266",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "00-full-active-r0",
+        "method": "pg_basebackup_full",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 1.0656122970000013,
+          "error": null,
+          "stdout": "013-pg_basebackup.out",
+          "stderr": "013-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06377951999999709,
+          "error": null,
+          "stdout": "014-pg_verifybackup.out",
+          "stderr": "014-pg_verifybackup.err"
+        },
+        "basis_verification": null,
+        "increment_verification": null,
+        "combination": null,
+        "backup_file_bytes": 47201575,
+        "output_file_bytes": 47201575,
+        "method_seconds": 1.0671189589999983,
+        "time_to_verified_seconds": 1.1326001759999968,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 1.0656122970000013,
+      "combine_seconds": 0.0,
+      "capture_bytes": 47201575,
+      "output_bytes": 47201575,
+      "method_seconds": 1.0671189589999983,
+      "verification_seconds": 0.06377951999999709,
+      "verified_backup_seconds": 1.1326001759999968,
+      "workload_window": {
+        "start_epoch": 1791581640.3054912,
+        "end_epoch": 1791581641.4683738
+      },
+      "workload": {
+        "window_seconds": 1.1628825664520264,
+        "completed": 128,
+        "completed_tps": 110.07130358014574,
+        "p50_ms": 1.759,
+        "p95_ms": 177.482,
+        "p99_ms": 250.458,
+        "schedule_lag_p95_ms": 155.442,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "workload_all": {
+        "window_seconds": 8.039720058441162,
+        "completed": 844,
+        "completed_tps": 104.97877959243831,
+        "p50_ms": 0.689,
+        "p95_ms": 30.206,
+        "p99_ms": 156.217,
+        "schedule_lag_p95_ms": 7.46,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "self_contained_restore": {
+        "seconds": 1.4795119069999885,
+        "startup": "pass",
+        "logical_match": "not_checked",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "c57513c62f561f55e27085bc80f0065ccfac4945e159abb4a10ef7556ea4aa63",
+            "canonical_bytes": 5530436,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "abb9727ee12b48349ea1a72d306dd86317fbc7353263a0b8e164605b39061c7a",
+            "canonical_bytes": 1412,
+            "rows": 60
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "pitr_target": {
+        "name": "baseline_e385bb26f9a649548fa8a94906a34dce",
+        "lsn": "0/5531C40"
+      },
+      "pitr_archive_bytes": 83886756,
+      "pitr_wal_preparation_seconds": 0.2427291959999991,
+      "pitr_restore": {
+        "seconds": 1.9893260059999989,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": "baseline_e385bb26f9a649548fa8a94906a34dce",
+        "state": {
+          "accounts": {
+            "sha256": "fe53dfc7f8f7fdc96cf2fab10d3c0f92672696b82d7b73c2940cd360b3a69c72",
+            "canonical_bytes": 5529687,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "b5e4eb5822e31da1f1aca8643caefc5401ab974d8972e7f6d551606ed1239b29",
+            "canonical_bytes": 20738,
+            "rows": 844
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "active_package_exact_cutoff_oracle": "not_implemented",
+      "correctness_scope": "package startup/invariant plus PITR-assisted exact logical match",
+      "basis_intact": true
+    },
+    {
+      "run_id": "01-no_backup-active-r0",
+      "repeat": 0,
+      "method": "no_backup",
+      "mode": "active",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784607483351256",
+      "basis_bytes": 47095075,
+      "method_seconds": 7.8618684929999745,
+      "workload_window": {
+        "start_epoch": 1791581655.3281395,
+        "end_epoch": 1791581663.1900089
+      },
+      "workload": {
+        "window_seconds": 7.8618693351745605,
+        "completed": 826,
+        "completed_tps": 105.06407125140295,
+        "p50_ms": 0.668,
+        "p95_ms": 4.367,
+        "p99_ms": 11.944,
+        "schedule_lag_p95_ms": 0.229,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "workload_all": {
+        "window_seconds": 8.030007123947144,
+        "completed": 844,
+        "completed_tps": 105.10575980474754,
+        "p50_ms": 0.668,
+        "p95_ms": 4.162,
+        "p99_ms": 11.944,
+        "schedule_lag_p95_ms": 0.229,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      }
+    },
+    {
+      "run_id": "02-full-quiescent-r0",
+      "repeat": 0,
+      "method": "full",
+      "mode": "quiescent",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784655785738543",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "02-full-quiescent-r0",
+        "method": "pg_basebackup_full",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.9653145089999953,
+          "error": null,
+          "stdout": "020-pg_basebackup.out",
+          "stderr": "020-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06380556199999887,
+          "error": null,
+          "stdout": "021-pg_verifybackup.out",
+          "stderr": "021-pg_verifybackup.err"
+        },
+        "basis_verification": null,
+        "increment_verification": null,
+        "combination": null,
+        "backup_file_bytes": 47160611,
+        "output_file_bytes": 47160611,
+        "method_seconds": 0.9668772850000096,
+        "time_to_verified_seconds": 1.0322826439999915,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.9653145089999953,
+      "combine_seconds": 0.0,
+      "capture_bytes": 47160611,
+      "output_bytes": 47160611,
+      "method_seconds": 0.9668772850000096,
+      "verification_seconds": 0.06380556199999887,
+      "verified_backup_seconds": 1.0322826439999915,
+      "self_contained_restore": {
+        "seconds": 1.3609738860000107,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "a63910681cd66e69d70aecbe4d87b82b0a90e04a886b7213cd4eb1cb28846472",
+            "canonical_bytes": 5530494,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "canonical_bytes": 0,
+            "rows": 0
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "correctness_scope": "self-contained exact logical match to quiescent source",
+      "negative_controls": {
+        "corrupt_data": "rejected",
+        "missing_wal": "rejected",
+        "stale_backup": "rejected"
+      },
+      "basis_intact": true
+    },
+    {
+      "run_id": "03-incremental-active-r0",
+      "repeat": 0,
+      "method": "incremental",
+      "mode": "active",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784687040946655",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "03-incremental-active-r0",
+        "method": "pg_basebackup_incremental",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.8651966459999869,
+          "error": null,
+          "stdout": "013-pg_basebackup.out",
+          "stderr": "013-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.063823296999999,
+          "error": null,
+          "stdout": "016-pg_verifybackup.out",
+          "stderr": "016-pg_verifybackup.err"
+        },
+        "basis_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06378381700000091,
+          "error": null,
+          "stdout": "006-pg_verifybackup.out",
+          "stderr": "006-pg_verifybackup.err"
+        },
+        "increment_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.03168380500000012,
+          "error": null,
+          "stdout": "014-pg_verifybackup.out",
+          "stderr": "014-pg_verifybackup.err"
+        },
+        "combination": {
+          "exit_code": 0,
+          "duration_seconds": 0.4646600610000178,
+          "error": null,
+          "stdout": "015-pg_combinebackup.out",
+          "stderr": "015-pg_combinebackup.err"
+        },
+        "backup_file_bytes": 22418813,
+        "output_file_bytes": 47201684,
+        "method_seconds": 1.3684936119999804,
+        "time_to_verified_seconds": 1.4341346089999831,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.8651966459999869,
+      "combine_seconds": 0.4646600610000178,
+      "increment_input_verification_seconds": 0.03168380500000012,
+      "capture_bytes": 22418813,
+      "output_bytes": 47201684,
+      "method_seconds": 1.3684936119999804,
+      "verification_seconds": 0.063823296999999,
+      "verified_backup_seconds": 1.4341346089999831,
+      "workload_window": {
+        "start_epoch": 1791581673.8819463,
+        "end_epoch": 1791581675.3476472
+      },
+      "workload": {
+        "window_seconds": 1.4657008647918701,
+        "completed": 153,
+        "completed_tps": 104.38692073892311,
+        "p50_ms": 0.818,
+        "p95_ms": 136.96,
+        "p99_ms": 199.086,
+        "schedule_lag_p95_ms": 115.78,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "workload_all": {
+        "window_seconds": 8.042056798934937,
+        "completed": 844,
+        "completed_tps": 104.94827642995217,
+        "p50_ms": 0.64,
+        "p95_ms": 31.705,
+        "p99_ms": 125.477,
+        "schedule_lag_p95_ms": 2.989,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "self_contained_restore": {
+        "seconds": 1.3643655449999983,
+        "startup": "pass",
+        "logical_match": "not_checked",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "5f86aaeb71dad5e0b1fae95fe4c25726a456c9adc248f2b0e681ac018663f798",
+            "canonical_bytes": 5530442,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "50660b555b5beb7fc2711ae96c6edf7c61acd7f056b12e830ab8145b95a4b518",
+            "canonical_bytes": 1266,
+            "rows": 54
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "pitr_target": {
+        "name": "baseline_f3534f4dfd38479386a877b55737547c",
+        "lsn": "0/554C840"
+      },
+      "pitr_archive_bytes": 83886812,
+      "pitr_wal_preparation_seconds": 0.21629949999999099,
+      "pitr_restore": {
+        "seconds": 1.9691945299999816,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": "baseline_f3534f4dfd38479386a877b55737547c",
+        "state": {
+          "accounts": {
+            "sha256": "fe53dfc7f8f7fdc96cf2fab10d3c0f92672696b82d7b73c2940cd360b3a69c72",
+            "canonical_bytes": 5529687,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "b5e4eb5822e31da1f1aca8643caefc5401ab974d8972e7f6d551606ed1239b29",
+            "canonical_bytes": 20738,
+            "rows": 844
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "active_package_exact_cutoff_oracle": "not_implemented",
+      "correctness_scope": "package startup/invariant plus PITR-assisted exact logical match",
+      "basis_intact": true
+    },
+    {
+      "run_id": "04-incremental-quiescent-r0",
+      "repeat": 0,
+      "method": "incremental",
+      "mode": "quiescent",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784751521317539",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "04-incremental-quiescent-r0",
+        "method": "pg_basebackup_incremental",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.7648982139999987,
+          "error": null,
+          "stdout": "020-pg_basebackup.out",
+          "stderr": "020-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06379564299999174,
+          "error": null,
+          "stdout": "023-pg_verifybackup.out",
+          "stderr": "023-pg_verifybackup.err"
+        },
+        "basis_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06379856999998879,
+          "error": null,
+          "stdout": "006-pg_verifybackup.out",
+          "stderr": "006-pg_verifybackup.err"
+        },
+        "increment_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.03175254800001426,
+          "error": null,
+          "stdout": "021-pg_verifybackup.out",
+          "stderr": "021-pg_verifybackup.err"
+        },
+        "combination": {
+          "exit_code": 0,
+          "duration_seconds": 0.4644097430000045,
+          "error": null,
+          "stdout": "022-pg_combinebackup.out",
+          "stderr": "022-pg_combinebackup.err"
+        },
+        "backup_file_bytes": 22238598,
+        "output_file_bytes": 47160720,
+        "method_seconds": 1.2659067200000038,
+        "time_to_verified_seconds": 1.3315078210000024,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.7648982139999987,
+      "combine_seconds": 0.4644097430000045,
+      "increment_input_verification_seconds": 0.03175254800001426,
+      "capture_bytes": 22238598,
+      "output_bytes": 47160720,
+      "method_seconds": 1.2659067200000038,
+      "verification_seconds": 0.06379564299999174,
+      "verified_backup_seconds": 1.3315078210000024,
+      "self_contained_restore": {
+        "seconds": 1.2608576760000005,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "a63910681cd66e69d70aecbe4d87b82b0a90e04a886b7213cd4eb1cb28846472",
+            "canonical_bytes": 5530494,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "canonical_bytes": 0,
+            "rows": 0
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "correctness_scope": "self-contained exact logical match to quiescent source",
+      "basis_intact": true
+    },
+    {
+      "run_id": "05-no_backup-active-r1",
+      "repeat": 1,
+      "method": "no_backup",
+      "mode": "active",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784776325964586",
+      "basis_bytes": 47095075,
+      "method_seconds": 7.8633232890000215,
+      "workload_window": {
+        "start_epoch": 1791581694.5571444,
+        "end_epoch": 1791581702.4204676
+      },
+      "workload": {
+        "window_seconds": 7.863323211669922,
+        "completed": 826,
+        "completed_tps": 105.04464559896726,
+        "p50_ms": 0.643,
+        "p95_ms": 0.922,
+        "p99_ms": 1.075,
+        "schedule_lag_p95_ms": 0.104,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "workload_all": {
+        "window_seconds": 8.028973579406738,
+        "completed": 844,
+        "completed_tps": 105.1192897389461,
+        "p50_ms": 0.645,
+        "p95_ms": 0.93,
+        "p99_ms": 1.197,
+        "schedule_lag_p95_ms": 0.104,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      }
+    },
+    {
+      "run_id": "06-incremental-active-r1",
+      "repeat": 1,
+      "method": "incremental",
+      "mode": "active",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784824230945665",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "06-incremental-active-r1",
+        "method": "pg_basebackup_incremental",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.7650114460000168,
+          "error": null,
+          "stdout": "013-pg_basebackup.out",
+          "stderr": "013-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06380510899998626,
+          "error": null,
+          "stdout": "016-pg_verifybackup.out",
+          "stderr": "016-pg_verifybackup.err"
+        },
+        "basis_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06377735099999882,
+          "error": null,
+          "stdout": "006-pg_verifybackup.out",
+          "stderr": "006-pg_verifybackup.err"
+        },
+        "increment_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.031686691999993855,
+          "error": null,
+          "stdout": "014-pg_verifybackup.out",
+          "stderr": "014-pg_verifybackup.err"
+        },
+        "combination": {
+          "exit_code": 0,
+          "duration_seconds": 0.46437625999999455,
+          "error": null,
+          "stdout": "015-pg_combinebackup.out",
+          "stderr": "015-pg_combinebackup.err"
+        },
+        "backup_file_bytes": 22410621,
+        "output_file_bytes": 47201684,
+        "method_seconds": 1.2657803489999822,
+        "time_to_verified_seconds": 1.3344179179999855,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.7650114460000168,
+      "combine_seconds": 0.46437625999999455,
+      "increment_input_verification_seconds": 0.031686691999993855,
+      "capture_bytes": 22410621,
+      "output_bytes": 47201684,
+      "method_seconds": 1.2657803489999822,
+      "verification_seconds": 0.06380510899998626,
+      "verified_backup_seconds": 1.3344179179999855,
+      "workload_window": {
+        "start_epoch": 1791581705.6655302,
+        "end_epoch": 1791581707.0315597
+      },
+      "workload": {
+        "window_seconds": 1.3660295009613037,
+        "completed": 144,
+        "completed_tps": 105.41500011431977,
+        "p50_ms": 0.761,
+        "p95_ms": 103.421,
+        "p99_ms": 192.401,
+        "schedule_lag_p95_ms": 82.24,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "workload_all": {
+        "window_seconds": 8.042059421539307,
+        "completed": 844,
+        "completed_tps": 104.94824220516048,
+        "p50_ms": 0.645,
+        "p95_ms": 17.728,
+        "p99_ms": 91.935,
+        "schedule_lag_p95_ms": 0.654,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "self_contained_restore": {
+        "seconds": 1.2612460649999946,
+        "startup": "pass",
+        "logical_match": "not_checked",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "5ed2adaebe4be4f5b0ce24e050750d1ba023f1ebd7256340d32e3c5f9d9f997c",
+            "canonical_bytes": 5530445,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "ee7c1a44f1892c987b9c53eb3659cf4ed095db8406ada5c66b6d72c362425040",
+            "canonical_bytes": 1195,
+            "rows": 51
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "pitr_target": {
+        "name": "baseline_baaf57df20504dee8fc41b3426242b5d",
+        "lsn": "0/554F010"
+      },
+      "pitr_archive_bytes": 83886812,
+      "pitr_wal_preparation_seconds": 0.23335035100001278,
+      "pitr_restore": {
+        "seconds": 1.87189436700001,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": "baseline_baaf57df20504dee8fc41b3426242b5d",
+        "state": {
+          "accounts": {
+            "sha256": "fe53dfc7f8f7fdc96cf2fab10d3c0f92672696b82d7b73c2940cd360b3a69c72",
+            "canonical_bytes": 5529687,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "b5e4eb5822e31da1f1aca8643caefc5401ab974d8972e7f6d551606ed1239b29",
+            "canonical_bytes": 20738,
+            "rows": 844
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "active_package_exact_cutoff_oracle": "not_implemented",
+      "correctness_scope": "package startup/invariant plus PITR-assisted exact logical match",
+      "basis_intact": true
+    },
+    {
+      "run_id": "07-full-active-r1",
+      "repeat": 1,
+      "method": "full",
+      "mode": "active",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784887331435589",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "07-full-active-r1",
+        "method": "pg_basebackup_full",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.8651259959999891,
+          "error": null,
+          "stdout": "013-pg_basebackup.out",
+          "stderr": "013-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06400606600001879,
+          "error": null,
+          "stdout": "014-pg_verifybackup.out",
+          "stderr": "014-pg_verifybackup.err"
+        },
+        "basis_verification": null,
+        "increment_verification": null,
+        "combination": null,
+        "backup_file_bytes": 47201575,
+        "output_file_bytes": 47201575,
+        "method_seconds": 0.8664707209999847,
+        "time_to_verified_seconds": 0.9322201819999805,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.8651259959999891,
+      "combine_seconds": 0.0,
+      "capture_bytes": 47201575,
+      "output_bytes": 47201575,
+      "method_seconds": 0.8664707209999847,
+      "verification_seconds": 0.06400606600001879,
+      "verified_backup_seconds": 0.9322201819999805,
+      "workload_window": {
+        "start_epoch": 1791581720.3457727,
+        "end_epoch": 1791581721.3086603
+      },
+      "workload": {
+        "window_seconds": 0.9628875255584717,
+        "completed": 106,
+        "completed_tps": 110.08554705132393,
+        "p50_ms": 0.879,
+        "p95_ms": 131.733,
+        "p99_ms": 206.531,
+        "schedule_lag_p95_ms": 116.112,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "workload_all": {
+        "window_seconds": 8.040128707885742,
+        "completed": 844,
+        "completed_tps": 104.97344391666348,
+        "p50_ms": 0.675,
+        "p95_ms": 17.871,
+        "p99_ms": 106.225,
+        "schedule_lag_p95_ms": 0.617,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "self_contained_restore": {
+        "seconds": 1.2660662320000142,
+        "startup": "pass",
+        "logical_match": "not_checked",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "b9e5f449f65a99bb8554480a1bcd9f84c5406d71cb29e50cb514b56a452314b1",
+            "canonical_bytes": 5530443,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "8f583d417686cb4d5e236e1d5d904a9a579b12eba99985a97e1969bdbbcdf3fd",
+            "canonical_bytes": 1243,
+            "rows": 53
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "pitr_target": {
+        "name": "baseline_b4e94cb897244d57ac09c8c1af131579",
+        "lsn": "0/5546CB0"
+      },
+      "pitr_archive_bytes": 83886756,
+      "pitr_wal_preparation_seconds": 0.23288573599998585,
+      "pitr_restore": {
+        "seconds": 1.8595293999999853,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": "baseline_b4e94cb897244d57ac09c8c1af131579",
+        "state": {
+          "accounts": {
+            "sha256": "fe53dfc7f8f7fdc96cf2fab10d3c0f92672696b82d7b73c2940cd360b3a69c72",
+            "canonical_bytes": 5529687,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "b5e4eb5822e31da1f1aca8643caefc5401ab974d8972e7f6d551606ed1239b29",
+            "canonical_bytes": 20738,
+            "rows": 844
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "active_package_exact_cutoff_oracle": "not_implemented",
+      "correctness_scope": "package startup/invariant plus PITR-assisted exact logical match",
+      "basis_intact": true
+    },
+    {
+      "run_id": "08-incremental-quiescent-r1",
+      "repeat": 1,
+      "method": "incremental",
+      "mode": "quiescent",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784949339825411",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "08-incremental-quiescent-r1",
+        "method": "pg_basebackup_incremental",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.8150888179999924,
+          "error": null,
+          "stdout": "020-pg_basebackup.out",
+          "stderr": "020-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06387456100000577,
+          "error": null,
+          "stdout": "023-pg_verifybackup.out",
+          "stderr": "023-pg_verifybackup.err"
+        },
+        "basis_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06378701899998873,
+          "error": null,
+          "stdout": "006-pg_verifybackup.out",
+          "stderr": "006-pg_verifybackup.err"
+        },
+        "increment_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.03173067299999843,
+          "error": null,
+          "stdout": "021-pg_verifybackup.out",
+          "stderr": "021-pg_verifybackup.err"
+        },
+        "combination": {
+          "exit_code": 0,
+          "duration_seconds": 0.46436586999999463,
+          "error": null,
+          "stdout": "022-pg_combinebackup.out",
+          "stderr": "022-pg_combinebackup.err"
+        },
+        "backup_file_bytes": 22238598,
+        "output_file_bytes": 47160720,
+        "method_seconds": 1.3160659760000044,
+        "time_to_verified_seconds": 1.3817763899999989,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.8150888179999924,
+      "combine_seconds": 0.46436586999999463,
+      "increment_input_verification_seconds": 0.03173067299999843,
+      "capture_bytes": 22238598,
+      "output_bytes": 47160720,
+      "method_seconds": 1.3160659760000044,
+      "verification_seconds": 0.06387456100000577,
+      "verified_backup_seconds": 1.3817763899999989,
+      "self_contained_restore": {
+        "seconds": 1.3618206950000058,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "a63910681cd66e69d70aecbe4d87b82b0a90e04a886b7213cd4eb1cb28846472",
+            "canonical_bytes": 5530494,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "canonical_bytes": 0,
+            "rows": 0
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "correctness_scope": "self-contained exact logical match to quiescent source",
+      "basis_intact": true
+    },
+    {
+      "run_id": "09-full-quiescent-r1",
+      "repeat": 1,
+      "method": "full",
+      "mode": "quiescent",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784974754211210",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "09-full-quiescent-r1",
+        "method": "pg_basebackup_full",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.8149711100000161,
+          "error": null,
+          "stdout": "020-pg_basebackup.out",
+          "stderr": "020-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06379563900000562,
+          "error": null,
+          "stdout": "021-pg_verifybackup.out",
+          "stderr": "021-pg_verifybackup.err"
+        },
+        "basis_verification": null,
+        "increment_verification": null,
+        "combination": null,
+        "backup_file_bytes": 47160611,
+        "output_file_bytes": 47160611,
+        "method_seconds": 0.8164258870000083,
+        "time_to_verified_seconds": 0.881911376000005,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.8149711100000161,
+      "combine_seconds": 0.0,
+      "capture_bytes": 47160611,
+      "output_bytes": 47160611,
+      "method_seconds": 0.8164258870000083,
+      "verification_seconds": 0.06379563900000562,
+      "verified_backup_seconds": 0.881911376000005,
+      "self_contained_restore": {
+        "seconds": 1.2537850109999908,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "a63910681cd66e69d70aecbe4d87b82b0a90e04a886b7213cd4eb1cb28846472",
+            "canonical_bytes": 5530494,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "canonical_bytes": 0,
+            "rows": 0
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "correctness_scope": "self-contained exact logical match to quiescent source",
+      "basis_intact": true
+    },
+    {
+      "run_id": "10-incremental-active-r2",
+      "repeat": 2,
+      "method": "incremental",
+      "mode": "active",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694784996990912011",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "10-incremental-active-r2",
+        "method": "pg_basebackup_incremental",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.8149721510000063,
+          "error": null,
+          "stdout": "013-pg_basebackup.out",
+          "stderr": "013-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06380139799998119,
+          "error": null,
+          "stdout": "016-pg_verifybackup.out",
+          "stderr": "016-pg_verifybackup.err"
+        },
+        "basis_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06377343799999835,
+          "error": null,
+          "stdout": "006-pg_verifybackup.out",
+          "stderr": "006-pg_verifybackup.err"
+        },
+        "increment_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.03181935500001032,
+          "error": null,
+          "stdout": "014-pg_verifybackup.out",
+          "stderr": "014-pg_verifybackup.err"
+        },
+        "combination": {
+          "exit_code": 0,
+          "duration_seconds": 0.51448820600001,
+          "error": null,
+          "stdout": "015-pg_combinebackup.out",
+          "stderr": "015-pg_combinebackup.err"
+        },
+        "backup_file_bytes": 22427005,
+        "output_file_bytes": 47201684,
+        "method_seconds": 1.368753369000018,
+        "time_to_verified_seconds": 1.4341231200000095,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.8149721510000063,
+      "combine_seconds": 0.51448820600001,
+      "increment_input_verification_seconds": 0.03181935500001032,
+      "capture_bytes": 22427005,
+      "output_bytes": 47201684,
+      "method_seconds": 1.368753369000018,
+      "verification_seconds": 0.06380139799998119,
+      "verified_backup_seconds": 1.4341231200000095,
+      "workload_window": {
+        "start_epoch": 1791581746.0047743,
+        "end_epoch": 1791581747.470325
+      },
+      "workload": {
+        "window_seconds": 1.4655506610870361,
+        "completed": 153,
+        "completed_tps": 104.3976193129455,
+        "p50_ms": 0.814,
+        "p95_ms": 87.034,
+        "p99_ms": 152.574,
+        "schedule_lag_p95_ms": 74.879,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "workload_all": {
+        "window_seconds": 8.041671514511108,
+        "completed": 844,
+        "completed_tps": 104.9533046055178,
+        "p50_ms": 0.668,
+        "p95_ms": 9.989,
+        "p99_ms": 77.942,
+        "schedule_lag_p95_ms": 0.496,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "self_contained_restore": {
+        "seconds": 1.259836483000015,
+        "startup": "pass",
+        "logical_match": "not_checked",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "5c3cfa30999bead860027b4274f7b1b155037e3cf7d40bdf61089ff20b4aecf2",
+            "canonical_bytes": 5530446,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "1fca709dec460f0ed13604db95569a78e7235fc7254aff24e644218583de87ea",
+            "canonical_bytes": 1172,
+            "rows": 50
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "pitr_target": {
+        "name": "baseline_0a9c680409424f19bae63292d2cf0f77",
+        "lsn": "0/5556E08"
+      },
+      "pitr_archive_bytes": 83886812,
+      "pitr_wal_preparation_seconds": 0.21449900799999,
+      "pitr_restore": {
+        "seconds": 1.8735721959999978,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": "baseline_0a9c680409424f19bae63292d2cf0f77",
+        "state": {
+          "accounts": {
+            "sha256": "fe53dfc7f8f7fdc96cf2fab10d3c0f92672696b82d7b73c2940cd360b3a69c72",
+            "canonical_bytes": 5529687,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "b5e4eb5822e31da1f1aca8643caefc5401ab974d8972e7f6d551606ed1239b29",
+            "canonical_bytes": 20738,
+            "rows": 844
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "active_package_exact_cutoff_oracle": "not_implemented",
+      "correctness_scope": "package startup/invariant plus PITR-assisted exact logical match",
+      "basis_intact": true
+    },
+    {
+      "run_id": "11-full-active-r2",
+      "repeat": 2,
+      "method": "full",
+      "mode": "active",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694785060089001679",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "11-full-active-r2",
+        "method": "pg_basebackup_full",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.8150754979999988,
+          "error": null,
+          "stdout": "013-pg_basebackup.out",
+          "stderr": "013-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06380590000000552,
+          "error": null,
+          "stdout": "014-pg_verifybackup.out",
+          "stderr": "014-pg_verifybackup.err"
+        },
+        "basis_verification": null,
+        "increment_verification": null,
+        "combination": null,
+        "backup_file_bytes": 47201575,
+        "output_file_bytes": 47201575,
+        "method_seconds": 0.8183026279999979,
+        "time_to_verified_seconds": 0.8838175399999955,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.8150754979999988,
+      "combine_seconds": 0.0,
+      "capture_bytes": 47201575,
+      "output_bytes": 47201575,
+      "method_seconds": 0.8183026279999979,
+      "verification_seconds": 0.06380590000000552,
+      "verified_backup_seconds": 0.8838175399999955,
+      "workload_window": {
+        "start_epoch": 1791581760.5781174,
+        "end_epoch": 1791581761.492607
+      },
+      "workload": {
+        "window_seconds": 0.91448974609375,
+        "completed": 101,
+        "completed_tps": 110.44410331709271,
+        "p50_ms": 0.865,
+        "p95_ms": 112.397,
+        "p99_ms": 186.55,
+        "schedule_lag_p95_ms": 96.774,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "workload_all": {
+        "window_seconds": 8.042195320129395,
+        "completed": 844,
+        "completed_tps": 104.94646876922911,
+        "p50_ms": 0.682,
+        "p95_ms": 2.46,
+        "p99_ms": 86.149,
+        "schedule_lag_p95_ms": 0.531,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "self_contained_restore": {
+        "seconds": 1.261792927999977,
+        "startup": "pass",
+        "logical_match": "not_checked",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "1d5657d8388d78885ea5c6dffd211da585ff22c61f915207517cc6daac7268a2",
+            "canonical_bytes": 5530444,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "6d4f4bccb5570c0e94d9408e95d8404bab1c0905fc84dbcba1e3ec97190f03b1",
+            "canonical_bytes": 1218,
+            "rows": 52
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "pitr_target": {
+        "name": "baseline_2bc817c59b6d4b1987e7807c579b93aa",
+        "lsn": "0/554AE58"
+      },
+      "pitr_archive_bytes": 83886756,
+      "pitr_wal_preparation_seconds": 0.22168663600001537,
+      "pitr_restore": {
+        "seconds": 1.8737051399999984,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": "baseline_2bc817c59b6d4b1987e7807c579b93aa",
+        "state": {
+          "accounts": {
+            "sha256": "fe53dfc7f8f7fdc96cf2fab10d3c0f92672696b82d7b73c2940cd360b3a69c72",
+            "canonical_bytes": 5529687,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "b5e4eb5822e31da1f1aca8643caefc5401ab974d8972e7f6d551606ed1239b29",
+            "canonical_bytes": 20738,
+            "rows": 844
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "active_package_exact_cutoff_oracle": "not_implemented",
+      "correctness_scope": "package startup/invariant plus PITR-assisted exact logical match",
+      "basis_intact": true
+    },
+    {
+      "run_id": "12-no_backup-active-r2",
+      "repeat": 2,
+      "method": "no_backup",
+      "mode": "active",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694785122124593037",
+      "basis_bytes": 47095075,
+      "method_seconds": 7.860773927999986,
+      "workload_window": {
+        "start_epoch": 1791581775.0957942,
+        "end_epoch": 1791581782.9565682
+      },
+      "workload": {
+        "window_seconds": 7.860774040222168,
+        "completed": 827,
+        "completed_tps": 105.20592447618894,
+        "p50_ms": 0.657,
+        "p95_ms": 0.9,
+        "p99_ms": 1.057,
+        "schedule_lag_p95_ms": 0.103,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      },
+      "workload_all": {
+        "window_seconds": 8.028070449829102,
+        "completed": 844,
+        "completed_tps": 105.13111528785434,
+        "p50_ms": 0.657,
+        "p95_ms": 0.909,
+        "p99_ms": 1.105,
+        "schedule_lag_p95_ms": 0.103,
+        "failures": 0,
+        "skipped": 0,
+        "all_logged_successes": 844,
+        "window_policy": "transaction completion in [start, end)",
+        "latency_policy": "pgbench scheduled-start latency including lag"
+      }
+    },
+    {
+      "run_id": "13-full-quiescent-r2",
+      "repeat": 2,
+      "method": "full",
+      "mode": "quiescent",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694785169991116772",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "13-full-quiescent-r2",
+        "method": "pg_basebackup_full",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.8150852710000436,
+          "error": null,
+          "stdout": "020-pg_basebackup.out",
+          "stderr": "020-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06384818299994777,
+          "error": null,
+          "stdout": "021-pg_verifybackup.out",
+          "stderr": "021-pg_verifybackup.err"
+        },
+        "basis_verification": null,
+        "increment_verification": null,
+        "combination": null,
+        "backup_file_bytes": 47160611,
+        "output_file_bytes": 47160611,
+        "method_seconds": 0.8167890480000324,
+        "time_to_verified_seconds": 0.8824069310000482,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.8150852710000436,
+      "combine_seconds": 0.0,
+      "capture_bytes": 47160611,
+      "output_bytes": 47160611,
+      "method_seconds": 0.8167890480000324,
+      "verification_seconds": 0.06384818299994777,
+      "verified_backup_seconds": 0.8824069310000482,
+      "self_contained_restore": {
+        "seconds": 1.2692201220000356,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "a63910681cd66e69d70aecbe4d87b82b0a90e04a886b7213cd4eb1cb28846472",
+            "canonical_bytes": 5530494,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "canonical_bytes": 0,
+            "rows": 0
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "correctness_scope": "self-contained exact logical match to quiescent source",
+      "basis_intact": true
+    },
+    {
+      "run_id": "14-incremental-quiescent-r2",
+      "repeat": 2,
+      "method": "incremental",
+      "mode": "quiescent",
+      "status": "pass",
+      "measurement_kind": "local_native_backup",
+      "wire_bytes": null,
+      "unavailable_metrics": {
+        "wire_bytes": "Unix socket transfer on one host",
+        "source_cpu_seconds": "server process monitoring not implemented",
+        "disk_io_bytes": "device I/O monitoring not implemented",
+        "peak_rss_bytes": "process-group monitoring not implemented"
+      },
+      "database_bytes": 14677683,
+      "system_identifier": "7694785192725129317",
+      "basis_bytes": 47095075,
+      "backup_result": {
+        "schema_version": 2,
+        "run_id": "14-incremental-quiescent-r2",
+        "method": "pg_basebackup_incremental",
+        "backup": {
+          "exit_code": 0,
+          "duration_seconds": 0.7648876949999703,
+          "error": null,
+          "stdout": "020-pg_basebackup.out",
+          "stderr": "020-pg_basebackup.err"
+        },
+        "verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06379190100000187,
+          "error": null,
+          "stdout": "023-pg_verifybackup.out",
+          "stderr": "023-pg_verifybackup.err"
+        },
+        "basis_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.06380752299997994,
+          "error": null,
+          "stdout": "006-pg_verifybackup.out",
+          "stderr": "006-pg_verifybackup.err"
+        },
+        "increment_verification": {
+          "exit_code": 0,
+          "duration_seconds": 0.03205187200001092,
+          "error": null,
+          "stdout": "021-pg_verifybackup.out",
+          "stderr": "021-pg_verifybackup.err"
+        },
+        "combination": {
+          "exit_code": 0,
+          "duration_seconds": 0.4643706699999939,
+          "error": null,
+          "stdout": "022-pg_combinebackup.out",
+          "stderr": "022-pg_combinebackup.err"
+        },
+        "backup_file_bytes": 22238598,
+        "output_file_bytes": 47160720,
+        "method_seconds": 1.2663717190000057,
+        "time_to_verified_seconds": 1.3318991169999777,
+        "integrity_verified": true,
+        "restore_tested": false,
+        "network_bytes": null,
+        "unavailable_metrics": {
+          "network_bytes": "transport observer not implemented"
+        },
+        "status": "PASS_MANIFEST_ONLY"
+      },
+      "capture_seconds": 0.7648876949999703,
+      "combine_seconds": 0.4643706699999939,
+      "increment_input_verification_seconds": 0.03205187200001092,
+      "capture_bytes": 22238598,
+      "output_bytes": 47160720,
+      "method_seconds": 1.2663717190000057,
+      "verification_seconds": 0.06379190100000187,
+      "verified_backup_seconds": 1.3318991169999777,
+      "self_contained_restore": {
+        "seconds": 1.2637066229999618,
+        "startup": "pass",
+        "logical_match": "pass",
+        "conservation": "pass",
+        "target": null,
+        "state": {
+          "accounts": {
+            "sha256": "a63910681cd66e69d70aecbe4d87b82b0a90e04a886b7213cd4eb1cb28846472",
+            "canonical_bytes": 5530494,
+            "rows": 20000
+          },
+          "ledger": {
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "canonical_bytes": 0,
+            "rows": 0
+          },
+          "markers": {
+            "sha256": "0f513f524e78920cbaaeb0e2d955abc5fa59c5dab37343465d4d14ff42ae3ef8",
+            "canonical_bytes": 17,
+            "rows": 1
+          },
+          "items": {
+            "sha256": "23fd4b405dd02e2a71eea6241b748195ecc5208d9e8b0d37d27797038db7762b",
+            "canonical_bytes": 41,
+            "rows": 2
+          },
+          "schema_sha256": "f869f9aa9886007959a13ebec013f3b283abc330a6804117fead7cc1c5e1e5fc",
+          "balance_total": 20000000000
+        }
+      },
+      "correctness_scope": "self-contained exact logical match to quiescent source",
+      "basis_intact": true
+    }
+  ],
+  "trial_order": [
+    [
+      0,
+      "full",
+      "active"
+    ],
+    [
+      0,
+      "no_backup",
+      "active"
+    ],
+    [
+      0,
+      "full",
+      "quiescent"
+    ],
+    [
+      0,
+      "incremental",
+      "active"
+    ],
+    [
+      0,
+      "incremental",
+      "quiescent"
+    ],
+    [
+      1,
+      "no_backup",
+      "active"
+    ],
+    [
+      1,
+      "incremental",
+      "active"
+    ],
+    [
+      1,
+      "full",
+      "active"
+    ],
+    [
+      1,
+      "incremental",
+      "quiescent"
+    ],
+    [
+      1,
+      "full",
+      "quiescent"
+    ],
+    [
+      2,
+      "incremental",
+      "active"
+    ],
+    [
+      2,
+      "full",
+      "active"
+    ],
+    [
+      2,
+      "no_backup",
+      "active"
+    ],
+    [
+      2,
+      "full",
+      "quiescent"
+    ],
+    [
+      2,
+      "incremental",
+      "quiescent"
+    ]
+  ]
+}

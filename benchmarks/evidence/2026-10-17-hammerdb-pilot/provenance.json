@@ -1,0 +1,19 @@
+{
+  "started_at": "2026-10-18T01:57:50.010257+00:00",
+  "seed": 116458667,
+  "settings": {
+    "repeats": 1,
+    "vu": 8,
+    "rampup": 1,
+    "duration": 11,
+    "warehouses": 10,
+    "backup_offset": 0,
+    "method": "pg_basebackup_full",
+    "checksum": "SHA256",
+    "checkpoint": "fast",
+    "network": "fixture_default",
+    "compose_project": "fixture",
+    "hammerdb_image": "tpcorg/hammerdb:latest"
+  },
+  "note": "single-host smoke measurement; not a baseline"
+}
