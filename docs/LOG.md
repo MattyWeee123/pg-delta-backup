@@ -4,6 +4,17 @@ A dated record of what was done, why, and what came out of it. Newest entries fi
 Experiments have their own write-ups in [docs/experiments/](experiments/).
 Dates are UTC, as the VMs log them. The six entries after EXP-70's pre-registration were first dated October 29 by mistake; they carry their commits' UTC times instead.
 
+## 2026-11-13: EXP-93 done: on ARM servers SHA-256 is the faster hash; the PyPI BLAKE3 lacks NEON there
+
+- **Why:** EXP-90's hash benchmark found SHA-256 faster than BLAKE3 on the Mac (ARM) and slower on the x86 VMs. The mentor had suggested SHA-2, and the owner asked whether the Mac's result holds on cloud ARM servers.
+- **Pre-registered** (bb11c76) and registered under rule 16 (c8f3a45) before the runs. One `c4a-standard-8` (Google Axion, Neoverse V2) and one `t2a-standard-8` (Ampere Altra, Neoverse N1) in `us-central1`, each deleted after its run, both on Python 3.11 like the x86 VMs. The Axion's first zone had no capacity.
+- **Results** (pages per second per process, one process):
+  - G1 held: Axion, SHA-256 2.970x BLAKE3;
+  - G2 held: Altra, 3.092x;
+  - G3 failed: BLAKE3 0.683x and 0.789x BLAKE2b (bar 1.5).
+- **Exploratory, not registered:** the `blake3` package's ARM wheels are built without the library's `neon` feature (its build workflow). Built with it, BLAKE3 doubled on the Altra (2.09x, 1.65x BLAKE2b), and SHA-256 still led by 1.48x.
+- **What follows:** the Mac's sign is an ARM result. On ARM, `--hash auto` picks BLAKE3, the slower hash there. Nothing changes now, since no hashing run is bound by CPU. Two idea-archive rows record it, with the trigger "an ARM target". The script is `experiments/network/exp93_arm.sh`.
+
 ## 2026-11-09 (23:30 UTC): The WAL-summary fast path archived to a branch (K19)
 
 - **Why:** the owner found the project running down two diverging paths. The fast path (EXP-61 to EXP-89, October 26–30) needs a provable history and WAL summaries, the case the niche (D01) leaves to PostgreSQL's own tools. The mentor has seen only plain page LSNs, which the October 23 notes call "a bit flimsy", and the work since October 30 is on hashing. The owner chose to box the fast path up rather than keep it frozen on `main`.
