@@ -1,0 +1,80 @@
+{
+  "role": "sender",
+  "elapsed_seconds": 43.409632,
+  "counts": {
+    "files": 1000,
+    "bytes_read": 625839655,
+    "round_trips": 41174,
+    "chunks_same": 40779,
+    "chunks_new": 35236,
+    "chunks_changed": 395
+  },
+  "seconds": {
+    "hash": 0.633847,
+    "read": 1.314387,
+    "scan": 0.031511,
+    "send": 2.29681,
+    "wait_for_verdict": 37.200114
+  },
+  "bytes_sent": {
+    "HELLO": 75366,
+    "CHUNK_HASH": 1358742,
+    "FILE_DONE": 33000,
+    "CHUNK_DATA": 292473130,
+    "COMPLETE": 5
+  },
+  "bytes_received": {
+    "ACCEPT": 10624,
+    "VERDICT": 247044,
+    "RESULT": 498
+  },
+  "bytes_sent_total": 293940243,
+  "bytes_received_total": 258166,
+  "bytes_source_to_dest": {
+    "total": 293940243,
+    "HELLO": 75366,
+    "CHUNK_HASH": 1358742,
+    "FILE_DONE": 33000,
+    "CHUNK_DATA": 292473130,
+    "COMPLETE": 5
+  },
+  "bytes_dest_to_source": {
+    "total": 258166,
+    "ACCEPT": 10624,
+    "VERDICT": 247044,
+    "RESULT": 498
+  },
+  "ok": true,
+  "chunk_size": 8192,
+  "receiver": {
+    "role": "receiver",
+    "elapsed_seconds": 43.408612,
+    "counts": {
+      "chunks_same": 40779,
+      "files": 1000,
+      "chunks_received": 35631,
+      "bytes_written": 291867403
+    },
+    "seconds": {
+      "fsync": 3.250136,
+      "hash": 0.692761,
+      "read_basis": 0.818625,
+      "send": 0.497712,
+      "verify": 1.238585,
+      "write": 0.706641
+    },
+    "bytes_sent": {
+      "ACCEPT": 10624,
+      "VERDICT": 247044
+    },
+    "bytes_received": {
+      "HELLO": 75366,
+      "CHUNK_HASH": 1358742,
+      "FILE_DONE": 33000,
+      "CHUNK_DATA": 292473130,
+      "COMPLETE": 5
+    },
+    "bytes_sent_total": 257668,
+    "bytes_received_total": 293940243
+  }
+}
