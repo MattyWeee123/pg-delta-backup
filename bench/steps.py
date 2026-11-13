@@ -9,7 +9,8 @@ Where the expected durations come from, best first:
    runs on the same computer. A cloud run learns from runs on the same machine type, and a lane also needs
    the same disk, link cap, change and chunk size;
 2. with no such run yet, the rules of thumb below, measured on one Apple-silicon laptop (scale 50) and one
-   cloud run (two n2-standard-4 VMs in two zones of us-central1, scale 20). They can be 2x off elsewhere.
+   cloud run (two n2-standard-4 VMs in two zones of us-central1, scale 20; 3:26 in all, these sum to 3:20).
+   They can be 2x off on other machines.
 """
 from __future__ import annotations
 
@@ -27,8 +28,8 @@ from bench.config import RunConfig
 RULES = {
     'laptop': {'build': (1, 5), 'copy': (1, 2), 'lane:pg_basebackup': (0.5, 1.5), 'lane:pgdelta': (0.5, 1),
                'check': (2, 0), 'publish': (5, 0)},
-    'gcp': {'vms': (70, 0), 'install': (110, 0), 'build': (5, 40), 'copy': (5, 25), 'lane:pg_basebackup': (8, 0),
-            'lane:pgdelta': (8, 10), 'check': (5, 0), 'delete': (45, 0), 'publish': (5, 0)},
+    'gcp': {'vms': (40, 0), 'install': (35, 0), 'build': (2, 15), 'copy': (5, 20), 'lane:pg_basebackup': (12, 0),
+            'lane:pgdelta': (20, 10), 'check': (3, 0), 'delete': (30, 0), 'publish': (5, 0)},
 }
 ROUND_TRIP = {'laptop': 0.0001, 'gcp': 0.00105}  # one stop-and-wait chunk: same machine; two zones
 # Settings that must match for an earlier run's step to predict this one (cloud runs; a laptop run matches
