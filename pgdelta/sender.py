@@ -25,17 +25,36 @@ from pgdelta.tree import scan
 DEFAULT_CHUNK_SIZE = 8192  # one PostgreSQL page
 MIN_CHUNK_SIZE, MAX_CHUNK_SIZE = 512, 16 << 20
 DEFAULT_BATCH = 128
+DEFAULT_BATCH_BYTES = 32 << 20
+
+# A CHUNK_HASHES frame holds one header plus `count` digests; capping the chunk count at what fits
+# in MAX_PAYLOAD keeps an oversized --batch-bytes from building a frame Channel.send will refuse.
+_MAX_BATCH_FOR_PAYLOAD = (protocol.MAX_PAYLOAD - CHUNK_HASHES_HEAD.size) // protocol.DIGEST_SIZE
+
+
+def effective_batch(batch: int, batch_bytes: int, chunk_size: int) -> int:
+    """How many chunks to accumulate before asking: the smallest of the count cap, the byte cap
+    (the accumulator holds each chunk's data, so `batch_bytes` bounds memory), and the payload cap
+    (a CHUNK_HASHES frame of that many digests must still fit under protocol.MAX_PAYLOAD). Never zero."""
+    return max(1, min(batch, batch_bytes // chunk_size, _MAX_BATCH_FOR_PAYLOAD))
 
 
 def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_SIZE, events: EventLog | None = None,
-               batch: int = DEFAULT_BATCH) -> dict:
+               batch: int = DEFAULT_BATCH, batch_bytes: int = DEFAULT_BATCH_BYTES) -> dict:
     """Send S to the receiver at the other end of `channel`. Returns this side's report, with the receiver's.
 
-    `batch` chunks are asked about per CHUNK_HASHES/VERDICTS round trip, at most (never spanning files).
+    `batch` chunks are asked about per CHUNK_HASHES/VERDICTS round trip, at most (never spanning files),
+    further capped by `batch_bytes` (the accumulator's memory bound, since it holds each chunk's data)
+    and by what fits in one CHUNK_HASHES frame; see `effective_batch`.
     `events`, if given, gets a start event, progress about every 0.1 s, and a done event (pgdelta.events)."""
     events = events or EventLog(None)
     if not MIN_CHUNK_SIZE <= chunk_size <= MAX_CHUNK_SIZE:
         raise ValueError(f'chunk size must be between {MIN_CHUNK_SIZE} and {MAX_CHUNK_SIZE} bytes')
+    if batch < 1:
+        raise ValueError('batch must be at least 1')
+    if batch_bytes < 1:
+        raise ValueError('batch_bytes must be at least 1')
+    batch = effective_batch(batch, batch_bytes, chunk_size)
     source = Path(source)
     stats = Stats('sender')
     try:

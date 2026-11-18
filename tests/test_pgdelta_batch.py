@@ -1,4 +1,5 @@
 """Tests for batched digest questions and bitmap answers."""
+import io
 import json
 import os
 import socket
@@ -6,11 +7,12 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pgdelta import protocol  # noqa: E402
+from pgdelta import protocol, sender  # noqa: E402
 from pgdelta.hashing import new_key  # noqa: E402
 from pgdelta.protocol import Channel  # noqa: E402
 from pgdelta.receiver import run_receiver  # noqa: E402
@@ -44,6 +46,58 @@ class Verdicts(unittest.TestCase):
 
     def test_the_protocol_version_is_two(self):
         self.assertEqual(protocol.VERSION, 2)
+
+
+class BatchOptions(RefreshFixture, unittest.TestCase):
+    def test_the_byte_cap_binds_before_the_count(self):
+        # 32 << 20 is exactly 2 * (16 << 20): plain floor division gives 2, not 1 (verified: both this
+        # case and the 8192*4/8192 case below are exact multiples, and no single floor/ceiling/strict-
+        # inequality rule can floor the first down to 1 while leaving the second at its exact value 4;
+        # 2 is the correct result of the formula given for effective_batch).
+        self.assertEqual(sender.effective_batch(1024, 32 << 20, 16 << 20), 2)
+        self.assertEqual(sender.effective_batch(1024, 32 << 20, 8192), 1024)
+        self.assertEqual(sender.effective_batch(1024, 8192 * 4, 8192), 4)
+
+    def test_the_batch_is_never_zero(self):
+        self.assertEqual(sender.effective_batch(1024, 1, 16 << 20), 1)
+
+    def test_the_payload_cap_binds_before_the_other_two(self):
+        """A large --batch-bytes with the minimum chunk size must still fit one CHUNK_HASHES frame
+        within MAX_PAYLOAD; the cap is derived from the protocol constants, not hardcoded."""
+        cap = (protocol.MAX_PAYLOAD - protocol.CHUNK_HASHES_HEAD.size) // protocol.DIGEST_SIZE
+        self.assertEqual(cap, 4194303)
+        result = sender.effective_batch(10 ** 9, 64 << 30, 512)
+        self.assertEqual(result, cap)
+        frame_size = protocol.CHUNK_HASHES_HEAD.size + result * protocol.DIGEST_SIZE
+        self.assertLessEqual(frame_size, protocol.MAX_PAYLOAD)
+
+    def test_a_non_positive_batch_is_a_bad_argument(self):
+        """argparse exits 2 from parse_args, which runs before cli.main's try block,
+        so SystemExit propagates out of main rather than being returned."""
+        for value in ('0', '-1'):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+                self.refresh('--batch', value)
+            self.assertEqual(caught.exception.code, 2)
+
+    def test_a_non_positive_batch_bytes_is_a_bad_argument(self):
+        """--batch-bytes gets the same lower-bound treatment as --batch, for the same reason."""
+        for value in ('0', '-1'):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+                self.refresh('--batch-bytes', value)
+            self.assertEqual(caught.exception.code, 2)
+
+    def test_batch_one_matches_the_stop_and_wait_accounting(self):
+        """G4's anchor: --batch 1 must reproduce the naive counts chunk for chunk."""
+        data = bytearray(os.urandom(6 * CHUNK))
+        write(self.b, 'f', bytes(data))
+        data[2 * CHUNK] ^= 0xFF
+        write(self.s, 'f', bytes(data))
+        code, report = self.refresh('--batch', '1')
+        self.assertEqual(tree_bytes(self.o), tree_bytes(self.s))
+        self.assertEqual(report['counts']['round_trips'], 6)
+        self.assertEqual(report['counts']['chunks_asked'], 6)
+        self.assertEqual(report['counts']['chunks_same'], 5)
+        self.assertEqual(report['counts']['chunks_changed'], 1)
 
 
 class BatchedExchange(RefreshFixture, unittest.TestCase):
