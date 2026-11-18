@@ -29,6 +29,8 @@ pgdelta: 998 files, 67471 chunks unchanged, 438 changed, 384 new; sent 9,089,083
    MATCH
 ```
 
+That trace predates batched digests (#36): `round trips` there is a per-chunk count from the stop-and-wait engine, what `--batch 1` now reproduces, and at today's default (`--batch 128`) it falls by roughly the batch size.
+
 `CHANGE=uniform` updates every 100th row instead, which touches nearly every page. A laptop has no slow network, so judge pgdelta here by the bytes it sends and by the copy being right, not by time. Time is what the benchmarks on Google Cloud measure.
 
 ## How the naive version works
