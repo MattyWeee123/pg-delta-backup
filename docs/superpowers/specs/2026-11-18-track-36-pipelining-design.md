@@ -335,6 +335,15 @@ and ~288 MB was simply absent from B. Round-trip counts are unaffected (they fol
 `chunks_same + chunks_changed`), so the timing conclusion stands, but a corrected fixture will make the
 round-trip share **rise**, not fall, because `chunks_new` costs no round trip.
 
+**`--batch 1` reproduces the baseline's accounting, not its byte count.** Per asked chunk the pre-#36
+engine sent 33 B (`CHUNK_HASH`) + 6 B (`VERDICT`) = 39 B; `--batch 1` sends 37 B (`CHUNK_HASHES`, 16-byte
+head) + 10 B (`VERDICTS`, 4-byte head plus one bitmap byte) = 47 B — about 20% more ask traffic. Counters,
+frame sequencing and timer buckets reproduce exactly, so the *accounting* the baseline exists for is
+sound; but a "bytes saved against the baseline" figure taken from the `--batch 1` arm reads roughly 20%
+flattering on ask traffic. For byte claims, compare against the pre-#36 binary or state the offset.
+Raised by the final whole-branch review, 18 November, and recorded here because the sweep that would use
+that arm as its baseline is deferred — whoever runs it will not have seen that review.
+
 ## 11. Test plan
 
 Existing tests that change **by design**, with what replaces them:
