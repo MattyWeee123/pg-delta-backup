@@ -4,8 +4,8 @@ B is only ever read. O is built in a staging directory next to it and appears, b
 after every file is written, synced and verified against S's whole-file digest. Any failure removes
 the staging directory, so O either appears complete and verified, or not at all.
 
-Naive on purpose: it answers one chunk question at a time, reading and hashing B's chunk only when
-asked, and verifies each file by reading it back from disk after writing it.
+Naive on purpose: it answers each batch of chunk questions with one bitmap reply, reading and hashing
+B's chunks only when asked, and verifies each file by reading it back from disk after writing it.
 """
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from pathlib import Path
 
 from pgdelta import protocol
 from pgdelta.hashing import Hasher
-from pgdelta.protocol import (CHUNK_DATA, CHUNK_DATA_HEAD, CHUNK_HASH, CHUNK_HASH_BODY, COMPLETE, DIFFERENT,
-                              FILE_DONE, FILE_DONE_BODY, HELLO, RESULT, SAME, VERDICT, VERDICT_BODY, Channel)
+from pgdelta.protocol import (CHUNK_DATA, CHUNK_DATA_HEAD, CHUNK_HASHES, CHUNK_HASHES_HEAD, COMPLETE, FILE_DONE,
+                              FILE_DONE_BODY, HELLO, RESULT, VERDICTS, Channel, pack_verdicts)
 from pgdelta.stats import Stats
 from pgdelta.tree import Entry
 
@@ -93,22 +93,35 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
 
         while True:
             kind, payload = channel.recv()
-            if kind == CHUNK_HASH:
-                index, chunk, digest = CHUNK_HASH_BODY.unpack(payload)
+            if kind == CHUNK_HASHES:
+                if len(payload) < CHUNK_HASHES_HEAD.size:
+                    raise protocol.ProtocolError('CHUNK_HASHES payload too short for header')
+                index, first_chunk, count = CHUNK_HASHES_HEAD.unpack_from(payload)
+                digests = payload[CHUNK_HASHES_HEAD.size:]
+                # count is peer-supplied: check it against the frame's actual length before using it
+                # to size anything.
+                if count == 0 or len(digests) != count * protocol.DIGEST_SIZE:
+                    raise protocol.ProtocolError(
+                        f'CHUNK_HASHES count {count} does not match its {len(digests)}-byte body')
                 out, base = open_file(index)
                 if base is None:
                     raise protocol.ProtocolError(f'asked about {entries[index].path}, which B lacks')
-                offset, length = span(index, chunk)
-                with stats.timed('read_basis'):
-                    data = os.pread(base, length, offset)
-                with stats.timed('hash'):
-                    same = len(data) == length and hasher.chunk(data) == digest
-                if same:
-                    with stats.timed('write'):
-                        os.pwrite(out, data, offset)
-                    stats.counts['chunks_same'] += 1
+                differs = []
+                for i in range(count):
+                    chunk = first_chunk + i
+                    digest = digests[i * protocol.DIGEST_SIZE:(i + 1) * protocol.DIGEST_SIZE]
+                    offset, length = span(index, chunk)
+                    with stats.timed('read_basis'):
+                        data = os.pread(base, length, offset)
+                    with stats.timed('hash'):
+                        same = len(data) == length and hasher.chunk(data) == digest
+                    if same:
+                        with stats.timed('write'):
+                            os.pwrite(out, data, offset)
+                        stats.counts['chunks_same'] += 1
+                    differs.append(not same)
                 with stats.timed('send'):
-                    channel.send(VERDICT, VERDICT_BODY.pack(SAME if same else DIFFERENT))
+                    channel.send(VERDICTS, pack_verdicts(differs))
             elif kind == CHUNK_DATA:
                 index, chunk = CHUNK_DATA_HEAD.unpack_from(payload)
                 data = payload[CHUNK_DATA_HEAD.size:]
