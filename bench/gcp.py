@@ -351,6 +351,7 @@ def _lane_pgdelta(src: VM, dst: VM, path: Path, lane_id: str, chunk_size: int, r
     c = report.get('counts', {})
     result = {'elapsed': report['elapsed_seconds'], 'bytes_sent': report['bytes_sent_total'],
               'total_bytes': c.get('bytes_read', 0), 'round_trips': c.get('round_trips', 0),
+              'chunks_asked': c.get('chunks_asked', 0),
               'chunks_changed': c.get('chunks_changed', 0), 'chunks_same': c.get('chunks_same', 0),
               'chunks_new': c.get('chunks_new', 0), 'ok': report.get('ok', False)}
     return _times(err.getvalue()), result
