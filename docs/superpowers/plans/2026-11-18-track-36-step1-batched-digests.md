@@ -300,9 +300,12 @@ class BatchOptions(unittest.TestCase):
         self.assertEqual(sender.effective_batch(1024, 1, 16 << 20), 1)
 
     def test_a_non_positive_batch_is_a_bad_argument(self):
+        """argparse exits 2 from parse_args, which runs before cli.main's try block,
+        so SystemExit propagates out of main rather than being returned."""
         for value in ('0', '-1'):
-            with redirect_stderr(io.StringIO()):
-                self.assertEqual(self.refresh('--batch', value)[0], 2)
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+                self.refresh('--batch', value)
+            self.assertEqual(caught.exception.code, 2)
 
     def test_batch_one_matches_the_stop_and_wait_accounting(self):
         """G4's anchor: --batch 1 must reproduce the naive counts chunk for chunk."""
