@@ -86,6 +86,9 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
             asking = []  # (chunk index, digest, data) for this file, accumulated but not yet asked about
 
             def flush() -> None:
+                # Closes over `index` and `asking`, both bound fresh each time around the outer
+                # `for` loop; every call to flush() below happens within that same iteration, so
+                # there's no late-binding hazard (the closure never outlives the file it was made for).
                 if not asking:
                     return
                 head = CHUNK_HASHES_HEAD.pack(index, asking[0][0], len(asking))
@@ -115,6 +118,10 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
                     stats.counts['bytes_read'] += want
                     if basis_size is not None and offset + want <= basis_size:
                         # B has this whole range: accumulate the question, asking once the batch is full.
+                        # `offset + want` only increases within a file and `basis_size` is fixed, so this
+                        # predicate can go true -> false at most once per file, never back -- which is why
+                        # `asking` is always a contiguous run of chunk indices. The receiver depends on
+                        # that: it pairs each digest with `first_chunk + i` rather than carrying indices.
                         with stats.timed('hash'):
                             digest = hasher.chunk(data)
                         asking.append((chunk, digest, data))

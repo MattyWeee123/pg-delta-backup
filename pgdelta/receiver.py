@@ -41,7 +41,16 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
 
     hello = json.loads(channel.expect(HELLO))
     if hello.get('version') != protocol.VERSION:
-        raise protocol.ProtocolError(f'protocol version {hello.get("version")!r}, expected {protocol.VERSION}')
+        # This check runs before the try/except below (no staging directory exists yet, so
+        # there's nothing there to clean up). Send the ERROR frame here, before raising --
+        # otherwise the peer sees only the connection close, with the real reason stuck on
+        # this side's stderr, no help when the two ends are on different machines.
+        message = f'protocol version {hello.get("version")!r}, expected {protocol.VERSION}'
+        try:
+            channel.send_json(protocol.ERROR, {'message': message})
+        except OSError:
+            pass
+        raise protocol.ProtocolError(message)
     chunk_size = int(hello['chunk_size'])
     root_mode = int(hello.get('root_mode', 0o700)) & 0o7777  # PostgreSQL refuses a data directory wider than 0750
     hasher = Hasher(bytes.fromhex(hello['key']))

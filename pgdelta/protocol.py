@@ -120,8 +120,9 @@ def unpack_verdicts(payload: bytes, expected: int) -> list[bool]:
         raise ProtocolError(f'verdicts count mismatch: got {count}, expected {expected}')
     # expected is trusted (the caller's own batch size), so this size is safe to use for slicing.
     bitmap_bytes = (count + 7) // 8
-    if len(payload) < VERDICTS_HEAD.size + bitmap_bytes:
-        raise ProtocolError('verdicts bitmap too short')
+    if len(payload) != VERDICTS_HEAD.size + bitmap_bytes:
+        raise ProtocolError(
+            f'verdicts payload is {len(payload)} bytes, expected {VERDICTS_HEAD.size + bitmap_bytes}')
     bitmap = payload[VERDICTS_HEAD.size:VERDICTS_HEAD.size + bitmap_bytes]
     return [bool((bitmap[i // 8] >> (i % 8)) & 1) for i in range(count)]
 

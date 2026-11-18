@@ -17,7 +17,7 @@ Everything goes to `runs/<name>/`, which isn't committed, until you publish:
 - `stats-<lane>.json`: pgdelta's full statistics;
 - `steps.json`: every step with its expected duration and when it started and finished, for the viewer's progress bar and ETA, and to predict the next run's (see `bench/steps.py`);
 - `raw/<lane>/`, for cloud runs: the 0.1-second link, disk and CPU samples from both VMs;
-- `report.md` and `charts/`: a results table (time, bytes, share of S, round trips, ratio to `pg_basebackup`), the correctness check, link and disk over time, the cost estimate and how to reproduce.
+- `report.md` and `charts/`: a results table (time, bytes, share of S, round trips, chunks asked, ratio to `pg_basebackup`), the correctness check, link and disk over time, the cost estimate and how to reproduce.
 
 ## Settings
 

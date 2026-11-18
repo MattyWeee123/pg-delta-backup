@@ -65,4 +65,4 @@ value — no sweep across batch sizes has been run yet.
 
 The report also carries `chunk_size` and `batch`, the settings it ran with.
 
-`wait_for_verdict` is the cost of stopping and waiting: the round trip plus the receiver's read and hash.
+`wait_for_verdict` is the cost of stopping and waiting: the round trip plus the receiver's reads and hashes for the whole batch.

@@ -10,6 +10,10 @@ import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
 
+# Points at this file's own directory (tests/), not the repo root: CI runs
+# `python -m unittest discover -s tests`, so test modules are already imported by their bare
+# name, and `from test_pgdelta import ...` below needs `tests/` on sys.path to resolve to that
+# same already-imported module, rather than importing a second, separate copy of it.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pgdelta import protocol, sender  # noqa: E402
@@ -43,6 +47,11 @@ class Verdicts(unittest.TestCase):
         payload = protocol.pack_verdicts([False] * 9)
         with self.assertRaises(protocol.ProtocolError):
             protocol.unpack_verdicts(payload[:-1], 9)
+
+    def test_a_long_bitmap_is_refused(self):
+        payload = protocol.pack_verdicts([False] * 9)
+        with self.assertRaises(protocol.ProtocolError):
+            protocol.unpack_verdicts(payload + b'\x00', 9)
 
     def test_the_protocol_version_is_two(self):
         self.assertEqual(protocol.VERSION, 2)
@@ -240,6 +249,49 @@ class MalformedBatch(unittest.TestCase):
         self.inject(head, b'\x00' * protocol.DIGEST_SIZE, basis_bytes=2 * CHUNK)
         self.assertFalse(self.o.exists())
         self.assertFalse(any(p.name.endswith('.pgdelta-partial') for p in self.o.parent.iterdir()))
+
+
+class VersionMismatch(unittest.TestCase):
+    """VERSION 2 makes a real sender/receiver version mismatch reachable; the peer must be told why,
+    not left to see only a closed connection."""
+
+    def test_sender_side_sees_a_legible_version_mismatch(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        basis, output = root / 'B', root / 'O'
+        basis.mkdir()
+        ours, theirs = socket.socketpair()
+        outcome = {}
+
+        def serve():
+            try:
+                outcome['report'] = run_receiver(Channel(theirs), basis, output)
+            except BaseException as exc:
+                outcome['error'] = exc
+            finally:
+                theirs.close()
+
+        thread = threading.Thread(target=serve, name='pgdelta-receiver-test')
+        thread.start()
+        channel = Channel(ours)
+        try:
+            # A v1 sender's HELLO, against this v2 receiver.
+            channel.send_json(protocol.HELLO, {'version': 1, 'chunk_size': CHUNK,
+                                                'key': new_key().hex(), 'entries': []})
+            # Real sender code does exactly this next: send HELLO, then expect ACCEPT. If the
+            # receiver only raised locally, this would see the connection close (Closed), not
+            # a message naming both versions.
+            with self.assertRaises(protocol.PeerError) as caught:
+                channel.expect(protocol.ACCEPT)
+            message = str(caught.exception)
+            self.assertIn('1', message)
+            self.assertIn(str(protocol.VERSION), message)
+        finally:
+            ours.close()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            self.assertIsInstance(outcome.get('error'), protocol.ProtocolError)
 
 
 if __name__ == '__main__':
