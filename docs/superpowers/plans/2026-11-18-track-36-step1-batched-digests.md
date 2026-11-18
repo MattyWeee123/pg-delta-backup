@@ -18,7 +18,7 @@
 - Within a file, chunk indices on the wire stay **monotonically ascending**.
 - Only chunks lying wholly within B's size for that file may be asked about. The existing predicate is `basis_size is not None and offset + want <= basis_size`; chunks failing it are `chunks_new` and are sent unasked.
 - `--chunk-size` stays independent of batch size: valid range 512 to `16 << 20`, default 8192.
-- Batch memory is bounded in **bytes**, not count: `--batch-bytes` default `32M`, effective batch `min(--batch, --batch-bytes // chunk_size)`, minimum 1.
+- Batch memory is bounded in **bytes**, not count: `--batch-bytes` default `32M`, effective batch `min(--batch, --batch-bytes // chunk_size, (MAX_PAYLOAD - CHUNK_HASHES_HEAD.size) // DIGEST_SIZE)`, minimum 1. The third cap keeps a user-set `--batch-bytes` from building a frame the channel refuses (ruling R8).
 - `MAX_PAYLOAD` is `64 << 20`; a frame larger than it must be rejected **before** any allocation sized by a peer-supplied count.
 - Digest size comes from `pgdelta.hashing.DIGEST_SIZE` (16), imported rather than hardcoded in new structs.
 - `stats.py` must keep emitting `bytes_source_to_dest` and `bytes_dest_to_source` (read by `benchmarks/methods.py`) and `counts['round_trips']` (read by `viz` progress events and `cli.summary`).
@@ -30,7 +30,7 @@
 1. **A peer-supplied `count` that is huge or zero.** A `CHUNK_HASHES` head claiming `count = 2^32-1` must be rejected from the frame length alone, before any list or buffer is sized by it; `count = 0` must be rejected too, not answered with an empty bitmap. Test in Task 2.
 2. **A `VERDICTS` body that disagrees with the batch just sent.** A short bitmap, a long one, or an echoed count that differs must raise `ProtocolError` rather than silently leaving chunks unwritten — an unwritten chunk would otherwise surface only as a `FILE_DONE` digest failure. Test in Task 2.
 3. **A chunk only partially covered by B.** When `basis_size` is not a multiple of `chunk_size`, the final chunk inside B's range is partial and must be treated as `chunks_new`, never batched. Test in Task 2.
-4. **`--chunk-size 16M` with `--batch 1024`.** The byte cap must bind and hold the batch to one chunk, or the sender buffers 16 GiB. Test in Task 3.
+4. **`--chunk-size 16M` with `--batch 1024`.** The byte cap must bind and hold the batch to the two chunks a 32 MiB budget allows, or the sender buffers 16 GiB. Test in Task 3.
 5. **`--batch 0` or a negative value.** Must exit 2 as a bad argument, not hang or send an empty frame. Test in Task 3.
 
 ---
