@@ -111,15 +111,18 @@ class BatchedExchange(RefreshFixture, unittest.TestCase):
 class MalformedBatch(unittest.TestCase):
     """A peer-supplied count must never size an allocation before it is validated."""
 
-    def inject(self, head, body) -> str:
-        """HELLO a single 4-chunk file B also has, then send one CHUNK_HASHES; return the ERROR message."""
+    def inject(self, head, body, basis_bytes=4 * CHUNK) -> str:
+        """HELLO a single 4-chunk file B also has, then send one CHUNK_HASHES; return the ERROR message.
+
+        `basis_bytes` is how much of that file actually exists in B (default: all of it), so a chunk
+        that's within S's declared size but past B's actual end can be injected too."""
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         root = Path(self.tmp.name)
         b = root / 'B'
         self.o = root / 'O'
         b.mkdir()
-        write(b, 'f', os.urandom(4 * CHUNK))
+        write(b, 'f', os.urandom(basis_bytes))
         entries = [Entry('f', 'file', 0o600, size=4 * CHUNK)]
         ours, theirs = socket.socketpair()
         outcome = {}
@@ -147,6 +150,7 @@ class MalformedBatch(unittest.TestCase):
         finally:
             ours.close()
             thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
 
     def test_a_zero_count_is_refused(self):
         head = protocol.CHUNK_HASHES_HEAD.pack(0, 0, 0)
@@ -164,8 +168,22 @@ class MalformedBatch(unittest.TestCase):
         head = protocol.CHUNK_HASHES_HEAD.pack(0, 99, 1)
         self.assertIn('past the end', self.inject(head, b'\x00' * protocol.DIGEST_SIZE))
 
+    def test_a_chunk_outside_bs_size_is_refused(self):
+        """Within S's declared 4-chunk size, but B's real file is only 2 chunks long."""
+        head = protocol.CHUNK_HASHES_HEAD.pack(0, 2, 1)
+        message = self.inject(head, b'\x00' * protocol.DIGEST_SIZE, basis_bytes=2 * CHUNK)
+        self.assertIn("outside B's size", message)
+
     def test_no_output_is_published_after_a_bad_batch(self):
-        self.test_a_zero_count_is_refused()
+        """Unlike the validation-order checks above, these two both fail after open_file has already
+        created the output fd (and, for the second, B's fd too) — cleanup must still remove everything."""
+        head = protocol.CHUNK_HASHES_HEAD.pack(0, 99, 1)
+        self.inject(head, b'\x00' * protocol.DIGEST_SIZE)
+        self.assertFalse(self.o.exists())
+        self.assertFalse(any(p.name.endswith('.pgdelta-partial') for p in self.o.parent.iterdir()))
+
+        head = protocol.CHUNK_HASHES_HEAD.pack(0, 2, 1)
+        self.inject(head, b'\x00' * protocol.DIGEST_SIZE, basis_bytes=2 * CHUNK)
         self.assertFalse(self.o.exists())
         self.assertFalse(any(p.name.endswith('.pgdelta-partial') for p in self.o.parent.iterdir()))
 

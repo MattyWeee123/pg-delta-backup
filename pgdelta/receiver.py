@@ -57,7 +57,7 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
                 continue
             if stat.S_ISREG(info.st_mode):
                 basis_sizes.append([index, info.st_size])
-    has_basis = {index for index, _ in basis_sizes}
+    basis_size = {index: size for index, size in basis_sizes}  # also tells has_basis: its keys
     channel.send_json(protocol.ACCEPT, {'basis_sizes': basis_sizes})
 
     files = {}  # index -> (output fd, basis fd or None), for the file being written
@@ -80,7 +80,7 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
                 for other in list(files):  # files arrive in order: the previous one is finished
                     _close(files.pop(other))
                 out = os.open(staging / entries[index].path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
-                base = os.open(basis / entries[index].path, os.O_RDONLY) if index in has_basis else None
+                base = os.open(basis / entries[index].path, os.O_RDONLY) if index in basis_size else None
                 files[index] = (out, base)
             return files[index]
 
@@ -111,6 +111,9 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
                     chunk = first_chunk + i
                     digest = digests[i * protocol.DIGEST_SIZE:(i + 1) * protocol.DIGEST_SIZE]
                     offset, length = span(index, chunk)
+                    if offset + length > basis_size[index]:
+                        raise protocol.ProtocolError(
+                            f"chunk {chunk} of {entries[index].path} is outside B's size")
                     with stats.timed('read_basis'):
                         data = os.pread(base, length, offset)
                     with stats.timed('hash'):
