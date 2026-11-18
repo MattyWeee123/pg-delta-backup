@@ -292,7 +292,7 @@ git commit -m "Ask about many chunks per message instead of one (#36, #17)"
 ```python
 class BatchOptions(unittest.TestCase):
     def test_the_byte_cap_binds_before_the_count(self):
-        self.assertEqual(sender.effective_batch(1024, 32 << 20, 16 << 20), 1)
+        self.assertEqual(sender.effective_batch(1024, 32 << 20, 16 << 20), 2)  # (32<<20)//(16<<20)
         self.assertEqual(sender.effective_batch(1024, 32 << 20, 8192), 1024)
         self.assertEqual(sender.effective_batch(1024, 8192 * 4, 8192), 4)
 
