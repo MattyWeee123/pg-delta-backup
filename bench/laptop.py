@@ -135,6 +135,7 @@ def _pgdelta_facts(stats_path: Path) -> dict:
     c = report.get('counts', {})
     return {'elapsed': report['elapsed_seconds'], 'bytes_sent': report['bytes_sent_total'],
             'total_bytes': c.get('bytes_read', 0), 'round_trips': c.get('round_trips', 0),
-            'chunks_asked': c.get('chunks_asked', 0),
+            'chunks_asked': c.get('chunks_asked', 0), 'copy_runs': c.get('copy_runs', 0),
+            'digest_waits': c.get('digest_waits', 0),
             'chunks_changed': c.get('chunks_changed', 0), 'chunks_same': c.get('chunks_same', 0),
             'chunks_new': c.get('chunks_new', 0), 'ok': report.get('ok', False)}

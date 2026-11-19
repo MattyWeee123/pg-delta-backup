@@ -1,13 +1,13 @@
-name: Batch sweep (#36 step 1)
+name: Digest-window sweep (#36 step 2)
 
-# Measures what `--batch` buys, on a real PostgreSQL cluster, on demand.
+# Measures what `--digest-window` buys, on a real PostgreSQL cluster, on demand.
 #
-# Why this exists: the sweep that should choose pgdelta's shipped `--batch` default needs
+# Why this exists: the sweep that should choose pgdelta's shipped `--digest-window` default needs
 # PostgreSQL 17 or 18 binaries, which not every contributor's machine has. This runner does.
 # It reports numbers and nothing else: it never publishes a run, opens a pull request, or
 # changes a default. Reading the table and deciding the default stays a person's job.
 #
-# Run it from the Actions tab, or: gh workflow run batch-sweep.yml -f scale=10
+# Run it from the Actions tab, or: gh workflow run digest-window-sweep.yml -f scale=10
 
 on:
   workflow_dispatch:
@@ -20,9 +20,9 @@ on:
         default: 'hot'
         type: choice
         options: [hot, uniform]
-      batches:
-        description: 'space-separated --batch values to sweep'
-        default: '1 16 128 1024'
+      digest_windows:
+        description: 'space-separated --digest-window values (bytes) to sweep'
+        default: '65536 1048576 8388608 67108864'
 
 permissions:
   contents: read
@@ -74,25 +74,25 @@ jobs:
           # interpolating them into the script, and validate before use.
           SCALE: ${{ inputs.scale }}
           CHANGE: ${{ inputs.change }}
-          BATCHES: ${{ inputs.batches }}
+          DIGEST_WINDOWS: ${{ inputs.digest_windows }}
         run: |
           set -euo pipefail
           case "$SCALE" in ''|*[!0-9]*) echo "::error::scale must be a whole number"; exit 1;; esac
-          for b in $BATCHES; do
-            case "$b" in ''|*[!0-9]*) echo "::error::--batch values must be whole numbers: $b"; exit 1;; esac
-            [ "$b" -ge 1 ] || { echo "::error::--batch must be at least 1: $b"; exit 1; }
+          for w in $DIGEST_WINDOWS; do
+            case "$w" in ''|*[!0-9]*) echo "::error::--digest-window values must be whole numbers: $w"; exit 1;; esac
+            [ "$w" -ge 1 ] || { echo "::error::--digest-window must be at least 1: $w"; exit 1; }
           done
 
           export PGBIN=/usr/lib/postgresql/17/bin
           export PYTHON=python3
           export LC_ALL=C.UTF-8 LANG=C.UTF-8
           mkdir -p sweep
-          for b in $BATCHES; do
-            echo "::group::--batch $b"
-            PGDELTA_ARGS="--batch $b" SCALE="$SCALE" CHANGE="$CHANGE" \
-              bash examples/local_demo.sh "sweep/work-$b"
-            cp "sweep/work-$b/pgdelta-stats.json" "sweep/stats-batch-$b.json"
-            rm -rf "sweep/work-$b"
+          for w in $DIGEST_WINDOWS; do
+            echo "::group::--digest-window $w"
+            PGDELTA_ARGS="--digest-window $w" SCALE="$SCALE" CHANGE="$CHANGE" \
+              bash examples/local_demo.sh "sweep/work-$w"
+            cp "sweep/work-$w/pgdelta-stats.json" "sweep/stats-window-$w.json"
+            rm -rf "sweep/work-$w"
             echo "::endgroup::"
           done
 
@@ -104,34 +104,39 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
           import json, os, pathlib
           rows = []
-          for p in sorted(pathlib.Path('sweep').glob('stats-batch-*.json'),
+          for p in sorted(pathlib.Path('sweep').glob('stats-window-*.json'),
                           key=lambda q: int(q.stem.rsplit('-', 1)[1])):
+              window = int(p.stem.rsplit('-', 1)[1])
               d = json.loads(p.read_text())
               c = d['counts']
-              rows.append((d.get('batch'), c.get('round_trips', 0), c.get('chunks_asked', 0),
-                           d['elapsed_seconds'], d['bytes_sent_total'], d['seconds'].get('wait_for_verdict', 0.0)))
-          print(f"## Batch sweep — pgbench scale {os.environ['SCALE']}, {os.environ['CHANGE']} change\n")
-          print('| `--batch` | Round trips | Chunks asked | Elapsed (s) | Waiting (s) | Sent (bytes) |')
+              rows.append((window, c.get('round_trips', 0), c.get('digest_waits', 0),
+                           d['seconds'].get('wait_for_digests', 0.0), d['elapsed_seconds'], d['bytes_sent_total']))
+          print(f"## Digest-window sweep — pgbench scale {os.environ['SCALE']}, {os.environ['CHANGE']} change\n")
+          print('| `--digest-window` (bytes) | Round trips | Digest waits | Waiting (s) | Elapsed (s) | Sent (bytes) |')
           print('|---:|---:|---:|---:|---:|---:|')
-          for batch, trips, asked, elapsed, sent, wait in rows:
-              print(f'| {batch} | {trips:,} | {asked:,} | {elapsed:.2f} | {wait:.2f} | {sent:,} |')
+          for window, trips, waits, waiting, elapsed, sent in rows:
+              print(f'| {window:,} | {trips:,} | {waits:,} | {waiting:.2f} | {elapsed:.2f} | {sent:,} |')
           print()
           if rows:
-              base = next((r for r in rows if r[0] == 1), None)
-              print('`--batch 1` reproduces the stop-and-wait engine this replaced, so it is the baseline '
-                    'the other rows are read against.' if base else
-                    'No `--batch 1` row in this sweep, so there is no stop-and-wait baseline to compare against.')
+              print('**Round trips are not the interesting column here.** In this streamed engine (#36 step '
+                    '2) the sender blocks on the peer only a handful of times regardless of window size -- '
+                    'accepting B\'s file list, each digest it has to wait for, and the final result -- so '
+                    'round trips no longer tracks `--digest-window` the way it tracked `--batch` in the '
+                    'engine before it. What the window actually governs is how often the sender\'s reader '
+                    'thread falls behind and the main thread has to stop and wait for a digest that has not '
+                    'arrived yet: digest waits, the seconds that costs, and in turn elapsed time and bytes '
+                    'sent.')
               print()
-              print('**This runner has no slow network.** Round trips and bytes are measured here; the time '
-                    'a round trip costs is not, because sender and receiver share a host. Judge `--batch` by '
-                    'the round-trip and byte columns, and leave the wall-clock claim to a run with a real '
-                    'link between two machines. Round trips cannot fall below one per file that has any '
-                    'chunk the old copy also holds, so the gain is bounded by S\'s file count, not by '
-                    '`--batch`.')
+              print('**This runner has no slow network.** Digest waits, waiting seconds, elapsed time and '
+                    'bytes sent are all measured here, but sender and receiver share a host, so the stall '
+                    '`--digest-window` exists to absorb -- a real link\'s round-trip time sitting between '
+                    'the two -- is not exercised. Judge `--digest-window` by these columns as a first '
+                    'signal, and leave the production-fit claim, and this knob\'s default, to a run with a '
+                    'real link between two machines.')
           PY
 
       - uses: actions/upload-artifact@v4
         with:
-          name: batch-sweep-stats
-          path: sweep/stats-batch-*.json
+          name: digest-window-sweep-stats
+          path: sweep/stats-window-*.json
           if-no-files-found: error

@@ -148,5 +148,7 @@ def summary(report: dict) -> str:
     return (f"pgdelta: {counts.get('files', 0)} files, "
             f"{counts.get('chunks_same', 0)} chunks unchanged, {counts.get('chunks_changed', 0)} changed, "
             f"{counts.get('chunks_new', 0)} new; sent {sent:,} bytes{share}; "
-            f"{counts.get('round_trips', 0)} round trips, {counts.get('chunks_asked', 0)} chunks compared; "
+            f"{counts.get('chunks_asked', 0)} chunks compared, {counts.get('copy_runs', 0)} copy runs, "
+            f"{counts.get('chunks_changed', 0) + counts.get('chunks_new', 0)} chunks sent, "
+            f"{counts.get('digest_waits', 0)} digest waits; "
             f"{report['elapsed_seconds']:.2f} s; every file verified")
