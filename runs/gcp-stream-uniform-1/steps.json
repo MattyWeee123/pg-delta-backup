@@ -1,0 +1,110 @@
+{
+ "created": 1795102982.6426258,
+ "host": "15e23a3aba",
+ "config": {
+  "name": "gcp-stream-uniform-1",
+  "where": "gcp",
+  "methods": [
+   "pg_basebackup",
+   "pgdelta"
+  ],
+  "scale": 20,
+  "change": "uniform",
+  "repeats": 1,
+  "chunk_size": 8192,
+  "link": "1gbit",
+  "machine": "n2-standard-4",
+  "disk_type": "pd-balanced",
+  "disk_gb": 50,
+  "region": "us-central1",
+  "zones": [
+   "us-central1-a",
+   "us-central1-b"
+  ],
+  "ttl_minutes": 120,
+  "notes": ""
+ },
+ "dollars_per_hour": 0.4072,
+ "steps": [
+  {
+   "id": "vms",
+   "kind": "vms",
+   "label": "Create the two VMs",
+   "lane": null,
+   "expect": 44.4,
+   "basis": "measured in gcp-stream-1",
+   "started": 1795102982.7564728,
+   "finished": 1795103028.2036073
+  },
+  {
+   "id": "install",
+   "kind": "install",
+   "label": "Install PostgreSQL and the code",
+   "lane": null,
+   "expect": 34.4,
+   "basis": "measured in gcp-stream-1",
+   "started": 1795103028.2302148,
+   "finished": 1795103096.0143096
+  },
+  {
+   "id": "build",
+   "kind": "build",
+   "label": "Build the database",
+   "lane": null,
+   "expect": 6.6,
+   "basis": "measured in gcp-stream-1",
+   "started": 1795103096.0404196,
+   "finished": 1795103102.8893008
+  },
+  {
+   "id": "copy",
+   "kind": "copy",
+   "label": "Take the old copy, then change 1% of rows",
+   "lane": null,
+   "expect": 15.4,
+   "basis": "measured in gcp-stream-1",
+   "started": 1795103103.0049722,
+   "finished": 1795103121.753439
+  },
+  {
+   "id": "lane:pg_basebackup",
+   "kind": "lane:pg_basebackup",
+   "label": "pg_basebackup (copies everything)",
+   "lane": "pg_basebackup",
+   "expect": 14.4,
+   "basis": "rule of thumb",
+   "started": 1795103121.7827973,
+   "finished": 1795103158.1283324
+  },
+  {
+   "id": "lane:pgdelta",
+   "kind": "lane:pgdelta",
+   "label": "pgdelta (sends what differs)",
+   "lane": "pgdelta",
+   "expect": 61.5,
+   "basis": "rule of thumb",
+   "started": 1795103158.1498275,
+   "finished": 1795103208.9540496
+  },
+  {
+   "id": "check",
+   "kind": "check",
+   "label": "Check the refreshed copy matches",
+   "lane": null,
+   "expect": 3.2,
+   "basis": "measured in gcp-stream-1",
+   "started": 1795103208.982589,
+   "finished": 1795103211.9796877
+  },
+  {
+   "id": "delete",
+   "kind": "delete",
+   "label": "Delete the VMs",
+   "lane": null,
+   "expect": 21.4,
+   "basis": "measured in gcp-stream-1",
+   "started": 1795103212.0202518,
+   "finished": 1795103235.3100295
+  }
+ ]
+}

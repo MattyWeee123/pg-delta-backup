@@ -1,0 +1,108 @@
+{
+  "name": "gcp-stream-uniform-1",
+  "title": "pg_basebackup vs pgdelta, scale 20, uniform change (GCP n2-standard-4, link 1gbit)",
+  "created": "2026-11-19 10:43:02",
+  "finished": true,
+  "lanes": [
+    {
+      "id": "pg_basebackup",
+      "label": "pg_basebackup (copies everything)",
+      "events": "events-pg_basebackup.jsonl"
+    },
+    {
+      "id": "pgdelta",
+      "label": "pgdelta (sends what differs)",
+      "events": "events-pgdelta.jsonl"
+    }
+  ],
+  "setup": {
+    "where": "gcp",
+    "scale": 20,
+    "change": "1% of rows, uniform",
+    "repeats": 1,
+    "machine": "n2-standard-4",
+    "disk": "50 GB pd-balanced",
+    "link": "1gbit",
+    "zones": "us-central1-a / us-central1-b"
+  },
+  "config": {
+    "name": "gcp-stream-uniform-1",
+    "where": "gcp",
+    "methods": [
+      "pg_basebackup",
+      "pgdelta"
+    ],
+    "scale": 20,
+    "change": "uniform",
+    "repeats": 1,
+    "chunk_size": 8192,
+    "link": "1gbit",
+    "machine": "n2-standard-4",
+    "disk_type": "pd-balanced",
+    "disk_gb": 50,
+    "region": "us-central1",
+    "zones": [
+      "us-central1-a",
+      "us-central1-b"
+    ],
+    "ttl_minutes": 120,
+    "notes": ""
+  },
+  "estimate": {
+    "minutes": 3.4,
+    "dollars": 0.02,
+    "vcpus": 8,
+    "machine_known": true,
+    "note": "approximate list prices for us-central1; a guide, not billing"
+  },
+  "facts": {
+    "vms": {
+      "source": "pgd-bench-amuniform18c56-src",
+      "destination": "pgd-bench-amuniform18c56-dst",
+      "zones": [
+        "us-central1-a",
+        "us-central1-b"
+      ],
+      "machine": "n2-standard-4",
+      "disk": "50 GB pd-balanced",
+      "image": "debian-13",
+      "deleted": true
+    },
+    "lanes": {
+      "pg_basebackup": {
+        "elapsed": 8.4254,
+        "bytes_sent": 340416512,
+        "total_bytes": 340416512,
+        "ok": true
+      },
+      "pgdelta": {
+        "elapsed": 8.917604,
+        "bytes_sent": 498289390,
+        "total_bytes": 625389095,
+        "round_trips": 3,
+        "chunks_asked": 41174,
+        "copy_runs": 13613,
+        "digest_waits": 1,
+        "chunks_changed": 25474,
+        "chunks_same": 15700,
+        "chunks_new": 35181,
+        "ok": true
+      }
+    },
+    "postgres": "17.12",
+    "rtt_ms": 1.024,
+    "database_bytes": 625305752,
+    "verify": {
+      "source": "2000000|140000",
+      "copy": "2000000|140000",
+      "checked": true,
+      "match": true
+    }
+  },
+  "verify": {
+    "source": "2000000|140000",
+    "copy": "2000000|140000",
+    "checked": true,
+    "match": true
+  }
+}
