@@ -1,0 +1,137 @@
+name: Batch sweep (#36 step 1)
+
+# Measures what `--batch` buys, on a real PostgreSQL cluster, on demand.
+#
+# Why this exists: the sweep that should choose pgdelta's shipped `--batch` default needs
+# PostgreSQL 17 or 18 binaries, which not every contributor's machine has. This runner does.
+# It reports numbers and nothing else: it never publishes a run, opens a pull request, or
+# changes a default. Reading the table and deciding the default stays a person's job.
+#
+# Run it from the Actions tab, or: gh workflow run batch-sweep.yml -f scale=10
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: 'pgbench scale (1 unit is about 15 MB; 10 is ~150 MB and keeps a run short)'
+        default: '10'
+      change:
+        description: 'which rows change on S before the refresh'
+        default: 'hot'
+        type: choice
+        options: [hot, uniform]
+      batches:
+        description: 'space-separated --batch values to sweep'
+        default: '1 16 128 1024'
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install PostgreSQL 17 binaries
+        run: |
+          set -euo pipefail
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/pgdg.gpg
+          echo "deb https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-17
+          # pgbench ships in the contrib package on some releases and in the server package on
+          # others. Install contrib only if the server package did not already provide it.
+          if [ ! -x /usr/lib/postgresql/17/bin/pgbench ]; then
+            sudo apt-get install -y -qq postgresql-contrib-17
+          fi
+
+      - name: Check every binary the demo needs
+        run: |
+          set -euo pipefail
+          PGBIN=/usr/lib/postgresql/17/bin
+          missing=''
+          for b in initdb pg_ctl psql pgbench pg_basebackup postgres; do
+            [ -x "$PGBIN/$b" ] || missing="$missing $b"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::missing from $PGBIN:$missing"
+            echo "Contents of $PGBIN:"; ls -1 "$PGBIN" || true
+            exit 1
+          fi
+          "$PGBIN/postgres" --version
+
+      - name: Sweep
+        env:
+          # Dispatch inputs are untrusted: pass them through the environment rather than
+          # interpolating them into the script, and validate before use.
+          SCALE: ${{ inputs.scale }}
+          CHANGE: ${{ inputs.change }}
+          BATCHES: ${{ inputs.batches }}
+        run: |
+          set -euo pipefail
+          case "$SCALE" in ''|*[!0-9]*) echo "::error::scale must be a whole number"; exit 1;; esac
+          for b in $BATCHES; do
+            case "$b" in ''|*[!0-9]*) echo "::error::--batch values must be whole numbers: $b"; exit 1;; esac
+            [ "$b" -ge 1 ] || { echo "::error::--batch must be at least 1: $b"; exit 1; }
+          done
+
+          export PGBIN=/usr/lib/postgresql/17/bin
+          export PYTHON=python3
+          export LC_ALL=C.UTF-8 LANG=C.UTF-8
+          mkdir -p sweep
+          for b in $BATCHES; do
+            echo "::group::--batch $b"
+            PGDELTA_ARGS="--batch $b" SCALE="$SCALE" CHANGE="$CHANGE" \
+              bash examples/local_demo.sh "sweep/work-$b"
+            cp "sweep/work-$b/pgdelta-stats.json" "sweep/stats-batch-$b.json"
+            rm -rf "sweep/work-$b"
+            echo "::endgroup::"
+          done
+
+      - name: Summarise
+        env:
+          SCALE: ${{ inputs.scale }}
+          CHANGE: ${{ inputs.change }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os, pathlib
+          rows = []
+          for p in sorted(pathlib.Path('sweep').glob('stats-batch-*.json'),
+                          key=lambda q: int(q.stem.rsplit('-', 1)[1])):
+              d = json.loads(p.read_text())
+              c = d['counts']
+              rows.append((d.get('batch'), c.get('round_trips', 0), c.get('chunks_asked', 0),
+                           d['elapsed_seconds'], d['bytes_sent_total'], d['seconds'].get('wait_for_verdict', 0.0)))
+          print(f"## Batch sweep — pgbench scale {os.environ['SCALE']}, {os.environ['CHANGE']} change\n")
+          print('| `--batch` | Round trips | Chunks asked | Elapsed (s) | Waiting (s) | Sent (bytes) |')
+          print('|---:|---:|---:|---:|---:|---:|')
+          for batch, trips, asked, elapsed, sent, wait in rows:
+              print(f'| {batch} | {trips:,} | {asked:,} | {elapsed:.2f} | {wait:.2f} | {sent:,} |')
+          print()
+          if rows:
+              base = next((r for r in rows if r[0] == 1), None)
+              print('`--batch 1` reproduces the stop-and-wait engine this replaced, so it is the baseline '
+                    'the other rows are read against.' if base else
+                    'No `--batch 1` row in this sweep, so there is no stop-and-wait baseline to compare against.')
+              print()
+              print('**This runner has no slow network.** Round trips and bytes are measured here; the time '
+                    'a round trip costs is not, because sender and receiver share a host. Judge `--batch` by '
+                    'the round-trip and byte columns, and leave the wall-clock claim to a run with a real '
+                    'link between two machines. Round trips cannot fall below one per file that has any '
+                    'chunk the old copy also holds, so the gain is bounded by S\'s file count, not by '
+                    '`--batch`.')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: batch-sweep-stats
+          path: sweep/stats-batch-*.json
+          if-no-files-found: error

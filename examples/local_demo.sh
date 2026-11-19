@@ -10,6 +10,8 @@
 #   3. O is started and its rows compared with S's.
 # CHANGE=hot (default) updates 1% of the rows in one contiguous range, so few pages change.
 # CHANGE=uniform updates every 100th row, which touches nearly every page of the table.
+# PGDELTA_ARGS passes extra flags through to pgdelta, e.g. PGDELTA_ARGS="--batch 1"
+#   for the stop-and-wait baseline that batching replaced.
 # Needs PostgreSQL 17 or 18 binaries: PGBIN, else pg_config's bindir, else Homebrew's postgresql@17.
 # Uses TCP on 127.0.0.1 ports 55432 and 55433, and no Unix sockets.
 set -euo pipefail
@@ -51,9 +53,11 @@ t0=$(now)
 echo "1. pg_basebackup copied all of S: $(du -sh "$WORK/full" | cut -f1) in $(seconds "$t0") s"
 stop "$WORK/S"
 
+# PGDELTA_ARGS is deliberately unquoted so it can carry several flags.
+# shellcheck disable=SC2086
 echo "2. pgdelta refreshes B into O:"
 (cd "$REPO" && "$PYTHON" -m pgdelta local --source "$WORK/S" --basis "$WORK/B" --output "$WORK/O" \
-  --stats-json "$WORK/pgdelta-stats.json")
+  --stats-json "$WORK/pgdelta-stats.json" ${PGDELTA_ARGS:-})
 
 start "$WORK/O" 55433
 GOT=$(psql -p 55433 -c 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
