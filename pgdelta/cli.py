@@ -46,7 +46,8 @@ def main(argv=None) -> int:
     local.add_argument('--digest-window', type=positive_int, default=DEFAULT_DIGEST_WINDOW,
                        help='bytes of B\'s undelivered digests the sender holds before it stops '
                             'draining the receiver (default: %(default)s); floored at one '
-                            'BASIS_DIGESTS frame so it cannot starve itself')
+                            'BASIS_DIGESTS frame so the pipeline never collapses into '
+                            'synchronous frame-at-a-time handoff')
     local.add_argument('--stats-json', type=Path, help='write both sides\' statistics here')
     local.add_argument('--pg-controldata', type=Path, help=argparse.SUPPRESS)  # passed by the benchmark harness; unused
     local.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
@@ -58,7 +59,8 @@ def main(argv=None) -> int:
     send.add_argument('--digest-window', type=positive_int, default=DEFAULT_DIGEST_WINDOW,
                       help='bytes of B\'s undelivered digests the sender holds before it stops '
                            'draining the receiver (default: %(default)s); floored at one '
-                           'BASIS_DIGESTS frame so it cannot starve itself')
+                           'BASIS_DIGESTS frame so the pipeline never collapses into '
+                           'synchronous frame-at-a-time handoff')
     send.add_argument('--stats-json', type=Path)
     send.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
 

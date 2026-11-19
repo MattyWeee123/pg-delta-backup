@@ -174,7 +174,10 @@ class DigestWindow(RefreshFixture, unittest.TestCase):
         self.assertEqual(sender.effective_digest_window(64 << 20), 64 << 20)
 
     def test_a_tiny_window_still_completes(self):
-        """Review Focus 5: a window below one frame would admit nothing and deadlock both sides."""
+        """Review Focus 5: a window below one frame starts the reader already over its own
+        limit on the very first frame, collapsing the pipeline into synchronous frame-at-a-time
+        handoff rather than deadlocking outright -- see MIN_DIGEST_WINDOW's comment in
+        sender.py for the mechanism."""
         data = bytearray(os.urandom(300 * CHUNK))
         write(self.b, 'f', bytes(data))
         for i in range(0, 300, 4):
