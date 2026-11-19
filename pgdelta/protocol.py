@@ -138,7 +138,7 @@ def unpack_verdicts(payload: bytes, expected: int) -> list[bool]:
 
 
 def unpack_digest_frame(payload: bytes) -> tuple[int, int, list[bytes]]:
-    """Unpack a BASIS_DIGESTS or CHUNK_COPY_BODY-shaped frame: (file index, first chunk, count) + digests.
+    """Unpack a BASIS_DIGESTS frame: (file index, first chunk, count) + digests.
 
     Validates against the payload's actual length before `count` sizes anything, so a peer-supplied
     count can never drive an allocation before it is checked.
