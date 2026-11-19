@@ -198,6 +198,25 @@ class Streaming(RefreshFixture, unittest.TestCase):
 The deadlock test, which is the one that matters — run it over `local` (a `socketpair`, whose buffers are tens of KB, so it deadlocks sooner) **and** over a real socket, with a timeout so a hang fails instead of hanging the suite:
 
 ```python
+def run_with_timeout(case, refresh, seconds, *extra):
+    """Run `refresh(*extra)` on a thread and fail if it does not finish. A deadlocked engine shows up
+    as a thread that never returns, so the assertion is on the thread, not on an exception."""
+    outcome = {}
+
+    def go():
+        try:
+            outcome['code'] = refresh(*extra)[0]
+        except BaseException as exc:
+            outcome['error'] = exc
+
+    thread = threading.Thread(target=go, daemon=True)
+    thread.start()
+    thread.join(timeout=seconds)
+    case.assertFalse(thread.is_alive(), 'the refresh never finished: both sides are deadlocked')
+    case.assertNotIn('error', outcome, f"refresh raised: {outcome.get('error')!r}")
+    case.assertEqual(outcome['code'], 0)
+
+
 class Deadlock(RefreshFixture, unittest.TestCase):
     """A basis big enough that the digest stream exceeds the socket buffer while the sender is still
     writing page data. A deadlocked engine fails these by timeout, not by assertion, so each runs on
@@ -210,24 +229,13 @@ class Deadlock(RefreshFixture, unittest.TestCase):
             data[c * CHUNK] ^= 0xFF
         write(self.s, 'f', bytes(data))
 
-    def run_with_timeout(self, seconds=120, *extra):
-        outcome = {}
-        def go():
-            try:
-                outcome['code'] = self.refresh(*extra)[0]
-            except BaseException as exc:      # a deadlock shows as a timeout, not an exception
-                outcome['error'] = exc
-        thread = threading.Thread(target=go, daemon=True)
-        thread.start()
-        thread.join(timeout=seconds)
-        self.assertFalse(thread.is_alive(), 'the refresh did not finish: both sides are deadlocked')
-        self.assertNotIn('error', outcome, f"refresh raised: {outcome.get('error')!r}")
-        self.assertEqual(outcome['code'], 0)
+    # run_with_timeout is a MODULE-LEVEL helper in this file, not a method: Task 3's tiny-window
+    # test needs the same thing, and a deadlock can only ever be detected as a timeout.
 
     def test_local_socketpair_completes_with_both_directions_busy(self):
         """`local` is the harsher case: socketpair buffers are tens of KB, not megabytes."""
         self.big_pair()
-        self.run_with_timeout()
+        run_with_timeout(self, self.refresh, 120)
         self.assertEqual(tree_bytes(self.o), tree_bytes(self.s))
 
     def test_a_real_socket_completes_with_both_directions_busy(self):
@@ -322,7 +330,7 @@ git commit -m "Both sides hash at the same time (#36, #18)"
 - [ ] **Step 1: Write the failing tests**
 
 ```python
-class DigestWindow(unittest.TestCase):
+class DigestWindow(RefreshFixture, unittest.TestCase):
     def test_the_window_floors_at_one_whole_frame(self):
         self.assertEqual(sender.MIN_DIGEST_WINDOW, 16384)
         self.assertEqual(sender.effective_digest_window(1), sender.MIN_DIGEST_WINDOW)
@@ -330,7 +338,8 @@ class DigestWindow(unittest.TestCase):
 
     def test_a_tiny_window_still_completes(self):
         """Review Focus 5: a window below one frame would admit nothing and deadlock both sides."""
-        # 300 chunks of basis, --digest-window 1, assert completion within a timeout and O == S
+        # 300 chunks of basis; run_with_timeout(self, self.refresh, 60, '--digest-window', '1')
+        # then assert tree_bytes(self.o) == tree_bytes(self.s)
 
     def test_a_non_positive_window_is_a_bad_argument(self):
         for value in ('0', '-1'):
