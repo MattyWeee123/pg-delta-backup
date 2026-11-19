@@ -32,7 +32,7 @@
 2. **A `BASIS_DIGESTS` frame naming a file B never declared, or a chunk beyond the size ACCEPT declared.** Must raise `ProtocolError` on the sender rather than silently poisoning the table. Test in Task 2.
 3. **A `CHUNK_COPY` run that spans a file boundary, or names a chunk outside B's size or past S's declared size.** Must raise `ProtocolError` on the receiver. Test in Task 2.
 4. **A file B has but whose digests never arrive** (a truncated or lying peer). The sender must fail with a legible error rather than block forever at `COMPLETE`. Test in Task 2.
-5. **`--digest-window` smaller than one `BASIS_DIGESTS` frame.** The reader would refuse to admit any digest, the receiver would block in `send`, and the sender would wait forever — a self-inflicted deadlock. The window must floor at one maximal frame. Test in Task 3.
+5. **`--digest-window` smaller than one `BASIS_DIGESTS` frame.** ~~The reader would refuse to admit any digest … a self-inflicted deadlock.~~ **That premise was wrong, and Task 3 disproved it empirically.** The window is checked *between* frames and `recv` admits a whole frame atomically, so a one-byte window self-drains frame to frame and never deadlocks. The floor still earns its place — it keeps the knob's units meaningful and avoids stop-start on every frame — but it prevents pathological churn, not a hang. Task 3 tests that a tiny window completes; it must not claim to test deadlock prevention.
 
 ---
 
