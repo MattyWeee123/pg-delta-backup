@@ -55,18 +55,31 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
     staging = output.with_name(f'.{output.name}.pgdelta-partial')
 
     hello = json.loads(channel.expect(HELLO))
-    if hello.get('version') != protocol.VERSION:
-        # This check runs before the try/except below (no staging directory exists yet, so
-        # there's nothing there to clean up). Send the ERROR frame here, before raising --
-        # otherwise the peer sees only the connection close, with the real reason stuck on
-        # this side's stderr, no help when the two ends are on different machines.
-        message = f'protocol version {hello.get("version")!r}, expected {protocol.VERSION}'
+
+    def refuse(message: str) -> protocol.ProtocolError:
+        """The error for a HELLO this side will not act on, with the peer told why first.
+
+        These checks run before the try/except below -- no staging directory exists yet, so there
+        is nothing there to clean up. The ERROR frame goes out here, before the raise, or the peer
+        sees only the connection close with the real reason stuck on this side's stderr: no help
+        when the two ends are on different machines.
+        """
         try:
             channel.send_json(protocol.ERROR, {'message': message})
         except OSError:
             pass
-        raise protocol.ProtocolError(message)
+        return protocol.ProtocolError(message)
+
+    if hello.get('version') != protocol.VERSION:
+        raise refuse(f'protocol version {hello.get("version")!r}, expected {protocol.VERSION}')
     chunk_size = int(hello['chunk_size'])
+    # Peer-supplied, and the generator below loops on it: at chunk_size 0, protocol.comparable is
+    # true for every chunk of a non-empty file because the offset it computes never advances, so an
+    # unchecked 0 is a thread spinning out digests for ever on one HELLO field. Checked here, before
+    # ACCEPT and before that thread starts.
+    if not protocol.MIN_CHUNK_SIZE <= chunk_size <= protocol.MAX_CHUNK_SIZE:
+        raise refuse(f'chunk size {chunk_size}, expected between {protocol.MIN_CHUNK_SIZE} '
+                     f'and {protocol.MAX_CHUNK_SIZE} bytes')
     root_mode = int(hello.get('root_mode', 0o700)) & 0o7777  # PostgreSQL refuses a data directory wider than 0750
     hasher = Hasher(bytes.fromhex(hello['key']))
     entries = [Entry.from_json(value) for value in hello['entries']]
@@ -260,14 +273,23 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
         # Stop the generator before writing anything: it owns this direction while it runs, and an
         # ERROR frame interleaved with a digest frame would be unreadable.
         stop.set()
-        _join_while_draining(channel.sock, generator)
+        quiet = True
+        try:
+            _join_while_draining(channel.sock, generator)
+        except BaseException:
+            # Tearing the generator down must not cost the staging directory: socketpair() and
+            # thread creation both fail under exhaustion, which is exactly when the rmtree below
+            # matters most. Leaving the generator unjoined costs nothing -- `stop` is set, it is a
+            # daemon, and its next send fails once the caller closes the socket -- but it may still
+            # be writing, so the ERROR frame is skipped rather than interleaved into a digest frame.
+            quiet = False
         for handles in files.values():
             _close(handles)
         # A generator failure breaks the connection deliberately, so the main loop usually surfaces
         # it as Closed: report the cause rather than the symptom.
         if generator_error and isinstance(exc, protocol.Closed):
             exc = generator_error[0]
-        if not isinstance(exc, (protocol.PeerError, protocol.Closed)):
+        if quiet and not isinstance(exc, (protocol.PeerError, protocol.Closed)):
             try:
                 channel.send_json(protocol.ERROR, {'message': f'receiver failed: {exc}'})
             except OSError:

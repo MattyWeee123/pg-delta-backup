@@ -80,12 +80,15 @@ class DigestFrames(unittest.TestCase):
 
 
 class Streaming(RefreshFixture, unittest.TestCase):
-    def test_no_chunk_is_asked_about(self):
+    def test_the_sender_asks_for_nothing(self):
+        """There is no question frame in the protocol any more, so this asserts the whole set of
+        frame types that leave this side rather than the absence of one retired name -- which,
+        now that the name is gone from protocol.NAMES, could never appear whatever the code did."""
         self.both('base/1/16384', os.urandom(5 * CHUNK))
         code, report = self.refresh()
         self.assertEqual(code, 0)
         self.assertEqual(tree_bytes(self.o), tree_bytes(self.s))
-        self.assertNotIn('CHUNK_HASHES', report['bytes_sent'])
+        self.assertEqual(set(report['bytes_sent']), {'HELLO', 'CHUNK_COPY', 'FILE_DONE', 'COMPLETE'})
         self.assertEqual(report['counts']['chunks_same'], 5)
 
     def test_an_unchanged_file_costs_one_copy_run(self):
@@ -224,10 +227,20 @@ class Deadlock(RefreshFixture, unittest.TestCase):
         generator is blocked writing digests that only that reader thread can take. All four wait on
         each other unless the receiver keeps draining while it shuts its generator down.
 
-        A one-digest window and 2 KiB socket buffers stand in for the 32 GiB of basis it would
+        A one-digest window and tiny socket buffers stand in for the 32 GiB of basis it would
         otherwise take to fill the default window, and the failure lands at the first file's
-        FILE_DONE, by which time the pipeline is in that steady state."""
-        small = 512   # the minimum chunk size, so 1024 digests cover only 512 KiB of basis
+        FILE_DONE, by which time the pipeline is in that steady state.
+
+        The two assertions below the setup are what keep those numbers honest. Sampling the window
+        at the instant of failure would be the direct check, but it is inherently racy -- the main
+        thread drains a frame between stalls -- so what is asserted instead is the configuration
+        that forces the stall: one frame of digests must overflow the window, so the reader has to
+        stop after every frame, and one frame must not fit the socket buffer, so the generator has
+        to block inside a send. Without both, this test would still pass against the bug."""
+        small = protocol.MIN_CHUNK_SIZE   # so one frame of digests covers only 512 KiB of basis
+        window = protocol.DIGEST_SIZE     # exactly one digest
+        buffer_bytes = 2048
+        frame = protocol.DIGESTS_PER_FRAME * protocol.DIGEST_SIZE
         for name, chunks in (('a', 2000), ('b', 4000)):
             write(self.b, name, os.urandom(chunks * small))
             write(self.s, name, os.urandom(chunks * small))   # differs everywhere: both sides stay busy
@@ -238,8 +251,12 @@ class Deadlock(RefreshFixture, unittest.TestCase):
 
         ours, theirs = socket.socketpair()
         for sock in (ours, theirs):
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2048)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2048)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, buffer_bytes)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, buffer_bytes)
+        self.assertGreater(frame, window, 'one frame must overflow the window, or the reader never stalls')
+        for sock in (ours, theirs):   # the kernel may clamp the buffer upwards; it must stay under a frame
+            self.assertLess(sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF), frame,
+                            'a whole frame fits the socket buffer, so the generator never blocks in send')
         outcome = {}
 
         def receive():
@@ -252,7 +269,7 @@ class Deadlock(RefreshFixture, unittest.TestCase):
 
         def send():
             try:
-                outcome['sender'] = run_sender(Channel(ours), self.s, small, None, 16)
+                outcome['sender'] = run_sender(Channel(ours), self.s, small, None, window)
             except BaseException as exc:
                 outcome['sender_error'] = exc
             finally:
@@ -356,6 +373,77 @@ class StreamFailures(unittest.TestCase):
             thread.join(timeout=seconds)
             self.assertFalse(thread.is_alive(), 'run_receiver never finished')
 
+    def drive_hello(self, hello: dict, seconds=30) -> str:
+        """HELLO a receiver with raw fields and return the ERROR message it refuses with, asserting
+        that it finished, that no O appeared and that nothing was left staged. The refusal is read
+        the way a real sender would meet it: as a PeerError where ACCEPT should have been."""
+        root = self.temp_root()
+        basis, output = root / 'B', root / 'O'
+        basis.mkdir()
+        write(basis, 'f', os.urandom(4 * CHUNK))   # a basis the generator would hash, if it started
+        ours, theirs = socket.socketpair()
+        outcome = {}
+
+        def serve():
+            try:
+                outcome['report'] = run_receiver(Channel(theirs), basis, output)
+            except BaseException as exc:
+                outcome['error'] = exc
+            finally:
+                theirs.close()
+
+        thread = threading.Thread(target=serve, name='pgdelta-receiver-test', daemon=True)
+        thread.start()
+        channel = Channel(ours)
+        try:
+            channel.send_json(protocol.HELLO, hello)
+            with self.assertRaises(protocol.PeerError) as caught:
+                channel.expect(protocol.ACCEPT)
+            return str(caught.exception)
+        finally:
+            ours.close()
+            thread.join(timeout=seconds)
+            self.assertFalse(thread.is_alive(), 'run_receiver never finished')
+            self.assertIsInstance(outcome.get('error'), protocol.ProtocolError)
+            self.assertFalse(output.exists())
+            self.assertFalse(any(p.name.endswith('.pgdelta-partial') for p in root.iterdir()))
+
+    def hello_with(self, **overrides) -> dict:
+        entries = [Entry('f', 'file', 0o600, size=4 * CHUNK)]
+        return {'version': protocol.VERSION, 'chunk_size': CHUNK, 'key': new_key().hex(),
+                'root_mode': 0o700, 'entries': [entry.to_json() for entry in entries], **overrides}
+
+    def test_a_digest_withheld_while_later_ones_arrive_is_refused(self):
+        """The one wait in the sender that had no wake-up. A peer that sends chunk 1's digest and
+        withholds chunk 0's, holding the connection open, parked the main thread in take() for
+        ever: no error, no RESULT, and a window filling with digests it cannot reach yet. Digests
+        arriving in the generator's order is the invariant that makes the window safe, so it is
+        checked rather than assumed."""
+        def peer(channel):
+            channel.expect(protocol.HELLO)
+            channel.send_json(protocol.ACCEPT, {'basis_sizes': [[0, 4 * CHUNK]]})
+            channel.send(protocol.BASIS_DIGESTS,
+                         protocol.BASIS_DIGESTS_HEAD.pack(0, 1, 1) + bytes(protocol.DIGEST_SIZE))
+            # and then nothing at all, with this end held open: only the ordering check ends it
+
+        error = self.drive_sender(peer)
+        self.assertIsInstance(error, protocol.ProtocolError)
+        self.assertIn(self.NAME, str(error))
+        self.assertIn('later chunks', str(error))
+
+    def test_a_hello_with_a_zero_chunk_size_is_refused(self):
+        """chunk_size arrives in HELLO, and at 0 protocol.comparable is true for every chunk of a
+        non-empty file at an offset that never advances: an endless digest generator and unbounded
+        memory out of one unvalidated field. Refused before ACCEPT, so that thread never starts."""
+        message = self.drive_hello(self.hello_with(chunk_size=0))
+        self.assertIn('chunk size 0', message)
+        self.assertIn(str(protocol.MIN_CHUNK_SIZE), message)
+
+    def test_a_hello_with_a_chunk_size_past_the_maximum_is_refused(self):
+        message = self.drive_hello(self.hello_with(chunk_size=protocol.MAX_CHUNK_SIZE + 1))
+        self.assertIn(str(protocol.MAX_CHUNK_SIZE + 1), message)
+        self.assertIn(str(protocol.MAX_CHUNK_SIZE), message)
+
     def test_a_dead_peer_raises_instead_of_hanging(self):
         """Review Focus 1 - the failure that would otherwise hang a user's refresh forever."""
         def peer(channel):
@@ -375,7 +463,8 @@ class StreamFailures(unittest.TestCase):
 
         error = self.drive_sender(peer)
         self.assertIsInstance(error, protocol.ProtocolError)
-        self.assertIn('0', str(error))
+        self.assertIn('entry 0', str(error))
+        self.assertIn('never declared', str(error))
 
     def test_a_digest_past_the_declared_basis_size_is_refused(self):
         def peer(channel):

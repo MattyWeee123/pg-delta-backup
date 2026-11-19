@@ -38,6 +38,11 @@ FILE_DONE_BODY = struct.Struct('>IQ16s')
 BASIS_DIGESTS_HEAD = struct.Struct('>IQI')
 CHUNK_COPY_BODY = struct.Struct('>IQI')
 
+# The chunk size both sides agree on, which arrives in HELLO and so is peer-supplied. It lives here
+# rather than in sender.py because the receiver has to check it before it starts hashing B, and must
+# not import the sender to do so.
+MIN_CHUNK_SIZE, MAX_CHUNK_SIZE = 512, 16 << 20
+
 # How many digests the receiver's generator puts in one BASIS_DIGESTS frame.
 DIGESTS_PER_FRAME = 1024
 # The most digests a BASIS_DIGESTS payload can hold without exceeding MAX_PAYLOAD.

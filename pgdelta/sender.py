@@ -30,7 +30,6 @@ from pgdelta.stats import Stats
 from pgdelta.tree import Entry, scan
 
 DEFAULT_CHUNK_SIZE = 8192  # one PostgreSQL page
-MIN_CHUNK_SIZE, MAX_CHUNK_SIZE = 512, 16 << 20
 
 # Bytes of undelivered digests the reader thread will hold before it stops draining the socket, which
 # lets TCP backpressure stall the receiver's generator rather than growing this table without bound.
@@ -107,9 +106,10 @@ class _BasisDigests:
         with self._ready:
             for offset, digest in enumerate(digests):
                 chunk = first_chunk + offset
-                # Only digests the main thread will consume are kept, so the window always drains:
-                # a conforming peer sends no others, and a peer that does cannot stall this side by
-                # filling the window with digests nobody asks for.
+                # Only digests the main thread will consume are kept, so a peer cannot stall this
+                # side by filling the window with digests nobody asks for. That is half of what
+                # keeps the window drainable; take()'s ordering check is the other half, against
+                # digests that will be consumed but not next.
                 if comparable(chunk, self._chunk_size, self._entries[index].size, size):
                     self._digests[(index, chunk)] = digest
                     self._held += len(digest)
@@ -162,6 +162,15 @@ class _BasisDigests:
         """Raise if no digest for this chunk can ever arrive, so a waiter never waits forever.
         Called with the condition held, before every wait."""
         path = self._entries[index].path
+        if self._digests:
+            # The generator emits the comparable chunks in order and this thread consumes exactly
+            # that sequence in order, so whenever a digest is missing the table is provably empty:
+            # nothing at or after this chunk has arrived, and everything before it was popped. A
+            # digest for a later chunk therefore means the peer is not sending in order, and
+            # waiting for this one would let it fill the window with digests this thread cannot
+            # reach yet -- the reader stops draining, and both threads wait for ever.
+            raise protocol.ProtocolError(
+                f'no digest for {path} chunk {chunk}, but digests for later chunks arrived')
         if self._error is not None:
             exc = self._error
             message = f'no basis digest for {path} chunk {chunk}: {exc}'
@@ -182,8 +191,9 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
     Progress is emitted from this thread only: the event log is single-writer, and an interleaved
     write would corrupt the JSON lines `python -m viz` reads."""
     events = events or EventLog(None)
-    if not MIN_CHUNK_SIZE <= chunk_size <= MAX_CHUNK_SIZE:
-        raise ValueError(f'chunk size must be between {MIN_CHUNK_SIZE} and {MAX_CHUNK_SIZE} bytes')
+    if not protocol.MIN_CHUNK_SIZE <= chunk_size <= protocol.MAX_CHUNK_SIZE:
+        raise ValueError(
+            f'chunk size must be between {protocol.MIN_CHUNK_SIZE} and {protocol.MAX_CHUNK_SIZE} bytes')
     if digest_window < 1:
         raise ValueError('digest_window must be at least 1')
     source = Path(source)
