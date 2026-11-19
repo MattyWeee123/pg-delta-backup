@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import socket
 import stat
+import sys
 import threading
 from pathlib import Path
 
@@ -61,6 +62,8 @@ class _BasisDigests:
     order to listen -- which is what keeps streaming in both directions at once from deadlocking.
     That thread stops reading only while the window is full, and a full window means digests are
     sitting here for the main thread to consume, so it is never what the main thread is waiting for.
+    Every frame it admits stores every digest it carries (`_store` refuses the rest), so the window
+    only ever fills with digests the main thread will come and take.
 
     Everything the main thread does wait for -- a digest, the peer's RESULT, or the reader thread's
     death -- wakes it through this one condition, so no wait here can outlive the reader.
@@ -117,19 +120,23 @@ class _BasisDigests:
         if size is None:
             raise protocol.ProtocolError(f'digests for entry {index}, which B never declared a basis for')
         last = first_chunk + len(digests) - 1
-        if last * self._chunk_size >= size:
+        # The run's *end* is what has to be inside what B declared, and `comparable` is the whole of
+        # that test: it is true for exactly the chunks 0..k-1 this side compares, so the last chunk
+        # of an ascending run bounds every chunk before it. A frame that fails it is refused, not
+        # filtered down to the digests this side wants. That is what makes "I was notified and the
+        # table is still empty" impossible: every frame admitted here stores every digest it carries,
+        # so a peer cannot wake a waiting take() with a frame that stores nothing and leaves `_held`
+        # where it was -- which would let it hold this side in that loop for ever while the reader
+        # kept reading. take()'s ordering check is the other half, against digests that will be
+        # consumed but not next.
+        if not comparable(last, self._chunk_size, self._entries[index].size, size):
             raise protocol.ProtocolError(
-                f'chunk {last} of {self._entries[index].path} is outside the {size} bytes B declared')
+                f'chunk {last} of {self._entries[index].path} is outside the chunks this side '
+                f'compares: S holds {self._entries[index].size} bytes and B declared {size}')
         with self._ready:
             for offset, digest in enumerate(digests):
-                chunk = first_chunk + offset
-                # Only digests the main thread will consume are kept, so a peer cannot stall this
-                # side by filling the window with digests nobody asks for. That is half of what
-                # keeps the window drainable; take()'s ordering check is the other half, against
-                # digests that will be consumed but not next.
-                if comparable(chunk, self._chunk_size, self._entries[index].size, size):
-                    self._digests[(index, chunk)] = digest
-                    self._held += len(digest)
+                self._digests[(index, first_chunk + offset)] = digest
+                self._held += len(digest)
             self._ready.notify_all()
 
     def take(self, index: int, chunk: int, stats: Stats) -> bytes:
@@ -160,6 +167,12 @@ class _BasisDigests:
                     raise self._error
                 self._ready.wait()
             return self._result
+
+    def error(self) -> BaseException | None:
+        """What the reader thread died of, if it has died yet. Read by the main thread's failure
+        path, where the peer's own reason has to beat a broken `send` on this side."""
+        with self._ready:
+            return self._error
 
     def stop(self) -> None:
         """Finish the reader thread, from any exit path. It is either already done (it returned on
@@ -213,7 +226,12 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
             f'chunk size must be between {protocol.MIN_CHUNK_SIZE} and {protocol.MAX_CHUNK_SIZE} bytes')
     if digest_window < 1:
         raise ValueError('digest_window must be at least 1')
-    digest_window = effective_digest_window(digest_window)
+    requested_window, digest_window = digest_window, effective_digest_window(digest_window)
+    if digest_window != requested_window:
+        # Said once, out loud: every report of this run carries the floored value, and without this
+        # line nothing would show that it is not the value the caller asked for.
+        print(f'pgdelta: --digest-window {requested_window} is below one BASIS_DIGESTS frame; '
+              f'using {digest_window}', file=sys.stderr, flush=True)
     source = Path(source)
     stats = Stats('sender')
     digests = None
@@ -308,17 +326,32 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
     except (protocol.PeerError, protocol.Closed):
         raise
     except BaseException as exc:
-        try:
-            channel.send_json(protocol.ERROR, {'message': f'sender failed: {exc}'})
-        except OSError:
-            pass
-        raise
+        # If the receiver failed, said why, and its caller closed the socket, this thread's next
+        # `send` breaks and its next `take()` raises the peer's reason -- a race between the two.
+        # The reader thread has that reason either way, so report the cause rather than whichever
+        # symptom won, and say nothing back to a peer that has already reported.
+        reported = digests.error() if digests is not None else None
+        cause = exc
+        if (isinstance(reported, (protocol.PeerError, protocol.ProtocolError))
+                and not isinstance(exc, (protocol.PeerError, protocol.ProtocolError))):
+            cause = reported
+        if not isinstance(reported, protocol.PeerError):
+            try:
+                channel.send_json(protocol.ERROR, {'message': f'sender failed: {cause}'})
+            except OSError:
+                pass
+        if cause is exc:
+            raise
+        raise cause from exc
     finally:
         if digests is not None:
             digests.stop()
     report = stats.report(channel)
     report['ok'] = bool(result.get('ok'))
     report['chunk_size'] = chunk_size
+    # The *effective* window, after flooring: a sweep that reports the value it asked for would
+    # label two runs at MIN_DIGEST_WINDOW with two different windows.
+    report['digest_window'] = digest_window
     report['receiver'] = result.get('stats')
     c = stats.counts
     events.emit('done', ok=report['ok'], elapsed=report['elapsed_seconds'], bytes_read=c['bytes_read'],

@@ -23,7 +23,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pgdelta import protocol, receiver as receiver_module, sender  # noqa: E402
+from pgdelta import cli, protocol, receiver as receiver_module, sender  # noqa: E402
 from pgdelta.hashing import new_key  # noqa: E402
 from pgdelta.protocol import Channel  # noqa: E402
 from pgdelta.receiver import run_receiver  # noqa: E402
@@ -185,6 +185,30 @@ class DigestWindow(RefreshFixture, unittest.TestCase):
         write(self.s, 'f', bytes(data))
         run_with_timeout(self, self.refresh, 60, '--digest-window', '1')
         self.assertEqual(tree_bytes(self.o), tree_bytes(self.s))
+
+    def test_a_floored_window_is_said_out_loud_and_recorded(self):
+        """The window a run really used has to be visible somewhere. The sweep that chooses this
+        knob's default labels each row with the value it asked for, so a floor that nothing reports
+        publishes a table whose independent variable is wrong. cli.main is called directly here
+        because RefreshFixture.refresh swallows stderr, which is where the flooring is said."""
+        self.both('f', os.urandom(2 * CHUNK))
+        said = io.StringIO()
+        with redirect_stderr(said):
+            code = cli.main(['local', '--source', str(self.s), '--basis', str(self.b),
+                             '--output', str(self.o), '--stats-json', str(self.stats),
+                             '--digest-window', '1'])
+        self.assertEqual(code, 0)
+        report = json.loads(self.stats.read_text())
+        self.assertEqual(report['digest_window'], sender.MIN_DIGEST_WINDOW)
+        self.assertIn('--digest-window 1', said.getvalue())
+        self.assertIn(str(sender.MIN_DIGEST_WINDOW), said.getvalue())
+
+    def test_a_window_above_the_floor_is_recorded_as_it_was_given(self):
+        self.both('f', os.urandom(2 * CHUNK))
+        window = 2 * sender.MIN_DIGEST_WINDOW
+        code, report = self.refresh('--digest-window', str(window))
+        self.assertEqual(code, 0)
+        self.assertEqual(report['digest_window'], window)
 
     def test_a_non_positive_window_is_a_bad_argument(self):
         for value in ('0', '-1'):
@@ -458,6 +482,27 @@ class StreamFailures(unittest.TestCase):
         self.assertIsInstance(error, protocol.ProtocolError)
         self.assertIn(self.NAME, str(error))
         self.assertIn('later chunks', str(error))
+
+    def test_a_frame_that_would_store_nothing_is_refused(self):
+        """A frame that passes validation and stores nothing used to be ignored, and ignoring it is
+        a livelock: it notifies the waiting take(), which re-checks, finds the table still empty and
+        waits again, while `_held` never moves so the reader thread never stops reading. A peer
+        could hold this side in that loop for ever while looking perfectly healthy. Refused now, so
+        every admitted frame either stores a digest or is a protocol error."""
+        def peer(channel):
+            channel.expect(protocol.HELLO)
+            # B declares more of this file than S holds, so chunk 4 is past S's end and is not a
+            # chunk this side compares. The bound this replaces tested the run's *start* against
+            # B's declared size, which a frame for chunk 4 passes.
+            channel.send_json(protocol.ACCEPT, {'basis_sizes': [[0, 8 * CHUNK]]})
+            channel.send(protocol.BASIS_DIGESTS,
+                         protocol.BASIS_DIGESTS_HEAD.pack(0, 4, 1) + bytes(protocol.DIGEST_SIZE))
+            # and then nothing at all, with this end held open: only the refusal ends it
+
+        error = self.drive_sender(peer)
+        self.assertIsInstance(error, protocol.ProtocolError)
+        self.assertIn(self.NAME, str(error))
+        self.assertIn('outside', str(error))
 
     def test_a_hello_with_a_zero_chunk_size_is_refused(self):
         """chunk_size arrives in HELLO, and at 0 protocol.comparable is true for every chunk of a

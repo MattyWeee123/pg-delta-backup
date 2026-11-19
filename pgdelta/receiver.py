@@ -155,7 +155,7 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
 
     files = {}  # index -> (output fd, basis fd or None), for the file being written
     done = set()
-    generator = threading.Thread(target=generate, name='pgdelta-basis-digests', daemon=True)
+    generator = threading.Thread(target=generate, name='pgdelta-basis-generator', daemon=True)
     generator.start()
     try:
         if staging.exists():
@@ -286,15 +286,18 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
         for handles in files.values():
             _close(handles)
         # A generator failure breaks the connection deliberately, so the main loop usually surfaces
-        # it as Closed: report the cause rather than the symptom.
+        # it as Closed: report the cause rather than the symptom, with the symptom chained to it.
+        closed = None
         if generator_error and isinstance(exc, protocol.Closed):
-            exc = generator_error[0]
+            closed, exc = exc, generator_error[0]
         if quiet and not isinstance(exc, (protocol.PeerError, protocol.Closed)):
             try:
                 channel.send_json(protocol.ERROR, {'message': f'receiver failed: {exc}'})
             except OSError:
                 pass
         shutil.rmtree(staging, ignore_errors=True)
+        if closed is not None:
+            raise exc from closed
         raise exc
 
 
@@ -308,8 +311,9 @@ def _join_while_draining(sock: socket.socket, thread: threading.Thread) -> None:
     all four wait on each other for ever. Nothing read here is parsed: this runs only where the
     session is over, either at COMPLETE or on the way out with an error.
 
-    The drainer ends on a byte through `waker`, so there is no timeout and no poll anywhere in it,
-    and it never shuts the socket down -- this side still has an ERROR or RESULT frame to write.
+    The drainer ends on a byte through `waker`, so there is no timeout and no poll anywhere in it.
+    It shuts this side's write direction down in one case only -- end of stream, where there is no
+    one left to read an ERROR or a RESULT anyway -- because that is what unblocks the generator.
     """
     waker_read, waker_write = socket.socketpair()
 
@@ -320,7 +324,13 @@ def _join_while_draining(sock: socket.socket, thread: threading.Thread) -> None:
                 if waker_read in ready:
                     return
                 if not sock.recv(READ_BYTES):
-                    return   # the sender is gone; the generator's own send will fail the same way
+                    # End of stream. A peer that closed both directions already fails the
+                    # generator's send, but one that shut down only its write side does not: no FIN
+                    # ever reaches the generator's direction, so it would stay parked in `send` and
+                    # this join would never return. Nobody is left to read an ERROR or a RESULT, so
+                    # shut this side's write direction down and let that send fail.
+                    sock.shutdown(socket.SHUT_WR)
+                    return
         except (OSError, ValueError):
             return   # ValueError: select on a socket a caller closed under us, which it should not
 

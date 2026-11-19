@@ -45,7 +45,7 @@ On a laptop there's no slow network, so the naive pgdelta loses on time: in one 
 
 A lane is a file of JSON lines (see `pgdelta/events.py`):
 - `start`, with `total_bytes`;
-- `progress`, about every 0.1 s, with any of `bytes_read`, `bytes_sent`, `round_trips`, `chunks_same`, `chunks_changed` and `chunks_new`. There is no `chunks_asked`, `copy_runs` or `digest_waits` in the live stream — those are in the final stats only. `chunks_same`/`chunks_changed`/`chunks_new` update as each chunk is compared, so there's no batch-flush lag any more; `round_trips` here no longer scales with chunks at all under the streamed engine (#36 step 2), so it stays a handful for the whole run regardless of database size.
+- `progress`, about every 0.1 s, with any of `bytes_read`, `bytes_sent`, `round_trips`, `chunks_same`, `chunks_changed` and `chunks_new`. There is no `chunks_asked`, `copy_runs` or `digest_waits` in the live stream — those are in the final stats only. `chunks_same`/`chunks_changed`/`chunks_new` update as each chunk is compared, so there's no batch-flush lag any more; `round_trips` here no longer scales with chunks at all under the streamed engine (#36 step 2), so it stays a handful for the whole run regardless of database size. The page draws one dot per `round_trips` increment and labels it as the sender stopping to wait for a digest: nothing is asked for, so a dot is a stall, not a question.
 - optionally `gauges`, with `link_MBps`, `src_read_MBps`, `dst_read_MBps` and `dst_write_MBps`;
 - `done`, with `elapsed`.
 

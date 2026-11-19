@@ -74,7 +74,15 @@ COMPLETE                                   ──▶    sync everything, rename 
 - **seconds:** time spent in `read`, `hash`, `send`, `wait_for_digests`, and on the receiver `read_basis`, `write`, `fsync`, `verify`;
 - **bytes:** sent and received per message type, with `bytes_source_to_dest` and `bytes_dest_to_source` totals (the benchmark harness reads these).
 
-The report also carries `chunk_size`, the setting it ran with.
+The report also carries `chunk_size` and `digest_window`, the settings it ran with. `digest_window` is
+the **effective** value, after the floor at one `BASIS_DIGESTS` frame, so a report always names the
+window the run really used rather than the one it was asked for.
 
 `wait_for_digests` is the cost of stopping and waiting: the round trip plus however long it takes the
 receiver's generator thread to catch up and send that digest.
+
+`round_trips`, `digest_waits` and `wait_for_digests` depend on how the two threads were scheduled —
+they count how often the main thread wanted a digest the reader thread had not delivered yet — so they
+differ from run to run on identical input. `chunks_same`, `chunks_changed`, `chunks_new`,
+`chunks_asked`, `copy_runs` and the bytes sent are decided by what S and B hold, and do not. Comparing
+two settings therefore means several runs each, not one.

@@ -23,6 +23,9 @@ on:
       digest_windows:
         description: 'space-separated --digest-window values (bytes) to sweep'
         default: '65536 1048576 8388608 67108864'
+      repeats:
+        description: 'runs per window. The counters that depend on thread scheduling vary run to run, so each window is reported as a median with its range over these runs'
+        default: '3'
 
 permissions:
   contents: read
@@ -30,7 +33,8 @@ permissions:
 jobs:
   sweep:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # One demo run per window per repeat, so this has to cover `digest_windows` x `repeats` of them.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -75,9 +79,12 @@ jobs:
           SCALE: ${{ inputs.scale }}
           CHANGE: ${{ inputs.change }}
           DIGEST_WINDOWS: ${{ inputs.digest_windows }}
+          REPEATS: ${{ inputs.repeats }}
         run: |
           set -euo pipefail
           case "$SCALE" in ''|*[!0-9]*) echo "::error::scale must be a whole number"; exit 1;; esac
+          case "$REPEATS" in ''|*[!0-9]*) echo "::error::repeats must be a whole number"; exit 1;; esac
+          [ "$REPEATS" -ge 1 ] || { echo "::error::repeats must be at least 1"; exit 1; }
           for w in $DIGEST_WINDOWS; do
             case "$w" in ''|*[!0-9]*) echo "::error::--digest-window values must be whole numbers: $w"; exit 1;; esac
             [ "$w" -ge 1 ] || { echo "::error::--digest-window must be at least 1: $w"; exit 1; }
@@ -87,13 +94,20 @@ jobs:
           export PYTHON=python3
           export LC_ALL=C.UTF-8 LANG=C.UTF-8
           mkdir -p sweep
+          # Every window is run REPEATS times: the counters this sweep reports on are a race
+          # between the sender's two threads, so one run per window cannot tell a difference
+          # between two windows from the spread within one of them.
           for w in $DIGEST_WINDOWS; do
-            echo "::group::--digest-window $w"
-            PGDELTA_ARGS="--digest-window $w" SCALE="$SCALE" CHANGE="$CHANGE" \
-              bash examples/local_demo.sh "sweep/work-$w"
-            cp "sweep/work-$w/pgdelta-stats.json" "sweep/stats-window-$w.json"
-            rm -rf "sweep/work-$w"
-            echo "::endgroup::"
+            r=1
+            while [ "$r" -le "$REPEATS" ]; do
+              echo "::group::--digest-window $w (run $r of $REPEATS)"
+              PGDELTA_ARGS="--digest-window $w" SCALE="$SCALE" CHANGE="$CHANGE" \
+                bash examples/local_demo.sh "sweep/work-$w-$r"
+              cp "sweep/work-$w-$r/pgdelta-stats.json" "sweep/stats-window-$w-run-$r.json"
+              rm -rf "sweep/work-$w-$r"
+              echo "::endgroup::"
+              r=$((r + 1))
+            done
           done
 
       - name: Summarise
@@ -102,22 +116,78 @@ jobs:
           CHANGE: ${{ inputs.change }}
         run: |
           python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
-          import json, os, pathlib
-          rows = []
-          for p in sorted(pathlib.Path('sweep').glob('stats-window-*.json'),
-                          key=lambda q: int(q.stem.rsplit('-', 1)[1])):
-              window = int(p.stem.rsplit('-', 1)[1])
-              d = json.loads(p.read_text())
-              c = d['counts']
-              rows.append((window, c.get('round_trips', 0), c.get('digest_waits', 0),
-                           d['seconds'].get('wait_for_digests', 0.0), d['elapsed_seconds'], d['bytes_sent_total']))
+          import json, os, pathlib, re, statistics
+          runs = {}   # the window asked for -> one stats dict per run of it
+          for path in pathlib.Path('sweep').glob('stats-window-*.json'):
+              named = re.fullmatch(r'stats-window-(\d+)-run-(\d+)', path.stem)
+              if named:
+                  runs.setdefault(int(named.group(1)), []).append(json.loads(path.read_text()))
+
+          def spread(values, fmt):
+              """The median, with the range beside it when the runs disagreed.
+
+              median_low, so every number printed here is a number some run actually produced
+              rather than the average of the two middle ones."""
+              text = fmt(statistics.median_low(values))
+              return text if min(values) == max(values) else f'{text} ({fmt(min(values))}-{fmt(max(values))})'
+
+          whole = lambda v: f'{round(v):,}'
+          secs = lambda v: f'{v:.2f}'
           print(f"## Digest-window sweep — pgbench scale {os.environ['SCALE']}, {os.environ['CHANGE']} change\n")
-          print('| `--digest-window` (bytes) | Round trips | Digest waits | Waiting (s) | Elapsed (s) | Sent (bytes) |')
-          print('|---:|---:|---:|---:|---:|---:|')
-          for window, trips, waits, waiting, elapsed, sent in rows:
-              print(f'| {window:,} | {trips:,} | {waits:,} | {waiting:.2f} | {elapsed:.2f} | {sent:,} |')
+          print('| `--digest-window` asked for | window actually run | runs | Round trips | Digest waits '
+                '| Waiting (s) | Elapsed (s) | Sent (bytes) |')
+          print('|---:|---:|---:|---:|---:|---:|---:|---:|')
+          floored, unknown = [], False
+          for window in sorted(runs):
+              stats = runs[window]
+              # The window each run really used, read from the run's own statistics: the sender
+              # floors anything below one BASIS_DIGESTS frame, so the value asked for on the
+              # command line is not necessarily the value that was measured.
+              effective = sorted({d.get('digest_window') for d in stats}, key=lambda v: (v is None, v))
+              if None in effective:
+                  unknown = True
+                  shown = 'not recorded'
+              else:
+                  shown = ', '.join(f'{value:,}' for value in effective)
+                  if effective != [window]:
+                      floored.append(window)
+                      shown += ' (floored)'
+              counts = [d['counts'] for d in stats]
+              print(f'| {window:,} | {shown} | {len(stats)} '
+                    f'| {spread([c.get("round_trips", 0) for c in counts], whole)} '
+                    f'| {spread([c.get("digest_waits", 0) for c in counts], whole)} '
+                    f'| {spread([d["seconds"].get("wait_for_digests", 0.0) for d in stats], secs)} '
+                    f'| {spread([d["elapsed_seconds"] for d in stats], secs)} '
+                    f'| {spread([d["bytes_sent_total"] for d in stats], whole)} |')
+          if not runs:
+              print('| no statistics files were found | | | | | | | |')
           print()
-          if rows:
+          if floored:
+              print('**Some rows did not run at the window they were dispatched with.** The sender floors '
+                    "`--digest-window` at one `BASIS_DIGESTS` frame, and the \"window actually run\" column "
+                    "is read from each run's own statistics rather than from the value asked for. Rows "
+                    'marked `(floored)` were measured at the floor; two rows showing the same value in '
+                    'that column were measured at the same window, whatever they asked for, so a '
+                    'difference between those two is noise and nothing else.')
+              print()
+          if unknown:
+              print('**One or more rows could not report the window they ran at:** their statistics carry '
+                    'no `digest_window` field, so they came from a build that did not record it. Do not '
+                    'read those rows as measurements of the window named on the left.')
+              print()
+          if runs:
+              print('**Which columns vary on their own.** `copy_runs`, `chunks_same`, `chunks_changed`, '
+                    '`chunks_asked` and the bytes sent are decided entirely by what S and B hold: on one '
+                    'fixed pair of directories they come out the same every time. Round trips, digest '
+                    "waits and the seconds spent waiting do not: they count how often the sender's main "
+                    'thread wanted a digest its reader thread had not delivered yet, which is a race '
+                    'between two threads, so they differ from run to run on identical input. That is why '
+                    'each window is run several times and those columns show a median, with the range in '
+                    'brackets whenever the runs disagreed. A gap between two windows that sits inside '
+                    "either one's own range is not a result. Each run also rebuilds the cluster from "
+                    'scratch, so even the bytes-sent column can move between runs of one window -- '
+                    'that spread is the new cluster, not the window.')
+              print()
               print('**Round trips are not the interesting column here.** In this streamed engine (#36 step '
                     '2) the sender blocks on the peer only a handful of times regardless of window size -- '
                     'accepting B\'s file list, each digest it has to wait for, and the final result -- so '
