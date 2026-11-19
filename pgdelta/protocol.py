@@ -26,15 +26,25 @@ RESULT = 8       # receiver -> sender: JSON {ok, stats}
 ERROR = 9        # either way: JSON {message}
 CHUNK_HASHES = 10  # sender -> receiver: batched file index, first chunk index, count
 VERDICTS = 11      # receiver -> sender: batched bitmap answer
+BASIS_DIGESTS = 12  # receiver -> sender: unasked, file index, first chunk index, count, B's digests
+CHUNK_COPY = 13      # sender -> receiver: file index, first chunk index, count, a run-length copy instruction
 
 NAMES = {HELLO: 'HELLO', ACCEPT: 'ACCEPT',
          CHUNK_DATA: 'CHUNK_DATA', FILE_DONE: 'FILE_DONE', COMPLETE: 'COMPLETE', RESULT: 'RESULT',
-         ERROR: 'ERROR', CHUNK_HASHES: 'CHUNK_HASHES', VERDICTS: 'VERDICTS'}
+         ERROR: 'ERROR', CHUNK_HASHES: 'CHUNK_HASHES', VERDICTS: 'VERDICTS',
+         BASIS_DIGESTS: 'BASIS_DIGESTS', CHUNK_COPY: 'CHUNK_COPY'}
 
 CHUNK_DATA_HEAD = struct.Struct('>IQ')
 FILE_DONE_BODY = struct.Struct('>IQ16s')
 CHUNK_HASHES_HEAD = struct.Struct('>IQI')
 VERDICTS_HEAD = struct.Struct('>I')
+BASIS_DIGESTS_HEAD = struct.Struct('>IQI')
+CHUNK_COPY_BODY = struct.Struct('>IQI')
+
+# How many digests the receiver's generator puts in one BASIS_DIGESTS frame.
+DIGESTS_PER_FRAME = 1024
+# The most digests a BASIS_DIGESTS payload can hold without exceeding MAX_PAYLOAD.
+MAX_DIGESTS_PER_FRAME = (MAX_PAYLOAD - BASIS_DIGESTS_HEAD.size) // DIGEST_SIZE
 
 
 class ProtocolError(Exception):
@@ -125,6 +135,27 @@ def unpack_verdicts(payload: bytes, expected: int) -> list[bool]:
             f'verdicts payload is {len(payload)} bytes, expected {VERDICTS_HEAD.size + bitmap_bytes}')
     bitmap = payload[VERDICTS_HEAD.size:VERDICTS_HEAD.size + bitmap_bytes]
     return [bool((bitmap[i // 8] >> (i % 8)) & 1) for i in range(count)]
+
+
+def unpack_digest_frame(payload: bytes) -> tuple[int, int, list[bytes]]:
+    """Unpack a BASIS_DIGESTS or CHUNK_COPY_BODY-shaped frame: (file index, first chunk, count) + digests.
+
+    Validates against the payload's actual length before `count` sizes anything, so a peer-supplied
+    count can never drive an allocation before it is checked.
+    """
+    if len(payload) < BASIS_DIGESTS_HEAD.size:
+        raise ProtocolError('digest frame payload too short for header')
+    file_index, first_chunk, count = BASIS_DIGESTS_HEAD.unpack(payload[:BASIS_DIGESTS_HEAD.size])
+    if count == 0:
+        raise ProtocolError('digest frame count must be nonzero')
+    if count > MAX_DIGESTS_PER_FRAME:
+        raise ProtocolError(f'digest frame count {count} exceeds the cap of {MAX_DIGESTS_PER_FRAME}')
+    body = payload[BASIS_DIGESTS_HEAD.size:]
+    if len(body) != count * DIGEST_SIZE:
+        raise ProtocolError(
+            f'digest frame body is {len(body)} bytes, expected {count * DIGEST_SIZE} for count {count}')
+    digests = [body[i * DIGEST_SIZE:(i + 1) * DIGEST_SIZE] for i in range(count)]
+    return file_index, first_chunk, digests
 
 
 def tune(sock: socket.socket) -> socket.socket:
