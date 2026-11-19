@@ -263,7 +263,15 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
                 os.rename(staging, output)
                 _fsync_dir(output.parent)
                 report = stats.report(channel)
-                channel.send_json(RESULT, {'ok': True, 'stats': report})
+                try:
+                    channel.send_json(RESULT, {'ok': True, 'stats': report})
+                except OSError:
+                    # O is renamed into place and every file in it is verified, so the refresh is
+                    # finished whether or not this last frame lands. A sender that went away after
+                    # COMPLETE -- or a half-close that had the drainer below shut this direction
+                    # down -- must not turn that into a failed run with no report. The sender sees
+                    # its own end of the connection break and reports that itself.
+                    pass
                 return report
             elif kind == protocol.ERROR:
                 raise protocol.PeerError(json.loads(payload).get('message', 'unknown error'))
@@ -312,8 +320,10 @@ def _join_while_draining(sock: socket.socket, thread: threading.Thread) -> None:
     session is over, either at COMPLETE or on the way out with an error.
 
     The drainer ends on a byte through `waker`, so there is no timeout and no poll anywhere in it.
-    It shuts this side's write direction down in one case only -- end of stream, where there is no
-    one left to read an ERROR or a RESULT anyway -- because that is what unblocks the generator.
+    It shuts this side's write direction down in one case only: end of stream while `thread` is
+    still running, where that shutdown is the only thing that can unblock a generator parked in
+    `send`. Once `thread` has finished there is nothing to unblock, so the direction is left open
+    and a RESULT can still go out to a peer that half-closed and is waiting for one.
     """
     waker_read, waker_write = socket.socketpair()
 
@@ -327,9 +337,12 @@ def _join_while_draining(sock: socket.socket, thread: threading.Thread) -> None:
                     # End of stream. A peer that closed both directions already fails the
                     # generator's send, but one that shut down only its write side does not: no FIN
                     # ever reaches the generator's direction, so it would stay parked in `send` and
-                    # this join would never return. Nobody is left to read an ERROR or a RESULT, so
-                    # shut this side's write direction down and let that send fail.
-                    sock.shutdown(socket.SHUT_WR)
+                    # this join would never return. Shutting this side's write direction down makes
+                    # that send fail -- but it also costs the RESULT this side may still owe, so it
+                    # is done only while there is a generator left to unblock. `is_alive` is false
+                    # only once the thread has finished, so a parked generator is never missed.
+                    if thread.is_alive():
+                        sock.shutdown(socket.SHUT_WR)
                     return
         except (OSError, ValueError):
             return   # ValueError: select on a socket a caller closed under us, which it should not

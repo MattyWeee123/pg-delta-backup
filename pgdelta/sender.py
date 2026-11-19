@@ -62,8 +62,10 @@ class _BasisDigests:
     order to listen -- which is what keeps streaming in both directions at once from deadlocking.
     That thread stops reading only while the window is full, and a full window means digests are
     sitting here for the main thread to consume, so it is never what the main thread is waiting for.
-    Every frame it admits stores every digest it carries (`_store` refuses the rest), so the window
-    only ever fills with digests the main thread will come and take.
+    Every frame it admits adds digests the main thread will come and take: `_store` refuses a frame
+    whose chunks this side does not compare, and refuses a repeat of digests it is already holding.
+    So `_held` only ever counts digests that are going to be taken, and a full window always means
+    there is something there to take.
 
     Everything the main thread does wait for -- a digest, the peer's RESULT, or the reader thread's
     death -- wakes it through this one condition, so no wait here can outlive the reader.
@@ -124,16 +126,29 @@ class _BasisDigests:
         # that test: it is true for exactly the chunks 0..k-1 this side compares, so the last chunk
         # of an ascending run bounds every chunk before it. A frame that fails it is refused, not
         # filtered down to the digests this side wants. That is what makes "I was notified and the
-        # table is still empty" impossible: every frame admitted here stores every digest it carries,
-        # so a peer cannot wake a waiting take() with a frame that stores nothing and leaves `_held`
-        # where it was -- which would let it hold this side in that loop for ever while the reader
-        # kept reading. take()'s ordering check is the other half, against digests that will be
-        # consumed but not next.
+        # table is still empty" impossible: every frame admitted here stores digests this side was
+        # not already holding, so a peer cannot wake a waiting take() with a frame that stores
+        # nothing and leaves `_held` where it was -- which would let it hold this side in that loop
+        # for ever while the reader kept reading. take()'s ordering check is the other half, against
+        # digests that will be consumed but not next.
         if not comparable(last, self._chunk_size, self._entries[index].size, size):
             raise protocol.ProtocolError(
                 f'chunk {last} of {self._entries[index].path} is outside the chunks this side '
                 f'compares: S holds {self._entries[index].size} bytes and B declared {size}')
         with self._ready:
+            # A repeat is refused for the same reason, and it is a different shape of the same
+            # livelock: overwriting a key already held would add to `_held` without adding anything
+            # to take, so a peer that sent every frame twice could walk `_held` up to the window
+            # over a table the main thread has emptied -- the reader parked, nothing to pop, and
+            # nothing left to wake the waiter. The generator sends each digest once, so a second
+            # one is the peer's error. A key stored, popped and stored again is caught by take()'s
+            # ordering check instead: the re-inserted entry leaves the table permanently non-empty.
+            # Checked for the whole frame before any of it is stored, as the bound above is.
+            for offset in range(len(digests)):
+                if (index, first_chunk + offset) in self._digests:
+                    raise protocol.ProtocolError(
+                        f'a second digest for {self._entries[index].path} '
+                        f'chunk {first_chunk + offset}')
             for offset, digest in enumerate(digests):
                 self._digests[(index, first_chunk + offset)] = digest
                 self._held += len(digest)

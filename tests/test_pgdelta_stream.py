@@ -504,6 +504,25 @@ class StreamFailures(unittest.TestCase):
         self.assertIn(self.NAME, str(error))
         self.assertIn('outside', str(error))
 
+    def test_a_repeated_digest_frame_is_refused(self):
+        """A frame can be comparable, be admitted, and still add nothing this side can take: a
+        repeat overwrites the key it already holds while `_held` rises anyway. Enough of those and
+        the reader parks on a full window over a table the main thread has emptied, with nothing
+        left to wake the waiter -- the livelock above again, with `_held` rising instead of staying
+        still. The generator sends each digest once, so a second one is the peer's error."""
+        def peer(channel):
+            channel.expect(protocol.HELLO)
+            channel.send_json(protocol.ACCEPT, {'basis_sizes': [[0, 4 * CHUNK]]})
+            frame = protocol.BASIS_DIGESTS_HEAD.pack(0, 0, 4) + bytes(4 * protocol.DIGEST_SIZE)
+            channel.send(protocol.BASIS_DIGESTS, frame)
+            channel.send(protocol.BASIS_DIGESTS, frame)   # the very same digests, a second time
+            # and then nothing at all, with this end held open: only the refusal ends it
+
+        error = self.drive_sender(peer)
+        self.assertIsInstance(error, protocol.ProtocolError)
+        self.assertIn(self.NAME, str(error))
+        self.assertIn('a second digest', str(error))
+
     def test_a_hello_with_a_zero_chunk_size_is_refused(self):
         """chunk_size arrives in HELLO, and at 0 protocol.comparable is true for every chunk of a
         non-empty file at an offset that never advances: an endless digest generator and unbounded
