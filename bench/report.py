@@ -97,17 +97,31 @@ def write(run_dir: Path, cfg: RunConfig, facts: dict, estimate: dict | None = No
     else:
         lines += [f"**Machine:** this laptop ({facts.get('machine', '?')}, {facts.get('cpus', '?')} CPUs), "
                   f"PostgreSQL {facts.get('postgres', '?')}. No network: judge pgdelta by bytes and correctness here.", '']
-    lines += ['## Results', '', "| Lane | Time | Sent | Of S's files | Round trips | vs pg_basebackup |",
-              '|---|---|---|---|---|---|']
+    lines += ['## Results', '', "| Lane | Time | Sent | Of S's files | Round trips | Chunks asked | vs pg_basebackup |",
+              '|---|---|---|---|---|---|---|']
+    has_round_trips = False
     for lane in lanes:
         r = facts['lanes'].get(lane['id'])
         if not r:
-            lines.append(f"| {lane['label']} | failed | | | | |")
+            lines.append(f"| {lane['label']} | failed | | | | | |")
             continue
         share = f"{100 * r['bytes_sent'] / database:.1f}%" if database else '–'
         ratio = f"{r['elapsed'] / base_mean:.2f}×" if base_mean else '–'
+        round_trips = r.get('round_trips')
+        if round_trips is None:
+            rt_cell, ca_cell = '–', '–'
+        else:
+            has_round_trips = True
+            rt_cell = str(round_trips)
+            chunks_asked = r.get('chunks_asked')
+            ca_cell = '–' if chunks_asked is None else str(chunks_asked)
         lines.append(f"| {lane['label']} | {r['elapsed']:.2f} s | {fmt_bytes(r['bytes_sent'])} | {share} | "
-                     f"{r.get('round_trips', '–') if r.get('round_trips') is not None else '–'} | {ratio} |")
+                     f"{rt_cell} | {ca_cell} | {ratio} |")
+    if has_round_trips:
+        lines += ['', "Round trips counts `CHUNK_HASHES`/`VERDICTS` exchanges, each covering up to `--batch` "
+                  "chunks; chunks asked is how many chunks those exchanges covered. A run recorded before "
+                  "batched digests (issue #36) has no chunks-asked count — there, round trips counted chunks "
+                  "directly, one per round trip, so the two columns meant the same thing."]
     verify = facts.get('verify', {})
     if base:
         lines += ['', "`pg_basebackup` skips old WAL and temporary files, so it sends less than S's whole directory."]

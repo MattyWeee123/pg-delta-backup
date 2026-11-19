@@ -29,11 +29,13 @@ pgdelta: 998 files, 67471 chunks unchanged, 438 changed, 384 new; sent 9,089,083
    MATCH
 ```
 
+That trace predates batched digests (#36): `round trips` there is a per-chunk count from the stop-and-wait engine, what `--batch 1` now reproduces, and at today's default it falls to one round trip per batch — at most one per file, so the fall is bounded by S's file count, not by `--batch`.
+
 `CHANGE=uniform` updates every 100th row instead, which touches nearly every page. A laptop has no slow network, so judge pgdelta here by the bytes it sends and by the copy being right, not by time. Time is what the benchmarks on Google Cloud measure.
 
 ## How the naive version works
 
-For every 8 KiB chunk of every file, the sender hashes its chunk and asks the receiver "is yours the same?". It waits for the answer, then sends the chunk only if it differs. One thread, one TCP connection, one round trip per chunk. The receiver builds the new copy beside the old one, verifies every file against the source's digest, and publishes it with one rename. See [pgdelta/README.md](pgdelta/README.md).
+For each file, the sender accumulates up to `--batch` 8 KiB chunks at a time, hashes them, and asks the receiver "are any of these different?" in one message. It waits for one bitmap answer covering the whole batch, then sends only the chunks that differ. One thread, one TCP connection, one round trip per batch, never spanning two files. The receiver builds the new copy beside the old one, verifies every file against the source's digest, and publishes it with one rename. See [pgdelta/README.md](pgdelta/README.md).
 
 It is slow on purpose: every wait in it is a step on the roadmap.
 

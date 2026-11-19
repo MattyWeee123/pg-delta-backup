@@ -1,13 +1,12 @@
-"""The source side (S): walk S, and for each chunk ask the receiver whether B already has it.
+"""The source side (S): walk S, and ask the receiver about a batch of chunks at a time.
 
-Naive on purpose ("stop and wait", the version the team's mentor sketched on October 30):
-- one thread does everything, in order;
-- for each chunk of each file, it hashes the chunk, sends the hash, and waits for the receiver's
-  verdict before it does anything else;
-- if the verdict is "different", it sends the chunk.
+One thread does everything, in order. For each file, chunks that B might already have are accumulated
+and asked about together, as one CHUNK_HASHES message; the receiver answers with one VERDICTS bitmap,
+and only the chunks that differ get sent. A chunk B cannot have (a new file, or past B's end) is sent
+unasked, after the pending batch is flushed so chunk indices stay ascending on the wire.
 
-While it waits, nothing else happens on this side, and while the receiver reads and hashes B's chunk,
-the network is idle. The roadmap issues remove these waits one at a time.
+While this side waits for a batch's verdicts, nothing else happens here, and while the receiver reads
+and hashes B's chunks, the network is idle. The roadmap issues remove these waits one at a time.
 """
 from __future__ import annotations
 
@@ -17,23 +16,45 @@ from pathlib import Path
 
 from pgdelta import protocol
 from pgdelta.hashing import Hasher, new_key
-from pgdelta.protocol import (CHUNK_DATA, CHUNK_DATA_HEAD, CHUNK_HASH, CHUNK_HASH_BODY, COMPLETE, FILE_DONE,
-                              FILE_DONE_BODY, HELLO, RESULT, SAME, VERDICT, VERDICT_BODY, Channel)
+from pgdelta.protocol import (CHUNK_DATA, CHUNK_DATA_HEAD, CHUNK_HASHES, CHUNK_HASHES_HEAD, COMPLETE, FILE_DONE,
+                              FILE_DONE_BODY, HELLO, RESULT, VERDICTS, Channel, unpack_verdicts)
 from pgdelta.events import EventLog
 from pgdelta.stats import Stats
 from pgdelta.tree import scan
 
 DEFAULT_CHUNK_SIZE = 8192  # one PostgreSQL page
 MIN_CHUNK_SIZE, MAX_CHUNK_SIZE = 512, 16 << 20
+DEFAULT_BATCH = 128
+DEFAULT_BATCH_BYTES = 32 << 20
+
+# A CHUNK_HASHES frame holds one header plus `count` digests; capping the chunk count at what fits
+# in MAX_PAYLOAD keeps an oversized --batch-bytes from building a frame Channel.send will refuse.
+_MAX_BATCH_FOR_PAYLOAD = (protocol.MAX_PAYLOAD - CHUNK_HASHES_HEAD.size) // protocol.DIGEST_SIZE
 
 
-def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_SIZE, events: EventLog | None = None) -> dict:
+def effective_batch(batch: int, batch_bytes: int, chunk_size: int) -> int:
+    """How many chunks to accumulate before asking: the smallest of the count cap, the byte cap
+    (the accumulator holds each chunk's data, so `batch_bytes` bounds memory), and the payload cap
+    (a CHUNK_HASHES frame of that many digests must still fit under protocol.MAX_PAYLOAD). Never zero."""
+    return max(1, min(batch, batch_bytes // chunk_size, _MAX_BATCH_FOR_PAYLOAD))
+
+
+def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_SIZE, events: EventLog | None = None,
+               batch: int = DEFAULT_BATCH, batch_bytes: int = DEFAULT_BATCH_BYTES) -> dict:
     """Send S to the receiver at the other end of `channel`. Returns this side's report, with the receiver's.
 
+    `batch` chunks are asked about per CHUNK_HASHES/VERDICTS round trip, at most (never spanning files),
+    further capped by `batch_bytes` (the accumulator's memory bound, since it holds each chunk's data)
+    and by what fits in one CHUNK_HASHES frame; see `effective_batch`.
     `events`, if given, gets a start event, progress about every 0.1 s, and a done event (pgdelta.events)."""
     events = events or EventLog(None)
     if not MIN_CHUNK_SIZE <= chunk_size <= MAX_CHUNK_SIZE:
         raise ValueError(f'chunk size must be between {MIN_CHUNK_SIZE} and {MAX_CHUNK_SIZE} bytes')
+    if batch < 1:
+        raise ValueError('batch must be at least 1')
+    if batch_bytes < 1:
+        raise ValueError('batch_bytes must be at least 1')
+    batch = effective_batch(batch, batch_bytes, chunk_size)
     source = Path(source)
     stats = Stats('sender')
     try:
@@ -62,6 +83,30 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
             basis_size = basis_sizes.get(index)  # None: B has no such file
             whole = hasher.file()
             offset = chunk = 0
+            asking = []  # (chunk index, digest, data) for this file, accumulated but not yet asked about
+
+            def flush() -> None:
+                # Closes over `index` and `asking`, both bound fresh each time around the outer
+                # `for` loop; every call to flush() below happens within that same iteration, so
+                # there's no late-binding hazard (the closure never outlives the file it was made for).
+                if not asking:
+                    return
+                head = CHUNK_HASHES_HEAD.pack(index, asking[0][0], len(asking))
+                with stats.timed('send'):
+                    channel.send(CHUNK_HASHES, head + b''.join(digest for _, digest, _ in asking))
+                with stats.timed('wait_for_verdict'):
+                    differs = unpack_verdicts(channel.expect(VERDICTS), len(asking))
+                stats.counts['round_trips'] += 1
+                stats.counts['chunks_asked'] += len(asking)
+                for (c_index, _, c_data), differed in zip(asking, differs):
+                    if differed:
+                        stats.counts['chunks_changed'] += 1
+                        with stats.timed('send'):
+                            channel.send(CHUNK_DATA, CHUNK_DATA_HEAD.pack(index, c_index) + c_data)
+                    else:
+                        stats.counts['chunks_same'] += 1
+                asking.clear()
+
             with open(source / entry.path, 'rb') as f:
                 while offset < entry.size:
                     want = min(chunk_size, entry.size - offset)
@@ -72,22 +117,20 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
                     whole.update(data)
                     stats.counts['bytes_read'] += want
                     if basis_size is not None and offset + want <= basis_size:
-                        # B has this whole range: ask whether it's the same, and wait for the answer.
+                        # B has this whole range: accumulate the question, asking once the batch is full.
+                        # `offset + want` only increases within a file and `basis_size` is fixed, so this
+                        # predicate can go true -> false at most once per file, never back -- which is why
+                        # `asking` is always a contiguous run of chunk indices. The receiver depends on
+                        # that: it pairs each digest with `first_chunk + i` rather than carrying indices.
                         with stats.timed('hash'):
                             digest = hasher.chunk(data)
-                        with stats.timed('send'):
-                            channel.send(CHUNK_HASH, CHUNK_HASH_BODY.pack(index, chunk, digest))
-                        with stats.timed('wait_for_verdict'):
-                            (verdict,) = VERDICT_BODY.unpack(channel.expect(VERDICT))
-                        stats.counts['round_trips'] += 1
-                        if verdict == SAME:
-                            stats.counts['chunks_same'] += 1
-                        else:
-                            stats.counts['chunks_changed'] += 1
-                            with stats.timed('send'):
-                                channel.send(CHUNK_DATA, CHUNK_DATA_HEAD.pack(index, chunk) + data)
+                        asking.append((chunk, digest, data))
+                        if len(asking) >= batch:
+                            flush()
                     else:
-                        # B lacks this range (a new file, or past B's end): nothing to compare, send it.
+                        # B lacks this range (a new file, or past B's end): flush first so chunk indices
+                        # on the wire stay ascending, then send it; nothing to compare.
+                        flush()
                         stats.counts['chunks_new'] += 1
                         with stats.timed('send'):
                             channel.send(CHUNK_DATA, CHUNK_DATA_HEAD.pack(index, chunk) + data)
@@ -97,6 +140,7 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
                         progress(entry.path)
                 if f.read(1):
                     raise RuntimeError(f'{entry.path} grew while it was read; S must not change')
+            flush()
             with stats.timed('send'):
                 channel.send(FILE_DONE, FILE_DONE_BODY.pack(index, entry.size, whole.digest()))
 
@@ -113,6 +157,7 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
     report = stats.report(channel)
     report['ok'] = bool(result.get('ok'))
     report['chunk_size'] = chunk_size
+    report['batch'] = batch
     report['receiver'] = result.get('stats')
     c = stats.counts
     events.emit('done', ok=report['ok'], elapsed=report['elapsed_seconds'], bytes_read=c['bytes_read'],

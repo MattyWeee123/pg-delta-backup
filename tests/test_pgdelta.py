@@ -45,7 +45,10 @@ def tree_bytes(root: Path) -> dict:
     return out
 
 
-class Refresh(unittest.TestCase):
+class RefreshFixture:
+    """Shared setup for tests that drive `cli.main(['local', ...])` end to end: S, B, O, and --stats-json.
+
+    No test methods here, so importing this into another test module doesn't re-run these as tests."""
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -66,6 +69,8 @@ class Refresh(unittest.TestCase):
         write(self.s, rel, data)
         write(self.b, rel, data)
 
+
+class Refresh(RefreshFixture, unittest.TestCase):
     def test_identical_copies_send_no_chunk(self):
         self.both('base/1/16384', os.urandom(5 * CHUNK))
         code, report = self.refresh()
@@ -74,7 +79,8 @@ class Refresh(unittest.TestCase):
         self.assertEqual(report['counts']['chunks_same'], 5)
         self.assertNotIn('chunks_changed', report['counts'])
         self.assertNotIn('CHUNK_DATA', report['bytes_sent'])
-        self.assertEqual(report['counts']['round_trips'], 5)
+        self.assertEqual(report['counts']['chunks_asked'], 5)
+        self.assertEqual(report['counts']['round_trips'], 1)
         self.assertEqual(report['bytes_source_to_dest']['total'], report['bytes_sent_total'])  # read by benchmarks/
 
     def test_one_changed_page_is_the_only_chunk_sent(self):
@@ -211,12 +217,12 @@ class Framing(unittest.TestCase):
         a, b = socket.socketpair()
         with a, b:
             left, right = Channel(a), Channel(b)
-            left.send(protocol.VERDICT, b'\x01')
+            left.send(protocol.CHUNK_DATA, b'\x01')
             left.send_json(protocol.HELLO, {'k': 1})
-            self.assertEqual(right.recv(), (protocol.VERDICT, b'\x01'))
+            self.assertEqual(right.recv(), (protocol.CHUNK_DATA, b'\x01'))
             self.assertEqual(json.loads(right.expect(protocol.HELLO)), {'k': 1})
-            self.assertEqual(left.sent['VERDICT'], protocol.HEADER.size + 1)
-            self.assertEqual(right.received['VERDICT'], protocol.HEADER.size + 1)
+            self.assertEqual(left.sent['CHUNK_DATA'], protocol.HEADER.size + 1)
+            self.assertEqual(right.received['CHUNK_DATA'], protocol.HEADER.size + 1)
 
     def test_an_error_frame_raises(self):
         a, b = socket.socketpair()

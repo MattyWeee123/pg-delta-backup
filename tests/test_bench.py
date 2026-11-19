@@ -108,6 +108,9 @@ FACTS = {'database_bytes': 750_000_000, 'postgres': '17.6', 'rtt_ms': 0.3,
 
 class Report(unittest.TestCase):
     def test_report_and_charts(self):
+        # FACTS' pgdelta lane has round_trips but no chunks_asked: a run recorded before batched
+        # digests (#36), when round_trips still counted chunks one-for-one. It must still render,
+        # without claiming a chunks-asked count it never measured.
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
             cfg = config.load({'where': 'gcp', 'name': 'r1'}, preset='quick')
@@ -115,10 +118,25 @@ class Report(unittest.TestCase):
                        'dst_write_MBps': 90} for t in range(10)]
             (run_dir / 'events-pgdelta.jsonl').write_text(''.join(json.dumps(g) + '\n' for g in gauges))
             markdown = report.write(run_dir, cfg, FACTS, cost.estimate(cfg))
-            self.assertIn('| pgdelta (sends what differs) | 25.00 s | 9.0 MB | 1.2% | 90000 | 2.50× |', markdown)
+            self.assertIn('| pgdelta (sends what differs) | 25.00 s | 9.0 MB | 1.2% | 90000 | – | 2.50× |', markdown)
             self.assertIn('match the source', markdown)
             self.assertTrue((run_dir / 'charts' / 'times.svg').read_text().startswith('<svg'))
             self.assertIn('polyline', (run_dir / 'charts' / 'pgdelta-timeline.svg').read_text())
+
+    def test_batched_run_shows_chunks_asked_distinctly_from_round_trips(self):
+        # A run from after #36: round_trips now counts batches, chunks_asked carries the old,
+        # per-chunk meaning. The table must show both, so the two are never mistaken for each other.
+        facts = {**FACTS, 'lanes': {**FACTS['lanes'],
+                 'pgdelta': {**FACTS['lanes']['pgdelta'], 'round_trips': 700, 'chunks_asked': 89_700}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            cfg = config.load({'where': 'gcp', 'name': 'r2'}, preset='quick')
+            markdown = report.write(run_dir, cfg, facts, None)
+            self.assertIn('| pgdelta (sends what differs) | 25.00 s | 9.0 MB | 1.2% | 700 | 89700 | 2.50× |', markdown)
+            # pg_basebackup has no round-trip concept at all; both columns stay a dash.
+            self.assertIn('| pg_basebackup (copies everything) | 10.00 s | 700.0 MB | 93.3% | – | – | 1.00× |',
+                          markdown)
+            self.assertIn('chunks asked', markdown.lower())
 
 
 class Scrub(unittest.TestCase):

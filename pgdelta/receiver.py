@@ -4,8 +4,8 @@ B is only ever read. O is built in a staging directory next to it and appears, b
 after every file is written, synced and verified against S's whole-file digest. Any failure removes
 the staging directory, so O either appears complete and verified, or not at all.
 
-Naive on purpose: it answers one chunk question at a time, reading and hashing B's chunk only when
-asked, and verifies each file by reading it back from disk after writing it.
+Naive on purpose: it answers each batch of chunk questions with one bitmap reply, reading and hashing
+B's chunks only when asked, and verifies each file by reading it back from disk after writing it.
 """
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ from pathlib import Path
 
 from pgdelta import protocol
 from pgdelta.hashing import Hasher
-from pgdelta.protocol import (CHUNK_DATA, CHUNK_DATA_HEAD, CHUNK_HASH, CHUNK_HASH_BODY, COMPLETE, DIFFERENT,
-                              FILE_DONE, FILE_DONE_BODY, HELLO, RESULT, SAME, VERDICT, VERDICT_BODY, Channel)
+from pgdelta.protocol import (CHUNK_DATA, CHUNK_DATA_HEAD, CHUNK_HASHES, CHUNK_HASHES_HEAD, COMPLETE, FILE_DONE,
+                              FILE_DONE_BODY, HELLO, RESULT, VERDICTS, Channel, pack_verdicts)
 from pgdelta.stats import Stats
 from pgdelta.tree import Entry
 
@@ -41,7 +41,16 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
 
     hello = json.loads(channel.expect(HELLO))
     if hello.get('version') != protocol.VERSION:
-        raise protocol.ProtocolError(f'protocol version {hello.get("version")!r}, expected {protocol.VERSION}')
+        # This check runs before the try/except below (no staging directory exists yet, so
+        # there's nothing there to clean up). Send the ERROR frame here, before raising --
+        # otherwise the peer sees only the connection close, with the real reason stuck on
+        # this side's stderr, no help when the two ends are on different machines.
+        message = f'protocol version {hello.get("version")!r}, expected {protocol.VERSION}'
+        try:
+            channel.send_json(protocol.ERROR, {'message': message})
+        except OSError:
+            pass
+        raise protocol.ProtocolError(message)
     chunk_size = int(hello['chunk_size'])
     root_mode = int(hello.get('root_mode', 0o700)) & 0o7777  # PostgreSQL refuses a data directory wider than 0750
     hasher = Hasher(bytes.fromhex(hello['key']))
@@ -57,7 +66,7 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
                 continue
             if stat.S_ISREG(info.st_mode):
                 basis_sizes.append([index, info.st_size])
-    has_basis = {index for index, _ in basis_sizes}
+    basis_size = {index: size for index, size in basis_sizes}  # also tells has_basis: its keys
     channel.send_json(protocol.ACCEPT, {'basis_sizes': basis_sizes})
 
     files = {}  # index -> (output fd, basis fd or None), for the file being written
@@ -80,7 +89,7 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
                 for other in list(files):  # files arrive in order: the previous one is finished
                     _close(files.pop(other))
                 out = os.open(staging / entries[index].path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600)
-                base = os.open(basis / entries[index].path, os.O_RDONLY) if index in has_basis else None
+                base = os.open(basis / entries[index].path, os.O_RDONLY) if index in basis_size else None
                 files[index] = (out, base)
             return files[index]
 
@@ -93,22 +102,38 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
 
         while True:
             kind, payload = channel.recv()
-            if kind == CHUNK_HASH:
-                index, chunk, digest = CHUNK_HASH_BODY.unpack(payload)
+            if kind == CHUNK_HASHES:
+                if len(payload) < CHUNK_HASHES_HEAD.size:
+                    raise protocol.ProtocolError('CHUNK_HASHES payload too short for header')
+                index, first_chunk, count = CHUNK_HASHES_HEAD.unpack_from(payload)
+                digests = payload[CHUNK_HASHES_HEAD.size:]
+                # count is peer-supplied: check it against the frame's actual length before using it
+                # to size anything.
+                if count == 0 or len(digests) != count * protocol.DIGEST_SIZE:
+                    raise protocol.ProtocolError(
+                        f'CHUNK_HASHES count {count} does not match its {len(digests)}-byte body')
                 out, base = open_file(index)
                 if base is None:
                     raise protocol.ProtocolError(f'asked about {entries[index].path}, which B lacks')
-                offset, length = span(index, chunk)
-                with stats.timed('read_basis'):
-                    data = os.pread(base, length, offset)
-                with stats.timed('hash'):
-                    same = len(data) == length and hasher.chunk(data) == digest
-                if same:
-                    with stats.timed('write'):
-                        os.pwrite(out, data, offset)
-                    stats.counts['chunks_same'] += 1
+                differs = []
+                for i in range(count):
+                    chunk = first_chunk + i
+                    digest = digests[i * protocol.DIGEST_SIZE:(i + 1) * protocol.DIGEST_SIZE]
+                    offset, length = span(index, chunk)
+                    if offset + length > basis_size[index]:
+                        raise protocol.ProtocolError(
+                            f"chunk {chunk} of {entries[index].path} is outside B's size")
+                    with stats.timed('read_basis'):
+                        data = os.pread(base, length, offset)
+                    with stats.timed('hash'):
+                        same = len(data) == length and hasher.chunk(data) == digest
+                    if same:
+                        with stats.timed('write'):
+                            os.pwrite(out, data, offset)
+                        stats.counts['chunks_same'] += 1
+                    differs.append(not same)
                 with stats.timed('send'):
-                    channel.send(VERDICT, VERDICT_BODY.pack(SAME if same else DIFFERENT))
+                    channel.send(VERDICTS, pack_verdicts(differs))
             elif kind == CHUNK_DATA:
                 index, chunk = CHUNK_DATA_HEAD.unpack_from(payload)
                 data = payload[CHUNK_DATA_HEAD.size:]

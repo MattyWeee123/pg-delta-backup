@@ -10,31 +10,31 @@ import socket
 import struct
 from collections import Counter
 
-VERSION = 1
+from pgdelta.hashing import DIGEST_SIZE
+
+VERSION = 2
 HEADER = struct.Struct('>IB')
 MAX_PAYLOAD = 64 << 20
 
-# Message types, in the order a session uses them.
+# Message types, in the order a session uses them. 3 and 4 are retired (the per-chunk CHUNK_HASH/VERDICT).
 HELLO = 1        # sender -> receiver: JSON {version, chunk_size, key, entries}
 ACCEPT = 2       # receiver -> sender: JSON {basis_sizes: [[file index, size], ...]}
-CHUNK_HASH = 3   # sender -> receiver: file index, chunk index, digest of S's chunk
-VERDICT = 4      # receiver -> sender: 0 = same as B's chunk, 1 = different
 CHUNK_DATA = 5   # sender -> receiver: file index, chunk index, the chunk's bytes
 FILE_DONE = 6    # sender -> receiver: file index, size, digest of S's whole file
 COMPLETE = 7     # sender -> receiver: every file has been sent
 RESULT = 8       # receiver -> sender: JSON {ok, stats}
 ERROR = 9        # either way: JSON {message}
+CHUNK_HASHES = 10  # sender -> receiver: batched file index, first chunk index, count
+VERDICTS = 11      # receiver -> sender: batched bitmap answer
 
-NAMES = {HELLO: 'HELLO', ACCEPT: 'ACCEPT', CHUNK_HASH: 'CHUNK_HASH', VERDICT: 'VERDICT',
+NAMES = {HELLO: 'HELLO', ACCEPT: 'ACCEPT',
          CHUNK_DATA: 'CHUNK_DATA', FILE_DONE: 'FILE_DONE', COMPLETE: 'COMPLETE', RESULT: 'RESULT',
-         ERROR: 'ERROR'}
+         ERROR: 'ERROR', CHUNK_HASHES: 'CHUNK_HASHES', VERDICTS: 'VERDICTS'}
 
-SAME, DIFFERENT = 0, 1
-
-CHUNK_HASH_BODY = struct.Struct('>IQ16s')
-VERDICT_BODY = struct.Struct('>B')
 CHUNK_DATA_HEAD = struct.Struct('>IQ')
 FILE_DONE_BODY = struct.Struct('>IQ16s')
+CHUNK_HASHES_HEAD = struct.Struct('>IQI')
+VERDICTS_HEAD = struct.Struct('>I')
 
 
 class ProtocolError(Exception):
@@ -92,6 +92,39 @@ class Channel:
             parts.append(part)
             left -= len(part)
         return b''.join(parts)
+
+
+def pack_verdicts(differs: list[bool]) -> bytes:
+    """Pack a list of boolean verdicts into a bitmap (LSB-first within each byte).
+
+    Returns: header (count as big-endian 4-byte int) + bitmap bytes.
+    """
+    count = len(differs)
+    bitmap = bytearray((count + 7) // 8)
+    for i, flag in enumerate(differs):
+        if flag:
+            bitmap[i // 8] |= 1 << (i % 8)
+    return VERDICTS_HEAD.pack(count) + bytes(bitmap)
+
+
+def unpack_verdicts(payload: bytes, expected: int) -> list[bool]:
+    """Unpack a bitmap into a list of boolean verdicts.
+
+    Raises ProtocolError if the echoed count differs from expected
+    or if the bitmap length is incorrect.
+    """
+    if len(payload) < VERDICTS_HEAD.size:
+        raise ProtocolError('verdicts payload too short for header')
+    count, = VERDICTS_HEAD.unpack(payload[:VERDICTS_HEAD.size])
+    if count != expected:
+        raise ProtocolError(f'verdicts count mismatch: got {count}, expected {expected}')
+    # expected is trusted (the caller's own batch size), so this size is safe to use for slicing.
+    bitmap_bytes = (count + 7) // 8
+    if len(payload) != VERDICTS_HEAD.size + bitmap_bytes:
+        raise ProtocolError(
+            f'verdicts payload is {len(payload)} bytes, expected {VERDICTS_HEAD.size + bitmap_bytes}')
+    bitmap = payload[VERDICTS_HEAD.size:VERDICTS_HEAD.size + bitmap_bytes]
+    return [bool((bitmap[i // 8] >> (i % 8)) & 1) for i in range(count)]
 
 
 def tune(sock: socket.socket) -> socket.socket:
