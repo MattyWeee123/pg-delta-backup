@@ -317,7 +317,7 @@ git commit -m "Both sides hash at the same time (#36, #18)"
 
 ---
 
-### Task 3: `--digest-window`, and the floor that stops it deadlocking
+### Task 3: `--digest-window`, and the floor that keeps it out of frame-at-a-time churn
 
 **Files:**
 - Modify: `pgdelta/cli.py`, `pgdelta/sender.py`
@@ -337,7 +337,9 @@ class DigestWindow(RefreshFixture, unittest.TestCase):
         self.assertEqual(sender.effective_digest_window(64 << 20), 64 << 20)
 
     def test_a_tiny_window_still_completes(self):
-        """Review Focus 5: a window below one frame would admit nothing and deadlock both sides."""
+        """Review Focus 5: a window below one frame starts the reader already over its limit on the
+        first frame, collapsing the pipeline into frame-at-a-time handoff. It does NOT deadlock --
+        see the corrected Review Focus 5 above and MIN_DIGEST_WINDOW's comment in sender.py."""
         # 300 chunks of basis; run_with_timeout(self, self.refresh, 60, '--digest-window', '1')
         # then assert tree_bytes(self.o) == tree_bytes(self.s)
 
