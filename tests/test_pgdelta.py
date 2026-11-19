@@ -80,7 +80,7 @@ class Refresh(RefreshFixture, unittest.TestCase):
         self.assertNotIn('chunks_changed', report['counts'])
         self.assertNotIn('CHUNK_DATA', report['bytes_sent'])
         self.assertEqual(report['counts']['chunks_asked'], 5)
-        self.assertEqual(report['counts']['round_trips'], 1)
+        self.assertEqual(report['counts']['copy_runs'], 1)
         self.assertEqual(report['bytes_source_to_dest']['total'], report['bytes_sent_total'])  # read by benchmarks/
 
     def test_one_changed_page_is_the_only_chunk_sent(self):

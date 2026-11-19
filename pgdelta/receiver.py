@@ -4,21 +4,31 @@ B is only ever read. O is built in a staging directory next to it and appears, b
 after every file is written, synced and verified against S's whole-file digest. Any failure removes
 the staging directory, so O either appears complete and verified, or not at all.
 
-Naive on purpose: it answers each batch of chunk questions with one bitmap reply, reading and hashing
-B's chunks only when asked, and verifies each file by reading it back from disk after writing it.
+Two threads. A generator thread walks the same file list in the same order as the sender, reads and
+hashes B, and streams `BASIS_DIGESTS` without being asked -- it is the only writer in this direction
+until it is finished. The main thread stays in `recv` for the whole session, which is what lets the
+sender stream page data at us while we stream digests back, and applies what arrives: `CHUNK_COPY`
+copies a run of chunks out of B, `CHUNK_DATA` writes the bytes the sender sent instead.
+
+The two threads share no mutable state: the generator keeps its own basis file handles and never
+touches `files`, and every write to O is positional (`os.pwrite`), so no file offset is ever shared.
 """
 from __future__ import annotations
 
 import json
 import os
+import select
 import shutil
+import socket
 import stat
+import threading
 from pathlib import Path
 
 from pgdelta import protocol
 from pgdelta.hashing import Hasher
-from pgdelta.protocol import (CHUNK_DATA, CHUNK_DATA_HEAD, CHUNK_HASHES, CHUNK_HASHES_HEAD, COMPLETE, FILE_DONE,
-                              FILE_DONE_BODY, HELLO, RESULT, VERDICTS, Channel, pack_verdicts)
+from pgdelta.protocol import (BASIS_DIGESTS, BASIS_DIGESTS_HEAD, CHUNK_COPY, CHUNK_COPY_BODY, CHUNK_DATA,
+                              CHUNK_DATA_HEAD, COMPLETE, FILE_DONE, FILE_DONE_BODY, HELLO, RESULT, Channel,
+                              comparable)
 from pgdelta.stats import Stats
 from pgdelta.tree import Entry
 
@@ -27,6 +37,11 @@ READ_BYTES = 1 << 20
 
 class VerificationError(Exception):
     """A file written in O doesn't match S's digest."""
+
+
+class _StreamBroken(Exception):
+    """A digest frame could not be written because the sender is gone. Its own failure is the one
+    that matters, and the main loop sees the same break in its own `recv`, so nothing is reported."""
 
 
 def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
@@ -69,8 +84,66 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
     basis_size = {index: size for index, size in basis_sizes}  # also tells has_basis: its keys
     channel.send_json(protocol.ACCEPT, {'basis_sizes': basis_sizes})
 
+    stop = threading.Event()
+    generator_error: list[BaseException] = []
+
+    def emit(index: int, first_chunk: int, digests: list[bytes]) -> None:
+        payload = BASIS_DIGESTS_HEAD.pack(index, first_chunk, len(digests)) + b''.join(digests)
+        try:
+            with stats.timed('send_digests'):
+                channel.send(BASIS_DIGESTS, payload)
+        except OSError as exc:
+            raise _StreamBroken from exc
+        stats.counts['basis_chunks_hashed'] += len(digests)
+
+    def generate() -> None:
+        """Walk `entries` in HELLO order and stream B's digests, unasked, for exactly the chunks the
+        sender compares (see protocol.comparable -- a contiguous run per file, so a frame needs only its
+        first chunk index). Opens its own basis handles and never touches `files`: `open_file`'s "the
+        previous file is finished" rule belongs to the main loop alone."""
+        try:
+            for index, entry in enumerate(entries):
+                size = basis_size.get(index)
+                if size is None or not comparable(0, chunk_size, entry.size, size):
+                    continue   # B lacks this file, or holds no whole chunk of S's range of it
+                fd = os.open(basis / entry.path, os.O_RDONLY)
+                try:
+                    first_chunk, chunk, pending = 0, 0, []
+                    while comparable(chunk, chunk_size, entry.size, size):
+                        if stop.is_set():
+                            return
+                        offset = chunk * chunk_size
+                        length = min(chunk_size, entry.size - offset)
+                        with stats.timed('read_digests'):
+                            data = os.pread(fd, length, offset)
+                        if len(data) != length:
+                            raise RuntimeError(f'{entry.path} shrank in B while it was hashed; B must not change')
+                        with stats.timed('hash_digests'):
+                            pending.append(hasher.chunk(data))
+                        chunk += 1
+                        if len(pending) == protocol.DIGESTS_PER_FRAME:
+                            emit(index, first_chunk, pending)
+                            first_chunk, pending = chunk, []
+                    if pending:
+                        emit(index, first_chunk, pending)
+                finally:
+                    os.close(fd)
+        except _StreamBroken:
+            pass
+        except BaseException as exc:
+            generator_error.append(exc)
+            # The sender may be waiting for a digest that will now never come, and the main loop
+            # for a frame the sender will never send: break the connection so both raise rather
+            # than wait forever.
+            try:
+                channel.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
     files = {}  # index -> (output fd, basis fd or None), for the file being written
     done = set()
+    generator = threading.Thread(target=generate, name='pgdelta-basis-digests', daemon=True)
+    generator.start()
     try:
         if staging.exists():
             shutil.rmtree(staging)
@@ -102,38 +175,34 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
 
         while True:
             kind, payload = channel.recv()
-            if kind == CHUNK_HASHES:
-                if len(payload) < CHUNK_HASHES_HEAD.size:
-                    raise protocol.ProtocolError('CHUNK_HASHES payload too short for header')
-                index, first_chunk, count = CHUNK_HASHES_HEAD.unpack_from(payload)
-                digests = payload[CHUNK_HASHES_HEAD.size:]
-                # count is peer-supplied: check it against the frame's actual length before using it
-                # to size anything.
-                if count == 0 or len(digests) != count * protocol.DIGEST_SIZE:
+            if kind == CHUNK_COPY:
+                # A run-length instruction, and nothing else: CHUNK_COPY carries no digest body, so
+                # its payload is exactly the head.
+                if len(payload) != CHUNK_COPY_BODY.size:
                     raise protocol.ProtocolError(
-                        f'CHUNK_HASHES count {count} does not match its {len(digests)}-byte body')
+                        f'CHUNK_COPY payload is {len(payload)} bytes, expected {CHUNK_COPY_BODY.size}')
+                index, first_chunk, count = CHUNK_COPY_BODY.unpack(payload)
+                if count == 0:
+                    raise protocol.ProtocolError('CHUNK_COPY count must be nonzero')
                 out, base = open_file(index)
                 if base is None:
-                    raise protocol.ProtocolError(f'asked about {entries[index].path}, which B lacks')
-                differs = []
+                    raise protocol.ProtocolError(f'asked to copy {entries[index].path}, which B lacks')
+                # The whole run is checked before a byte is written: its last chunk bounds the rest,
+                # since offsets only ascend. A run that reaches past the file is a run spanning two.
+                last = first_chunk + count - 1
+                end_offset, end_length = span(index, last)
+                if end_offset + end_length > basis_size[index]:
+                    raise protocol.ProtocolError(f"chunk {last} of {entries[index].path} is outside B's size")
                 for i in range(count):
-                    chunk = first_chunk + i
-                    digest = digests[i * protocol.DIGEST_SIZE:(i + 1) * protocol.DIGEST_SIZE]
-                    offset, length = span(index, chunk)
-                    if offset + length > basis_size[index]:
-                        raise protocol.ProtocolError(
-                            f"chunk {chunk} of {entries[index].path} is outside B's size")
+                    offset, length = span(index, first_chunk + i)
                     with stats.timed('read_basis'):
                         data = os.pread(base, length, offset)
-                    with stats.timed('hash'):
-                        same = len(data) == length and hasher.chunk(data) == digest
-                    if same:
-                        with stats.timed('write'):
-                            os.pwrite(out, data, offset)
-                        stats.counts['chunks_same'] += 1
-                    differs.append(not same)
-                with stats.timed('send'):
-                    channel.send(VERDICTS, pack_verdicts(differs))
+                    if len(data) != length:
+                        raise protocol.ProtocolError(f'{entries[index].path} is shorter in B than B declared')
+                    with stats.timed('write'):
+                        os.pwrite(out, data, offset)
+                    stats.counts['chunks_same'] += 1
+                stats.counts['copy_runs'] += 1
             elif kind == CHUNK_DATA:
                 index, chunk = CHUNK_DATA_HEAD.unpack_from(payload)
                 data = payload[CHUNK_DATA_HEAD.size:]
@@ -165,6 +234,12 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
                            if entry.kind == 'file' and index not in done]
                 if missing:
                     raise protocol.ProtocolError(f'{len(missing)} files were never finished, e.g. {missing[0]}')
+                # The generator must be finished before RESULT goes out: one writer per direction,
+                # and half a BASIS_DIGESTS frame ahead of RESULT would corrupt the stream.
+                stop.set()
+                _join_while_draining(channel.sock, generator)
+                if generator_error:
+                    raise generator_error[0]
                 with stats.timed('fsync'):
                     for entry in reversed(entries):  # children before parents
                         if entry.kind == 'dir':
@@ -182,15 +257,63 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
             else:
                 raise protocol.ProtocolError(f'unexpected {protocol.NAMES.get(kind, kind)}')
     except BaseException as exc:
+        # Stop the generator before writing anything: it owns this direction while it runs, and an
+        # ERROR frame interleaved with a digest frame would be unreadable.
+        stop.set()
+        _join_while_draining(channel.sock, generator)
         for handles in files.values():
             _close(handles)
+        # A generator failure breaks the connection deliberately, so the main loop usually surfaces
+        # it as Closed: report the cause rather than the symptom.
+        if generator_error and isinstance(exc, protocol.Closed):
+            exc = generator_error[0]
         if not isinstance(exc, (protocol.PeerError, protocol.Closed)):
             try:
                 channel.send_json(protocol.ERROR, {'message': f'receiver failed: {exc}'})
             except OSError:
                 pass
         shutil.rmtree(staging, ignore_errors=True)
-        raise
+        raise exc
+
+
+def _join_while_draining(sock: socket.socket, thread: threading.Thread) -> None:
+    """Wait for `thread` to finish, reading and discarding anything the sender sends meanwhile.
+
+    The draining is what makes the wait bounded, and it is not optional. The generator can be
+    blocked in a send that only the sender's reader thread can take; that thread stops reading once
+    its digest window is full, and the window only frees when the sender's main thread consumes a
+    digest -- which it cannot do while it is blocked writing page data at us. Stop reading here and
+    all four wait on each other for ever. Nothing read here is parsed: this runs only where the
+    session is over, either at COMPLETE or on the way out with an error.
+
+    The drainer ends on a byte through `waker`, so there is no timeout and no poll anywhere in it,
+    and it never shuts the socket down -- this side still has an ERROR or RESULT frame to write.
+    """
+    waker_read, waker_write = socket.socketpair()
+
+    def discard() -> None:
+        try:
+            while True:
+                ready, _, _ = select.select([sock, waker_read], [], [])
+                if waker_read in ready:
+                    return
+                if not sock.recv(READ_BYTES):
+                    return   # the sender is gone; the generator's own send will fail the same way
+        except (OSError, ValueError):
+            return   # ValueError: select on a socket a caller closed under us, which it should not
+
+    drainer = threading.Thread(target=discard, name='pgdelta-drain', daemon=True)
+    drainer.start()
+    try:
+        thread.join()
+    finally:
+        try:
+            waker_write.send(b'\x00')
+        except OSError:
+            pass
+        drainer.join()
+        waker_read.close()
+        waker_write.close()
 
 
 def _check_parents(entries: list[Entry]) -> None:
