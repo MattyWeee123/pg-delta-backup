@@ -62,10 +62,14 @@ class _BasisDigests:
     order to listen -- which is what keeps streaming in both directions at once from deadlocking.
     That thread stops reading only while the window is full, and a full window means digests are
     sitting here for the main thread to consume, so it is never what the main thread is waiting for.
-    Every frame it admits adds digests the main thread will come and take: `_store` refuses a frame
-    whose chunks this side does not compare, and refuses a repeat of digests it is already holding.
-    So `_held` only ever counts digests that are going to be taken, and a full window always means
-    there is something there to take.
+    What makes a full window safe is that consumption order is emission order: the generator emits
+    each chunk `protocol.comparable` is true for exactly once, in ascending (entry, chunk) order, and
+    the main thread walks the same list in the same order and takes exactly that sequence -- both
+    sides decide which chunks those are with the same call on the same two sizes. A digest therefore
+    always arrives above `_taken`, the highest key the main thread has consumed, which is why
+    `_store` can refuse everything at or below it, and everything it is already holding, without ever
+    refusing a conforming peer. `_held` counts only digests that are still to be taken, so a full
+    window always means there is something there for the main thread to take.
 
     Everything the main thread does wait for -- a digest, the peer's RESULT, or the reader thread's
     death -- wakes it through this one condition, so no wait here can outlive the reader.
@@ -81,6 +85,7 @@ class _BasisDigests:
         self._ready = threading.Condition()
         self._digests: dict[tuple[int, int], bytes] = {}  # (file index, chunk index) -> B's digest
         self._held = 0          # bytes of digests received but not yet consumed
+        self._taken = (-1, -1)  # the highest (entry, chunk) the main thread has consumed; see _store
         self._error: BaseException | None = None   # what the reader died of; every waiter re-raises it
         self._result: bytes | None = None          # the RESULT payload, read by the reader like any frame
         self._stopped = False
@@ -124,26 +129,41 @@ class _BasisDigests:
         last = first_chunk + len(digests) - 1
         # The run's *end* is what has to be inside what B declared, and `comparable` is the whole of
         # that test: it is true for exactly the chunks 0..k-1 this side compares, so the last chunk
-        # of an ascending run bounds every chunk before it. A frame that fails it is refused, not
-        # filtered down to the digests this side wants. That is what makes "I was notified and the
-        # table is still empty" impossible: every frame admitted here stores digests this side was
-        # not already holding, so a peer cannot wake a waiting take() with a frame that stores
-        # nothing and leaves `_held` where it was -- which would let it hold this side in that loop
-        # for ever while the reader kept reading. take()'s ordering check is the other half, against
-        # digests that will be consumed but not next.
+        # of an ascending run bounds every chunk before it.
         if not comparable(last, self._chunk_size, self._entries[index].size, size):
             raise protocol.ProtocolError(
                 f'chunk {last} of {self._entries[index].path} is outside the chunks this side '
                 f'compares: S holds {self._entries[index].size} bytes and B declared {size}')
         with self._ready:
-            # A repeat is refused for the same reason, and it is a different shape of the same
-            # livelock: overwriting a key already held would add to `_held` without adding anything
-            # to take, so a peer that sent every frame twice could walk `_held` up to the window
-            # over a table the main thread has emptied -- the reader parked, nothing to pop, and
-            # nothing left to wake the waiter. The generator sends each digest once, so a second
-            # one is the peer's error. A key stored, popped and stored again is caught by take()'s
-            # ordering check instead: the re-inserted entry leaves the table permanently non-empty.
-            # Checked for the whole frame before any of it is stored, as the bound above is.
+            # Then the two checks that together make "a frame was admitted and added nothing the
+            # main thread will ever take" impossible -- the thing that would let a peer fill the
+            # window with digests nobody can drain, park the reader on it, and leave a waiting
+            # take() or result() with nothing to wake it.
+            #
+            # The watermark refuses every key at or below the highest one the main thread has taken,
+            # so a digest already compared cannot come back, as an orphan or otherwise. It cannot
+            # refuse a conforming frame, because consumption order is emission order: the generator
+            # walks `entries` in HELLO order and, for each file, emits the chunks `comparable` is
+            # true for in ascending order exactly once; the main thread walks the same list in the
+            # same order and takes exactly those chunks, decided by the same `comparable` call on
+            # the same two sizes (S's size from its own scan, B's from ACCEPT, which is where the
+            # generator's came from). Both sides therefore handle one strictly ascending sequence of
+            # keys, and a key can only be taken after it is stored, so when a key arrives the main
+            # thread has taken only keys before it in that sequence: the watermark is below it. The
+            # first chunk of a file clears it because every key of the previous file has a smaller
+            # entry index; a file B holds only part of simply ends its run at the last comparable
+            # chunk; a file B lacks puts nothing in the sequence on either side.
+            #
+            # The second check refuses a key still held, which the watermark cannot see: a repeat
+            # landing before the main thread has popped it would overwrite the entry and add to
+            # `_held` without adding anything to take. Between them a digest is stored once, and
+            # only while it is still to come. Both are checked for the whole frame before any of it
+            # is stored, as the bound above is, so a refused frame leaves nothing behind.
+            if (index, first_chunk) <= self._taken:
+                raise protocol.ProtocolError(
+                    f'a digest for {self._entries[index].path} chunk {first_chunk}, which this side '
+                    f'has already compared: the last digest it took was entry {self._taken[0]}, '
+                    f'chunk {self._taken[1]}')
             for offset in range(len(digests)):
                 if (index, first_chunk + offset) in self._digests:
                     raise protocol.ProtocolError(
@@ -167,6 +187,7 @@ class _BasisDigests:
                         self._fail_if_finished(index, chunk)
                         self._ready.wait()
             digest = self._digests.pop(key)
+            self._taken = key   # ascending by construction: this is the walk's own order
             was_full = self._held >= self._window
             self._held -= len(digest)
             if was_full:
@@ -180,6 +201,16 @@ class _BasisDigests:
             while self._result is None:
                 if self._error is not None:
                     raise self._error
+                # Every file has been compared by the time this is called, so the sequence _store
+                # describes is exhausted and nothing will call take() again. A digest still sitting
+                # here is therefore one nothing can drain, and it is holding window space the reader
+                # needs to reach the RESULT this is waiting for. This is the one wait the ordering
+                # invariant does not cover by itself, so it consults the table the way
+                # _fail_if_finished does rather than waiting on a reader that cannot come back.
+                if self._digests:
+                    raise protocol.ProtocolError(
+                        f'{len(self._digests)} basis digests are still here with every file '
+                        f'compared: nothing will take them, so the window cannot drain')
                 self._ready.wait()
             return self._result
 

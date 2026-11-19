@@ -24,10 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pgdelta import cli, protocol, receiver as receiver_module, sender  # noqa: E402
-from pgdelta.hashing import new_key  # noqa: E402
+from pgdelta.hashing import Hasher, new_key  # noqa: E402
 from pgdelta.protocol import Channel  # noqa: E402
 from pgdelta.receiver import run_receiver  # noqa: E402
 from pgdelta.sender import run_sender  # noqa: E402
+from pgdelta.stats import Stats  # noqa: E402
 from pgdelta.tree import Entry  # noqa: E402
 from test_pgdelta import CHUNK, RefreshFixture, tree_bytes, write  # noqa: E402
 
@@ -523,6 +524,28 @@ class StreamFailures(unittest.TestCase):
         self.assertIn(self.NAME, str(error))
         self.assertIn('a second digest', str(error))
 
+    def test_a_replayed_digest_frame_is_refused(self):
+        """The sibling of the one above, and the reason both are now closed by one watermark rather
+        than case by case. A digest already taken is absent from the table, so a replay of it passes
+        both the end-of-run bound and the already-holding check, and lands as an orphan: the walk
+        never revisits an entry, so nothing will ever take it. Sent after the sender's last take()
+        -- while it is parked in result() -- enough of them fill the window with a table nothing can
+        drain, and the reader parks before it can read the RESULT that wait is for."""
+        def peer(channel):
+            channel.expect(protocol.HELLO)
+            channel.send_json(protocol.ACCEPT, {'basis_sizes': [[0, 4 * CHUNK]]})
+            frame = protocol.BASIS_DIGESTS_HEAD.pack(0, 0, 4) + bytes(4 * protocol.DIGEST_SIZE)
+            channel.send(protocol.BASIS_DIGESTS, frame)
+            while channel.recv()[0] != protocol.COMPLETE:
+                pass                 # by COMPLETE all four chunks have been compared and popped
+            channel.send(protocol.BASIS_DIGESTS, frame)   # the same digests again, now as orphans
+            # and no RESULT, with this end held open: only the refusal ends it
+
+        error = self.drive_sender(peer)
+        self.assertIsInstance(error, protocol.ProtocolError)
+        self.assertIn(self.NAME, str(error))
+        self.assertIn('already compared', str(error))
+
     def test_a_hello_with_a_zero_chunk_size_is_refused(self):
         """chunk_size arrives in HELLO, and at 0 protocol.comparable is true for every chunk of a
         non-empty file at an offset that never advances: an endless digest generator and unbounded
@@ -606,6 +629,115 @@ class StreamFailures(unittest.TestCase):
         self.assertIn("outside B's size", message)
         self.assertFalse(self.output.exists())
         self.assertFalse(any(p.name.endswith('.pgdelta-partial') for p in self.output.parent.iterdir()))
+
+
+class ResultIsGuarded(unittest.TestCase):
+    """`result()` is the one wait in _BasisDigests that the emission-order invariant does not cover
+    by itself: by the time it is called the walk is over, so a digest still in the table is one
+    nothing will take, and it holds window space the reader needs to reach RESULT. The watermark in
+    _store is what stops a peer putting one there, so this drives the table directly."""
+
+    def test_a_table_nothing_can_drain_raises_instead_of_waiting(self):
+        ours, theirs = socket.socketpair()
+        self.addCleanup(theirs.close)
+        self.addCleanup(ours.close)
+        entries = [Entry('f', 'file', 0o600, size=CHUNK)]
+        digests = sender._BasisDigests(Channel(ours), CHUNK, entries, {0: CHUNK}, 1 << 20)
+        digests._digests[(0, 0)] = bytes(protocol.DIGEST_SIZE)   # an orphan nothing will take
+        outcome = {}
+
+        def ask():
+            try:
+                digests.result(Stats('sender'))
+            except BaseException as exc:
+                outcome['error'] = exc
+
+        # On a thread, so losing the guard fails this test rather than wedging the whole run: there
+        # is no reader here, and the wait it would fall into has nothing that could ever end it.
+        thread = threading.Thread(target=ask, name='pgdelta-result-test', daemon=True)
+        thread.start()
+        thread.join(timeout=30)
+        self.assertFalse(thread.is_alive(), 'result() is waiting for a RESULT that cannot arrive')
+        self.assertIsInstance(outcome.get('error'), protocol.ProtocolError)
+        self.assertIn('cannot drain', str(outcome['error']))
+
+
+class ResultWhenTheSenderLeaves(unittest.TestCase):
+    """O is renamed and every file in it verified before RESULT goes out, so a sender that leaves
+    after COMPLETE must not turn a finished refresh into a failure with no report. Two ways it can
+    leave: closing outright, and half-closing its write side while still waiting for RESULT -- which
+    must still receive it, because by COMPLETE there is no generator left to unblock."""
+
+    def drive(self, leave: str) -> tuple[dict, bytes, Path, list[int]]:
+        """Drive a real receiver through a whole session, leave the way `leave` says, and return its
+        report, B's bytes, O and the frame types this peer saw."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        basis, output = root / 'B', root / 'O'
+        basis.mkdir()
+        data = os.urandom(4 * CHUNK)
+        write(basis, 'f', data)
+        key = new_key()
+        entries = [Entry('f', 'file', 0o600, size=len(data))]
+        ours, theirs = socket.socketpair()
+        outcome = {}
+
+        def serve():
+            try:
+                outcome['report'] = run_receiver(Channel(theirs), basis, output)
+            except BaseException as exc:
+                outcome['error'] = exc
+            finally:
+                theirs.close()
+
+        thread = threading.Thread(target=serve, name='pgdelta-receiver-test', daemon=True)
+        thread.start()
+        channel = Channel(ours)
+        seen = []
+        try:
+            channel.send_json(protocol.HELLO, {
+                'version': protocol.VERSION, 'chunk_size': CHUNK, 'key': key.hex(),
+                'root_mode': 0o700, 'entries': [entry.to_json() for entry in entries]})
+            channel.expect(protocol.ACCEPT)
+            # Waiting for B's digests before COMPLETE is what makes the half-close case definite:
+            # one file, one frame, so a frame in hand means the generator has finished.
+            kind, _ = channel.recv()
+            self.assertEqual(kind, protocol.BASIS_DIGESTS, protocol.NAMES.get(kind, kind))
+            whole = Hasher(key).file()
+            for chunk in range(4):
+                piece = data[chunk * CHUNK:(chunk + 1) * CHUNK]
+                whole.update(piece)
+                channel.send(protocol.CHUNK_DATA, protocol.CHUNK_DATA_HEAD.pack(0, chunk) + piece)
+            channel.send(protocol.FILE_DONE, protocol.FILE_DONE_BODY.pack(0, len(data), whole.digest()))
+            channel.send(protocol.COMPLETE)
+            if leave == 'close':
+                ours.close()
+            else:
+                ours.shutdown(socket.SHUT_WR)
+                try:
+                    while True:
+                        seen.append(channel.recv()[0])
+                except (protocol.Closed, OSError):
+                    pass
+        finally:
+            thread.join(timeout=30)
+            if leave != 'close':
+                ours.close()
+        self.assertFalse(thread.is_alive(), 'run_receiver never finished')
+        self.assertNotIn('error', outcome, f"run_receiver raised: {outcome.get('error')!r}")
+        return outcome['report'], data, output, seen
+
+    def test_a_sender_that_closes_after_complete_keeps_o_and_the_report(self):
+        report, data, output, _ = self.drive('close')
+        self.assertEqual(report['counts']['files'], 1)     # the report, not a broken pipe
+        self.assertEqual((output / 'f').read_bytes(), data)
+
+    def test_a_half_closed_sender_still_receives_the_result(self):
+        report, data, output, seen = self.drive('half-close')
+        self.assertEqual(report['counts']['files'], 1)
+        self.assertEqual((output / 'f').read_bytes(), data)
+        self.assertIn(protocol.RESULT, seen)
 
 
 class VersionMismatch(unittest.TestCase):
