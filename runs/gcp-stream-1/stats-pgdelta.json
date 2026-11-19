@@ -1,0 +1,87 @@
+{
+  "role": "sender",
+  "elapsed_seconds": 9.033405,
+  "counts": {
+    "round_trips": 30,
+    "files": 1000,
+    "bytes_read": 625839655,
+    "digest_waits": 28,
+    "chunks_asked": 41174,
+    "chunks_same": 40779,
+    "copy_runs": 808,
+    "chunks_new": 35236,
+    "chunks_changed": 395
+  },
+  "seconds": {
+    "hash": 0.597643,
+    "read": 1.317454,
+    "scan": 0.035172,
+    "send": 5.383305,
+    "wait_for_digests": 0.086427
+  },
+  "bytes_sent": {
+    "HELLO": 75366,
+    "CHUNK_COPY": 16968,
+    "FILE_DONE": 33000,
+    "CHUNK_DATA": 292473130,
+    "COMPLETE": 5
+  },
+  "bytes_received": {
+    "ACCEPT": 10624,
+    "BASIS_DIGESTS": 676550,
+    "RESULT": 585
+  },
+  "bytes_sent_total": 292598469,
+  "bytes_received_total": 687759,
+  "bytes_source_to_dest": {
+    "total": 292598469,
+    "HELLO": 75366,
+    "CHUNK_COPY": 16968,
+    "FILE_DONE": 33000,
+    "CHUNK_DATA": 292473130,
+    "COMPLETE": 5
+  },
+  "bytes_dest_to_source": {
+    "total": 687759,
+    "ACCEPT": 10624,
+    "BASIS_DIGESTS": 676550,
+    "RESULT": 585
+  },
+  "ok": true,
+  "chunk_size": 8192,
+  "digest_window": 67108864,
+  "receiver": {
+    "role": "receiver",
+    "elapsed_seconds": 9.032247,
+    "counts": {
+      "basis_chunks_hashed": 41174,
+      "chunks_same": 40779,
+      "copy_runs": 808,
+      "files": 1000,
+      "chunks_received": 35631,
+      "bytes_written": 291867403
+    },
+    "seconds": {
+      "fsync": 3.668179,
+      "hash_digests": 0.633709,
+      "read_basis": 0.115122,
+      "read_digests": 1.494761,
+      "send_digests": 0.014166,
+      "verify": 1.222207,
+      "write": 0.437341
+    },
+    "bytes_sent": {
+      "ACCEPT": 10624,
+      "BASIS_DIGESTS": 676550
+    },
+    "bytes_received": {
+      "HELLO": 75366,
+      "CHUNK_COPY": 16968,
+      "FILE_DONE": 33000,
+      "CHUNK_DATA": 292473130,
+      "COMPLETE": 5
+    },
+    "bytes_sent_total": 687174,
+    "bytes_received_total": 292598469
+  }
+}

@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 300" font-family="sans-serif" font-size="11">
+<rect width="720" height="300" fill="#ffffff"/>
+<text x="50" y="22" font-size="13" fill="#1b2130">pg_basebackup (copies everything): link and disk over time</text>
+<line x1="50" y1="250" x2="700" y2="250" stroke="#999"/>
+<line x1="50" y1="250" x2="50" y2="40" stroke="#999"/>
+<text x="44" y="254.0" text-anchor="end" fill="#666">0</text>
+<text x="44" y="201.5" text-anchor="end" fill="#666">72</text>
+<text x="44" y="149.0" text-anchor="end" fill="#666">144</text>
+<text x="44" y="96.5" text-anchor="end" fill="#666">216</text>
+<text x="44" y="44.0" text-anchor="end" fill="#666">288</text>
+<text x="50.0" y="266" text-anchor="middle" fill="#666">0s</text>
+<text x="180.0" y="266" text-anchor="middle" fill="#666">2s</text>
+<text x="310.0" y="266" text-anchor="middle" fill="#666">3s</text>
+<text x="440.0" y="266" text-anchor="middle" fill="#666">5s</text>
+<text x="570.0" y="266" text-anchor="middle" fill="#666">6s</text>
+<text x="700.0" y="266" text-anchor="middle" fill="#666">8s</text>
+<text x="12" y="145" transform="rotate(-90 12 145)" fill="#666">MB/s</text>
+<polyline points="55.9,250.0 72.3,201.5 88.7,165.2 105.1,162.5 121.5,162.5 146.1,163.0 162.5,163.0 187.2,163.0 203.6,162.5 228.2,162.5 244.6,163.0 269.2,165.4 285.6,162.5 310.2,225.6 326.6,250.0 351.2,250.0 367.6,250.0 392.2,250.0 408.6,250.0 433.3,250.0 449.7,250.0 474.3,250.0" fill="none" stroke="#2459c4" stroke-width="1.5"/>
+<rect x="50" y="276" width="12" height="4" fill="#2459c4"/>
+<text x="66" y="282" fill="#1b2130">link (source sends)</text>
+<polyline points="55.9,247.8 72.3,203.0 88.7,174.5 105.1,166.8 121.5,163.9 146.1,163.0 162.5,162.0 187.2,162.0 203.6,162.0 228.2,163.0 244.6,163.9 269.2,198.0 285.6,160.1 310.2,240.1 326.6,250.0 351.2,250.0 367.6,250.0 392.2,250.0 408.6,250.0 433.3,250.0 449.7,250.0 474.3,250.0" fill="none" stroke="#2c7a4c" stroke-width="1.5"/>
+<rect x="210" y="276" width="12" height="4" fill="#2c7a4c"/>
+<text x="226" y="282" fill="#1b2130">source disk read</text>
+<polyline points="55.9,250.0 72.3,250.0 88.7,250.0 105.1,250.0 121.5,250.0 146.1,250.0 162.5,250.0 187.2,250.0 203.6,250.0 228.2,250.0 244.6,250.0 269.2,250.0 285.6,250.0 310.2,250.0 326.6,250.0 351.2,250.0 367.6,250.0 392.2,250.0 408.6,250.0 433.3,250.0 449.7,250.0 474.3,250.0" fill="none" stroke="#c46a12" stroke-width="1.5"/>
+<rect x="370" y="276" width="12" height="4" fill="#c46a12"/>
+<text x="386" y="282" fill="#1b2130">dest disk read</text>
+<polyline points="55.9,250.0 72.3,250.0 88.7,250.0 105.1,250.0 121.5,250.0 146.1,250.0 162.5,250.0 187.2,250.0 203.6,250.0 228.2,250.0 244.6,250.0 269.2,250.0 285.6,250.0 310.2,59.1 326.6,129.3 351.2,123.8 367.6,131.5 392.2,126.4 408.6,131.5 433.3,129.5 449.7,127.6 474.3,223.0" fill="none" stroke="#a8322b" stroke-width="1.5"/>
+<rect x="530" y="276" width="12" height="4" fill="#a8322b"/>
+<text x="546" y="282" fill="#1b2130">dest disk write</text>
+</svg>

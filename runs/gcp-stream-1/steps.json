@@ -1,0 +1,110 @@
+{
+ "created": 1795102306.4389122,
+ "host": "15e23a3aba",
+ "config": {
+  "name": "gcp-stream-1",
+  "where": "gcp",
+  "methods": [
+   "pg_basebackup",
+   "pgdelta"
+  ],
+  "scale": 20,
+  "change": "hot",
+  "repeats": 1,
+  "chunk_size": 8192,
+  "link": "1gbit",
+  "machine": "n2-standard-4",
+  "disk_type": "pd-balanced",
+  "disk_gb": 50,
+  "region": "us-central1",
+  "zones": [
+   "us-central1-a",
+   "us-central1-b"
+  ],
+  "ttl_minutes": 120,
+  "notes": ""
+ },
+ "dollars_per_hour": 0.4072,
+ "steps": [
+  {
+   "id": "vms",
+   "kind": "vms",
+   "label": "Create the two VMs",
+   "lane": null,
+   "expect": 40.0,
+   "basis": "rule of thumb",
+   "started": 1795102306.5244234,
+   "finished": 1795102350.9281685
+  },
+  {
+   "id": "install",
+   "kind": "install",
+   "label": "Install PostgreSQL and the code",
+   "lane": null,
+   "expect": 35.0,
+   "basis": "rule of thumb",
+   "started": 1795102350.990273,
+   "finished": 1795102385.3709867
+  },
+  {
+   "id": "build",
+   "kind": "build",
+   "label": "Build the database",
+   "lane": null,
+   "expect": 6.5,
+   "basis": "rule of thumb",
+   "started": 1795102385.4060013,
+   "finished": 1795102391.9854753
+  },
+  {
+   "id": "copy",
+   "kind": "copy",
+   "label": "Take the old copy, then change 1% of rows",
+   "lane": null,
+   "expect": 11.0,
+   "basis": "rule of thumb",
+   "started": 1795102392.0201175,
+   "finished": 1795102407.4463117
+  },
+  {
+   "id": "lane:pg_basebackup",
+   "kind": "lane:pg_basebackup",
+   "label": "pg_basebackup (copies everything)",
+   "lane": "pg_basebackup",
+   "expect": 14.4,
+   "basis": "rule of thumb",
+   "started": 1795102407.5437167,
+   "finished": 1795102442.3372843
+  },
+  {
+   "id": "lane:pgdelta",
+   "kind": "lane:pgdelta",
+   "label": "pgdelta (sends what differs)",
+   "lane": "pgdelta",
+   "expect": 61.5,
+   "basis": "rule of thumb",
+   "started": 1795102442.3881137,
+   "finished": 1795102492.0447512
+  },
+  {
+   "id": "check",
+   "kind": "check",
+   "label": "Check the refreshed copy matches",
+   "lane": null,
+   "expect": 3.0,
+   "basis": "rule of thumb",
+   "started": 1795102492.0778573,
+   "finished": 1795102495.2755635
+  },
+  {
+   "id": "delete",
+   "kind": "delete",
+   "label": "Delete the VMs",
+   "lane": null,
+   "expect": 30.0,
+   "basis": "rule of thumb",
+   "started": 1795102495.2986686,
+   "finished": 1795102516.7184231
+  }
+ ]
+}
