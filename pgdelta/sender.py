@@ -36,6 +36,23 @@ DEFAULT_CHUNK_SIZE = 8192  # one PostgreSQL page
 # 64 MiB is 4,194,304 digests, which is about 32 GiB of basis at an 8 KiB chunk.
 DEFAULT_DIGEST_WINDOW = 64 << 20
 
+# The reader thread's window-full check only gates the *next* recv(), so one BASIS_DIGESTS frame
+# always lands no matter how small the window is -- and a frame can hold up to DIGESTS_PER_FRAME
+# digests. A window under that many bytes would, after admitting that one frame, already be over
+# its own limit before the main thread has taken anything from it: every digest in the frame would
+# then have to be drained before the reader is allowed to ask for the next one, collapsing what is
+# meant to be a pipeline into a fully synchronous, frame-at-a-time handoff -- and if that handoff
+# ever stalls (the receiver not draining is the one this engine has to survive; see Deadlock in
+# tests/test_pgdelta_stream.py), the reader has nothing banked to keep the main thread moving while
+# it waits. Flooring the window at one whole frame is the smallest value that never puts the reader
+# behind on the very first frame it is handed.
+MIN_DIGEST_WINDOW = protocol.DIGESTS_PER_FRAME * protocol.DIGEST_SIZE
+
+
+def effective_digest_window(digest_window: int) -> int:
+    """`digest_window`, floored at `MIN_DIGEST_WINDOW` so it can never start the reader out behind."""
+    return max(MIN_DIGEST_WINDOW, digest_window)
+
 
 class _BasisDigests:
     """B's digests as they stream in: filled by a reader thread, drained by the sender's main thread.
@@ -196,6 +213,7 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
             f'chunk size must be between {protocol.MIN_CHUNK_SIZE} and {protocol.MAX_CHUNK_SIZE} bytes')
     if digest_window < 1:
         raise ValueError('digest_window must be at least 1')
+    digest_window = effective_digest_window(digest_window)
     source = Path(source)
     stats = Stats('sender')
     digests = None

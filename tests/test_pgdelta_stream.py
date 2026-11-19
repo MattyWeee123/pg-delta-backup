@@ -4,6 +4,7 @@ Nothing is asked for here. The receiver hashes B on a thread of its own and stre
 without being asked; the sender drains them on a reader thread while its main thread hashes S,
 compares locally, and streams CHUNK_COPY runs plus CHUNK_DATA for what differs.
 """
+import io
 import json
 import os
 import socket
@@ -11,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from contextlib import redirect_stderr
 from pathlib import Path
 from unittest import mock
 
@@ -21,7 +23,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from pgdelta import protocol, receiver as receiver_module  # noqa: E402
+from pgdelta import protocol, receiver as receiver_module, sender  # noqa: E402
 from pgdelta.hashing import new_key  # noqa: E402
 from pgdelta.protocol import Channel  # noqa: E402
 from pgdelta.receiver import run_receiver  # noqa: E402
@@ -163,6 +165,29 @@ class Streaming(RefreshFixture, unittest.TestCase):
         self.assertEqual(tree_bytes(self.o), tree_bytes(self.s))
         self.assertEqual(report['counts'].get('digest_waits', 0), 0)
         self.assertEqual(report['counts'].get('copy_runs', 0), 0)
+
+
+class DigestWindow(RefreshFixture, unittest.TestCase):
+    def test_the_window_floors_at_one_whole_frame(self):
+        self.assertEqual(sender.MIN_DIGEST_WINDOW, 16384)
+        self.assertEqual(sender.effective_digest_window(1), sender.MIN_DIGEST_WINDOW)
+        self.assertEqual(sender.effective_digest_window(64 << 20), 64 << 20)
+
+    def test_a_tiny_window_still_completes(self):
+        """Review Focus 5: a window below one frame would admit nothing and deadlock both sides."""
+        data = bytearray(os.urandom(300 * CHUNK))
+        write(self.b, 'f', bytes(data))
+        for i in range(0, 300, 4):
+            data[i * CHUNK] ^= 0xFF
+        write(self.s, 'f', bytes(data))
+        run_with_timeout(self, self.refresh, 60, '--digest-window', '1')
+        self.assertEqual(tree_bytes(self.o), tree_bytes(self.s))
+
+    def test_a_non_positive_window_is_a_bad_argument(self):
+        for value in ('0', '-1'):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+                self.refresh('--digest-window', value)
+            self.assertEqual(caught.exception.code, 2)
 
 
 class Deadlock(RefreshFixture, unittest.TestCase):

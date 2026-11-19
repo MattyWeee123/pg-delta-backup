@@ -23,6 +23,15 @@ from pgdelta.receiver import run_receiver
 from pgdelta.sender import DEFAULT_CHUNK_SIZE, DEFAULT_DIGEST_WINDOW, run_sender
 
 
+def positive_int(text: str) -> int:
+    """argparse `type=` for an option that must be at least 1: a bad value exits 2 from parse_args,
+    before cli.main's try block, rather than surfacing as the 1 a ValueError there would produce."""
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError(f'must be at least 1, got {text!r}')
+    return value
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog='pgdelta', description=__doc__.splitlines()[0])
     parser.add_argument('--version', action='version', version=f'pgdelta {__version__}')
@@ -34,6 +43,10 @@ def main(argv=None) -> int:
     local.add_argument('--output', type=Path, required=True, help='O: where the refreshed copy appears')
     local.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE,
                        help='bytes compared per chunk (default: %(default)s, one PostgreSQL page)')
+    local.add_argument('--digest-window', type=positive_int, default=DEFAULT_DIGEST_WINDOW,
+                       help='bytes of B\'s undelivered digests the sender holds before it stops '
+                            'draining the receiver (default: %(default)s); floored at one '
+                            'BASIS_DIGESTS frame so it cannot starve itself')
     local.add_argument('--stats-json', type=Path, help='write both sides\' statistics here')
     local.add_argument('--pg-controldata', type=Path, help=argparse.SUPPRESS)  # passed by the benchmark harness; unused
     local.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
@@ -42,6 +55,10 @@ def main(argv=None) -> int:
     send.add_argument('--source', type=Path, required=True)
     send.add_argument('--connect', required=True, metavar='HOST:PORT')
     send.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE)
+    send.add_argument('--digest-window', type=positive_int, default=DEFAULT_DIGEST_WINDOW,
+                      help='bytes of B\'s undelivered digests the sender holds before it stops '
+                           'draining the receiver (default: %(default)s); floored at one '
+                           'BASIS_DIGESTS frame so it cannot starve itself')
     send.add_argument('--stats-json', type=Path)
     send.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
 
@@ -60,7 +77,7 @@ def main(argv=None) -> int:
                 events = EventLog(args.events)
                 try:
                     report = run_sender(Channel(tune(sock)), args.source, args.chunk_size, events,
-                                        DEFAULT_DIGEST_WINDOW)
+                                        args.digest_window)
                 finally:
                     events.close()
         else:
@@ -96,7 +113,7 @@ def _local(args) -> dict:
     try:
         events = EventLog(getattr(args, 'events', None))
         try:
-            report = run_sender(Channel(ours), args.source, args.chunk_size, events, DEFAULT_DIGEST_WINDOW)
+            report = run_sender(Channel(ours), args.source, args.chunk_size, events, args.digest_window)
         finally:
             events.close()
     except BaseException:
