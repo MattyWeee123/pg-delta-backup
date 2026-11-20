@@ -88,6 +88,33 @@ class Steps(unittest.TestCase):
             self.assertNotIn('started', saved['lane:pg_basebackup'])
 
 
+class ArchivedEngine(unittest.TestCase):
+    def test_arms_are_methods_with_plans_and_labels(self):
+        from bench import v1
+        cfg = config.load({'methods': ['pgdelta-v1-inplace', 'pg_basebackup', 'pgdelta-v1', 'pgdelta']})
+        self.assertEqual([lane['method'] for lane in cfg.lanes()],
+                         ['pg_basebackup', 'pgdelta', 'pgdelta-v1', 'pgdelta-v1-inplace'])
+        self.assertIn('archived', cfg.lanes()[2]['label'])
+        self.assertEqual(config.load({}).methods, ['pg_basebackup', 'pgdelta'])  # not raced unless asked
+        for where in ('laptop', 'gcp'):
+            plan = steps.plan(config.load({'where': where, 'methods': list(v1.METHODS)}))
+            self.assertTrue(all(s['expect'] > 0 for s in plan))
+
+    def test_arguments_match_exp92s_best_arm_with_blake2b(self):
+        from bench import v1
+        out = v1.local_args('pgdelta-v1', 'S', 'B', 'O', 'pc')
+        self.assertEqual(out[:7], ['local', '--source', 'S', '--basis', 'B', '--output', 'O'])
+        for flag in ('--hash-ahead', '--read-ahead', '--fsync', '--source-kind'):
+            self.assertIn(flag, out)
+        self.assertEqual(out.count('--jobs'), 1)
+        self.assertEqual(out[out.index('--hash') + 1], 'blake2b')
+        self.assertNotIn('--verify-scope', out)          # verify-as-written needs --in-place
+        inplace = v1.local_args('pgdelta-v1-inplace', 'S', 'Bw', 'Bw', 'pc')
+        self.assertNotIn('--output', inplace)
+        self.assertIn('--in-place', inplace)
+        self.assertEqual(inplace[inplace.index('--verify-scope') + 1], 'as-written')
+
+
 class Cost(unittest.TestCase):
     def test_bigger_runs_cost_more_and_a_cap_is_slower(self):
         small = cost.estimate(config.load({'where': 'gcp'}, preset='quick'))

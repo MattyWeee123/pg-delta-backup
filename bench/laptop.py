@@ -16,6 +16,7 @@ from pathlib import Path
 
 from bench.config import RunConfig
 from bench.lanes import pump_pg_basebackup
+from bench import v1
 from bench.steps import no_steps
 from pgdelta.events import EventLog
 
@@ -58,7 +59,7 @@ def run_laptop(cfg: RunConfig, run_dir: Path, work: Path, pgbin: Path, log=print
 
     work = Path(work).resolve()
     work.mkdir(parents=True, exist_ok=True)
-    for d in ('S', 'B', 'O', 'full'):
+    for d in ('S', 'B', 'O', 'O1', 'Bw', 'full'):
         shutil.rmtree(work / d, ignore_errors=True)
     found = re.search(r'\d+(?:\.\d+)+', run(pgbin / 'postgres', '--version', capture_output=True, text=True).stdout)
     facts = {'postgres': found.group(0) if found else 'unknown', 'machine': os.uname().machine,
@@ -100,6 +101,32 @@ def run_laptop(cfg: RunConfig, run_dir: Path, work: Path, pgbin: Path, log=print
                     events.emit('done', ok=True, elapsed=elapsed, bytes_sent=total, total_bytes=total)
                     events.close()
                     facts['lanes'][lane['id']] = {'elapsed': elapsed, 'bytes_sent': total, 'total_bytes': total}
+                elif lane['method'] in v1.METHODS:
+                    if running:
+                        ctl('stop', work / 'S')
+                        running = False
+                    inplace = lane['method'] == 'pgdelta-v1-inplace'
+                    target = work / ('Bw' if inplace else 'O1')
+                    shutil.rmtree(target, ignore_errors=True)
+                    if inplace:  # a fresh copy of B to patch, made before the clock starts
+                        shutil.copytree(work / 'B', target, symlinks=True)
+                    stats = run_dir / f"stats-{lane['id']}.json"
+                    events = EventLog(path, method=lane['id'])
+                    events.emit('start', total_bytes=facts['database_bytes'])
+                    run(sys.executable, '-m', 'pgdelta', *v1.local_args(lane['method'], work / 'S', target if inplace else work / 'B', target,
+                                                                         str(pgbin / 'pg_controldata')),
+                        '--stats-json', stats, cwd=v1.extract(work / 'v1'), stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
+                    elapsed = time.perf_counter() - events.started
+                    result = v1.facts(stats, elapsed, facts['database_bytes'])
+                    events.emit('done', ok=result['ok'], elapsed=result['elapsed'], bytes_sent=result['bytes_sent'],
+                                total_bytes=facts['database_bytes'])
+                    events.close()
+                    ctl('start', target, 55434)  # every archived-engine copy is started and checked
+                    result['copy'] = sql(55434, 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
+                    ctl('stop', target)
+                    result['match'] = result['copy'] == expect
+                    facts['lanes'][lane['id']] = result
                 else:
                     if running:
                         ctl('stop', work / 'S')
@@ -119,12 +146,14 @@ def run_laptop(cfg: RunConfig, run_dir: Path, work: Path, pgbin: Path, log=print
                 got = sql(55433, 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
                 ctl('stop', work / 'O')
     finally:
-        for d in ('S', 'O'):
+        for d in ('S', 'O', 'O1', 'Bw'):
             if (work / d / 'postmaster.pid').exists():
                 subprocess.run([str(pgbin / 'pg_ctl'), '-D', str(work / d), '-m', 'fast', '-w', 'stop'],
                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    facts['verify'] = {'source': expect, 'copy': got, 'match': got is None or (bool(expect) and expect == got),
-                       'checked': got is not None}
+    archived = [lane for lane in facts['lanes'].values() if 'match' in lane]
+    facts['verify'] = {'source': expect, 'copy': got if got is not None else (archived[0]['copy'] if archived else None),
+                       'match': (got is None or (bool(expect) and expect == got)) and all(l['match'] for l in archived),
+                       'checked': got is not None or bool(archived)}
     log(f"copy check: source {expect}, refreshed copy {got}: {'MATCH' if facts['verify']['match'] else 'MISMATCH'}")
     return facts
 

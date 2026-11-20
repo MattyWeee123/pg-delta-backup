@@ -24,14 +24,15 @@ from pathlib import Path
 from bench import cost
 from bench.config import RunConfig
 
-# Seconds, as (fixed, per GB of database). pgdelta's lanes add ROUND_TRIP seconds per chunk.
+# Seconds, as (fixed, per GB of database). Today's pgdelta streams (PR #44): no per-chunk round trips.
 RULES = {
-    'laptop': {'build': (1, 5), 'copy': (1, 2), 'lane:pg_basebackup': (0.5, 1.5), 'lane:pgdelta': (0.5, 1),
+    'laptop': {'build': (1, 5), 'copy': (1, 2), 'lane:pg_basebackup': (0.5, 1.5), 'lane:pgdelta': (0.5, 6),
+               'lane:pgdelta-v1': (3, 2), 'lane:pgdelta-v1-inplace': (5, 2),
                'check': (2, 0), 'publish': (5, 0)},
     'gcp': {'vms': (40, 0), 'install': (35, 0), 'build': (2, 15), 'copy': (5, 20), 'lane:pg_basebackup': (12, 0),
-            'lane:pgdelta': (20, 10), 'check': (3, 0), 'delete': (30, 0), 'publish': (5, 0)},
+            'lane:pgdelta': (20, 25), 'lane:pgdelta-v1': (25, 25), 'lane:pgdelta-v1-inplace': (30, 25),
+            'check': (3, 0), 'delete': (30, 0), 'publish': (5, 0)},
 }
-ROUND_TRIP = {'laptop': 0.0001, 'gcp': 0.00105}  # one stop-and-wait chunk: same machine; two zones
 # Settings that must match for an earlier run's step to predict this one (cloud runs; a laptop run matches
 # on the computer instead of machine and disk).
 MATCH = {'vms': ('machine',), 'install': ('machine',), 'delete': ('machine',), 'check': (), 'publish': (),
@@ -49,8 +50,6 @@ def rule(cfg: RunConfig, kind: str) -> float:
     fixed, per_gb = RULES[cfg.where][kind]
     gb = cfg.database_bytes / 1e9
     seconds = fixed + per_gb * gb
-    if kind == 'lane:pgdelta':
-        seconds += ROUND_TRIP[cfg.where] * cfg.database_bytes / cfg.chunk_size
     if kind == 'lane:pg_basebackup' and cfg.where == 'gcp':
         seconds += gb * 1000 / min(cost.DISK_MBPS.get(cfg.disk_type, 200), cost.link_mbps(cfg.link))
     return seconds

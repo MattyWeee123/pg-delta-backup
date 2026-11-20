@@ -7,7 +7,7 @@ from statistics import mean
 
 from bench.config import RunConfig
 
-COLORS = {'pg_basebackup': '#8a93a6', 'pgdelta': '#2459c4'}
+COLORS = {'pg_basebackup': '#8a93a6', 'pgdelta': '#2459c4', 'pgdelta-v1': '#c46a12', 'pgdelta-v1-inplace': '#2c7a4c'}
 SERIES = (('link_MBps', 'link (source sends)', '#2459c4'), ('src_read_MBps', 'source disk read', '#2c7a4c'),
           ('dst_read_MBps', 'dest disk read', '#c46a12'), ('dst_write_MBps', 'dest disk write', '#a8322b'))
 

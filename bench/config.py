@@ -13,7 +13,8 @@ import re
 import time
 from dataclasses import asdict, dataclass, field, fields
 
-METHODS = ('pg_basebackup', 'pgdelta')
+METHODS = ('pg_basebackup', 'pgdelta', 'pgdelta-v1', 'pgdelta-v1-inplace')  # the last two: bench/v1.py
+DEFAULT_METHODS = ('pg_basebackup', 'pgdelta')
 CHANGES = ('hot', 'uniform')
 LINK = re.compile(r'^(full|\d+(mbit|gbit))$')
 
@@ -27,7 +28,7 @@ PRESETS = {
 class RunConfig:
     name: str = ''
     where: str = 'laptop'                       # 'laptop' or 'gcp'
-    methods: list = field(default_factory=lambda: list(METHODS))
+    methods: list = field(default_factory=lambda: list(DEFAULT_METHODS))
     scale: int = 50                             # pgbench scale: about 15 MB each
     change: str = 'hot'                         # 1% of rows: 'hot' (one range) or 'uniform' (every 100th)
     repeats: int = 1
@@ -75,8 +76,9 @@ class RunConfig:
 
     def lanes(self) -> list[dict]:
         """One lane per method and repeat, in run order (pg_basebackup's first: it needs the server running)."""
+        from bench.v1 import LABELS
         labels = {'pg_basebackup': 'pg_basebackup (copies everything)',
-                  'pgdelta': 'pgdelta (sends what differs)'}
+                  'pgdelta': 'pgdelta (sends what differs)', **LABELS}
         out = []
         for method in sorted(self.methods, key=METHODS.index):
             for k in range(1, self.repeats + 1):
