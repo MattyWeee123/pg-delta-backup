@@ -1,0 +1,171 @@
+{
+ "created": 1795209953.001442,
+ "host": "3d04c2ecc6",
+ "config": {
+  "name": "cloud-resources-hot-20261120",
+  "where": "gcp",
+  "methods": [
+   "pg_basebackup",
+   "pgdelta",
+   "pgdelta-inplace"
+  ],
+  "scale": 50,
+  "change": "hot",
+  "repeats": 3,
+  "chunk_size": 8192,
+  "link": "1gbit",
+  "machine": "n2-standard-4",
+  "disk_type": "pd-balanced",
+  "disk_gb": 50,
+  "region": "us-central1",
+  "zones": [
+   "us-central1-a",
+   "us-central1-b"
+  ],
+  "ttl_minutes": 120,
+  "notes": ""
+ },
+ "dollars_per_hour": 0.4072,
+ "steps": [
+  {
+   "id": "vms",
+   "kind": "vms",
+   "label": "Create the two VMs",
+   "lane": null,
+   "expect": 40.0,
+   "basis": "rule of thumb",
+   "started": 1795209953.007421,
+   "finished": 1795209998.917696
+  },
+  {
+   "id": "install",
+   "kind": "install",
+   "label": "Install PostgreSQL and the code",
+   "lane": null,
+   "expect": 35.0,
+   "basis": "rule of thumb",
+   "started": 1795209998.9187121,
+   "finished": 1795210029.370503
+  },
+  {
+   "id": "build",
+   "kind": "build",
+   "label": "Build the database",
+   "lane": null,
+   "expect": 13.2,
+   "basis": "rule of thumb",
+   "started": 1795210029.3714461,
+   "finished": 1795210041.391718
+  },
+  {
+   "id": "copy",
+   "kind": "copy",
+   "label": "Take the old copy, then change 1% of rows",
+   "lane": null,
+   "expect": 20.0,
+   "basis": "rule of thumb",
+   "started": 1795210041.3926988,
+   "finished": 1795210059.5963268
+  },
+  {
+   "id": "lane:pg_basebackup-r1",
+   "kind": "lane:pg_basebackup",
+   "label": "pg_basebackup (copies everything) \u00b7 run 1",
+   "lane": "pg_basebackup-r1",
+   "expect": 18.0,
+   "basis": "rule of thumb",
+   "started": 1795210059.5972621,
+   "finished": 1795210102.264228
+  },
+  {
+   "id": "lane:pg_basebackup-r2",
+   "kind": "lane:pg_basebackup",
+   "label": "pg_basebackup (copies everything) \u00b7 run 2",
+   "lane": "pg_basebackup-r2",
+   "expect": 18.0,
+   "basis": "rule of thumb",
+   "started": 1795210102.264647,
+   "finished": 1795210144.783805
+  },
+  {
+   "id": "lane:pg_basebackup-r3",
+   "kind": "lane:pg_basebackup",
+   "label": "pg_basebackup (copies everything) \u00b7 run 3",
+   "lane": "pg_basebackup-r3",
+   "expect": 18.0,
+   "basis": "rule of thumb",
+   "started": 1795210144.784211,
+   "finished": 1795210187.6523032
+  },
+  {
+   "id": "lane:pgdelta-r1",
+   "kind": "lane:pgdelta",
+   "label": "pgdelta (new copy) \u00b7 run 1",
+   "lane": "pgdelta-r1",
+   "expect": 38.8,
+   "basis": "rule of thumb",
+   "started": 1795210187.6527848,
+   "finished": 1795210236.6517031
+  },
+  {
+   "id": "lane:pgdelta-r2",
+   "kind": "lane:pgdelta",
+   "label": "pgdelta (new copy) \u00b7 run 2",
+   "lane": "pgdelta-r2",
+   "expect": 38.8,
+   "basis": "rule of thumb",
+   "started": 1795210236.652183,
+   "finished": 1795210282.454614
+  },
+  {
+   "id": "lane:pgdelta-r3",
+   "kind": "lane:pgdelta",
+   "label": "pgdelta (new copy) \u00b7 run 3",
+   "lane": "pgdelta-r3",
+   "expect": 38.8,
+   "basis": "rule of thumb",
+   "started": 1795210282.45514,
+   "finished": 1795210326.2298722
+  },
+  {
+   "id": "lane:pgdelta-inplace-r1",
+   "kind": "lane:pgdelta-inplace",
+   "label": "pgdelta (in place) \u00b7 run 1",
+   "lane": "pgdelta-inplace-r1",
+   "expect": 36.2,
+   "basis": "rule of thumb",
+   "started": 1795210326.230446,
+   "finished": 1795210374.5981572
+  },
+  {
+   "id": "lane:pgdelta-inplace-r2",
+   "kind": "lane:pgdelta-inplace",
+   "label": "pgdelta (in place) \u00b7 run 2",
+   "lane": "pgdelta-inplace-r2",
+   "expect": 36.2,
+   "basis": "rule of thumb",
+   "started": 1795210374.598658,
+   "finished": 1795210426.089654
+  },
+  {
+   "id": "lane:pgdelta-inplace-r3",
+   "kind": "lane:pgdelta-inplace",
+   "label": "pgdelta (in place) \u00b7 run 3",
+   "lane": "pgdelta-inplace-r3",
+   "expect": 36.2,
+   "basis": "rule of thumb",
+   "started": 1795210426.0902221,
+   "finished": 1795210474.834614
+  },
+  {
+   "id": "delete",
+   "kind": "delete",
+   "label": "Delete the VMs",
+   "lane": null,
+   "expect": 30.0,
+   "basis": "rule of thumb",
+   "started": 1795210474.835165,
+   "finished": 1795210495.249661
+  }
+ ]
+}

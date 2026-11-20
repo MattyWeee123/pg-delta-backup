@@ -1,0 +1,395 @@
+{
+  "schema_version": 1,
+  "tool": "pgdelta",
+  "tool_version": "0.1.0",
+  "protocol_version": 1,
+  "status": "complete",
+  "exit_code": 0,
+  "error": null,
+  "mode": "reuse",
+  "gate_reason": "source and basis identities match",
+  "reuse_policy": "same-cluster",
+  "block": 8192,
+  "node_blocks": 128,
+  "high_churn_node_fraction": null,
+  "window": 4,
+  "hash_ahead": {
+    "bytes": 68719476736,
+    "room_wait_seconds": 0.001636,
+    "plan_wait_seconds": 5.046994,
+    "most_ahead_bytes": 792018944,
+    "read_ahead_reads": 59,
+    "read_ahead_wait_seconds": 0.001049,
+    "read_ahead_threads": 8
+  },
+  "jobs": 4,
+  "hash_backend": "process",
+  "hash": "blake2b",
+  "worker_start_method": "spawn",
+  "switches": {
+    "sender": {
+      "jobs": 4,
+      "hash_backend": "process"
+    },
+    "receiver": {
+      "jobs": 4,
+      "hash_backend": "process",
+      "rebuild": "in-place",
+      "verify": "pipelined"
+    }
+  },
+  "source_identity": {
+    "pg_control_version": 1700,
+    "catalog_version": 202406281,
+    "system_identifier": "7710368373105611498",
+    "cluster_state": "shut down",
+    "redo_lsn": "0/31031810",
+    "timeline": 1,
+    "block_size": 8192,
+    "blocks_per_segment": 131072,
+    "wal_segment_size": 16777216,
+    "data_checksum_version": 1
+  },
+  "basis_identity": {
+    "pg_control_version": 1700,
+    "catalog_version": 202406281,
+    "system_identifier": "7710368373105611498",
+    "cluster_state": "in production",
+    "redo_lsn": "0/280000D8",
+    "timeline": 1,
+    "block_size": 8192,
+    "blocks_per_segment": 131072,
+    "wal_segment_size": 16777216,
+    "data_checksum_version": 1
+  },
+  "source_kind": "datadir",
+  "source_excluded": {
+    "files": 42,
+    "directories": 1,
+    "bytes": 654480647,
+    "by_rule": {
+      "temporary": {
+        "files": 0,
+        "directories": 1,
+        "bytes": 0
+      },
+      "macos": {
+        "files": 0,
+        "directories": 0,
+        "bytes": 0
+      },
+      "named_files": {
+        "files": 2,
+        "directories": 0,
+        "bytes": 161031
+      },
+      "unlogged_relations": {
+        "files": 0,
+        "directories": 0,
+        "bytes": 0
+      },
+      "temporary_relations": {
+        "files": 0,
+        "directories": 0,
+        "bytes": 0
+      },
+      "directory_contents": {
+        "files": 1,
+        "directories": 0,
+        "bytes": 8192
+      },
+      "wal": {
+        "files": 39,
+        "directories": 0,
+        "bytes": 654311424
+      }
+    },
+    "unlogged_main_forks_reset": 0
+  },
+  "live": null,
+  "in_place": true,
+  "files": {
+    "total": 980,
+    "unchanged": 959,
+    "changed": 18,
+    "new": 3,
+    "size_mismatch": 5
+  },
+  "directories": 26,
+  "files_digest": "f7ee150412e9b9c8acf649cc57e20c8b7537a17749cc4eda215d5b15ef7bd572",
+  "pages": {
+    "total": 101623,
+    "sent": 4029,
+    "reused": 97594,
+    "sent_bytes": 32998864
+  },
+  "nodes": {
+    "total": 1580,
+    "matched": 1527,
+    "descended": 28,
+    "sent_whole": 25
+  },
+  "high_churn_files": 0,
+  "leaf_requests": 18,
+  "protocol_timers": {
+    "connect_s": 0.0061,
+    "accept_wait_s": 0.005321,
+    "accept_wait_busy_s": 0.001127,
+    "accept_wait_idle_s": 0.004195,
+    "accept_waits": 1,
+    "accept_waits_over_1ms": 1,
+    "basis_wait_s": 0.0,
+    "basis_wait_busy_s": 0.0,
+    "basis_wait_idle_s": 0.0,
+    "basis_waits": 0,
+    "basis_waits_over_1ms": 0,
+    "leaf_wait_s": 0.013182,
+    "leaf_wait_busy_s": 0.001134,
+    "leaf_wait_idle_s": 0.012048,
+    "leaf_waits": 11,
+    "leaf_waits_over_1ms": 3,
+    "complete_wait_s": 0.075561,
+    "complete_wait_busy_s": 0.012164,
+    "complete_wait_idle_s": 0.063397,
+    "complete_waits": 1,
+    "complete_waits_over_1ms": 1,
+    "page_send_s": 0.213606,
+    "other_send_s": 0.036761,
+    "send_queue": {
+      "split": true,
+      "why_not": null,
+      "busy_inflight_bytes": null,
+      "poll_s": 0.001,
+      "readings": 104
+    }
+  },
+  "bytes_source_to_dest": {
+    "total": 33058944,
+    "control": 58803,
+    "node_digests": 0,
+    "leaf_digests": 274,
+    "page_data": 32999867,
+    "by_message_type": {
+      "HELLO": {
+        "frames": 1,
+        "bytes": 26428
+      },
+      "LEAF_REQUEST": {
+        "frames": 18,
+        "bytes": 274
+      },
+      "PAGE_DATA": {
+        "frames": 59,
+        "bytes": 32999867
+      },
+      "FILE_DONE": {
+        "frames": 980,
+        "bytes": 32340
+      },
+      "COMPLETE": {
+        "frames": 1,
+        "bytes": 35
+      }
+    }
+  },
+  "bytes_dest_to_source": {
+    "total": 80189,
+    "control": 13930,
+    "node_digests": 41489,
+    "leaf_digests": 24770,
+    "page_data": 0,
+    "by_message_type": {
+      "ACCEPT": {
+        "frames": 1,
+        "bytes": 10973
+      },
+      "BASIS_NODES": {
+        "frames": 977,
+        "bytes": 41489
+      },
+      "LEAF_DIGESTS": {
+        "frames": 18,
+        "bytes": 24770
+      },
+      "COMPLETE": {
+        "frames": 1,
+        "bytes": 2957
+      }
+    }
+  },
+  "timings_seconds": {
+    "hash_source": 5.178685,
+    "hash_basis": 1.149634,
+    "protocol": 5.453749,
+    "rebuild": 0.08045,
+    "copy_basis": 0.0,
+    "fsync": 0.354378,
+    "verify": 0.145016,
+    "verify_wait": 0.013488,
+    "pool_start": 0.015005,
+    "pool_first_ready": 0.099779,
+    "pool_ready": 0.122579,
+    "receiver_pool_first_ready": 0.081273,
+    "receiver_pool_ready": 0.111242,
+    "total": 5.507894
+  },
+  "receiver": {
+    "mode": "reuse",
+    "gate_reason": "source and basis identities match",
+    "reuse_policy": "same-cluster",
+    "source_identity": {
+      "pg_control_version": 1700,
+      "catalog_version": 202406281,
+      "system_identifier": "7710368373105611498",
+      "cluster_state": "shut down",
+      "redo_lsn": "0/31031810",
+      "timeline": 1,
+      "block_size": 8192,
+      "blocks_per_segment": 131072,
+      "wal_segment_size": 16777216,
+      "data_checksum_version": 1
+    },
+    "basis_identity": {
+      "pg_control_version": 1700,
+      "catalog_version": 202406281,
+      "system_identifier": "7710368373105611498",
+      "cluster_state": "in production",
+      "redo_lsn": "0/280000D8",
+      "timeline": 1,
+      "block_size": 8192,
+      "blocks_per_segment": 131072,
+      "wal_segment_size": 16777216,
+      "data_checksum_version": 1
+    },
+    "output": "/data/Bw",
+    "published": true,
+    "receipt": "/data/Bw.pgdelta-receipt.json",
+    "files_digest": "f7ee150412e9b9c8acf649cc57e20c8b7537a17749cc4eda215d5b15ef7bd572",
+    "files": 980,
+    "directories": 26,
+    "jobs": 4,
+    "switches": {
+      "jobs": 4,
+      "hash_backend": "process",
+      "rebuild": "in-place",
+      "verify": "pipelined"
+    },
+    "in_place": true,
+    "in_place_tree": {
+      "attempt": 1,
+      "control_renamed": true,
+      "directories_created": 0,
+      "files_removed": 3,
+      "directories_removed": 0
+    },
+    "fsync": "worker",
+    "fsync_effective": "worker",
+    "fsync_mode": "worker",
+    "writeback_calls": 0,
+    "files_verified": 980,
+    "pages_received": 4029,
+    "page_bytes_received": 32998864,
+    "pages_copied": 97594,
+    "bytes_copied": 799400732,
+    "whole_file_copies": 790,
+    "leaf_nodes_cached": 28,
+    "leaf_nodes_reread": 0,
+    "basis_copy_bytes": 0,
+    "basis_copies": 0,
+    "hash_basis_seconds": 1.149634,
+    "rebuild_seconds": 0.08045,
+    "copy_seconds": 0.0,
+    "fsync_seconds": 0.354378,
+    "fsync_wait_seconds": 0.021286,
+    "writeback_seconds": 0.0,
+    "verify_seconds": 0.145016,
+    "verify_wait_seconds": 0.013488,
+    "pool_start_seconds": 0.016772,
+    "pool_first_ready_seconds": 0.081273,
+    "pool_ready_seconds": 0.111242,
+    "worker_start_method": "spawn",
+    "prefetch": {
+      "switch": "on",
+      "ran": true,
+      "why_not": null,
+      "files": 981,
+      "basis_bytes": 824534001,
+      "cap_bytes": 8094957568,
+      "files_read": 647,
+      "bytes": 714327286,
+      "seconds": 4.252007,
+      "waited_seconds": 4.250081,
+      "started_utc": 1795210343.488253,
+      "ended_utc": 1795210347.74026,
+      "stopped": "connected",
+      "fadvise": true,
+      "noatime": true,
+      "error": null
+    },
+    "protocol_timers": {
+      "hello_wait_s": 4.311225,
+      "recv_wait_s": 5.113581,
+      "publish_s": 9.896655,
+      "published_utc": 1795210353.2459
+    },
+    "bytes_read": {
+      "total": 33058944,
+      "control": 58803,
+      "node_digests": 0,
+      "leaf_digests": 274,
+      "page_data": 32999867,
+      "by_message_type": {
+        "HELLO": {
+          "frames": 1,
+          "bytes": 26428
+        },
+        "LEAF_REQUEST": {
+          "frames": 18,
+          "bytes": 274
+        },
+        "PAGE_DATA": {
+          "frames": 59,
+          "bytes": 32999867
+        },
+        "FILE_DONE": {
+          "frames": 980,
+          "bytes": 32340
+        },
+        "COMPLETE": {
+          "frames": 1,
+          "bytes": 35
+        }
+      }
+    },
+    "bytes_written": {
+      "total": 77232,
+      "control": 10973,
+      "node_digests": 41489,
+      "leaf_digests": 24770,
+      "page_data": 0,
+      "by_message_type": {
+        "ACCEPT": {
+          "frames": 1,
+          "bytes": 10973
+        },
+        "BASIS_NODES": {
+          "frames": 977,
+          "bytes": 41489
+        },
+        "LEAF_DIGESTS": {
+          "frames": 18,
+          "bytes": 24770
+        }
+      }
+    },
+    "verify_scope": "as-written",
+    "verify_written": {
+      "nodes_kept": 1527,
+      "nodes_composed": 30,
+      "nodes_reread": 23,
+      "pages_reread": 14,
+      "pages_read_back": 4029,
+      "read_back_seconds": 0.06444455000001881
+    }
+  }
+}

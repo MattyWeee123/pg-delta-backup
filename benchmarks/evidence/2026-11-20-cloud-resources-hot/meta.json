@@ -1,0 +1,209 @@
+{
+  "name": "cloud-resources-hot-20261120",
+  "title": "pg_basebackup vs pgdelta vs pgdelta-inplace, scale 50, hot change (GCP n2-standard-4, link 1gbit)",
+  "created": "2026-11-20 16:25:53",
+  "finished": true,
+  "lanes": [
+    {
+      "id": "pg_basebackup-r1",
+      "label": "pg_basebackup (copies everything) \u00b7 run 1",
+      "events": "events-pg_basebackup-r1.jsonl"
+    },
+    {
+      "id": "pg_basebackup-r2",
+      "label": "pg_basebackup (copies everything) \u00b7 run 2",
+      "events": "events-pg_basebackup-r2.jsonl"
+    },
+    {
+      "id": "pg_basebackup-r3",
+      "label": "pg_basebackup (copies everything) \u00b7 run 3",
+      "events": "events-pg_basebackup-r3.jsonl"
+    },
+    {
+      "id": "pgdelta-r1",
+      "label": "pgdelta (new copy) \u00b7 run 1",
+      "events": "events-pgdelta-r1.jsonl"
+    },
+    {
+      "id": "pgdelta-r2",
+      "label": "pgdelta (new copy) \u00b7 run 2",
+      "events": "events-pgdelta-r2.jsonl"
+    },
+    {
+      "id": "pgdelta-r3",
+      "label": "pgdelta (new copy) \u00b7 run 3",
+      "events": "events-pgdelta-r3.jsonl"
+    },
+    {
+      "id": "pgdelta-inplace-r1",
+      "label": "pgdelta (in place) \u00b7 run 1",
+      "events": "events-pgdelta-inplace-r1.jsonl"
+    },
+    {
+      "id": "pgdelta-inplace-r2",
+      "label": "pgdelta (in place) \u00b7 run 2",
+      "events": "events-pgdelta-inplace-r2.jsonl"
+    },
+    {
+      "id": "pgdelta-inplace-r3",
+      "label": "pgdelta (in place) \u00b7 run 3",
+      "events": "events-pgdelta-inplace-r3.jsonl"
+    }
+  ],
+  "setup": {
+    "where": "gcp",
+    "scale": 50,
+    "change": "1% of rows, hot",
+    "repeats": 3,
+    "machine": "n2-standard-4",
+    "disk": "50 GB pd-balanced",
+    "link": "1gbit",
+    "zones": "us-central1-a / us-central1-b"
+  },
+  "config": {
+    "name": "cloud-resources-hot-20261120",
+    "where": "gcp",
+    "methods": [
+      "pg_basebackup",
+      "pgdelta",
+      "pgdelta-inplace"
+    ],
+    "scale": 50,
+    "change": "hot",
+    "repeats": 3,
+    "chunk_size": 8192,
+    "link": "1gbit",
+    "machine": "n2-standard-4",
+    "disk_type": "pd-balanced",
+    "disk_gb": 50,
+    "region": "us-central1",
+    "zones": [
+      "us-central1-a",
+      "us-central1-b"
+    ],
+    "ttl_minutes": 120,
+    "notes": ""
+  },
+  "estimate": {
+    "minutes": 7.0,
+    "dollars": 0.05,
+    "vcpus": 8,
+    "machine_known": true,
+    "note": "approximate list prices for us-central1; a guide, not billing"
+  },
+  "facts": {
+    "vms": {
+      "source": "pgd-bench-ot2026112034c1-src",
+      "destination": "pgd-bench-ot2026112034c1-dst",
+      "zones": [
+        "us-central1-a",
+        "us-central1-b"
+      ],
+      "machine": "n2-standard-4",
+      "disk": "50 GB pd-balanced",
+      "image": "debian-13",
+      "deleted": true
+    },
+    "lanes": {
+      "pg_basebackup-r1": {
+        "elapsed": 11.9685,
+        "bytes_sent": 815978496,
+        "total_bytes": 815978496,
+        "ok": true,
+        "copy": "5000000|350000",
+        "match": true
+      },
+      "pg_basebackup-r2": {
+        "elapsed": 11.9445,
+        "bytes_sent": 815978496,
+        "total_bytes": 815978496,
+        "ok": true,
+        "copy": "5000000|350000",
+        "match": true
+      },
+      "pg_basebackup-r3": {
+        "elapsed": 11.8858,
+        "bytes_sent": 816060416,
+        "total_bytes": 816060416,
+        "ok": true,
+        "copy": "5000000|350000",
+        "match": true
+      },
+      "pgdelta-r1": {
+        "elapsed": 10.1306,
+        "bytes_sent": 33058957,
+        "total_bytes": 1486743704,
+        "pages_sent": 4029,
+        "pages_reused": 97594,
+        "ok": true,
+        "copy": "5000000|350000",
+        "match": true
+      },
+      "pgdelta-r2": {
+        "elapsed": 10.0572,
+        "bytes_sent": 33058957,
+        "total_bytes": 1486743704,
+        "pages_sent": 4029,
+        "pages_reused": 97594,
+        "ok": true,
+        "copy": "5000000|350000",
+        "match": true
+      },
+      "pgdelta-r3": {
+        "elapsed": 10.039,
+        "bytes_sent": 33058957,
+        "total_bytes": 1486743704,
+        "pages_sent": 4029,
+        "pages_reused": 97594,
+        "ok": true,
+        "copy": "5000000|350000",
+        "match": true
+      },
+      "pgdelta-inplace-r1": {
+        "elapsed": 5.7259,
+        "bytes_sent": 33058944,
+        "total_bytes": 1486743704,
+        "pages_sent": 4029,
+        "pages_reused": 97594,
+        "ok": true,
+        "copy": "5000000|350000",
+        "match": true
+      },
+      "pgdelta-inplace-r2": {
+        "elapsed": 5.763,
+        "bytes_sent": 33058944,
+        "total_bytes": 1486743704,
+        "pages_sent": 4029,
+        "pages_reused": 97594,
+        "ok": true,
+        "copy": "5000000|350000",
+        "match": true
+      },
+      "pgdelta-inplace-r3": {
+        "elapsed": 5.7187,
+        "bytes_sent": 33058944,
+        "total_bytes": 1486743704,
+        "pages_sent": 4029,
+        "pages_reused": 97594,
+        "ok": true,
+        "copy": "5000000|350000",
+        "match": true
+      }
+    },
+    "postgres": "17.12",
+    "rtt_ms": 0.81,
+    "database_bytes": 1486743704,
+    "verify": {
+      "source": "5000000|350000",
+      "copy": "5000000|350000",
+      "checked": true,
+      "match": true
+    }
+  },
+  "verify": {
+    "source": "5000000|350000",
+    "copy": "5000000|350000",
+    "checked": true,
+    "match": true
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "sampler_sha256": "080033140d186d5e6dc823e62a8895cb989b6fa06aaed987fb5f10353cbd5bd4",
+  "memory_metric": "summed RSS of matching backup processes; shared pages can be counted multiple times",
+  "memory_record": "M epoch total available cached dirty writeback matched_rss matched_process_count",
+  "sampling_interval_s": 0.1,
+  "engine_revision": "da1a770f618b1c89d2195357f7b57e3ef9cc3d2e",
+  "tracked_engine_diff": "",
+  "archived_wrapper_changes": "Repository paths are portable; the cloud project must be supplied explicitly. The sampler used in the run is archived byte-for-byte."
+}

@@ -1,5 +1,7 @@
 # Benchmark and restore plan
 
+[Cloud CPU, memory, disk and network results from November 20, 2026](evidence/2026-11-20-cloud-resources-hot/README.md) compare full basebackup with both pgdelta modes.
+
 Status: overall experiment design. The [native runner](NATIVE.md) now executes a limited real PostgreSQL smoke matrix; the controlled baseline release is still incomplete. See the [baseline release gate](BASELINE-GATE.md) for the distinction.
 Sponsor direction from the supplied chats: active workload, time/network/application-impact comparison, team-defined scales and a custom correctness benchmark.
 Do not compare an already staged custom source against an end-to-end baseline without also reporting staging cost.

@@ -1,0 +1,15 @@
+{
+  "observed_lifetime_seconds": 542.2422399520874,
+  "recorded_hourly_rate_usd": 0.4072,
+  "estimated_compute_storage_usd": 0.061333622252358326,
+  "network_charges_included": false,
+  "billing_invoice_verified": false,
+  "owned_instances_remaining": 0,
+  "owned_disks_remaining": 0,
+  "estimated_benchmark_plus_initial_basis_network_bytes": 3481630375.623156,
+  "interzone_usd_per_gib": 0.01,
+  "estimated_interzone_transfer_usd": 0.03242520965284813,
+  "estimated_compute_storage_plus_interzone_usd": 0.09375883190520645,
+  "network_price_source": "https://cloud.google.com/vpc/network-pricing",
+  "initial_basis_transfer_estimated_from_full_backup": true
+}
