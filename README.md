@@ -29,13 +29,13 @@ pgdelta: 998 files, 67471 chunks unchanged, 438 changed, 384 new; sent 9,089,083
    MATCH
 ```
 
-That trace predates batched digests (#36): `round trips` there is a per-chunk count from the stop-and-wait engine, what `--batch 1` now reproduces, and at today's default it falls to one round trip per batch — at most one per file, so the fall is bounded by S's file count, not by `--batch`.
+That trace predates both batched digests (#36 step 1) and today's streamed engine (#36 step 2): `round trips` there is a per-chunk count from the original stop-and-wait engine, where each round trip asked about one chunk. In the streamed engine round trips no longer scales with chunks at all — it's accepting B's file list, each digest the sender has to wait for, and the final result — so the count collapses to a handful regardless of database size. That collapse is observable from the counters; this trace has not been re-run to show what time it buys.
 
 `CHANGE=uniform` updates every 100th row instead, which touches nearly every page. A laptop has no slow network, so judge pgdelta here by the bytes it sends and by the copy being right, not by time. Time is what the benchmarks on Google Cloud measure.
 
 ## How the naive version works
 
-For each file, the sender accumulates up to `--batch` 8 KiB chunks at a time, hashes them, and asks the receiver "are any of these different?" in one message. It waits for one bitmap answer covering the whole batch, then sends only the chunks that differ. One thread, one TCP connection, one round trip per batch, never spanning two files. The receiver builds the new copy beside the old one, verifies every file against the source's digest, and publishes it with one rename. See [pgdelta/README.md](pgdelta/README.md).
+For each file, the receiver streams B's chunk digests unasked, on its own thread, while the sender reads and hashes S at the same time on its own thread and compares each chunk locally against the next digest waiting for it — nothing is asked for, and the sender only ever stops to wait when the digest it needs hasn't arrived yet. Chunks B already holds accumulate into one run-length `CHUNK_COPY` instruction; everything else goes out as `CHUNK_DATA`. One TCP connection, never spanning two files. The receiver builds the new copy beside the old one, verifies every file against the source's digest, and publishes it with one rename. See [pgdelta/README.md](pgdelta/README.md).
 
 It is slow on purpose: every wait in it is a step on the roadmap.
 

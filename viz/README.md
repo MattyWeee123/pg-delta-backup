@@ -33,7 +33,7 @@ One run at a time. The page only accepts requests from itself.
 
 Finally it starts the refreshed copy and compares its rows with the source. The page shows each lane live as it runs, then replays both side by side. Runs are saved in `runs/` (not committed).
 
-On a laptop there's no slow network, so the naive pgdelta loses on time: in one run at scale 50, 8.7 s against `pg_basebackup`'s 1.1 s, because of its 168,340 chunk questions. That run predates batched digests (#36): it used the stop-and-wait engine, where one round trip asked about one chunk, so the figure is a chunk count, not a round-trip count under today's batched engine; the run has not been repeated under batching. It wins on bytes: 22 MB sent against 817 MB. Closing that time gap is what the roadmap is for.
+On a laptop there's no slow network, so the naive pgdelta loses on time: in one run at scale 50, 8.7 s against `pg_basebackup`'s 1.1 s, because of its 168,340 chunk questions. That run predates batched digests (#36 step 1) and today's streamed engine (#36 step 2): it used the stop-and-wait engine, where one round trip asked about one chunk, so the figure is a chunk count, not a round-trip count under either of the engines that replaced it; the run has not been repeated under batching or streaming. It wins on bytes: 22 MB sent against 817 MB. Closing that time gap is what the roadmap is for.
 
 ## Replaying recorded VM runs
 
@@ -45,7 +45,7 @@ On a laptop there's no slow network, so the naive pgdelta loses on time: in one 
 
 A lane is a file of JSON lines (see `pgdelta/events.py`):
 - `start`, with `total_bytes`;
-- `progress`, about every 0.1 s, with any of `bytes_read`, `bytes_sent`, `round_trips`, `chunks_same`, `chunks_changed` and `chunks_new`. There is no `chunks_asked`, so the live display can't show a per-chunk question count, only round trips; and because the same/changed/new counters only advance when a batch flushes, that trio can lag `bytes_read` by up to one batch's worth of chunks.
+- `progress`, about every 0.1 s, with any of `bytes_read`, `bytes_sent`, `round_trips`, `chunks_same`, `chunks_changed` and `chunks_new`. There is no `chunks_asked`, `copy_runs` or `digest_waits` in the live stream — those are in the final stats only. `chunks_same`/`chunks_changed`/`chunks_new` update as each chunk is compared, so there's no batch-flush lag any more; `round_trips` here no longer scales with chunks at all under the streamed engine (#36 step 2), so it stays a handful for the whole run regardless of database size. The page draws one dot per `round_trips` increment and labels it as the sender stopping to wait for a digest: nothing is asked for, so a dot is a stall, not a question.
 - optionally `gauges`, with `link_MBps`, `src_read_MBps`, `dst_read_MBps` and `dst_write_MBps`;
 - `done`, with `elapsed`.
 

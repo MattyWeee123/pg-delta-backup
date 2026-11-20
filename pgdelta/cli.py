@@ -20,7 +20,7 @@ from pgdelta import __version__
 from pgdelta.events import EventLog
 from pgdelta.protocol import Channel, tune
 from pgdelta.receiver import run_receiver
-from pgdelta.sender import DEFAULT_BATCH, DEFAULT_BATCH_BYTES, DEFAULT_CHUNK_SIZE, run_sender
+from pgdelta.sender import DEFAULT_CHUNK_SIZE, DEFAULT_DIGEST_WINDOW, run_sender
 
 
 def positive_int(text: str) -> int:
@@ -42,13 +42,12 @@ def main(argv=None) -> int:
     local.add_argument('--basis', type=Path, required=True, help='B: the old copy (read only)')
     local.add_argument('--output', type=Path, required=True, help='O: where the refreshed copy appears')
     local.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE,
-                       help='bytes compared per question (default: %(default)s, one PostgreSQL page)')
-    local.add_argument('--batch', type=positive_int, default=DEFAULT_BATCH,
-                       help='chunks asked about per round trip, at most (1 reproduces stop-and-wait; '
-                            'default: %(default)s)')
-    local.add_argument('--batch-bytes', type=positive_int, default=DEFAULT_BATCH_BYTES,
-                       help='memory bound on a batch: chunk data held while verdicts are awaited '
-                            '(default: %(default)s)')
+                       help='bytes compared per chunk (default: %(default)s, one PostgreSQL page)')
+    local.add_argument('--digest-window', type=positive_int, default=DEFAULT_DIGEST_WINDOW,
+                       help='bytes of B\'s undelivered digests the sender holds before it stops '
+                            'draining the receiver (default: %(default)s); floored at one '
+                            'BASIS_DIGESTS frame so the pipeline never collapses into '
+                            'synchronous frame-at-a-time handoff')
     local.add_argument('--stats-json', type=Path, help='write both sides\' statistics here')
     local.add_argument('--pg-controldata', type=Path, help=argparse.SUPPRESS)  # passed by the benchmark harness; unused
     local.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
@@ -57,9 +56,11 @@ def main(argv=None) -> int:
     send.add_argument('--source', type=Path, required=True)
     send.add_argument('--connect', required=True, metavar='HOST:PORT')
     send.add_argument('--chunk-size', type=int, default=DEFAULT_CHUNK_SIZE)
-    send.add_argument('--batch', type=positive_int, default=DEFAULT_BATCH,
-                      help='chunks asked about per round trip, at most (1 reproduces stop-and-wait)')
-    send.add_argument('--batch-bytes', type=positive_int, default=DEFAULT_BATCH_BYTES)
+    send.add_argument('--digest-window', type=positive_int, default=DEFAULT_DIGEST_WINDOW,
+                      help='bytes of B\'s undelivered digests the sender holds before it stops '
+                           'draining the receiver (default: %(default)s); floored at one '
+                           'BASIS_DIGESTS frame so the pipeline never collapses into '
+                           'synchronous frame-at-a-time handoff')
     send.add_argument('--stats-json', type=Path)
     send.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
 
@@ -77,8 +78,8 @@ def main(argv=None) -> int:
             with socket.create_connection(_address(args.connect)) as sock:
                 events = EventLog(args.events)
                 try:
-                    report = run_sender(Channel(tune(sock)), args.source, args.chunk_size, events, args.batch,
-                                        args.batch_bytes)
+                    report = run_sender(Channel(tune(sock)), args.source, args.chunk_size, events,
+                                        args.digest_window)
                 finally:
                     events.close()
         else:
@@ -114,7 +115,7 @@ def _local(args) -> dict:
     try:
         events = EventLog(getattr(args, 'events', None))
         try:
-            report = run_sender(Channel(ours), args.source, args.chunk_size, events, args.batch, args.batch_bytes)
+            report = run_sender(Channel(ours), args.source, args.chunk_size, events, args.digest_window)
         finally:
             events.close()
     except BaseException:
@@ -147,5 +148,7 @@ def summary(report: dict) -> str:
     return (f"pgdelta: {counts.get('files', 0)} files, "
             f"{counts.get('chunks_same', 0)} chunks unchanged, {counts.get('chunks_changed', 0)} changed, "
             f"{counts.get('chunks_new', 0)} new; sent {sent:,} bytes{share}; "
-            f"{counts.get('round_trips', 0)} round trips asking about {counts.get('chunks_asked', 0)} chunks; "
+            f"{counts.get('chunks_asked', 0)} chunks compared, {counts.get('copy_runs', 0)} copy runs, "
+            f"{counts.get('chunks_changed', 0) + counts.get('chunks_new', 0)} chunks sent, "
+            f"{counts.get('digest_waits', 0)} digest waits; "
             f"{report['elapsed_seconds']:.2f} s; every file verified")

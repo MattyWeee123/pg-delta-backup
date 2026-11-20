@@ -88,7 +88,7 @@ summary { cursor: pointer; }
   <div id="lanes"></div>
   <div class="legend">
     <span><svg width="22" height="10"><rect width="18" height="8" y="1" rx="2" fill="var(--data)"/></svg> data sent across</span>
-    <span><svg width="14" height="10"><circle cx="5" cy="5" r="3" fill="var(--ask)"/></svg> a hash question (one round trip)</span>
+    <span><svg width="14" height="10"><circle cx="5" cy="5" r="3" fill="var(--ask)"/></svg> the sender stopping to wait for a digest (a round trip, not a question: nothing is asked for)</span>
     <span>Each lane's clock starts at zero, so recorded lanes race side by side.</span>
   </div>
 </main>
@@ -137,7 +137,11 @@ function build() {
   calibrate();
 }
 
-function calibrate() {  // particles per byte and dots per round trip, scaled to the busiest lane
+// Particles per byte, and dots per round trip, scaled to the busiest lane. A round trip is no
+// longer one question per chunk: under the streamed engine it is the sender stopping to wait --
+// for B's file list, for a digest that has not arrived yet, or for the final result -- so the dot
+// channel marks those few stalls rather than tracking the data channel.
+function calibrate() {
   let maxB = 1, maxQ = 1;
   for (const l of lanes) {
     const p = l.events.filter((e) => e.kind === 'progress');

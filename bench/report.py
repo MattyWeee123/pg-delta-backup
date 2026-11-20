@@ -97,31 +97,36 @@ def write(run_dir: Path, cfg: RunConfig, facts: dict, estimate: dict | None = No
     else:
         lines += [f"**Machine:** this laptop ({facts.get('machine', '?')}, {facts.get('cpus', '?')} CPUs), "
                   f"PostgreSQL {facts.get('postgres', '?')}. No network: judge pgdelta by bytes and correctness here.", '']
-    lines += ['## Results', '', "| Lane | Time | Sent | Of S's files | Round trips | Chunks asked | vs pg_basebackup |",
-              '|---|---|---|---|---|---|---|']
+    lines += ['## Results', '',
+              "| Lane | Time | Sent | Of S's files | Round trips | Chunks asked | Copy runs | Digest waits | "
+              "vs pg_basebackup |", '|---|---|---|---|---|---|---|---|---|']
     has_round_trips = False
     for lane in lanes:
         r = facts['lanes'].get(lane['id'])
         if not r:
-            lines.append(f"| {lane['label']} | failed | | | | | |")
+            lines.append(f"| {lane['label']} | failed | | | | | | | |")
             continue
         share = f"{100 * r['bytes_sent'] / database:.1f}%" if database else '–'
         ratio = f"{r['elapsed'] / base_mean:.2f}×" if base_mean else '–'
-        round_trips = r.get('round_trips')
-        if round_trips is None:
-            rt_cell, ca_cell = '–', '–'
-        else:
+        if r.get('round_trips') is not None:
             has_round_trips = True
-            rt_cell = str(round_trips)
-            chunks_asked = r.get('chunks_asked')
-            ca_cell = '–' if chunks_asked is None else str(chunks_asked)
+        rt_cell, ca_cell, cr_cell, dw_cell = (
+            '–' if r.get(key) is None else str(r[key])
+            for key in ('round_trips', 'chunks_asked', 'copy_runs', 'digest_waits'))
         lines.append(f"| {lane['label']} | {r['elapsed']:.2f} s | {fmt_bytes(r['bytes_sent'])} | {share} | "
-                     f"{rt_cell} | {ca_cell} | {ratio} |")
+                     f"{rt_cell} | {ca_cell} | {cr_cell} | {dw_cell} | {ratio} |")
     if has_round_trips:
-        lines += ['', "Round trips counts `CHUNK_HASHES`/`VERDICTS` exchanges, each covering up to `--batch` "
-                  "chunks; chunks asked is how many chunks those exchanges covered. A run recorded before "
-                  "batched digests (issue #36) has no chunks-asked count — there, round trips counted chunks "
-                  "directly, one per round trip, so the two columns meant the same thing."]
+        lines += ['', "Round trips counts every time the sender blocked on the peer; what that buys varies "
+                  "by when a run was recorded. **Streamed** (issue #36 step 2, both copy runs and digest "
+                  "waits present): round trips no longer scales with chunks at all — it's ACCEPT, each "
+                  "digest wait, and RESULT — so it stays a handful regardless of size; copy runs counts "
+                  "run-length `CHUNK_COPY` instructions (one for an untouched file), and digest waits is how "
+                  "many of those round trips were spent waiting for a digest that had not arrived yet. "
+                  "**Batched** (issue #36 step 1, chunks asked present but copy runs and digest waits a "
+                  "dash): round trips counted `CHUNK_HASHES`/`VERDICTS` exchanges, each covering up to "
+                  "`--batch` chunks, and chunks asked is how many chunks those exchanges covered. **Stop-"
+                  "and-wait** (chunks asked also a dash): round trips counted chunks directly, one per "
+                  "round trip, so it meant what chunks asked means in the other two generations."]
     verify = facts.get('verify', {})
     if base:
         lines += ['', "`pg_basebackup` skips old WAL and temporary files, so it sends less than S's whole directory."]
