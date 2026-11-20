@@ -16,7 +16,7 @@ from pathlib import Path
 
 from bench.config import RunConfig
 from bench.lanes import pump_pg_basebackup
-from bench import v1
+from bench import engine
 from bench.steps import no_steps
 from pgdelta.events import EventLog
 
@@ -101,70 +101,45 @@ def run_laptop(cfg: RunConfig, run_dir: Path, work: Path, pgbin: Path, log=print
                     events.emit('done', ok=True, elapsed=elapsed, bytes_sent=total, total_bytes=total)
                     events.close()
                     facts['lanes'][lane['id']] = {'elapsed': elapsed, 'bytes_sent': total, 'total_bytes': total}
-                elif lane['method'] in v1.METHODS:
-                    if running:
-                        ctl('stop', work / 'S')
-                        running = False
-                    inplace = lane['method'] == 'pgdelta-v1-inplace'
-                    target = work / ('Bw' if inplace else 'O1')
-                    shutil.rmtree(target, ignore_errors=True)
-                    if inplace:  # a fresh copy of B to patch, made before the clock starts
-                        shutil.copytree(work / 'B', target, symlinks=True)
-                    stats = run_dir / f"stats-{lane['id']}.json"
-                    events = EventLog(path, method=lane['id'])
-                    events.emit('start', total_bytes=facts['database_bytes'])
-                    run(sys.executable, '-m', 'pgdelta', *v1.local_args(lane['method'], work / 'S', target if inplace else work / 'B', target,
-                                                                         str(pgbin / 'pg_controldata')),
-                        '--stats-json', stats, cwd=v1.extract(work / 'v1'), stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL)
-                    elapsed = time.perf_counter() - events.started
-                    result = v1.facts(stats, elapsed, facts['database_bytes'])
-                    events.emit('done', ok=result['ok'], elapsed=result['elapsed'], bytes_sent=result['bytes_sent'],
-                                total_bytes=facts['database_bytes'])
-                    events.close()
-                    ctl('start', target, 55434)  # every archived-engine copy is started and checked
-                    result['copy'] = sql(55434, 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
-                    ctl('stop', target)
-                    result['match'] = result['copy'] == expect
-                    facts['lanes'][lane['id']] = result
                 else:
                     if running:
                         ctl('stop', work / 'S')
                         running = False
-                    shutil.rmtree(work / 'O', ignore_errors=True)
+                    inplace = lane['method'] == 'pgdelta-inplace'
+                    target = work / ('Bw' if inplace else 'O')
+                    shutil.rmtree(target, ignore_errors=True)
+                    if inplace:  # a fresh copy of B to patch, made before the clock starts
+                        shutil.copytree(work / 'B', target, symlinks=True)
                     stats = run_dir / f"stats-{lane['id']}.json"
-                    run(sys.executable, '-m', 'pgdelta', 'local', '--source', work / 'S', '--basis', work / 'B',
-                        '--output', work / 'O', '--chunk-size', cfg.chunk_size, '--events', path, '--stats-json', stats,
-                        cwd=REPO, stderr=subprocess.DEVNULL)
-                    facts['lanes'][lane['id']] = _pgdelta_facts(stats)
+                    started = time.perf_counter()
+                    run(sys.executable, '-m', 'pgdelta',
+                        *engine.local_args(lane['method'], work / 'S', target if inplace else work / 'B', target,
+                                           str(pgbin / 'pg_controldata')),
+                        '--events', path, '--stats-json', stats, cwd=REPO, stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL)
+                    result = engine.facts(stats, time.perf_counter() - started, facts['database_bytes'])
+                    _retag(path, lane['id'])
+                    ctl('start', target, 55434)  # every copy is started and checked
+                    result['copy'] = sql(55434, 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
+                    ctl('stop', target)
+                    result['match'] = result['copy'] == expect
+                    facts['lanes'][lane['id']] = result
         if running:
             ctl('stop', work / 'S')
-        got = None
-        if 'pgdelta' in cfg.methods:
-            with step('check'):
-                ctl('start', work / 'O', 55433)
-                got = sql(55433, 'SELECT count(*), sum(abalance) FROM pgbench_accounts')
-                ctl('stop', work / 'O')
     finally:
         for d in ('S', 'O', 'O1', 'Bw'):
             if (work / d / 'postmaster.pid').exists():
                 subprocess.run([str(pgbin / 'pg_ctl'), '-D', str(work / d), '-m', 'fast', '-w', 'stop'],
                                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    archived = [lane for lane in facts['lanes'].values() if 'match' in lane]
-    facts['verify'] = {'source': expect, 'copy': got if got is not None else (archived[0]['copy'] if archived else None),
-                       'match': (got is None or (bool(expect) and expect == got)) and all(l['match'] for l in archived),
-                       'checked': got is not None or bool(archived)}
-    log(f"copy check: source {expect}, refreshed copy {got}: {'MATCH' if facts['verify']['match'] else 'MISMATCH'}")
+    checked = [lane for lane in facts['lanes'].values() if 'match' in lane]
+    facts['verify'] = {'source': expect, 'copy': checked[0]['copy'] if checked else None,
+                       'match': all(lane['match'] for lane in checked), 'checked': bool(checked)}
+    log(f"copy check: source {expect}, {len(checked)} pgdelta copies: {'all MATCH' if facts['verify']['match'] else 'MISMATCH'}")
     return facts
 
 
-def _pgdelta_facts(stats_path: Path) -> dict:
+def _retag(path: Path, lane_id: str) -> None:
+    """pgdelta's events say method "pgdelta"; the viewer wants the lane's id (pgdelta-inplace-r2, ...)."""
     import json
-    report = json.loads(Path(stats_path).read_text())
-    c = report.get('counts', {})
-    return {'elapsed': report['elapsed_seconds'], 'bytes_sent': report['bytes_sent_total'],
-            'total_bytes': c.get('bytes_read', 0), 'round_trips': c.get('round_trips', 0),
-            'chunks_asked': c.get('chunks_asked', 0), 'copy_runs': c.get('copy_runs', 0),
-            'digest_waits': c.get('digest_waits', 0),
-            'chunks_changed': c.get('chunks_changed', 0), 'chunks_same': c.get('chunks_same', 0),
-            'chunks_new': c.get('chunks_new', 0), 'ok': report.get('ok', False)}
+    events = [json.loads(line) for line in Path(path).read_text().splitlines() if line.strip()]
+    Path(path).write_text(''.join(json.dumps({**e, 'method': lane_id}, separators=(',', ':')) + '\n' for e in events))

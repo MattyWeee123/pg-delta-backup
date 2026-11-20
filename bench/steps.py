@@ -24,14 +24,14 @@ from pathlib import Path
 from bench import cost
 from bench.config import RunConfig
 
-# Seconds, as (fixed, per GB of database). Today's pgdelta streams (PR #44): no per-chunk round trips.
+# Seconds, as (fixed, per GB of database), measured with the engine restored on Nov 20 (bench/engine.py).
 RULES = {
-    'laptop': {'build': (1, 5), 'copy': (1, 2), 'lane:pg_basebackup': (0.5, 1.5), 'lane:pgdelta': (0.5, 6),
-               'lane:pgdelta-v1': (3, 2), 'lane:pgdelta-v1-inplace': (5, 2),
+    'laptop': {'build': (1, 5), 'copy': (1, 2), 'lane:pg_basebackup': (0.5, 1.5), 'lane:pgdelta': (3, 2),
+               'lane:pgdelta-inplace': (5, 2),
                'check': (2, 0), 'publish': (5, 0)},
     'gcp': {'vms': (40, 0), 'install': (35, 0), 'build': (2, 15), 'copy': (5, 20), 'lane:pg_basebackup': (12, 0),
-            'lane:pgdelta': (20, 25), 'lane:pgdelta-v1': (25, 25), 'lane:pgdelta-v1-inplace': (30, 25),
-            'check': (3, 0), 'delete': (30, 0), 'publish': (5, 0)},
+            'lane:pgdelta': (20, 25), 'lane:pgdelta-inplace': (25, 15),
+            'delete': (30, 0), 'publish': (5, 0)},
 }
 # Settings that must match for an earlier run's step to predict this one (cloud runs; a laptop run matches
 # on the computer instead of machine and disk).
@@ -100,8 +100,6 @@ def plan(cfg: RunConfig, publish: bool = False, root: Path | None = None) -> lis
     add('copy', 'Take the old copy, then change 1% of rows')
     for lane in cfg.lanes():
         add('lane:' + lane['id'], lane['label'], kind='lane:' + lane['method'], lane=lane['id'])
-    if 'pgdelta' in cfg.methods:
-        add('check', 'Check the refreshed copy matches')
     if cfg.where == 'gcp':
         add('delete', 'Delete the VMs')
     if publish:

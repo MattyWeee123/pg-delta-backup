@@ -7,7 +7,7 @@ from statistics import mean
 
 from bench.config import RunConfig
 
-COLORS = {'pg_basebackup': '#8a93a6', 'pgdelta': '#2459c4', 'pgdelta-v1': '#c46a12', 'pgdelta-v1-inplace': '#2c7a4c'}
+COLORS = {'pg_basebackup': '#8a93a6', 'pgdelta': '#2459c4', 'pgdelta-inplace': '#2c7a4c'}
 SERIES = (('link_MBps', 'link (source sends)', '#2459c4'), ('src_read_MBps', 'source disk read', '#2c7a4c'),
           ('dst_read_MBps', 'dest disk read', '#c46a12'), ('dst_write_MBps', 'dest disk write', '#a8322b'))
 
@@ -98,35 +98,22 @@ def write(run_dir: Path, cfg: RunConfig, facts: dict, estimate: dict | None = No
         lines += [f"**Machine:** this laptop ({facts.get('machine', '?')}, {facts.get('cpus', '?')} CPUs), "
                   f"PostgreSQL {facts.get('postgres', '?')}. No network: judge pgdelta by bytes and correctness here.", '']
     lines += ['## Results', '',
-              "| Lane | Time | Sent | Of S's files | Round trips | Chunks asked | Copy runs | Digest waits | "
-              "vs pg_basebackup |", '|---|---|---|---|---|---|---|---|---|']
-    has_round_trips = False
+              "| Lane | Time | Sent | Of S's files | Pages sent | Pages reused | Copy check | vs pg_basebackup |",
+              '|---|---|---|---|---|---|---|---|']
     for lane in lanes:
         r = facts['lanes'].get(lane['id'])
         if not r:
-            lines.append(f"| {lane['label']} | failed | | | | | | | |")
+            lines.append(f"| {lane['label']} | failed | | | | | | |")
             continue
         share = f"{100 * r['bytes_sent'] / database:.1f}%" if database else '–'
         ratio = f"{r['elapsed'] / base_mean:.2f}×" if base_mean else '–'
-        if r.get('round_trips') is not None:
-            has_round_trips = True
-        rt_cell, ca_cell, cr_cell, dw_cell = (
-            '–' if r.get(key) is None else str(r[key])
-            for key in ('round_trips', 'chunks_asked', 'copy_runs', 'digest_waits'))
+        sent_cell, reused_cell = ('–' if r.get(key) is None else f"{r[key]:,}" for key in ('pages_sent', 'pages_reused'))
+        check = '–' if 'match' not in r else ('match' if r['match'] else '**MISMATCH**')
         lines.append(f"| {lane['label']} | {r['elapsed']:.2f} s | {fmt_bytes(r['bytes_sent'])} | {share} | "
-                     f"{rt_cell} | {ca_cell} | {cr_cell} | {dw_cell} | {ratio} |")
-    if has_round_trips:
-        lines += ['', "Round trips counts every time the sender blocked on the peer; what that buys varies "
-                  "by when a run was recorded. **Streamed** (issue #36 step 2, both copy runs and digest "
-                  "waits present): round trips no longer scales with chunks at all — it's ACCEPT, each "
-                  "digest wait, and RESULT — so it stays a handful regardless of size; copy runs counts "
-                  "run-length `CHUNK_COPY` instructions (one for an untouched file), and digest waits is how "
-                  "many of those round trips were spent waiting for a digest that had not arrived yet. "
-                  "**Batched** (issue #36 step 1, chunks asked present but copy runs and digest waits a "
-                  "dash): round trips counted `CHUNK_HASHES`/`VERDICTS` exchanges, each covering up to "
-                  "`--batch` chunks, and chunks asked is how many chunks those exchanges covered. **Stop-"
-                  "and-wait** (chunks asked also a dash): round trips counted chunks directly, one per "
-                  "round trip, so it meant what chunks asked means in the other two generations."]
+                     f"{sent_cell} | {reused_cell} | {check} | {ratio} |")
+    lines += ['', 'Every lane is timed the same way: on the machine doing the work, from just before the command '
+              'starts to just after it exits. Each pgdelta copy is started with PostgreSQL and its rows compared '
+              "with the source's (the copy check)."]
     verify = facts.get('verify', {})
     if base:
         lines += ['', "`pg_basebackup` skips old WAL and temporary files, so it sends less than S's whole directory."]

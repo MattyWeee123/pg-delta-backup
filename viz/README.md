@@ -33,7 +33,7 @@ One run at a time. The page only accepts requests from itself.
 
 Finally it starts the refreshed copy and compares its rows with the source. The page shows each lane live as it runs, then replays both side by side. Runs are saved in `runs/` (not committed).
 
-On a laptop there's no slow network, so the naive pgdelta loses on time: in one run at scale 50, 8.7 s against `pg_basebackup`'s 1.1 s, because of its 168,340 chunk questions. That run predates batched digests (#36 step 1) and today's streamed engine (#36 step 2): it used the stop-and-wait engine, where one round trip asked about one chunk, so the figure is a chunk count, not a round-trip count under either of the engines that replaced it; the run has not been repeated under batching or streaming. It wins on bytes: 22 MB sent against 817 MB. Closing that time gap is what the roadmap is for.
+On a laptop there's no network, so judge pgdelta by bytes and correctness there: in one run at scale 50, pgdelta in place took 0.59 s against `pg_basebackup`'s 0.94 s and sent 16 MB against 817 MB. Each pgdelta lane's copy is started and checked.
 
 ## Replaying recorded VM runs
 

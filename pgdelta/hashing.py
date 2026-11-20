@@ -1,36 +1,147 @@
-"""Keyed digests: one for each chunk, one for each whole file.
+"""Keyed digests for pages (leaves), 1 MiB nodes and whole files: BLAKE2b, or BLAKE3 if asked for.
 
-The key is random for every session, so nobody can prepare, in advance, a chunk whose digest equals
-another chunk's. The two kinds use different personalizations, so a chunk digest can't pass for a
-file digest. BLAKE2b ships with Python (hashlib); trying BLAKE3 or SHA-256 is a roadmap issue.
+The key is random per session, so page contents chosen by a database user
+cannot be crafted in advance to collide. Each level has its own BLAKE2b
+personalization, so a leaf digest can never be confused with a node digest.
+BLAKE3 (EXP-29: 4.8 times BLAKE2b's pages per core on the x86 VMs) has no
+personalization: each level gets its own key instead, derived from the
+session key in BLAKE3's key-derivation mode. It needs the blake3 package.
 """
 from __future__ import annotations
 
 import hashlib
 import os
 
+BLOCK = 8192
+NODE_BLOCKS = 128
 DIGEST_SIZE = 16
 KEY_SIZE = 32
-_CHUNK = b'pgdelta-chunk'
-_FILE = b'pgdelta-file'
+LEAF_PERSON = b'pgdelta-leaf'
+NODE_PERSON = b'pgdelta-node'
+FILE_PERSON = b'pgdelta-file'
+FILES_PERSON = b'pgdelta-files'
+# --subpage (pgdelta.subpage): a page's 512-byte blocks, each with an 8-byte keyed digest, always BLAKE2b (faster
+# than BLAKE3 at this size through Python, EXP-55). A wrong match only costs a failed verification, never a
+# wrong copy: the page and file digests still have to match S's.
+SUB_BLOCK = 512
+SUB_DIGEST_SIZE = 8
+SUB_PERSON = b'pgdelta-subblock'
+ALGORITHMS = ('blake2b', 'blake3')
+DEFAULT_ALGORITHM = 'blake2b'
+BLAKE3_CONTEXTS = ('pgdelta 2026-10-25 leaf digest key', 'pgdelta 2026-10-25 node digest key',
+                   'pgdelta 2026-10-25 file digest key')
 
 
-def new_key() -> bytes:
+def usable(algorithm):
+    """Whether `algorithm` can hash here: BLAKE2b always, BLAKE3 with the blake3 package."""
+    if algorithm == 'blake3':
+        try:
+            blake3_module()
+        except ImportError:
+            return False
+    return algorithm in ALGORITHMS
+
+
+def offer():
+    """What a sender asked for --hash auto offers, preferred first: BLAKE3 where it can hash here, then BLAKE2b."""
+    return [algorithm for algorithm in ('blake3', 'blake2b') if usable(algorithm)]
+
+
+def blake3_module():
+    """The blake3 package, or ImportError saying how to get it."""
+    try:
+        import blake3
+    except ImportError as exc:
+        raise ImportError('the blake3 hash needs the blake3 package (pip install blake3)') from exc
+    return blake3
+
+
+def new_key():
     return os.urandom(KEY_SIZE)
 
 
 class Hasher:
-    def __init__(self, key: bytes):
-        if len(key) != KEY_SIZE:
-            raise ValueError('the session key must be 32 bytes')
-        self._chunk = hashlib.blake2b(key=key, person=_CHUNK, digest_size=DIGEST_SIZE)
-        self._file = hashlib.blake2b(key=key, person=_FILE, digest_size=DIGEST_SIZE)
+    """Digests for one session key. Copies pre-keyed states instead of re-keying per page."""
 
-    def chunk(self, data: bytes) -> bytes:
-        state = self._chunk.copy()
-        state.update(data)
-        return state.digest()
+    def __init__(self, key, algorithm=DEFAULT_ALGORITHM):
+        if not isinstance(key, (bytes, bytearray)) or len(key) != KEY_SIZE:
+            raise ValueError(f'hash key must be {KEY_SIZE} bytes')
+        if algorithm not in ALGORITHMS:
+            raise ValueError(f'hash algorithm must be one of {", ".join(ALGORITHMS)}, not {algorithm!r}')
+        # A process hash pool checks that its workers use this key and algorithm.
+        self.key, self.algorithm = bytes(key), algorithm
+        self._blake3 = algorithm == 'blake3'
+        if self._blake3:
+            blake3 = blake3_module()
+            self._leaf, self._node, self._file = (
+                blake3.blake3(key=blake3.blake3(self.key, derive_key_context=context).digest())
+                for context in BLAKE3_CONTEXTS)
+        else:
+            self._leaf = hashlib.blake2b(key=key, person=LEAF_PERSON, digest_size=DIGEST_SIZE)
+            self._node = hashlib.blake2b(key=key, person=NODE_PERSON, digest_size=DIGEST_SIZE)
+            self._file = hashlib.blake2b(key=key, person=FILE_PERSON, digest_size=DIGEST_SIZE)
+        self._sub = hashlib.blake2b(key=key, person=SUB_PERSON, digest_size=SUB_DIGEST_SIZE)
 
-    def file(self):
-        """A fresh whole-file digest: feed it the file's bytes in order with update(), then digest()."""
-        return self._file.copy()
+    def _digest(self, state):
+        return state.digest(length=DIGEST_SIZE) if self._blake3 else state.digest()
+
+    def leaf(self, page):
+        state = self._leaf.copy()
+        state.update(page)
+        return self._digest(state)
+
+    def node(self, leaf_digests):
+        """Digest of the concatenated leaf digests of one node."""
+        state = self._node.copy()
+        state.update(leaf_digests)
+        return self._digest(state)
+
+    def blocks(self, page):
+        """The concatenated digests of `page`'s SUB_BLOCK-byte blocks (a short page: of the blocks it has)."""
+        parts = []
+        for start in range(0, len(page), SUB_BLOCK):
+            state = self._sub.copy()
+            state.update(page[start:start + SUB_BLOCK])
+            parts.append(state.digest())
+        return b''.join(parts)
+
+    def file(self, size, node_digests):
+        """Digest of the file size (8 bytes, big-endian) and the concatenated node digests."""
+        state = self._file.copy()
+        state.update(size.to_bytes(8, 'big'))
+        state.update(node_digests)
+        return self._digest(state)
+
+
+def leaf_digest(page, key):
+    return Hasher(key).leaf(page)
+
+
+def node_digest(leaf_digests, key):
+    return Hasher(key).node(leaf_digests)
+
+
+def file_digest(size, node_digests, key):
+    return Hasher(key).file(size, node_digests)
+
+
+class FilesDigest:
+    """Combined digest of a whole inventory, for matching a sender's statistics to a receipt.
+
+    Unkeyed BLAKE2b-256 over, for every file in inventory order: the path's
+    UTF-8 length (4 bytes, big-endian) and bytes, the size (8 bytes) and the
+    16-byte keyed file digest. The session key is not kept, so the value
+    names one run's verified content; it cannot be recomputed from O later.
+    """
+
+    def __init__(self):
+        self._state = hashlib.blake2b(digest_size=32, person=FILES_PERSON)
+        self.count = 0
+
+    def add(self, path, size, digest):
+        encoded = path.encode('utf-8', 'surrogatepass')
+        self._state.update(len(encoded).to_bytes(4, 'big') + encoded + size.to_bytes(8, 'big') + digest)
+        self.count += 1
+
+    def hexdigest(self):
+        return self._state.hexdigest()
