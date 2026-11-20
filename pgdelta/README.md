@@ -66,3 +66,15 @@ value — no sweep across batch sizes has been run yet.
 The report also carries `chunk_size` and `batch`, the settings it ran with.
 
 `wait_for_verdict` is the cost of stopping and waiting: the round trip plus the receiver's reads and hashes for the whole batch.
+
+## Select WAL for a stopped snapshot
+
+Use `--wal-mode shutdown` on `local` or `send` to retain the WAL segment containing a verified shutdown checkpoint. For example, on a Mac with Homebrew PostgreSQL 17 installed, run the following from the repository.
+
+```bash
+python3 -m pgdelta local --source S --basis B --output O --wal-mode shutdown --pg-controldata /opt/homebrew/opt/postgresql@17/bin/pg_controldata --stats-json stats.json
+```
+
+Selection supports immutable PostgreSQL 17 primary snapshots on timeline 1, with 16 MiB WAL segments and a shutdown checkpoint contained safely within one segment. It validates the control metadata and parses the checkpoint with the sibling `pg_waldump` executable. Missing or corrupt required WAL fails the transfer. Base backups, recovery states, other timelines, replication slots, symbolic links, checkpoints near segment boundaries, and unavailable tools retain the existing inventory with all WAL. A message and the `wal_selection` statistics explain that fallback. The default `--wal-mode all` preserves the complete source inventory.
+
+The source must remain frozen throughout transfer. File verification covers the selected inventory, and a restore is still required to validate the resulting database.

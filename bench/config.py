@@ -32,6 +32,7 @@ class RunConfig:
     change: str = 'hot'                         # 1% of rows: 'hot' (one range) or 'uniform' (every 100th)
     repeats: int = 1
     chunk_size: int = 8192
+    wal_mode: str = 'all'                      # opt-in shutdown-checkpoint WAL selection
     link: str = 'full'                          # gcp: 'full' or a cap like '1gbit', '500mbit'
     machine: str = 'n2-standard-4'              # gcp
     disk_type: str = 'pd-balanced'              # gcp: the data disk at /data
@@ -56,6 +57,8 @@ class RunConfig:
             raise ValueError('scale must be between 1 and 20000')
         if not 1 <= self.repeats <= 10:
             raise ValueError('repeats must be between 1 and 10')
+        if self.wal_mode not in ('all', 'shutdown'):
+            raise ValueError('wal_mode must be all or shutdown')
         if not LINK.match(self.link):
             raise ValueError("link must be 'full' or a rate like '1gbit' or '500mbit'")
         if self.where == 'laptop' and self.link != 'full':

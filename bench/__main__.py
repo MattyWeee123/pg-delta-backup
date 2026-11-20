@@ -20,6 +20,7 @@ def _config_flags(p):
     p.add_argument('--change', choices=config.CHANGES)
     p.add_argument('--repeats', type=int)
     p.add_argument('--chunk-size', type=int)
+    p.add_argument('--wal-mode', choices=('all', 'shutdown'))
     p.add_argument('--link', help="gcp: full, or a cap like 1gbit or 500mbit")
     p.add_argument('--machine', help='gcp machine type, e.g. n2-standard-4')
     p.add_argument('--disk-type', choices=('pd-standard', 'pd-balanced', 'pd-ssd'))
@@ -31,7 +32,8 @@ def _load(args) -> config.RunConfig:
     source = config.load_file(args.config) if args.config else {}
     return config.load(source, preset=args.preset, name=args.name, where=args.where,
                        methods=args.methods.split(',') if args.methods else None, scale=args.scale,
-                       change=args.change, repeats=args.repeats, chunk_size=args.chunk_size, link=args.link,
+                       change=args.change, repeats=args.repeats, chunk_size=args.chunk_size,
+                       wal_mode=args.wal_mode, link=args.link,
                        machine=args.machine, disk_type=args.disk_type, disk_gb=args.disk_gb, notes=args.notes)
 
 

@@ -50,7 +50,9 @@ def main(argv=None) -> int:
                        help='memory bound on a batch: chunk data held while verdicts are awaited '
                             '(default: %(default)s)')
     local.add_argument('--stats-json', type=Path, help='write both sides\' statistics here')
-    local.add_argument('--pg-controldata', type=Path, help=argparse.SUPPRESS)  # passed by the benchmark harness; unused
+    local.add_argument('--pg-controldata', type=Path, help='path to PostgreSQL 17 pg_controldata')
+    local.add_argument('--wal-mode', choices=('all', 'shutdown'), default='all',
+                       help='select shutdown-checkpoint WAL for supported stopped snapshots')
     local.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
 
     send = commands.add_parser('send', help='the source side: connect to a receiver and send S')
@@ -61,6 +63,8 @@ def main(argv=None) -> int:
                       help='chunks asked about per round trip, at most (1 reproduces stop-and-wait)')
     send.add_argument('--batch-bytes', type=positive_int, default=DEFAULT_BATCH_BYTES)
     send.add_argument('--stats-json', type=Path)
+    send.add_argument('--wal-mode', choices=('all', 'shutdown'), default='all')
+    send.add_argument('--pg-controldata', type=Path)
     send.add_argument('--events', type=Path, help='write progress events here as JSON lines (for python -m viz)')
 
     receive = commands.add_parser('receive', help='the destination side: wait for a sender, build O from B')
@@ -78,7 +82,7 @@ def main(argv=None) -> int:
                 events = EventLog(args.events)
                 try:
                     report = run_sender(Channel(tune(sock)), args.source, args.chunk_size, events, args.batch,
-                                        args.batch_bytes)
+                                        args.batch_bytes, args.wal_mode, args.pg_controldata)
                 finally:
                     events.close()
         else:
@@ -92,6 +96,9 @@ def main(argv=None) -> int:
         return 1
     if args.stats_json:
         args.stats_json.write_text(json.dumps(report, indent=2) + '\n')
+    selection = report.get('wal_selection', {})
+    if selection.get('requested') == 'shutdown' and not selection.get('applied'):
+        print(f"pgdelta: keeping all WAL: {selection.get('reason', 'selection unavailable')}", file=sys.stderr)
     print(summary(report), file=sys.stderr)
     return 0
 
@@ -114,7 +121,7 @@ def _local(args) -> dict:
     try:
         events = EventLog(getattr(args, 'events', None))
         try:
-            report = run_sender(Channel(ours), args.source, args.chunk_size, events, args.batch, args.batch_bytes)
+            report = run_sender(Channel(ours), args.source, args.chunk_size, events, args.batch, args.batch_bytes, args.wal_mode, args.pg_controldata)
         finally:
             events.close()
     except BaseException:

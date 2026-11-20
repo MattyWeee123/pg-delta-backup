@@ -107,7 +107,8 @@ def run_laptop(cfg: RunConfig, run_dir: Path, work: Path, pgbin: Path, log=print
                     shutil.rmtree(work / 'O', ignore_errors=True)
                     stats = run_dir / f"stats-{lane['id']}.json"
                     run(sys.executable, '-m', 'pgdelta', 'local', '--source', work / 'S', '--basis', work / 'B',
-                        '--output', work / 'O', '--chunk-size', cfg.chunk_size, '--events', path, '--stats-json', stats,
+                        '--output', work / 'O', '--chunk-size', cfg.chunk_size,
+                        '--wal-mode', cfg.wal_mode, '--pg-controldata', pgbin / 'pg_controldata', '--events', path, '--stats-json', stats,
                         cwd=REPO, stderr=subprocess.DEVNULL)
                     facts['lanes'][lane['id']] = _pgdelta_facts(stats)
         if running:

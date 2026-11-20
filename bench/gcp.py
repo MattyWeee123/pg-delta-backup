@@ -252,7 +252,7 @@ printf 'host all all {dst.ip}/32 trust\\nhost replication all {dst.ip}/32 trust\
                 if lane['method'] == 'pg_basebackup':
                     times, result = _lane_pg_basebackup(src, dst, path, lane_id)
                 else:
-                    times, result = _lane_pgdelta(src, dst, path, lane_id, cfg.chunk_size, run_dir)
+                    times, result = _lane_pgdelta(src, dst, path, lane_id, cfg.chunk_size, run_dir, cfg.wal_mode)
                 lane_raw = raw / lane_id
                 lane_raw.mkdir(parents=True, exist_ok=True)
                 for vm, side in ((src, 'source'), (dst, 'dest')):
@@ -321,7 +321,7 @@ def _lane_pg_basebackup(src: VM, dst: VM, path: Path, lane_id: str):
     return _times(out_text.getvalue()), {'elapsed': elapsed, 'bytes_sent': total, 'total_bytes': total, 'ok': True}
 
 
-def _lane_pgdelta(src: VM, dst: VM, path: Path, lane_id: str, chunk_size: int, run_dir: Path):
+def _lane_pgdelta(src: VM, dst: VM, path: Path, lane_id: str, chunk_size: int, run_dir: Path, wal_mode: str = 'all'):
     receiver = dst.popen('rm -rf /data/O; cd ~/pgd && python3 -m pgdelta receive --basis /data/B --output /data/O '
                          '--listen 0.0.0.0:7000 --stats-json /data/recv.json',
                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -333,7 +333,8 @@ def _lane_pgdelta(src: VM, dst: VM, path: Path, lane_id: str, chunk_size: int, r
         receiver.kill()
         raise RuntimeError('the pgdelta receiver never started listening')
     command = (f'cd ~/pgd && echo T0 $(date +%s.%N) >&2; python3 -m pgdelta send --source /data/S '
-               f'--connect {dst.ip}:7000 --chunk-size {chunk_size} --events - --stats-json /data/send.json; rc=$?; '
+               f'--connect {dst.ip}:7000 --chunk-size {chunk_size} --wal-mode {wal_mode} '
+               f'--pg-controldata {PGBIN}/pg_controldata --events - --stats-json /data/send.json; rc=$?; '
                f'echo T1 $(date +%s.%N) >&2; exit $rc')
     sender = src.popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     err = io.StringIO()

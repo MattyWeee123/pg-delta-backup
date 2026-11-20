@@ -63,3 +63,21 @@ You need `gcloud`, signed in (`gcloud auth login`), with the project set (`gclou
 3. **Pushes and opens a pull request** with the report. Merge it to keep the result.
 
 `python -m bench publish <name>` publishes a run you've already made.
+
+## Laptop network matrix
+
+The four-method matrix runs native PostgreSQL processes and sends every backup connection through a shared rate-limited localhost TCP relay. It compares full plain basebackup, native incremental plus combine, pgdelta, and uncompressed full tar plus extraction and syncing. It records TCP payload bytes in each direction at 100, 500, and 1,000 Mbit/s, with three repeats for localized and scattered updates. Every output is started, compared with ordered hashes of all four pgbench tables, and checked with `pg_amcheck`.
+
+Install PostgreSQL 17 locally, then run from the repository. Choose a fresh result directory each time.
+
+```bash
+python3 -m benchmarks.laptop_network --pgbin /opt/homebrew/opt/postgresql@17/bin --wal-mode shutdown --result runs/network-shutdown
+```
+
+The result directory contains `report.md`, `config.json`, `trials.jsonl`, command logs, and pgdelta statistics including WAL-selection evidence. This models bandwidth caps on the laptop with no added WAN latency. The fixture has 200,000 accounts by default. Use `--scale` to change it. The source snapshot and old backup are prepared before timing. WAL selection runs inside pgdelta’s timed transfer. Native backup commands can advance WAL between trials. Short laptop timings depend on host activity.
+
+Use `--wal-mode all` and another result directory for the complete-source comparison. The existing two-method runner also accepts selection.
+
+```bash
+python3 -m bench run --where laptop --scale 2 --repeats 3 --wal-mode shutdown --pgbin /opt/homebrew/opt/postgresql@17/bin
+```

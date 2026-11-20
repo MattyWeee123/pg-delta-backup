@@ -40,13 +40,17 @@ def effective_batch(batch: int, batch_bytes: int, chunk_size: int) -> int:
 
 
 def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_SIZE, events: EventLog | None = None,
-               batch: int = DEFAULT_BATCH, batch_bytes: int = DEFAULT_BATCH_BYTES) -> dict:
+               batch: int = DEFAULT_BATCH, batch_bytes: int = DEFAULT_BATCH_BYTES,
+               wal_mode: str = 'all', pg_controldata: Path | None = None) -> dict:
     """Send S to the receiver at the other end of `channel`. Returns this side's report, with the receiver's.
 
     `batch` chunks are asked about per CHUNK_HASHES/VERDICTS round trip, at most (never spanning files),
     further capped by `batch_bytes` (the accumulator's memory bound, since it holds each chunk's data)
     and by what fits in one CHUNK_HASHES frame; see `effective_batch`.
     `events`, if given, gets a start event, progress about every 0.1 s, and a done event (pgdelta.events)."""
+    if wal_mode not in ('all', 'shutdown'):
+        raise ValueError('wal_mode must be all or shutdown')
+    wal_selection = {'requested': wal_mode, 'applied': False}
     events = events or EventLog(None)
     if not MIN_CHUNK_SIZE <= chunk_size <= MAX_CHUNK_SIZE:
         raise ValueError(f'chunk size must be between {MIN_CHUNK_SIZE} and {MAX_CHUNK_SIZE} bytes')
@@ -60,6 +64,9 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
     try:
         with stats.timed('scan'):
             entries = scan(source)
+            if wal_mode == 'shutdown':
+                from pgdelta.wal import select_shutdown_wal
+                entries, wal_selection = select_shutdown_wal(source, entries, pg_controldata)
         key = new_key()
         hasher = Hasher(key)
         channel.send_json(HELLO, {'version': protocol.VERSION, 'chunk_size': chunk_size, 'key': key.hex(),
@@ -158,6 +165,7 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
     report['ok'] = bool(result.get('ok'))
     report['chunk_size'] = chunk_size
     report['batch'] = batch
+    report['wal_selection'] = wal_selection
     report['receiver'] = result.get('stats')
     c = stats.counts
     events.emit('done', ok=report['ok'], elapsed=report['elapsed_seconds'], bytes_read=c['bytes_read'],
