@@ -367,6 +367,12 @@ class StreamFailures(unittest.TestCase):
         source.mkdir()
         write(source, self.NAME, os.urandom(4 * CHUNK))   # four chunks, as every peer below declares
         ours, theirs = socket.socketpair()
+        # Small buffers, as macOS has by default (8 KiB), so that a sender writing page data at a peer
+        # that has stopped reading blocks in its send on every system -- the case where only hanging
+        # up wakes it. Linux's ~208 KiB default let these tests pass while macOS hung.
+        for sock in (ours, theirs):
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
         outcome = {}
 
         def send():

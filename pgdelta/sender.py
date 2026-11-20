@@ -121,6 +121,13 @@ class _BasisDigests:
             with self._ready:
                 self._error = exc
                 self._ready.notify_all()
+            if not self._stopped:
+                # The notify wakes a main thread waiting in take() or result(), but not one blocked in
+                # a send the peer has stopped draining: hang up so that send fails and the main thread
+                # reaches this error (the receiver's generator does the same on its side). This costs
+                # the ERROR frame that would have told a misbehaving peer why; it cannot be sent from
+                # here without interleaving into a frame the main thread may be half-way through.
+                protocol.hang_up(self._channel.sock)
 
     def _store(self, index: int, first_chunk: int, digests: list[bytes]) -> None:
         size = self._basis_sizes.get(index)
@@ -281,6 +288,7 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
     source = Path(source)
     stats = Stats('sender')
     digests = None
+    current = None  # the file being sent, to name in an error
     try:
         with stats.timed('scan'):
             entries = scan(source)
@@ -306,6 +314,7 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
         for index, entry in enumerate(entries):
             if entry.kind != 'file':
                 continue
+            current = entry.path
             stats.counts['files'] += 1
             basis_size = basis_sizes.get(index)  # None: B has no such file
             whole = hasher.file()
@@ -381,6 +390,10 @@ def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_S
         if (isinstance(reported, (protocol.PeerError, protocol.ProtocolError))
                 and not isinstance(exc, (protocol.PeerError, protocol.ProtocolError))):
             cause = reported
+        elif isinstance(reported, protocol.Closed) and isinstance(exc, OSError):
+            # The peer closed its direction, the reader hung up, and that broke a send here: the
+            # closed connection is the cause, the broken pipe its symptom.
+            cause = protocol.Closed(f'{reported} while sending {current}' if current else str(reported))
         if not isinstance(reported, protocol.PeerError):
             try:
                 channel.send_json(protocol.ERROR, {'message': f'sender failed: {cause}'})

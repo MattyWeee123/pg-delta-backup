@@ -144,6 +144,22 @@ def unpack_digest_frame(payload: bytes) -> tuple[int, int, list[bytes]]:
     return file_index, first_chunk, digests
 
 
+def hang_up(sock: socket.socket) -> None:
+    """Shut the connection down so that a thread blocked on `sock` -- in a send the peer will never
+    drain, or in a recv -- wakes with an error or end of stream.
+
+    Both directions where the system allows it. macOS refuses SHUT_RDWR (and SHUT_RD) with ENOTCONN
+    once the peer has shut its own write side down; reads already end there, so shutting the write
+    side is all that is left to do, and it is what fails a blocked send."""
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        try:
+            sock.shutdown(socket.SHUT_WR)
+        except OSError:
+            pass
+
+
 def tune(sock: socket.socket) -> socket.socket:
     """TCP_NODELAY on: both directions send small frames (a CHUNK_COPY is 21 bytes), and Nagle's
     algorithm would hold each one back."""
