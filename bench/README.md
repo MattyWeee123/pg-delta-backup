@@ -17,7 +17,7 @@ Everything goes to `runs/<name>/`, which isn't committed, until you publish:
 - `stats-<lane>.json`: pgdelta's full statistics;
 - `steps.json`: every step with its expected duration and when it started and finished, for the viewer's progress bar and ETA, and to predict the next run's (see `bench/steps.py`);
 - `raw/<lane>/`, for cloud runs: the 0.1-second link, disk and CPU samples from both VMs;
-- `report.md` and `charts/`: a results table (time, bytes, share of S, round trips, chunks asked, copy runs, digest waits, ratio to `pg_basebackup`), the correctness check, link and disk over time, the cost estimate and how to reproduce.
+- `report.md` and `charts/`: a results table (time, bytes, share of S, pages sent and reused, each copy's check, ratio to `pg_basebackup`), link and disk over time, the cost estimate and how to reproduce.
 
 ## Settings
 
@@ -26,11 +26,10 @@ Flags or a JSON config; anything left out comes from the preset.
 | Setting | Default | Meaning |
 |---|---|---|
 | `where` | `laptop` | `laptop` or `gcp` |
-| `methods` | `pg_basebackup,pgdelta` | which methods to compare, each a lane |
+| `methods` | `pg_basebackup,pgdelta,pgdelta-inplace` | which methods to compare, each a lane: pgdelta building a new copy, and pgdelta patching a copy of B in place (bench/engine.py) |
 | `scale` | 50 | pgbench scale, about 15 MB each |
 | `change` | `hot` | 1% of rows: `hot` (one range, few pages) or `uniform` (every 100th row, most pages) |
 | `repeats` | 1 | runs of each method |
-| `chunk_size` | 8192 | pgdelta's chunk size |
 | `link` | `full` | cloud: `full`, or a cap such as `1gbit` or `500mbit` (applied to both VMs) |
 | `machine`, `disk_type`, `disk_gb` | preset | cloud VM type, and its data disk at `/data` |
 | `zones` | `us-central1-a`, `-b` | cloud: source zone, destination zone |

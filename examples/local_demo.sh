@@ -10,7 +10,7 @@
 #   3. O is started and its rows compared with S's.
 # CHANGE=hot (default) updates 1% of the rows in one contiguous range, so few pages change.
 # CHANGE=uniform updates every 100th row, which touches nearly every page of the table.
-# PGDELTA_ARGS passes extra flags through to pgdelta, e.g. PGDELTA_ARGS="--digest-window 65536"
+# PGDELTA_ARGS passes extra flags through to pgdelta, e.g. PGDELTA_ARGS="--jobs 1"
 #   to try a small window on B's undelivered digests (floored at one BASIS_DIGESTS frame).
 # Needs PostgreSQL 17 or 18 binaries: PGBIN, else pg_config's bindir, else Homebrew's postgresql@17.
 # Uses TCP on 127.0.0.1 ports 55432 and 55433, and no Unix sockets.
@@ -57,7 +57,8 @@ stop "$WORK/S"
 # shellcheck disable=SC2086
 echo "2. pgdelta refreshes B into O:"
 (cd "$REPO" && "$PYTHON" -m pgdelta local --source "$WORK/S" --basis "$WORK/B" --output "$WORK/O" \
-  --stats-json "$WORK/pgdelta-stats.json" ${PGDELTA_ARGS:-})
+  --source-kind datadir --pg-controldata "$PGBIN/pg_controldata" --basis-pg-controldata "$PGBIN/pg_controldata" \
+  --jobs 4 --hash-ahead 64G --read-ahead 8 --fsync worker --stats-json "$WORK/pgdelta-stats.json" ${PGDELTA_ARGS:-})
 
 start "$WORK/O" 55433
 GOT=$(psql -p 55433 -c 'SELECT count(*), sum(abalance) FROM pgbench_accounts')

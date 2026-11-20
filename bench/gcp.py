@@ -25,7 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from bench import cost
+from bench import cost, engine
 from bench.config import RunConfig
 from bench.lanes import copy_events, merge_gauges, pump_pg_basebackup
 from bench.steps import no_steps
@@ -238,9 +238,11 @@ printf 'host all all {dst.ip}/32 trust\\nhost replication all {dst.ip}/32 trust\
                 if lane['method'] == 'pg_basebackup' and not running:
                     src.ssh(f"{PGBIN}/pg_ctl -D /data/S -l /data/S.log -w start -o '-p 5432 -c unix_socket_directories=/tmp' > /dev/null")
                     running = True
-                if lane['method'] == 'pgdelta' and running:
+                if lane['method'] != 'pg_basebackup' and running:
                     src.ssh(f'{PGBIN}/pg_ctl -D /data/S -m fast -w stop > /dev/null')
                     running = False
+                if lane['method'] == 'pgdelta-inplace':  # a fresh copy of B to patch, before caches drop
+                    dst.ssh('rm -rf /data/Bw && cp -a /data/B /data/Bw')
                 log(f'lane {lane_id} …')
                 for vm in (src, dst):
                     vm.ssh(f'sync; echo 3 | sudo tee /proc/sys/vm/drop_caches > /dev/null; '
@@ -252,7 +254,7 @@ printf 'host all all {dst.ip}/32 trust\\nhost replication all {dst.ip}/32 trust\
                 if lane['method'] == 'pg_basebackup':
                     times, result = _lane_pg_basebackup(src, dst, path, lane_id)
                 else:
-                    times, result = _lane_pgdelta(src, dst, path, lane_id, cfg.chunk_size, run_dir)
+                    times, result = _lane_pgdelta(src, dst, path, lane, run_dir, facts['database_bytes'], expect)
                 lane_raw = raw / lane_id
                 lane_raw.mkdir(parents=True, exist_ok=True)
                 for vm, side in ((src, 'source'), (dst, 'dest')):
@@ -267,16 +269,11 @@ printf 'host all all {dst.ip}/32 trust\\nhost replication all {dst.ip}/32 trust\
                 facts['lanes'][lane_id] = result
         if running:
             src.ssh(f'{PGBIN}/pg_ctl -D /data/S -m fast -w stop > /dev/null', check=False)
-        got = None
-        if 'pgdelta' in cfg.methods:
-            with step('check'):
-                got = dst.ssh(f"""set -e
-{PGBIN}/pg_ctl -D /data/O -l /data/O.log -w start -o '-p 5433 -c listen_addresses= -c unix_socket_directories=/tmp' > /dev/null
-{PGBIN}/psql -h /tmp -p 5433 -U postgres -qAt postgres -c "SELECT count(*), sum(abalance) FROM pgbench_accounts"
-{PGBIN}/pg_ctl -D /data/O -m fast -w stop > /dev/null""").strip()
-        facts['verify'] = {'source': expect, 'copy': got, 'checked': got is not None,
-                           'match': got is None or (bool(expect) and expect == got)}
-        log(f"copy check: source {expect}, refreshed copy {got}: {'MATCH' if facts['verify']['match'] else 'MISMATCH'}")
+        checked = [lane for lane in facts['lanes'].values() if 'match' in lane]
+        facts['verify'] = {'source': expect, 'copy': checked[0]['copy'] if checked else None,
+                           'checked': bool(checked), 'match': all(lane['match'] for lane in checked)}
+        log(f"copy check: source {expect}, {len(checked)} pgdelta copies: "
+            f"{'all MATCH' if facts['verify']['match'] else 'MISMATCH'}")
         return facts
     finally:
         if created and not keep:
@@ -313,46 +310,58 @@ def _lane_pg_basebackup(src: VM, dst: VM, path: Path, lane_id: str):
     total = pump_pg_basebackup(proc.stderr, events)
     rc = proc.wait()
     reader.join()
-    elapsed = round(time.perf_counter() - events.started, 4)
+    times = _times(out_text.getvalue())
+    # Timed on the VM, like every lane: the clock here also counts ssh's start-up, about 2.7 s, which made
+    # pg_basebackup look that much slower in every cloud run published before this fix.
+    elapsed = round(times['t1'] - times['t0'], 4) if times else round(time.perf_counter() - events.started, 4)
     events.emit('done', ok=rc == 0, elapsed=elapsed, bytes_sent=total, total_bytes=total)
     events.close()
     if rc:
         raise RuntimeError('pg_basebackup failed on the destination')
-    return _times(out_text.getvalue()), {'elapsed': elapsed, 'bytes_sent': total, 'total_bytes': total, 'ok': True}
+    return times, {'elapsed': elapsed, 'bytes_sent': total, 'total_bytes': total, 'ok': True}
 
 
-def _lane_pgdelta(src: VM, dst: VM, path: Path, lane_id: str, chunk_size: int, run_dir: Path):
-    receiver = dst.popen('rm -rf /data/O; cd ~/pgd && python3 -m pgdelta receive --basis /data/B --output /data/O '
-                         '--listen 0.0.0.0:7000 --stats-json /data/recv.json',
+def _lane_pgdelta(src: VM, dst: VM, path: Path, lane: dict, run_dir: Path, total: int, expect: str):
+    """One pgdelta lane (bench/engine.py): its progress streams back over ssh as it runs, it is timed on the
+    source VM like every lane, and then its copy is started and checked, and removed to keep the disk free."""
+    lane_id, method = lane['id'], lane['method']
+    inplace = method == 'pgdelta-inplace'
+    target = '/data/Bw' if inplace else '/data/O'
+    control = f'{PGBIN}/pg_controldata'
+    output = '' if inplace else f'--output {target} '
+    receiver = dst.popen(f"{'' if inplace else f'rm -rf {target}; '}cd ~/pgd && python3 -m pgdelta receive "
+                         f"--basis {target if inplace else '/data/B'} {output}--listen 0.0.0.0:{engine.PORT} "
+                         f"{' '.join(engine.receiver_args(method, control))}",
                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     for _ in range(60):
-        if ':7000 ' in dst.ssh("ss -ltn | grep ':7000 ' || true"):
+        if f':{engine.PORT} ' in dst.ssh(f"ss -ltn | grep ':{engine.PORT} ' || true"):
             break
         time.sleep(0.5)
     else:
         receiver.kill()
         raise RuntimeError('the pgdelta receiver never started listening')
-    command = (f'cd ~/pgd && echo T0 $(date +%s.%N) >&2; python3 -m pgdelta send --source /data/S '
-               f'--connect {dst.ip}:7000 --chunk-size {chunk_size} --events - --stats-json /data/send.json; rc=$?; '
-               f'echo T1 $(date +%s.%N) >&2; exit $rc')
+    command = (f"cd ~/pgd && echo T0 $(date +%s.%N) >&2; python3 -m pgdelta send --source /data/S "
+               f"--connect {dst.ip}:{engine.PORT} {' '.join(engine.sender_args(control))} --events - "
+               f"--stats-json /data/send.json; rc=$?; echo T1 $(date +%s.%N) >&2; exit $rc")
     sender = src.popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     err = io.StringIO()
-    reader = threading.Thread(target=lambda: err.write(sender.stderr.read().decode()), daemon=True)
+    reader = threading.Thread(target=lambda: err.write(sender.stderr.read().decode(errors='replace')), daemon=True)
     reader.start()
     copy_events(sender.stdout, path, lane_id)
     rc = sender.wait()
     reader.join()
-    receiver.wait(timeout=120)
-    if rc:
-        raise RuntimeError(f'pgdelta send failed: {err.getvalue().strip()[-300:]}')
+    receiver_err = receiver.communicate(timeout=300)[1].decode(errors='replace')
+    if rc or receiver.returncode:
+        raise RuntimeError(f'pgdelta failed: {err.getvalue().strip()[-300:]} {receiver_err.strip()[-300:]}')
+    times = _times(err.getvalue())
     stats = run_dir / f'stats-{lane_id}.json'
     src.scp_from('/data/send.json', stats)
-    report = json.loads(stats.read_text())
-    c = report.get('counts', {})
-    result = {'elapsed': report['elapsed_seconds'], 'bytes_sent': report['bytes_sent_total'],
-              'total_bytes': c.get('bytes_read', 0), 'round_trips': c.get('round_trips', 0),
-              'chunks_asked': c.get('chunks_asked', 0), 'copy_runs': c.get('copy_runs', 0),
-              'digest_waits': c.get('digest_waits', 0),
-              'chunks_changed': c.get('chunks_changed', 0), 'chunks_same': c.get('chunks_same', 0),
-              'chunks_new': c.get('chunks_new', 0), 'ok': report.get('ok', False)}
-    return _times(err.getvalue()), result
+    result = engine.facts(stats, times['t1'] - times['t0'], total)
+    result['copy'] = dst.ssh(f"""set -e
+{PGBIN}/pg_ctl -D {target} -l /data/check.log -w start -o '-p 5434 -c listen_addresses= -c unix_socket_directories=/tmp' > /dev/null
+{PGBIN}/psql -h /tmp -p 5434 -U postgres -qAt postgres -c "SELECT count(*), sum(abalance) FROM pgbench_accounts"
+{PGBIN}/pg_ctl -D {target} -m fast -w stop > /dev/null""").strip()
+    result['match'] = result['copy'] == expect
+    dst.ssh(f'rm -rf {target}')
+    return times, result
+

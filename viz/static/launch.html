@@ -58,14 +58,14 @@ label .hint { font-weight: 400; }
     <div class="hint">Laptop: a real PostgreSQL on this computer; both copies share one disk and there is no network, so it shows the protocol working, not network speed. Cloud: source and destination are separate VMs in different zones, so the network and disks are real; the VMs are deleted when the run ends.</div>
     <fieldset aria-label="Methods">
       <label><input type="checkbox" id="m-pg_basebackup" checked> pg_basebackup (copies everything)</label>
-      <label><input type="checkbox" id="m-pgdelta" checked> pgdelta (sends what differs)</label>
+      <label><input type="checkbox" id="m-pgdelta" checked> pgdelta, new copy</label>
+      <label><input type="checkbox" id="m-pgdelta-inplace" checked> pgdelta, in place</label>
     </fieldset>
-    <div class="hint">Which tools race. pg_basebackup is the baseline: PostgreSQL's own full copy. pgdelta refreshes the old copy by sending only the chunks that changed.</div>
+    <div class="hint">Which tools race. pg_basebackup is the baseline: PostgreSQL's own full copy. pgdelta sends only the pages that changed, then either builds a new copy beside the old one, or patches the old copy in place (writing only the changed pages, the fastest).</div>
     <div class="grid">
       <label>Database size (pgbench scale)<input id="scale" type="number" min="1" max="20000" value="50"><span class="hint" id="size-hint">about 750 MB</span></label>
       <label>Change (1% of rows)<select id="change"><option value="hot">hot: one range, few pages</option><option value="uniform">uniform: every 100th row, most pages</option></select><span class="hint">What changes between the old copy and now. Hot is pgdelta's good case; uniform touches nearly every 8 KiB page, its hard case.</span></label>
       <label>Repeats<input id="repeats" type="number" min="1" max="10" value="1"><span class="hint">Runs each method this many times. Use 3 or more when a result will be compared or quoted.</span></label>
-      <label>Chunk size (bytes)<input id="chunk_size" type="number" min="512" value="8192"><span class="hint">How much pgdelta compares at once. 8192 is one PostgreSQL page. Smaller means more round trips; larger resends more around each change.</span></label>
       <label>Name (optional)<input id="name" placeholder="generated if empty"><span class="hint">The run's folder name and pull-request branch.</span></label>
     </div>
   </section>
@@ -105,8 +105,8 @@ const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<
 const where = () => document.querySelector('input[name=where]:checked').value;
 
 function body() {
-  const cfg = { where: where(), methods: ['pg_basebackup', 'pgdelta'].filter((m) => $('m-' + m).checked),
-    scale: +$('scale').value, change: $('change').value, repeats: +$('repeats').value, chunk_size: +$('chunk_size').value,
+  const cfg = { where: where(), methods: ['pg_basebackup', 'pgdelta', 'pgdelta-inplace'].filter((m) => $('m-' + m).checked),
+    scale: +$('scale').value, change: $('change').value, repeats: +$('repeats').value,
     notes: $('notes').value };
   if ($('name').value.trim()) cfg.name = $('name').value.trim();
   if (cfg.where === 'gcp') Object.assign(cfg, { machine: $('machine').value, disk_type: $('disk_type').value,

@@ -98,7 +98,8 @@ class Events(unittest.TestCase):
             (root / 'S' / 'f').write_bytes(data[:-1] + b'x')
             with redirect_stderr(io.StringIO()):
                 code = cli.main(['local', '--source', str(root / 'S'), '--basis', str(root / 'B'),
-                                 '--output', str(root / 'O'), '--events', str(root / 'ev.jsonl')])
+                                 '--output', str(root / 'O'), '--reuse-any-basis', '--block', '8192',
+                                 '--events', str(root / 'ev.jsonl')])
             self.assertEqual(code, 0)
             events = [json.loads(line) for line in (root / 'ev.jsonl').read_text().splitlines()]
             self.assertEqual(events[0]['kind'], 'start')

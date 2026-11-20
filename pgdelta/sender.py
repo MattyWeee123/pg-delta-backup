@@ -1,433 +1,1311 @@
-"""The source side (S): walk S and decide, locally, what the receiver already has.
+"""Source side: hash S, compare against the basis digests, send only differing pages.
 
-Nothing is asked for. The receiver streams B's digests unasked (BASIS_DIGESTS); a reader thread here
-drains them into a `(file, chunk) -> digest` table while the main thread walks S, hashes each chunk,
-and compares it against B's digest without ever waiting for a reply. Consecutive chunks B already
-holds accumulate into one `CHUNK_COPY` run-length instruction; everything else is sent as
-`CHUNK_DATA`. This is rsync's generator -> sender -> receiver pipeline: both sides read and hash at
-the same time, and the request/reply dependency that put a floor of one round trip per file is gone.
+A reader thread drains everything the receiver sends (all of it small:
+digests and acknowledgements), so neither side can block the other while
+page data is in flight. Files are processed in inventory order with up to
+`window` files hashed ahead (DEFAULT_WINDOW, or `--window`), so leaf-digest
+round trips overlap hashing. Each file's nodes are hashed on a pool of
+`jobs` worker processes (or threads, for comparison), or in the main thread
+when jobs is 1. The waits for the receiver, and the time blocked sending,
+are timed for EXP-13 (pgdelta.waits).
 
-Two threads, and the rule that keeps them from deadlocking: the reader thread sits in `recv` for the
-whole session, so this side never stops draining the receiver's digests while the main thread is
-blocked writing page data. The main thread never touches the socket for reading -- it waits only on
-the digest table's condition, which the reader thread notifies on every arrival and on its own death.
+The source is a finished backup S (`source_kind` "backup", default), a
+cleanly stopped data directory read directly ("datadir", pgdelta.datadir),
+of which only what pg_basebackup would send is listed, or a running
+cluster's data directory read in backup mode ("live", pgdelta.live): the
+listed files are read only after pg_backup_start returns, and the WAL from
+the backup's start to its stop and the backup_label are appended to the
+inventory (APPEND) after pg_backup_stop.
 """
 from __future__ import annotations
 
-import json
-import socket
-import stat
-import sys
-import threading
+import base64
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
+import os
+import threading
+import time
 
-from pgdelta import protocol
-from pgdelta.hashing import Hasher, new_key
-from pgdelta.protocol import (BASIS_DIGESTS, CHUNK_COPY, CHUNK_COPY_BODY, CHUNK_DATA, CHUNK_DATA_HEAD, COMPLETE,
-                              FILE_DONE, FILE_DONE_BODY, HELLO, RESULT, Channel, comparable,
-                              unpack_digest_frame)
+from pgdelta import __version__, datadir, live, matching, protocol, subpage, transport, waits
+from pgdelta import compress as compression
 from pgdelta.events import EventLog
-from pgdelta.stats import Stats
-from pgdelta.tree import Entry, scan
+from pgdelta.errors import (EXIT_TRANSFER_FAILURE, InvalidInput, PeerError, PgDeltaError,
+                            ProtocolError, TransferError, VerificationError)
+from pgdelta.hashing import (BLOCK, DEFAULT_ALGORITHM, DIGEST_SIZE, NODE_BLOCKS, SUB_BLOCK, FilesDigest, Hasher,
+                             new_key, offer)
+from pgdelta.identity import check_major
+from pgdelta.inplace import COMMITTED
+from pgdelta.inventory import require_plain, scan
+from pgdelta.protocol import ChannelClosed
+from pgdelta.receiver import RECEIPT_SUFFIX
+from pgdelta.tree import (BACKENDS, DEFAULT_BACKEND, DEFAULT_JOBS, HashPool, hash_file, node_count, open_regular,
+                          pread_exact, span_length)
 
-DEFAULT_CHUNK_SIZE = 8192  # one PostgreSQL page
-
-# Bytes of undelivered digests the reader thread will hold before it stops draining the socket, which
-# lets TCP backpressure stall the receiver's generator rather than growing this table without bound.
-# 64 MiB is 4,194,304 digests, which is about 32 GiB of basis at an 8 KiB chunk.
-DEFAULT_DIGEST_WINDOW = 64 << 20
-
-# The reader thread's window-full check only gates the *next* recv(), so one BASIS_DIGESTS frame
-# always lands no matter how small the window is -- and a frame can hold up to DIGESTS_PER_FRAME
-# digests. A window under that many bytes would, after admitting that one frame, already be over
-# its own limit before the main thread has taken anything from it: every digest in the frame would
-# then have to be drained before the reader is allowed to ask for the next one, collapsing what is
-# meant to be a pipeline into a fully synchronous, frame-at-a-time handoff -- and if that handoff
-# ever stalls (the receiver not draining is the one this engine has to survive; see Deadlock in
-# tests/test_pgdelta_stream.py), the reader has nothing banked to keep the main thread moving while
-# it waits. Flooring the window at one whole frame is the smallest value that never puts the reader
-# behind on the very first frame it is handed.
-MIN_DIGEST_WINDOW = protocol.DIGESTS_PER_FRAME * protocol.DIGEST_SIZE
+STATS_SCHEMA_VERSION = 1
+DEFAULT_WINDOW = 4
+# --hash-ahead (EXP-91): bytes of files S's hashing may run ahead of the file being sent; 0 hashes on the sending
+# thread, `window` files ahead, as before.
+DEFAULT_HASH_AHEAD = 0
+RUN_BYTES = 1 << 20
+# --read-ahead's default with --hash-ahead: reader threads for the pages each file sends. 8 threads reached a balanced
+# persistent disk's operation rate on scattered reads and 16 added nothing (EXP-64b, EXP-68, measured for the archived
+# fast path); EXP-91 kept 8 for --hash-ahead.
+DEFAULT_READ_AHEAD = 8
+# --read-ahead: how far its reader threads may read ahead of the sending thread.
+READ_AHEAD_BYTES = 64 << 20
+JOIN_SECONDS = 10.0
 
 
-def effective_digest_window(digest_window: int) -> int:
-    """`digest_window`, floored at `MIN_DIGEST_WINDOW` so it can never start the reader out behind."""
-    return max(MIN_DIGEST_WINDOW, digest_window)
+def prepare_source(source):
+    inventory = require_plain(scan(source), 'source')
+    if any(entry.path == 'postmaster.pid' for entry in inventory.files):
+        raise InvalidInput('source contains postmaster.pid: v0 needs a completed backup, '
+                           'not a running data directory')
+    return inventory
 
 
-class _BasisDigests:
-    """B's digests as they stream in: filled by a reader thread, drained by the sender's main thread.
+class Inbox:
+    """Reader thread for receiver -> sender messages."""
 
-    A thread of this side does nothing but read, so the main thread never has to stop writing in
-    order to listen -- which is what keeps streaming in both directions at once from deadlocking.
-    That thread stops reading only while the window is full, and a full window means digests are
-    sitting here for the main thread to consume, so it is never what the main thread is waiting for.
-    What makes a full window safe is that consumption order is emission order: the generator emits
-    each chunk `protocol.comparable` is true for exactly once, in ascending (entry, chunk) order, and
-    the main thread walks the same list in the same order and takes exactly that sequence -- both
-    sides decide which chunks those are with the same call on the same two sizes. A digest therefore
-    always arrives above `_taken`, the highest key the main thread has consumed, which is why
-    `_store` can refuse everything at or below it, and everything it is already holding, without ever
-    refusing a conforming peer. `_held` counts only digests that are still to be taken, so a full
-    window always means there is something there for the main thread to take.
+    def __init__(self, channel, timers=None):
+        self.channel = channel
+        self.cond = threading.Condition()
+        self.accept = self.complete = self.error = None
+        self.basis, self.leaves, self.blocks = {}, {}, {}
+        self.subpage = False  # set once ACCEPT took the subpage_offer: BLOCK_DIGESTS may arrive
+        self.closed = False
+        # The sender's protocol timers (pgdelta.waits.WaitTimers); without them waits aren't timed.
+        self.timers = timers
+        # For the stall watch (StallWatch): when the last message arrived, and since when and for what a wait has
+        # blocked (time.monotonic(); None while no wait blocks).
+        self.last_message = 0.0
+        self.waiting_since = self.waiting_for = None
+        # --hash-ahead: since when and for what the planner's quiet wait has blocked, and since when the sending thread
+        # has waited for the planner (_Planner.take). Both at once is a wait on the receiver, for the stall watch.
+        self.quiet_since = self.quiet_for = self.taking_since = None
+        self.thread = threading.Thread(target=self._run, name='pgdelta-inbox', daemon=True)
 
-    Everything the main thread does wait for -- a digest, the peer's RESULT, or the reader thread's
-    death -- wakes it through this one condition, so no wait here can outlive the reader.
-    """
+    def start(self):
+        self.thread.start()
 
-    def __init__(self, channel: Channel, chunk_size: int, entries: list[Entry], basis_sizes: dict[int, int],
-                 window: int):
-        self._channel = channel
-        self._chunk_size = chunk_size
-        self._entries = entries
-        self._basis_sizes = basis_sizes
-        self._window = window
-        self._ready = threading.Condition()
-        self._digests: dict[tuple[int, int], bytes] = {}  # (file index, chunk index) -> B's digest
-        self._held = 0          # bytes of digests received but not yet consumed
-        self._taken = (-1, -1)  # the highest (entry, chunk) the main thread has consumed; see _store
-        self._error: BaseException | None = None   # what the reader died of; every waiter re-raises it
-        self._result: bytes | None = None          # the RESULT payload, read by the reader like any frame
-        self._stopped = False
-        self._thread = threading.Thread(target=self._read, name='pgdelta-basis-digests', daemon=True)
+    def join(self, timeout):
+        if self.thread.is_alive():
+            self.thread.join(timeout)
 
-    def start(self) -> None:
-        self._thread.start()
+    def settle(self, timeout):
+        """Wait until the receiver has reported an error or the stream has ended."""
+        with self.cond:
+            self.cond.wait_for(lambda: self.error is not None or self.closed, timeout)
 
-    def _read(self) -> None:
-        """Drain the receiver's direction until RESULT, an error, or `stop`. The only writer to
-        `_error` and `_result`, and the only reader of the socket."""
+    def _run(self):
         try:
             while True:
-                with self._ready:
-                    while self._held >= self._window and not self._stopped:
-                        self._ready.wait()   # woken by take() freeing space, or by stop()
-                    if self._stopped:
-                        return
-                kind, payload = self._channel.recv()
-                if kind == BASIS_DIGESTS:
-                    self._store(*unpack_digest_frame(payload))
-                elif kind == RESULT:
-                    with self._ready:
-                        self._result = payload
-                        self._ready.notify_all()
+                message = self.channel.recv()
+                if message is None:
                     return
-                elif kind == protocol.ERROR:
-                    raise protocol.PeerError(json.loads(payload).get('message', 'unknown error'))
-                else:
-                    raise protocol.ProtocolError(
-                        f'expected BASIS_DIGESTS, got {protocol.NAMES.get(kind, kind)}')
-        except BaseException as exc:
-            with self._ready:
-                self._error = exc
-                self._ready.notify_all()
-            if not self._stopped:
-                # The notify wakes a main thread waiting in take() or result(), but not one blocked in
-                # a send the peer has stopped draining: hang up so that send fails and the main thread
-                # reaches this error (the receiver's generator does the same on its side). This costs
-                # the ERROR frame that would have told a misbehaving peer why; it cannot be sent from
-                # here without interleaving into a frame the main thread may be half-way through.
-                protocol.hang_up(self._channel.sock)
+                self.last_message = time.monotonic()
+                code, payload = message
+                with self.cond:
+                    self._dispatch(code, payload)
+                    self.cond.notify_all()
+                if code == protocol.COMPLETE:
+                    return
+                if code == protocol.ERROR:
+                    break
+        except PgDeltaError as exc:
+            self._set_error(exc)
+        except Exception as exc:
+            self._set_error(TransferError(f'reading from the receiver failed: {exc!r}'))
+        finally:
+            with self.cond:
+                self.closed = True
+                self.cond.notify_all()
+        # After a failure, keep reading so the receiver never blocks writing to us while it cleans up.
+        self.channel.discard_input()
 
-    def _store(self, index: int, first_chunk: int, digests: list[bytes]) -> None:
-        size = self._basis_sizes.get(index)
-        if size is None:
-            raise protocol.ProtocolError(f'digests for entry {index}, which B never declared a basis for')
-        last = first_chunk + len(digests) - 1
-        # The run's *end* is what has to be inside what B declared, and `comparable` is the whole of
-        # that test: it is true for exactly the chunks 0..k-1 this side compares, so the last chunk
-        # of an ascending run bounds every chunk before it.
-        if not comparable(last, self._chunk_size, self._entries[index].size, size):
-            raise protocol.ProtocolError(
-                f'chunk {last} of {self._entries[index].path} is outside the chunks this side '
-                f'compares: S holds {self._entries[index].size} bytes and B declared {size}')
-        with self._ready:
-            # Then the two checks that together make "a frame was admitted and added nothing the
-            # main thread will ever take" impossible -- the thing that would let a peer fill the
-            # window with digests nobody can drain, park the reader on it, and leave a waiting
-            # take() or result() with nothing to wake it.
-            #
-            # The watermark refuses every key at or below the highest one the main thread has taken,
-            # so a digest already compared cannot come back, as an orphan or otherwise. It cannot
-            # refuse a conforming frame, because consumption order is emission order: the generator
-            # walks `entries` in HELLO order and, for each file, emits the chunks `comparable` is
-            # true for in ascending order exactly once; the main thread walks the same list in the
-            # same order and takes exactly those chunks, decided by the same `comparable` call on
-            # the same two sizes (S's size from its own scan, B's from ACCEPT, which is where the
-            # generator's came from). Both sides therefore handle one strictly ascending sequence of
-            # keys, and a key can only be taken after it is stored, so when a key arrives the main
-            # thread has taken only keys before it in that sequence: the watermark is below it. The
-            # first chunk of a file clears it because every key of the previous file has a smaller
-            # entry index; a file B holds only part of simply ends its run at the last comparable
-            # chunk; a file B lacks puts nothing in the sequence on either side.
-            #
-            # The second check refuses a key still held, which the watermark cannot see: a repeat
-            # landing before the main thread has popped it would overwrite the entry and add to
-            # `_held` without adding anything to take. Between them a digest is stored once, and
-            # only while it is still to come. Both are checked for the whole frame before any of it
-            # is stored, as the bound above is, so a refused frame leaves nothing behind.
-            if (index, first_chunk) <= self._taken:
-                raise protocol.ProtocolError(
-                    f'a digest for {self._entries[index].path} chunk {first_chunk}, which this side '
-                    f'has already compared: the last digest it took was entry {self._taken[0]}, '
-                    f'chunk {self._taken[1]}')
-            for offset in range(len(digests)):
-                if (index, first_chunk + offset) in self._digests:
-                    raise protocol.ProtocolError(
-                        f'a second digest for {self._entries[index].path} '
-                        f'chunk {first_chunk + offset}')
-            for offset, digest in enumerate(digests):
-                self._digests[(index, first_chunk + offset)] = digest
-                self._held += len(digest)
-            self._ready.notify_all()
+    def _set_error(self, exc):
+        with self.cond:
+            if self.error is None:
+                self.error = exc
 
-    def take(self, index: int, chunk: int, stats: Stats) -> bytes:
-        """B's digest for this chunk, waiting for it only if it has not arrived yet. Counts one
-        `digest_waits` and one `round_trips` when it really does block on the peer."""
-        key = (index, chunk)
-        with self._ready:
-            if key not in self._digests:
-                stats.counts['digest_waits'] += 1
-                stats.counts['round_trips'] += 1
-                with stats.timed('wait_for_digests'):
-                    while key not in self._digests:
-                        self._fail_if_finished(index, chunk)
-                        self._ready.wait()
-            digest = self._digests.pop(key)
-            self._taken = key   # ascending by construction: this is the walk's own order
-            was_full = self._held >= self._window
-            self._held -= len(digest)
-            if was_full:
-                self._ready.notify_all()   # the reader can start draining the socket again
-            return digest
+    def fail(self, exc):
+        """Fail the run from another thread (the stall watch): a wait in progress or to come raises `exc`."""
+        with self.cond:
+            if self.error is None:
+                self.error = exc
+            self.cond.notify_all()
 
-    def result(self, stats: Stats) -> bytes:
-        """The receiver's RESULT payload, which the reader thread hands over like any other frame."""
-        with self._ready:
-            stats.counts['round_trips'] += 1
-            while self._result is None:
-                if self._error is not None:
-                    raise self._error
-                # Every file has been compared by the time this is called, so the sequence _store
-                # describes is exhausted and nothing will call take() again. A digest still sitting
-                # here is therefore one nothing can drain, and it is holding window space the reader
-                # needs to reach the RESULT this is waiting for. This is the one wait the ordering
-                # invariant does not cover by itself, so it consults the table the way
-                # _fail_if_finished does rather than waiting on a reader that cannot come back.
-                if self._digests:
-                    raise protocol.ProtocolError(
-                        f'{len(self._digests)} basis digests are still here with every file '
-                        f'compared: nothing will take them, so the window cannot drain')
-                self._ready.wait()
-            return self._result
+    def _dispatch(self, code, payload):
+        if code == protocol.ERROR:
+            info = protocol.decode_json(payload, 'ERROR')
+            if self.error is None:
+                self.error = PeerError(f'receiver: {info.get("message", "unspecified error")}',
+                                       info.get('exit_code'))
+        elif self.accept is None:
+            if code != protocol.ACCEPT:
+                raise ProtocolError(f'expected ACCEPT, received {protocol.name(code)}')
+            self.accept = protocol.decode_json(payload, 'ACCEPT')
+        elif code == protocol.BASIS_NODES:
+            index, size, nodes = protocol.decode_basis_nodes(payload)
+            if index in self.basis:
+                raise ProtocolError(f'duplicate BASIS_NODES for file {index}')
+            self.basis[index] = (size, nodes)
+        elif code == protocol.LEAF_DIGESTS:
+            index, entries = protocol.decode_leaf_digests(payload)
+            for node, blob in entries:
+                self.leaves[(index, node)] = blob
+        elif code == protocol.BLOCK_DIGESTS and self.subpage:
+            index, entries = protocol.decode_block_digests(payload)
+            for node, blob in entries:
+                self.blocks[(index, node)] = blob
+        elif code == protocol.COMPLETE:
+            self.complete = protocol.decode_json(payload, 'COMPLETE')
+        else:
+            raise ProtocolError(f'unexpected {protocol.name(code)} from the receiver')
 
-    def error(self) -> BaseException | None:
-        """What the reader thread died of, if it has died yet. Read by the main thread's failure
-        path, where the peer's own reason has to beat a broken `send` on this side."""
-        with self._ready:
-            return self._error
+    def wait(self, ready, what, kind=None, quiet=False):
+        """ready()'s first value that isn't None. If it has to block for it, the wait is timed under
+        `kind` (pgdelta.waits.KINDS), waking every poll interval to read the send queue. A `quiet` wait (the
+        planner's, --hash-ahead) isn't timed; the stall watch counts it only while the sending thread waits for the
+        planner (StallWatch.stalled)."""
+        timers = self.timers if kind is not None and not quiet else None
+        blocked = False
+        try:
+            with self.cond:
+                while True:
+                    if self.error is not None:
+                        raise self.error
+                    value = ready()
+                    if value is not None:
+                        return value
+                    if self.closed:
+                        raise ChannelClosed(f'receiver closed the connection while the sender waited for {what}')
+                    if quiet:
+                        if self.quiet_since is None:
+                            self.quiet_since, self.quiet_for = time.monotonic(), what
+                        self.cond.wait()
+                        continue
+                    if self.waiting_since is None:
+                        self.waiting_since, self.waiting_for = time.monotonic(), what
+                    if timers is None:
+                        self.cond.wait()
+                        continue
+                    if not blocked:
+                        timers.begin(kind)
+                        blocked = True
+                    self.cond.wait(timers.poll)
+                    timers.tick()
+        finally:
+            if quiet:
+                self.quiet_since = self.quiet_for = None
+            else:
+                self.waiting_since = self.waiting_for = None
+            if blocked:
+                timers.end()
 
-    def stop(self) -> None:
-        """Finish the reader thread, from any exit path. It is either already done (it returned on
-        RESULT or on an error), waiting for window space -- which `_stopped` ends -- or blocked in
-        `recv`, which `shutdown(SHUT_RD)` ends by making that `recv` return nothing."""
-        with self._ready:
-            self._stopped = True
-            self._ready.notify_all()
-        if self._thread.is_alive():
-            try:
-                self._channel.sock.shutdown(socket.SHUT_RD)
-            except OSError:
-                pass
-        self._thread.join()
-
-    def _fail_if_finished(self, index: int, chunk: int) -> None:
-        """Raise if no digest for this chunk can ever arrive, so a waiter never waits forever.
-        Called with the condition held, before every wait."""
-        path = self._entries[index].path
-        if self._digests:
-            # The generator emits the comparable chunks in order and this thread consumes exactly
-            # that sequence in order, so whenever a digest is missing the table is provably empty:
-            # nothing at or after this chunk has arrived, and everything before it was popped. A
-            # digest for a later chunk therefore means the peer is not sending in order, and
-            # waiting for this one would let it fill the window with digests this thread cannot
-            # reach yet -- the reader stops draining, and both threads wait for ever.
-            raise protocol.ProtocolError(
-                f'no digest for {path} chunk {chunk}, but digests for later chunks arrived')
-        if self._error is not None:
-            exc = self._error
-            message = f'no basis digest for {path} chunk {chunk}: {exc}'
-            if isinstance(exc, (protocol.Closed, protocol.PeerError, protocol.ProtocolError)):
-                raise type(exc)(message) from exc
-            raise exc
-        if self._result is not None:
-            raise protocol.ProtocolError(
-                f'the receiver finished without sending a basis digest for {path} chunk {chunk}')
+    def check(self):
+        if self.error is not None:
+            raise self.error
 
 
-def run_sender(channel: Channel, source: Path, chunk_size: int = DEFAULT_CHUNK_SIZE, events: EventLog | None = None,
-               digest_window: int = DEFAULT_DIGEST_WINDOW) -> dict:
-    """Send S to the receiver at the other end of `channel`. Returns this side's report, with the receiver's.
+class StallWatch:
+    """While a live source holds backup mode and its slot: give up on a receiver that has stopped.
 
-    `digest_window` bounds the bytes of B's digests held here but not yet compared; see `_BasisDigests`.
-    `events`, if given, gets a start event, progress about every 0.1 s, and a done event (pgdelta.events).
-    Progress is emitted from this thread only: the event log is single-writer, and an interleaved
-    write would corrupt the JSON lines `python -m viz` reads."""
-    events = events or EventLog(None)
-    if not protocol.MIN_CHUNK_SIZE <= chunk_size <= protocol.MAX_CHUNK_SIZE:
-        raise ValueError(
-            f'chunk size must be between {protocol.MIN_CHUNK_SIZE} and {protocol.MAX_CHUNK_SIZE} bytes')
-    if digest_window < 1:
-        raise ValueError('digest_window must be at least 1')
-    requested_window, digest_window = digest_window, effective_digest_window(digest_window)
-    if digest_window != requested_window:
-        # Said once, out loud: every report of this run carries the floored value, and without this
-        # line nothing would show that it is not the value the caller asked for.
-        print(f'pgdelta: --digest-window {requested_window} is below one BASIS_DIGESTS frame; '
-              f'using {digest_window}', file=sys.stderr, flush=True)
-    source = Path(source)
-    stats = Stats('sender')
-    digests = None
-    current = None  # the file being sent, to name in an error
-    try:
-        with stats.timed('scan'):
-            entries = scan(source)
-        key = new_key()
-        hasher = Hasher(key)
-        channel.send_json(HELLO, {'version': protocol.VERSION, 'chunk_size': chunk_size, 'key': key.hex(),
-                                  'root_mode': stat.S_IMODE(source.stat().st_mode),
-                                  'entries': [entry.to_json() for entry in entries]})
-        accept = json.loads(channel.expect(protocol.ACCEPT))
-        stats.counts['round_trips'] += 1
-        basis_sizes = _basis_sizes(accept, entries)
-        digests = _BasisDigests(channel, chunk_size, entries, basis_sizes, digest_window)
-        digests.start()
-        events.emit('start', total_bytes=sum(e.size for e in entries if e.kind == 'file'),
-                    files=sum(e.kind == 'file' for e in entries), chunk_size=chunk_size)
+    The sender is stalled when it has been blocked on the receiver for
+    `seconds`: in one send() the receiver doesn't take (Channel.sending_since),
+    or in a wait during which no message arrived (Inbox.waiting_since and
+    last_message). Time spent working (hashing, reading S, psql) is no stall.
+    A thread checks every `interval`; on a stall it fails the inbox with a
+    TransferError naming it and aborts the channel, so the run fails and
+    pg_backup_stop is called and the slot dropped. Should the run still not
+    have ended `grace` seconds later (a send that even an abort cannot end),
+    it kills the psql session itself, which ends backup mode and drops the
+    temporary slot server side. Over TCP the connection also gets keepalives
+    (pgdelta.transport.keep_alive) for a peer lost while nothing is sent.
+    """
 
-        def progress(path: str) -> None:
-            c = stats.counts
-            events.emit('progress', bytes_read=c['bytes_read'], bytes_sent=sum(channel.sent.values()),
-                        chunks_same=c['chunks_same'], chunks_changed=c['chunks_changed'],
-                        chunks_new=c['chunks_new'], round_trips=c['round_trips'], file=path)
+    GRACE_SECONDS = 30.0
 
-        for index, entry in enumerate(entries):
-            if entry.kind != 'file':
+    def __init__(self, channel, inbox, seconds, *, on_give_up=None, interval=None, grace=GRACE_SECONDS,
+                 clock=time.monotonic):
+        if not isinstance(seconds, (int, float)) or isinstance(seconds, bool) or not seconds > 0:
+            raise InvalidInput(f'the live timeout must be a positive number of seconds, not {seconds!r}')
+        self.channel, self.inbox, self.seconds = channel, inbox, float(seconds)
+        self.on_give_up, self.grace, self.clock = on_give_up, grace, clock
+        self.interval = interval if interval is not None else min(1.0, self.seconds / 10)
+        self.error = None
+        self._stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name='pgdelta-stall-watch', daemon=True)
+
+    def stalled(self, now):
+        """What the sender has been blocked on for `seconds` by `now` (time.monotonic()), or None."""
+        since = self.channel.sending_since
+        if since is not None and now - since >= self.seconds:
+            return 'sending'
+        since, what = self.inbox.waiting_since, self.inbox.waiting_for
+        if since is not None and now - max(since, self.inbox.last_message) >= self.seconds:
+            return f'waiting for {what}'
+        # --hash-ahead: the sending thread waits for the planner, which waits for the receiver.
+        quiet, what, taking = self.inbox.quiet_since, self.inbox.quiet_for, self.inbox.taking_since
+        if quiet is not None and taking is not None and now - max(quiet, taking, self.inbox.last_message) >= self.seconds:
+            return f'waiting for {what}'
+        return None
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def stop(self):
+        """The slot is gone or the run is over: stop watching. Safe to repeat."""
+        self._stopped.set()
+        if self.thread.is_alive() and self.thread is not threading.current_thread():
+            self.thread.join(5)
+
+    def _run(self):
+        while not self._stopped.wait(self.interval):
+            what = self.stalled(self.clock())
+            if what is None:
                 continue
-            current = entry.path
-            stats.counts['files'] += 1
-            basis_size = basis_sizes.get(index)  # None: B has no such file
-            whole = hasher.file()
-            offset = chunk = 0
-            run_first = run_length = 0  # a pending CHUNK_COPY: chunks B already holds, not yet named
+            self.error = TransferError(
+                f'the receiver made no progress for {self.seconds:g} s while the sender was {what}, with backup '
+                f'mode and the replication slot held on the source: giving up, so that backup mode ends and the '
+                f'slot is dropped (--live-timeout)')
+            self.inbox.fail(self.error)
+            self.channel.abort()
+            if not self._stopped.wait(self.grace) and self.on_give_up is not None:
+                self.on_give_up()
+            return
 
-            def flush_run() -> None:
-                # Closes over `index`, `run_first` and `run_length`, all bound fresh each time around
-                # the outer `for` loop; every call below happens within that same iteration, so
-                # there's no late-binding hazard (the closure never outlives the file it was made for).
-                nonlocal run_length
-                if not run_length:
-                    return
-                with stats.timed('send'):
-                    channel.send(CHUNK_COPY, CHUNK_COPY_BODY.pack(index, run_first, run_length))
-                stats.counts['copy_runs'] += 1
-                run_length = 0
 
-            with open(source / entry.path, 'rb') as f:
-                while offset < entry.size:
-                    want = min(chunk_size, entry.size - offset)
-                    with stats.timed('read'):
-                        data = f.read(want)
-                    if len(data) != want:
-                        raise RuntimeError(f'{entry.path} shrank while it was read; S must not change')
-                    whole.update(data)
-                    stats.counts['bytes_read'] += want
-                    if basis_size is not None and comparable(chunk, chunk_size, entry.size, basis_size):
-                        with stats.timed('hash'):
-                            digest = hasher.chunk(data)
-                        theirs = digests.take(index, chunk, stats)
-                        stats.counts['chunks_asked'] += 1
-                        if theirs == digest:
-                            # Extend the pending run. Every break below flushes it first, so a
-                            # pending run is always the chunks immediately before this one.
-                            stats.counts['chunks_same'] += 1
-                            if not run_length:
-                                run_first = chunk
-                            run_length += 1
-                        else:
-                            flush_run()
-                            stats.counts['chunks_changed'] += 1
-                            with stats.timed('send'):
-                                channel.send(CHUNK_DATA, CHUNK_DATA_HEAD.pack(index, chunk) + data)
-                    else:
-                        # B lacks this range (a new file, or past B's end): flush first so chunk
-                        # indices on the wire stay ascending, then send it; nothing to compare.
-                        flush_run()
-                        stats.counts['chunks_new'] += 1
-                        with stats.timed('send'):
-                            channel.send(CHUNK_DATA, CHUNK_DATA_HEAD.pack(index, chunk) + data)
-                    offset += want
-                    chunk += 1
-                    if events.due():
-                        progress(entry.path)
-                if f.read(1):
-                    raise RuntimeError(f'{entry.path} grew while it was read; S must not change')
-            flush_run()  # a run never spans two files
-            with stats.timed('send'):
-                channel.send(FILE_DONE, FILE_DONE_BODY.pack(index, entry.size, whole.digest()))
+@dataclass
+class _Job:
+    index: int
+    path: str
+    tree: object
+    basis_size: object = None
+    plan: matching.NodePlan = field(default_factory=matching.NodePlan)
+    entry: object = None
+    # Live: the digest of what the copy is made of, the pages sent as sent (pgdelta.live.composite_digest).
+    digest: object = None
 
-        channel.send(COMPLETE)
-        result = json.loads(digests.result(stats))
-    except (protocol.PeerError, protocol.Closed):
-        raise
-    except BaseException as exc:
-        # If the receiver failed, said why, and its caller closed the socket, this thread's next
-        # `send` breaks and its next `take()` raises the peer's reason -- a race between the two.
-        # The reader thread has that reason either way, so report the cause rather than whichever
-        # symptom won, and say nothing back to a peer that has already reported.
-        reported = digests.error() if digests is not None else None
-        cause = exc
-        if (isinstance(reported, (protocol.PeerError, protocol.ProtocolError))
-                and not isinstance(exc, (protocol.PeerError, protocol.ProtocolError))):
-            cause = reported
-        elif isinstance(reported, protocol.Closed) and isinstance(exc, OSError):
-            # The peer closed its direction, the reader hung up, and that broke a send here: the
-            # closed connection is the cause, the broken pipe its symptom.
-            cause = protocol.Closed(f'{reported} while sending {current}' if current else str(reported))
-        if not isinstance(reported, protocol.PeerError):
-            try:
-                channel.send_json(protocol.ERROR, {'message': f'sender failed: {cause}'})
-            except OSError:
-                pass
-        if cause is exc:
+
+class _ReadAhead:
+    """--read-ahead (with --hash-ahead): the runs a file sends, read on `threads` threads in sending order, up to
+    READ_AHEAD_BYTES ahead of the sending thread, so that the source's reads overlap the sending and the receiver's
+    writes instead of alternating with them (EXP-64b, EXP-91). `runs` lists (file index, entry, first page, page
+    count, bytes) in the order they are sent."""
+
+    def __init__(self, reader, runs, threads, window, block):
+        self.reader, self.runs, self.block, self.window = reader, iter(runs), block, window
+        self.pool = ThreadPoolExecutor(threads, thread_name_prefix='pgdelta-read')
+        self.pending, self.handles, self.inflight, self.exhausted = deque(), {}, 0, False
+        self.wait_seconds, self.reads = 0.0, 0
+        try:
+            self._fill()
+        except BaseException:
+            self.close()
             raise
-        raise cause from exc
-    finally:
-        if digests is not None:
-            digests.stop()
-    report = stats.report(channel)
-    report['ok'] = bool(result.get('ok'))
-    report['chunk_size'] = chunk_size
-    # The *effective* window, after flooring: a sweep that reports the value it asked for would
-    # label two runs at MIN_DIGEST_WINDOW with two different windows.
-    report['digest_window'] = digest_window
-    report['receiver'] = result.get('stats')
-    c = stats.counts
-    events.emit('done', ok=report['ok'], elapsed=report['elapsed_seconds'], bytes_read=c['bytes_read'],
-                bytes_sent=report['bytes_sent_total'], chunks_same=c['chunks_same'],
-                chunks_changed=c['chunks_changed'], chunks_new=c['chunks_new'], round_trips=c['round_trips'])
-    return report
+
+    def _fill(self):
+        while not self.exhausted and (self.inflight < self.window or not self.pending):
+            try:
+                index, entry, first, count, length = next(self.runs)
+            except StopIteration:
+                self.exhausted = True
+                return
+            handle = self.handles.get(index)
+            if handle is None:
+                handle = self.handles[index] = self.reader.open(entry)
+            future = self.pool.submit(handle.read, first * self.block, length)
+            self.pending.append((index, first, count, length, future))
+            self.inflight += length
+
+    def next(self, index, first):
+        """The next run's bytes; it must be file `index`'s run starting at page `first`."""
+        if not self.pending:
+            raise TransferError('read-ahead ran out of runs')
+        run_index, run_first, _, length, future = self.pending.popleft()
+        if (run_index, run_first) != (index, first):
+            raise TransferError(f'read-ahead out of order: file {run_index} page {run_first}, expected {index} {first}')
+        started = time.perf_counter()
+        data = future.result()
+        self.wait_seconds += time.perf_counter() - started
+        self.inflight -= length
+        self.reads += 1
+        self._fill()
+        return data
+
+    def done(self, index):
+        """File `index`'s runs are all taken, so no read of it is in flight: its handle is closed. (After a failure,
+        close() closes the rest once the threads have stopped.)"""
+        handle = self.handles.pop(index, None)
+        if handle is not None:
+            handle.close()
+
+    def close(self):
+        for *_, future in self.pending:
+            future.cancel()
+        self.pool.shutdown(wait=True, cancel_futures=True)
+        for handle in self.handles.values():
+            handle.close()
+        self.handles.clear()
 
 
-def _basis_sizes(accept: dict, entries: list[Entry]) -> dict[int, int]:
-    """ACCEPT's declaration of what B holds, checked against what this side actually sent: the
-    indices are peer-supplied, and everything downstream uses them to index `entries`."""
-    sizes = {}
-    for pair in accept['basis_sizes']:
-        index, size = int(pair[0]), int(pair[1])
-        if not 0 <= index < len(entries) or entries[index].kind != 'file':
-            raise protocol.ProtocolError(f'ACCEPT declares a basis for entry {index}, which is not a file S sent')
-        if size < 0:
-            raise protocol.ProtocolError(f'ACCEPT declares a basis of {size} bytes for {entries[index].path}')
-        sizes[index] = size
-    return sizes
+def check_ahead(read_ahead, hash_ahead):
+    """Refuse a --read-ahead or --hash-ahead that is not a whole number, and --read-ahead without --hash-ahead."""
+    if type(read_ahead) is not int or read_ahead < 0:
+        raise InvalidInput(f'read-ahead must be a whole number of threads, not {read_ahead!r}')
+    if type(hash_ahead) is not int or hash_ahead < 0:
+        raise InvalidInput(f'hash-ahead must be a whole number of bytes, not {hash_ahead!r}')
+    if read_ahead and not hash_ahead:
+        raise InvalidInput('--read-ahead reads the pages hashing chose with --hash-ahead, so it needs --hash-ahead')
+
+
+def _parse_accept(accept, file_count):
+    mode, reason = accept.get('mode'), accept.get('reason')
+    if mode not in ('reuse', 'full') or not isinstance(reason, str):
+        raise ProtocolError('ACCEPT needs mode "reuse" or "full" and a reason')
+    identity = accept.get('basis_identity')
+    if identity is not None and not isinstance(identity, dict):
+        raise ProtocolError('ACCEPT basis_identity must be an object or null')
+    policy = accept.get('reuse_policy')
+    if policy is not None and not isinstance(policy, str):
+        raise ProtocolError('ACCEPT reuse_policy must be a string or null')
+    basis_sizes = {}
+    for item in accept.get('basis_files', []):
+        if (not isinstance(item, list) or len(item) != 2 or type(item[0]) is not int
+                or type(item[1]) is not int or not 0 <= item[0] < file_count or item[1] < 0
+                or item[0] in basis_sizes):
+            raise ProtocolError(f'invalid ACCEPT basis_files entry {item!r}')
+        basis_sizes[item[0]] = item[1]
+    return mode == 'reuse', reason, policy, identity, basis_sizes
+
+
+class _FileReader:
+    """A finished backup's or a stopped data directory's files, opened as pgdelta.live.Reader opens a live source's,
+    so that _ReadAhead reads either (--hash-ahead with --read-ahead)."""
+
+    def __init__(self, path_of):
+        self.path_of = path_of
+
+    def open(self, entry):
+        return _FileHandle(open_regular(self.path_of(entry.path)))
+
+
+class _FileHandle:
+    def __init__(self, fd):
+        self.fd = fd
+
+    def read(self, offset, length):
+        return pread_exact(self.fd, length, offset)
+
+    def close(self):
+        os.close(self.fd)
+
+
+class _Planner:
+    """--hash-ahead (EXP-91): S's files hashed, compared with B's node digests, and their leaf requests made on a
+    thread of their own, up to `limit` bytes of files ahead of the file being sent (always at least one file).
+
+    Without it, one thread hashes a file, then sends the oldest pending file's pages, then hashes the next, so
+    S is not read while a send blocks: EXP-90's source read nothing for 40 s while dest wrote, then read its last
+    9 GB alone. Here the sending thread takes the planned jobs in order, and sends the leaf requests queued here
+    before each run of pages (only it writes to the channel). A job's requests are queued before the job, so they
+    always precede its pages on the wire, as the receiver requires in place.
+    """
+
+    def __init__(self, sender, entries, first_index, limit):
+        self.sender, self.limit = sender, limit
+        self.entries = list(enumerate(entries, first_index))
+        self.cond = threading.Condition()
+        self.jobs, self.requests = deque(), deque()
+        self.ahead = 0  # bytes of the files planned and not yet sent
+        self.done = self.stopped = False
+        self.error = None
+        self.room_wait_seconds = self.plan_wait_seconds = 0.0
+        self.most_ahead = 0
+        self.thread = threading.Thread(target=self._run, name='pgdelta-plan', daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        try:
+            for index, entry in self.entries:
+                with self.cond:
+                    started = time.perf_counter()
+                    self.cond.wait_for(lambda: self.stopped or not self.ahead
+                                       or self.ahead + entry.size <= self.limit)
+                    self.room_wait_seconds += time.perf_counter() - started
+                    if self.stopped:
+                        return
+                    self.ahead += entry.size
+                    self.most_ahead = max(self.most_ahead, self.ahead)
+                job = self.sender._plan(index, entry, self.requests)
+                with self.cond:
+                    self.jobs.append(job)
+                    self.cond.notify_all()
+        except BaseException as exc:
+            if not isinstance(exc, PgDeltaError):
+                exc = TransferError(f'hashing ahead failed: {exc!r}')
+            with self.cond:
+                self.error = exc
+                self.cond.notify_all()
+        finally:
+            with self.cond:
+                self.done = True
+                self.cond.notify_all()
+
+    def take(self):
+        """The next planned job, in order; the planner's failure, if it failed first."""
+        started, inbox = time.perf_counter(), self.sender.inbox
+        with self.cond:
+            if not self.jobs:
+                inbox.taking_since = time.monotonic()
+            try:
+                self.cond.wait_for(lambda: self.jobs or self.error is not None or self.done)
+            finally:
+                inbox.taking_since = None
+            self.plan_wait_seconds += time.perf_counter() - started
+            if self.jobs:
+                return self.jobs.popleft()
+            if self.error is not None:
+                raise self.error
+            raise TransferError('hashing ahead ended before every file was planned')
+
+    def sent(self, job):
+        with self.cond:
+            self.ahead -= job.entry.size
+            self.cond.notify_all()
+
+    def stop(self, timeout=JOIN_SECONDS):
+        with self.cond:
+            self.stopped = True
+            self.cond.notify_all()
+        self.thread.join(timeout)
+
+
+class _Sender:
+    def __init__(self, channel, source, identity, block, node_blocks, high_churn_node_fraction,
+                 window, key, jobs, hash_backend, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
+                 busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
+                 hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
+                 read_ahead=0, hash_ahead=DEFAULT_HASH_AHEAD):
+        self.started = time.perf_counter()
+        # --hash-ahead (EXP-91): the planner thread of the files being hashed (None without it, or between
+        # _send_files calls); what all its planners did.
+        self.hash_ahead, self.planner = hash_ahead, None
+        self.hash_ahead_counts = {'bytes': hash_ahead, 'room_wait_seconds': 0.0, 'plan_wait_seconds': 0.0,
+                                  'most_ahead_bytes': 0, 'read_ahead_reads': 0, 'read_ahead_wait_seconds': 0.0}
+        # --read-ahead: with --hash-ahead, the pages each file sends are read on this many threads ahead of sending (0:
+        # one run at a time in the sending thread).
+        self.read_ahead = read_ahead
+        self.hash_algorithm = hash_algorithm
+        # --compress zstd: offered in HELLO; the codec exists once the receiver accepted it (pgdelta.compress).
+        self.compress, self.codec = compress, None
+        # EXP-46: runs are compressed on a pool of `jobs` threads (zstd releases the GIL) while this thread reads
+        # and sends; EXP-50: queued into tasks of compress.TASK_BYTES, up to two tasks per thread wait, in order.
+        # `seconds` sums the compressing, `wait_seconds` is the time this thread waited for the oldest task.
+        self.compressor, self.compressing, self.queued, self.queued_bytes = None, deque(), [], 0
+        self.compress_counts = {'runs': 0, 'runs_compressed': 0, 'raw_bytes': 0, 'wire_bytes': 0, 'seconds': 0.0,
+                                'wait_seconds': 0.0, 'threads': 0, 'tasks': 0}
+        # --subpage (pgdelta.subpage): offered in HELLO; used once the receiver accepted it.
+        self.subpage, self.subpage_used = subpage, False
+        self.subpage_counts = {'pages_whole': 0, 'pages_partial': 0, 'pages_same': 0, 'blocks_sent': 0,
+                               'block_digest_bytes': 0, 'hash_seconds': 0.0}
+        self.channel, self.source, self.identity = channel, Path(source), identity
+        self.source_kind, self.pg_controldata, self.selection = source_kind, pg_controldata, None
+        # A live source (pgdelta.live): its backup session, and how its files are read; the files appended
+        # after pg_backup_stop; the watch that gives up on a stalled receiver while the slot is held.
+        self.pg_conn, self.psql = pg_conn, psql
+        self.live_timeout = live.DEFAULT_TIMEOUT if live_timeout is None else live_timeout
+        self.checkpoint = checkpoint
+        self.live = self.reader = self.watch = None
+        self.appended = []
+        # Whether the receiver refreshes B in place (from ACCEPT; null until it arrives).
+        self.in_place = None
+        self.block, self.node_blocks = block, node_blocks
+        self.high_churn = high_churn_node_fraction
+        self.window = max(1, window)
+        self.key = key
+        self.jobs, self.pool, self.hash_backend = jobs, None, hash_backend
+        self.pool_start_seconds = 0.0
+        # EXP-13: the waits for the receiver, each split by the socket's send queue against
+        # busy_inflight_bytes, and the time blocked sending (pgdelta.waits).
+        self.busy_inflight_bytes = busy_inflight_bytes
+        self.waits = waits.WaitTimers(waits.SendQueue(getattr(channel, 'sock', None)), busy_inflight_bytes)
+        self.inbox = Inbox(channel, self.waits)
+        self.leaf_requests = 0
+        self.mode = self.reason = self.policy = self.basis_identity = self.receiver_stats = None
+        self.directory_count = 0
+        self.files = dict.fromkeys(('total', 'unchanged', 'changed', 'new', 'size_mismatch'), 0)
+        self.pages = dict.fromkeys(('total', 'sent', 'reused', 'sent_bytes'), 0)
+        self.nodes = dict.fromkeys(('total', 'matched', 'descended', 'sent_whole'), 0)
+        self.high_churn_files = 0
+        self.file_count = None
+        self.files_digest = FilesDigest()
+        self.hash_source = 0.0
+        self.bytes_done = 0           # bytes of S's files finished: --events' bytes_read
+        self.events_path = None       # --events: progress for python -m viz, from a thread of its own
+        self.events = self._events_stop = self._events_thread = None
+        self.protocol_started = self.protocol_seconds = None
+
+    def run(self):
+        try:
+            stats = self._run()
+            self._events_finish(True)
+        except BaseException as exc:
+            self._events_finish(False)
+            failure = exc
+            try:
+                failure = self._fail(exc)
+            finally:
+                # A live source: end backup mode and drop the slot before the statistics record how.
+                self._close_live()
+                failure.pgdelta_stats = self.stats('failed', getattr(failure, 'exit_code',
+                                                   EXIT_TRANSFER_FAILURE), str(failure))
+            if failure is exc:
+                raise
+            raise failure from exc
+        finally:
+            self._close_live()
+            if self.pool is not None:
+                self.pool.close()
+            if self.compressor is not None:
+                self.compressor.shutdown(wait=False, cancel_futures=True)
+        if self.live is not None and self.live.variant is not None:
+            raise self._wrong_by_design(stats)
+        return stats
+
+    def _wrong_by_design(self, stats):
+        """A broken test variant ran to the end: the run fails (exit 4), however complete it looks."""
+        output = f'B, which {COMMITTED},' if self.in_place else 'the output the receiver published'
+        error = VerificationError(
+            f'the deliberately broken test variant ran ({live.READ_BEFORE_START_ENV}: {self.live.variant}): the '
+            f'files were read before pg_backup_start returned, so {output} is wrong by design and must not be '
+            f'used; refresh it again without the switch, or replace it with a full copy')
+        error.pgdelta_stats = dict(stats, status='failed', exit_code=error.exit_code, error=str(error))
+        return error
+
+    def _close_live(self):
+        if self.live is not None:
+            if self.watch is not None and self.watch.error is not None:
+                self.live.timed_out = True
+            try:
+                self.live.close()
+            except Exception:  # never hide the run's own failure; the session's end aborts backup mode anyway
+                pass
+        if self.watch is not None:
+            self.watch.stop()
+
+    def _kill_session(self):
+        """The stall watch's last resort, when even aborting the channel did not end the run: end the psql session,
+        which ends backup mode and drops the temporary slot server side."""
+        session = self.live.session if self.live is not None else None
+        if session is not None:
+            session.kill()
+
+    def _fail(self, exc):
+        if self.watch is not None and self.watch.error is not None and not isinstance(exc, PeerError):
+            # The receiver stalled while the slot was held: whatever the run then hit (a wait failed by the watch,
+            # a send cut off by its abort) has that cause, and the aborted channel can carry no ERROR.
+            return self.watch.error
+        if isinstance(exc, PeerError):
+            return exc
+        if isinstance(exc, ChannelClosed):
+            self.inbox.settle(JOIN_SECONDS)
+            return self.inbox.error if isinstance(self.inbox.error, PeerError) else exc
+        if isinstance(exc, PgDeltaError):
+            self._send_error(exc.exit_code, str(exc))
+        elif isinstance(exc, KeyboardInterrupt):
+            self._send_error(EXIT_TRANSFER_FAILURE, 'sender interrupted')
+        else:
+            self._send_error(EXIT_TRANSFER_FAILURE, f'sender internal error: {exc!r}')
+        return exc
+
+    def _send_error(self, exit_code, message):
+        try:
+            self.channel.send_json(protocol.ERROR, {'exit_code': exit_code, 'message': message})
+        except PgDeltaError:
+            pass
+
+    def _resolve_block(self):
+        identity = self.identity or {}
+        identity_block = None if identity.get('untrustworthy') else identity.get('block_size')
+        if self.block is None:
+            return identity_block or BLOCK
+        if identity_block is not None and self.block != identity_block:
+            raise InvalidInput(f'block size {self.block} does not match the source cluster '
+                               f'block size {identity_block}')
+        return self.block
+
+    def _run(self):
+        check_ahead(self.read_ahead, self.hash_ahead)
+        if self.source_kind not in datadir.SOURCE_KINDS:
+            raise InvalidInput(f'source kind must be one of {", ".join(datadir.SOURCE_KINDS)}, '
+                               f'not {self.source_kind!r}')
+        check_major(self.source, 'source')
+        if self.source_kind == 'datadir':
+            # Refuses unless the cluster is cleanly shut down; lists only what pg_basebackup would send.
+            self.selection = datadir.select(self.source, self.pg_controldata)
+            if self.identity is None:
+                self.identity = self.selection.identity
+        elif self.source_kind == 'live':
+            self._begin_live()
+        self.block = self._resolve_block()
+        protocol.check_parameters(self.block, self.node_blocks, InvalidInput)
+        if self.high_churn is not None and not 0 <= self.high_churn <= 1:
+            raise InvalidInput('high_churn_node_fraction must be between 0 and 1')
+        if type(self.jobs) is not int or self.jobs < 1:
+            raise InvalidInput(f'jobs must be a positive integer, not {self.jobs!r}')
+        if self.busy_inflight_bytes is not None and (type(self.busy_inflight_bytes) is not int
+                                                     or self.busy_inflight_bytes < 0):
+            raise InvalidInput(f'busy_inflight_bytes must be a whole number of bytes, '
+                               f'not {self.busy_inflight_bytes!r}')
+        if self.hash_backend not in BACKENDS:
+            raise InvalidInput(f'hash backend must be one of {", ".join(BACKENDS)}, not {self.hash_backend!r}')
+        if self.compress not in (None, *compression.ALGORITHMS):
+            raise InvalidInput(f'compress must be one of {", ".join(compression.ALGORITHMS)} or None, '
+                               f'not {self.compress!r}')
+        if self.compress is not None and not compression.usable(self.compress):
+            raise InvalidInput(f'--compress {self.compress} needs Python 3.14 (compression.zstd) or the zstandard '
+                               f'package here')
+        inventory = prepare_source(self.source) if self.selection is None else self.selection.inventory
+        self.directory_count, self.file_count = len(inventory.directories), len(inventory.files)
+        self._events_start(inventory)
+        key = self.key or new_key()
+        # --hash auto: offer BLAKE3 too where it can hash here; the receiver picks in ACCEPT, so the hasher and the
+        # pool start after it. With only BLAKE2b to offer, nothing is offered and the session is as before.
+        offered = offer() if self.hash_algorithm == 'auto' else None
+        if offered == [DEFAULT_ALGORITHM]:
+            offered, self.hash_algorithm = None, DEFAULT_ALGORITHM
+        if offered is None:
+            self._start_hashing(key)
+        self.protocol_started = time.perf_counter()
+        self.inbox.start()
+        hello = {
+            'protocol_version': protocol.PROTOCOL_VERSION,
+            'block': self.block,
+            'node_blocks': self.node_blocks,
+            'key': base64.b64encode(key).decode('ascii'),
+            'source_identity': self.identity,
+            'root_mode': inventory.root_mode,
+            'directories': [[entry.path, entry.mode] for entry in inventory.directories],
+            'files': [[entry.path, entry.size, entry.mode] for entry in inventory.files],
+        }
+        if self.live is not None:
+            hello['appends'] = True  # the WAL and backup_label follow in APPEND, after pg_backup_stop
+        if offered is not None:
+            hello['hash_offer'] = offered
+        elif self.hash_algorithm != DEFAULT_ALGORITHM:
+            hello['hash'] = self.hash_algorithm  # EXP-29: absent means BLAKE2b, so older receivers still match
+        if self.compress is not None:
+            hello['compress_offer'] = [self.compress]
+        if self.subpage:
+            hello['subpage_offer'] = SUB_BLOCK
+        self._send_json(protocol.HELLO, hello)
+        accept = self.inbox.wait(lambda: self.inbox.accept, 'ACCEPT', 'accept')
+        if offered is not None:
+            chosen = accept.get('hash')
+            if chosen not in offered:
+                raise ProtocolError(f'ACCEPT hash must be one of the offered {offered}, not {chosen!r}')
+            self.hash_algorithm = chosen
+            self._start_hashing(key)
+        if self.compress is not None:
+            # A receiver without zstd accepts without it, and the pages go plain.
+            chosen = accept.get('compress')
+            if chosen not in (None, self.compress):
+                raise ProtocolError(f'ACCEPT compress must be {self.compress!r} or absent, not {chosen!r}')
+            self.codec = compression.Codec() if chosen else None
+            if self.codec is not None:
+                threads = max(1, self.jobs)
+                self.compressor = ThreadPoolExecutor(threads, thread_name_prefix='pgdelta-zstd')
+                self.compress_counts['threads'] = threads
+        elif 'compress' in accept:
+            raise ProtocolError('ACCEPT compress without a compress_offer')
+        if 'subpage' in accept:
+            # A receiver that can't build on B's bytes accepts without it, and runs go as PAGE_DATA.
+            if not self.subpage or accept['subpage'] != SUB_BLOCK:
+                raise ProtocolError(f'ACCEPT subpage {accept["subpage"]!r} without a matching subpage_offer')
+            self.subpage_used = self.inbox.subpage = True
+        self.reuse, self.reason, self.policy, self.basis_identity, self.basis_sizes = _parse_accept(
+            accept, len(inventory.files))
+        self.in_place = accept.get('in_place', False)
+        if type(self.in_place) is not bool:
+            raise ProtocolError('ACCEPT in_place must be true or false')
+        self.mode = 'reuse' if self.reuse else 'full'
+        self.max_run = max(1, RUN_BYTES // self.block)
+        self.max_request = protocol.max_nodes_per_request(self.node_blocks)
+        self._send_files(inventory.files, 0)
+        if self.live is not None:
+            # Every listed file has been sent: end backup mode, then send the WAL it needs and its backup_label.
+            self._end_live(len(inventory.files))
+        elif self.selection is not None:
+            # A server started on the data directory meanwhile: fail before the receiver publishes.
+            datadir.check_unchanged(self.source, self.pg_controldata, self.selection)
+        self._send_json(protocol.COMPLETE, {'files': self.file_count, 'directories': self.directory_count})
+        try:
+            final = self.inbox.wait(lambda: self.inbox.complete, 'COMPLETE', 'complete')
+        except ChannelClosed as exc:
+            raise ChannelClosed(f'{exc}. Every file was sent, so the receiver may have published the output '
+                                f'anyway: check its log and the receipt beside the output '
+                                f'(<output>{RECEIPT_SUFFIX}), whose files_digest should equal this run\'s '
+                                f'statistics') from exc
+        self.protocol_seconds = time.perf_counter() - self.protocol_started
+        self.inbox.join(JOIN_SECONDS)
+        if final.get('published') is not True:
+            raise ProtocolError('receiver finished without confirming publication')
+        receiver = final.get('receiver')
+        self.receiver_stats = receiver if isinstance(receiver, dict) else None
+        return self.stats('complete', 0, None)
+
+    def _start_hashing(self, key):
+        """The session's hasher and hash pool, and a live source's reader, for self.hash_algorithm."""
+        try:
+            self.hasher = Hasher(key, self.hash_algorithm)
+        except (ImportError, ValueError) as exc:
+            raise InvalidInput(str(exc)) from exc
+        started = time.perf_counter()
+        try:
+            self.pool = HashPool(self.jobs, backend=self.hash_backend, key=key, algorithm=self.hash_algorithm)
+        except (OSError, ValueError) as exc:
+            raise TransferError(f'cannot start the hashing workers: {exc}') from exc
+        self.pool_start_seconds = time.perf_counter() - started
+        if self.live is not None:
+            # Read before start (test switch): the data files come from the copy made before pg_backup_start.
+            self.reader = live.Reader(self.live.snapshot or self.source, self.source, self.hasher, self.block,
+                                      self.node_blocks, self.pool)
+
+    def _send_files(self, entries, first_index):
+        """Hash, compare and send `entries` (file indexes from first_index on), up to `window` files ahead; with
+        --hash-ahead, hashed on the planner's thread up to hash_ahead bytes ahead (_Planner)."""
+        if self.hash_ahead:
+            self.planner, finished = _Planner(self, entries, first_index, self.hash_ahead), False
+            try:
+                for _ in range(len(entries)):
+                    job = self.planner.take()
+                    self._finish(job)
+                    self.planner.sent(job)
+                finished = True
+            finally:
+                planner, self.planner = self.planner, None
+                # Every file planned: the thread has ended. After a failure it may be hashing or waiting for the
+                # receiver; it is a daemon and stops at its next check, so the failure is reported now.
+                planner.stop(JOIN_SECONDS if finished else 0.1)
+                counts = self.hash_ahead_counts
+                counts['room_wait_seconds'] += planner.room_wait_seconds
+                counts['plan_wait_seconds'] += planner.plan_wait_seconds
+                counts['most_ahead_bytes'] = max(counts['most_ahead_bytes'], planner.most_ahead)
+            return
+        pending = deque()
+        for index, entry in enumerate(entries, first_index):
+            self.inbox.check()
+            pending.append(self._plan(index, entry))
+            while len(pending) > self.window:
+                self._finish(pending.popleft())
+        while pending:
+            self._finish(pending.popleft())
+
+    def _begin_live(self):
+        """Open the backup session and its slot, call pg_backup_start, then list the data directory.
+
+        From the slot's creation until it is dropped, the stall watch gives up on a receiver that stops
+        (StallWatch), and a TCP connection to it gets keepalives.
+
+        EXP-25's broken variants (PGDELTA_TEST_READ_BEFORE_START, pgdelta.live): the data directory is listed
+        and copied aside before pg_backup_start is called ("before_start"), or once it is sent and before
+        its answer is read ("during_start").
+        """
+        self.live = live.LiveSource(self.source, self.pg_conn, self.pg_controldata, psql=self.psql,
+                                    checkpoint=self.checkpoint)
+        self.watch = StallWatch(self.channel, self.inbox, self.live_timeout, on_give_up=self._kill_session)
+        self.live.timeout = self.watch.seconds
+        sock = getattr(self.channel, 'sock', None)
+        if sock is not None:
+            self.live.keepalive = transport.keep_alive(sock, self.watch.seconds)
+        self.watch.start()
+        self.live.open()
+        if self.live.variant == 'before_start':
+            self.selection = self.live.select()
+            self.live.pre_read(self.selection)
+            self.live.start()
+        elif self.live.variant == 'during_start':
+            def read_meanwhile():
+                self.selection = self.live.select()
+                self.live.pre_read(self.selection)
+
+            self.live.start(meanwhile=read_meanwhile)
+        else:
+            self.live.start()
+            self.selection = self.live.select()
+        if self.live.oracle_dir:
+            self.live.oracle_read(self.selection)
+        if self.identity is None:
+            self.identity = self.selection.identity
+
+    def _end_live(self, first_index):
+        """pg_backup_stop, then the WAL segments, history files and backup_label, appended; then drop the slot."""
+        entries = self.live.stop()
+        for entry in entries:
+            if entry.path == live.BACKUP_LABEL:
+                self.reader.pin(entry.path, self.live.backup_label)
+            else:
+                self.reader.hold(entry.path, self.live.segment_check(entry.path))
+        self.appended = entries
+        self.file_count += len(entries)
+        self._send_json(protocol.APPEND, {'files': [[entry.path, entry.size, entry.mode] for entry in entries]})
+        self._send_files(entries, first_index)
+        self.live.finish()
+        self.watch.stop()  # the slot is dropped: waiting on the receiver from here on holds nothing on the source
+
+    def _source_file(self, path):
+        """The file read for the listed `path` (datadir: an unlogged relation's main fork is its init fork)."""
+        return self.source / (path if self.selection is None else self.selection.source_path(path))
+
+    def _plan(self, index, entry, requests=None):
+        """Hash a file of S, compare it with B's node digests and ask for the leaf digests of the nodes that
+        differ. On the planner's thread (--hash-ahead) the leaf requests go into `requests`, for the sending thread
+        to send, and the wait for B's digests is quiet."""
+        started = time.perf_counter()
+        try:
+            if self.reader is not None:  # live: always entry.size bytes (pgdelta.live.Reader)
+                tree = self.reader.hash(entry)
+            else:
+                tree = hash_file(self._source_file(entry.path), None, self.block, self.node_blocks,
+                                 hasher=self.hasher, pool=self.pool)
+        except OSError as exc:
+            raise TransferError(f'cannot read source file {entry.path}: {exc}') from exc
+        self.hash_source += time.perf_counter() - started
+        if tree.size != entry.size:
+            raise VerificationError(f'source file {entry.path} changed size during the run '
+                                    f'({entry.size} -> {tree.size} bytes); S must be immutable')
+        job = _Job(index, entry.path, tree, self.basis_sizes.get(index), entry=entry)
+        if job.basis_size is None or not self.reuse:
+            job.plan.whole = list(range(tree.node_count))
+            return job
+        size, nodes = self.inbox.wait(lambda: self.inbox.basis.pop(index, None),
+                                      f'basis digests of {entry.path}', 'basis', quiet=requests is not None)
+        if size != job.basis_size or len(nodes) != node_count(size, self.block, self.node_blocks) * DIGEST_SIZE:
+            raise ProtocolError(f'BASIS_NODES for {entry.path} disagrees with the announced basis size')
+        job.plan = matching.classify_nodes(tree, size, nodes, self.high_churn)
+        for start in range(0, len(job.plan.descend), self.max_request):
+            chunk = job.plan.descend[start:start + self.max_request]
+            frame = protocol.encode_leaf_request(index, chunk)
+            if requests is None:
+                self._send(protocol.LEAF_REQUEST, frame)
+            else:
+                requests.append(frame)
+            self.leaf_requests += 1
+        return job
+
+    def _send_requests(self):
+        """--hash-ahead: the leaf requests the planner queued, sent now (before a file's pages and each run)."""
+        planner = self.planner
+        while planner is not None and planner.requests:
+            self._send(protocol.LEAF_REQUEST, planner.requests.popleft())
+
+    def _finish(self, job):
+        self._send_requests()
+        tree, plan = job.tree, job.plan
+        pages, blocks = [], {}
+        for node in plan.descend:
+            blob = self.inbox.wait(lambda: self.inbox.leaves.pop((job.index, node), None),
+                                   f'leaf digests of {job.path}', 'leaf')
+            expected = matching.basis_leaf_count(node, job.basis_size, self.block, self.node_blocks)
+            if len(blob) != expected * DIGEST_SIZE:
+                raise ProtocolError(f'LEAF_DIGESTS for {job.path} node {node} has the wrong length')
+            pages += matching.changed_pages(tree, node, job.basis_size, blob)
+            if self.subpage_used:
+                blocks[node] = self._block_digests(job, node, expected)
+        for node in plan.whole:
+            pages += matching.node_pages(tree, node)
+        pages.sort()
+        old = self._old_blocks(job, blocks) if self.subpage_used else None
+        ahead = None
+        if pages and self.planner is not None and self.read_ahead:
+            # Hashing ran ahead, so these pages may have left the page cache: read them on read_ahead threads.
+            runs = [(job.index, job.entry, first, count, min(count * self.block, tree.size - first * self.block))
+                    for first, count in matching.runs(pages, self.max_run)]
+            ahead = _ReadAhead(self.reader or _FileReader(self._source_file), runs, self.read_ahead,
+                               READ_AHEAD_BYTES, self.block)
+        try:
+            if self.reader is not None:
+                sent_bytes = self._send_live_pages(job, pages, old, ahead) if pages else 0
+            else:
+                sent_bytes = self._send_pages(job, pages, old, ahead) if pages else 0
+        finally:
+            if ahead is not None:
+                ahead.close()
+                self.hash_ahead_counts['read_ahead_reads'] += ahead.reads
+                self.hash_ahead_counts['read_ahead_wait_seconds'] += ahead.wait_seconds
+        digest = job.digest or tree.digest
+        self._send(protocol.FILE_DONE, protocol.encode_file_done(job.index, tree.size, digest))
+        self.files_digest.add(job.path, tree.size, digest)
+        self._count(job, len(pages), sent_bytes)
+
+    def _block_digests(self, job, node, basis_pages):
+        """B's block digests for the pages of `node` (--subpage), checked against the pages B has there."""
+        blob = self.inbox.wait(lambda: self.inbox.blocks.pop((job.index, node), None),
+                               f'block digests of {job.path}', 'leaf')
+        first = node * self.node_blocks
+        expected = sum(subpage.digest_bytes(span_length(page, self.block, job.basis_size))
+                       for page in range(first, first + basis_pages))
+        if len(blob) != expected:
+            raise ProtocolError(f'BLOCK_DIGESTS for {job.path} node {node} has the wrong length')
+        self.subpage_counts['block_digest_bytes'] += len(blob)
+        return blob
+
+    def _old_blocks(self, job, blocks):
+        """page -> B's block digests of that page, or None where B has no full page there (it goes whole)."""
+        def old(page):
+            node, at = divmod(page, self.node_blocks)
+            blob = blocks.get(node)
+            if blob is None or self.block != subpage.PAGE or (page + 1) * self.block > job.basis_size:
+                return None
+            return blob[at * subpage.DIGESTS_PER_PAGE:(at + 1) * subpage.DIGESTS_PER_PAGE]
+        return old
+
+    def _send_pages(self, job, pages, old=None, ahead=None):
+        """`ahead`, a _ReadAhead of exactly these runs (--hash-ahead with --read-ahead), reads them instead."""
+        sent = 0
+        try:
+            fd = open_regular(self._source_file(job.path))
+        except OSError as exc:
+            raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
+        try:
+            for first, count in matching.runs(pages, self.max_run):
+                offset = first * self.block
+                length = min(count * self.block, job.tree.size - offset)
+                try:
+                    data = pread_exact(fd, length, offset) if ahead is None else ahead.next(job.index, first)
+                except OSError as exc:
+                    raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
+                self.inbox.check()
+                self._send_requests()
+                self._send_run(job.index, first, data, old)
+                sent += length
+            self._drain_runs()
+        finally:
+            os.close(fd)
+        return sent
+
+    def _send_live_pages(self, job, pages, old=None, ahead=None):
+        """Live: send the pages as read now, each hashed again, and keep the digest of what was sent in job.digest.
+
+        A page may have changed since the file was hashed; the copy is made of
+        these bytes, so FILE_DONE carries the digest of the file with them in
+        place (pgdelta.live.composite_digest), and the receiver verifies that.
+        A file held strictly (the WAL and history files) must not change at
+        all: a page of it that differs fails the run.
+        """
+        sent, changed, tree, block = 0, {}, job.tree, self.block
+        strict = job.path in self.reader.strict
+        try:
+            handle = self.reader.open(job.entry)
+        except OSError as exc:
+            raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
+        try:
+            for first, count in matching.runs(pages, self.max_run):
+                offset = first * block
+                length = min(count * block, tree.size - offset)
+                try:
+                    data = handle.read(offset, length) if ahead is None else ahead.next(job.index, first)
+                except OSError as exc:
+                    raise TransferError(f'cannot read source file {job.path}: {exc}') from exc
+                view = memoryview(data)
+                for page in range(first, first + count):
+                    leaf = self.hasher.leaf(view[(page - first) * block:(page - first + 1) * block])
+                    if leaf != tree.leaf(page):
+                        if strict:
+                            raise VerificationError(f'{job.path} changed after it was hashed (page {page}): WAL '
+                                                    f'must not change once pg_backup_stop has returned')
+                        changed[page] = leaf
+                self.inbox.check()
+                self._send_requests()
+                self._send_run(job.index, first, data, old)
+                sent += length
+            self._drain_runs()
+        finally:
+            handle.close()
+        if changed:
+            self.reader.counts['pages_changed_after_hash'] += len(changed)
+            job.digest = live.composite_digest(tree, self.hasher, changed)
+        return sent
+
+    def _send_run(self, index, first, data, old=None):
+        """One run of pages: PAGE_DATA at once, or, with compression accepted, queued for the compressing pool.
+        With --subpage accepted, the run goes as PAGE_DELTA: each page's changed blocks against `old`."""
+        head, plain, packed = protocol.page_data_head(index, first), protocol.PAGE_DATA, protocol.PAGE_DATA_ZSTD
+        if self.subpage_used:
+            data, plain, packed = self._delta(first, data, old), protocol.PAGE_DELTA, protocol.PAGE_DELTA_ZSTD
+        if self.codec is None:
+            self._send(plain, head, data)
+            return
+        self.queued.append((head, data, plain, packed))
+        self.queued_bytes += len(data)
+        if self.queued_bytes >= compression.TASK_BYTES:
+            self._submit_queued()
+
+    def _submit_queued(self):
+        """The queued runs as one task for the compressing pool (EXP-50); at most two tasks per thread wait."""
+        if not self.queued:
+            return
+        self.compressing.append((self.queued, self.compressor.submit(self._compress_task, self.queued)))
+        self.queued, self.queued_bytes = [], 0
+        while len(self.compressing) > 2 * self.compress_counts['threads']:
+            self._send_compressed()
+
+    def _delta(self, first, data, old):
+        """A run's PAGE_DELTA body (pgdelta.subpage): every page against B's block digests where B has it."""
+        started, parts, view = time.perf_counter(), [], memoryview(data)
+        for at in range(0, len(data), self.block):
+            page = first + at // self.block
+            parts += subpage.encode_page(view[at:at + self.block], old(page) if old else None, self.hasher,
+                                         self.subpage_counts)
+        self.subpage_counts['hash_seconds'] += time.perf_counter() - started
+        return b''.join(parts)
+
+    def _compress_task(self, runs):
+        started = time.perf_counter()
+        packed = [self.codec.compress(data) for _, data, _, _ in runs]
+        return packed, time.perf_counter() - started
+
+    def _drain_runs(self):
+        """Send every queued run, in order: a file's pages all precede its FILE_DONE."""
+        self._submit_queued()
+        while self.compressing:
+            self._send_compressed()
+
+    def _send_compressed(self):
+        """The oldest task's runs, in order: each PAGE_DATA_ZSTD if it shrank, else PAGE_DATA."""
+        runs, future = self.compressing.popleft()
+        counts = self.compress_counts
+        started = time.perf_counter()
+        packed, seconds = future.result()
+        counts['wait_seconds'] += time.perf_counter() - started
+        counts['seconds'] += seconds
+        counts['tasks'] += 1
+        for (head, data, plain, packed_code), frame in zip(runs, packed):
+            counts['runs'] += 1
+            counts['raw_bytes'] += len(data)
+            if len(frame) < len(data):
+                counts['runs_compressed'] += 1
+                counts['wire_bytes'] += len(frame)
+                self._send(packed_code, head, frame)
+            else:
+                counts['wire_bytes'] += len(data)
+                self._send(plain, head, data)
+
+    def _send(self, code, *parts):
+        """Send one frame, counting the time send() blocked: page_send_s for page data, other_send_s else."""
+        started = time.perf_counter()
+        self.channel.send(code, *parts)
+        self.waits.sent(code in (protocol.PAGE_DATA, protocol.PAGE_DATA_ZSTD), time.perf_counter() - started)
+
+    def _send_json(self, code, value):
+        started = time.perf_counter()
+        self.channel.send_json(code, value)
+        self.waits.sent(False, time.perf_counter() - started)
+
+    def _events_start(self, inventory):
+        """--events: a start event now, then progress every 0.1 s from a thread of its own (the event log has
+        one writer at a time: this thread until _events_finish stops it), in pgdelta.events' format."""
+        if not self.events_path:
+            return
+        self.events = EventLog(self.events_path, method='pgdelta')
+        self.events.emit('start', total_bytes=sum(entry.size for entry in inventory.files),
+                         files=len(inventory.files), chunk_size=self.block)
+        self._events_stop = threading.Event()
+
+        def sample():
+            while not self._events_stop.wait(self.events.interval):
+                self.events.emit('progress', **self._progress())
+
+        self._events_thread = threading.Thread(target=sample, name='pgdelta-events', daemon=True)
+        self._events_thread.start()
+
+    def _progress(self):
+        return {'bytes_read': self.bytes_done, 'bytes_sent': self.channel.sent.total,
+                'chunks_same': self.pages['reused'], 'chunks_changed': self.pages['sent'], 'chunks_new': 0,
+                'files_done': self.files['total']}
+
+    def _events_finish(self, ok):
+        if self.events is None:
+            return
+        self._events_stop.set()
+        self._events_thread.join()
+        self.events.emit('done', ok=ok, elapsed=round(time.perf_counter() - self.events.started, 4),
+                         **self._progress())
+        self.events.close()
+        self.events = None
+
+    def _count(self, job, pages_sent, sent_bytes):
+        tree, plan, files = job.tree, job.plan, self.files
+        self.bytes_done += tree.size
+        files['total'] += 1
+        if job.basis_size is None:
+            files['new'] += 1
+        else:
+            if job.basis_size != tree.size:
+                files['size_mismatch'] += 1
+            unchanged = self.reuse and pages_sent == 0 and job.basis_size == tree.size
+            files['unchanged' if unchanged else 'changed'] += 1
+        self.pages['total'] += tree.page_count
+        self.pages['sent'] += pages_sent
+        self.pages['reused'] += tree.page_count - pages_sent
+        self.pages['sent_bytes'] += sent_bytes
+        self.nodes['total'] += tree.node_count
+        self.nodes['matched'] += len(plan.matched)
+        self.nodes['descended'] += len(plan.descend)
+        self.nodes['sent_whole'] += len(plan.whole)
+        self.high_churn_files += plan.high_churn
+
+    def _live_summary(self):
+        if self.live is None:
+            return None
+        summary = self.live.summary()
+        summary['appended_files'] = len(self.appended)
+        summary.update(self.reader.counts if self.reader is not None else {})
+        return summary
+
+    def switches(self):
+        """The sender's engine settings in effect."""
+        return {'jobs': self.jobs,
+                'hash_backend': self.pool.backend if self.pool is not None else None}
+
+    def stats(self, status, exit_code, error):
+        receiver = self.receiver_stats or {}
+        now = time.perf_counter()
+        protocol_seconds = self.protocol_seconds
+        if protocol_seconds is None and self.protocol_started is not None:
+            protocol_seconds = now - self.protocol_started
+        timings = {
+            'hash_source': self.hash_source,
+            'hash_basis': receiver.get('hash_basis_seconds'),
+            'protocol': protocol_seconds,
+            'rebuild': receiver.get('rebuild_seconds'),  # writing O
+            'copy_basis': receiver.get('copy_seconds'),  # of which: copying from B
+            # of which: fsync of O's files. With --fsync worker it runs on a background thread alongside
+            # rebuild instead (and may exceed it); rebuild then holds the receiver's fsync_wait_seconds.
+            'fsync': receiver.get('fsync_seconds'),
+            'verify': receiver.get('verify_seconds'),  # re-hashing O (overlaps writing it when pipelined)
+            'verify_wait': receiver.get('verify_wait_seconds'),  # of which the receiver's main loop waited
+            'pool_start': self.pool_start_seconds,
+            # until the first, and until every one, of the workers had started (null until then)
+            'pool_first_ready': None if self.pool is None else self.pool.first_ready_seconds,
+            'pool_ready': None if self.pool is None else self.pool.ready_seconds,
+            'receiver_pool_first_ready': receiver.get('pool_first_ready_seconds'),
+            'receiver_pool_ready': receiver.get('pool_ready_seconds'),
+            'total': now - self.started,
+        }
+        return {
+            'schema_version': STATS_SCHEMA_VERSION,
+            'tool': 'pgdelta',
+            'tool_version': __version__,
+            'protocol_version': protocol.PROTOCOL_VERSION,
+            'status': status,
+            'exit_code': exit_code,
+            'error': error,
+            'mode': self.mode,
+            'gate_reason': self.reason,
+            'reuse_policy': self.policy,
+            'block': self.block,
+            'node_blocks': self.node_blocks,
+            'high_churn_node_fraction': self.high_churn,
+            'window': self.window,
+            # --hash-ahead (EXP-91): the bound, how far ahead hashing got and what each thread waited for; absent
+            # without it, so a session without it keeps its statistics' keys.
+            **({'hash_ahead': {**{k: round(v, 6) if isinstance(v, float) else v
+                                  for k, v in self.hash_ahead_counts.items()},
+                               'read_ahead_threads': self.read_ahead}} if self.hash_ahead else {}),
+            'jobs': self.jobs,
+            'hash_backend': self.switches()['hash_backend'],
+            'hash': self.hash_algorithm,  # the keyed digest both ends used (EXP-29: blake2b or blake3)
+            # "spawn": the workers are this process's children, so wait4/RUSAGE_CHILDREN count them.
+            'worker_start_method': None if self.pool is None else self.pool.start_method,
+            # Both ends' engine settings; the receiver's are null until its final statistics arrive.
+            'switches': {'sender': self.switches(), 'receiver': receiver.get('switches')},
+            'source_identity': self.identity,
+            'basis_identity': self.basis_identity,
+            # A backup (S), a stopped data directory read directly, or a running one read in backup mode, and
+            # what was left out of it.
+            'source_kind': self.source_kind,
+            'source_excluded': None if self.selection is None else self.selection.excluded_summary(),
+            # A running source (pgdelta.live): its backup's LSNs and times, the WAL sent, how its files changed
+            # while they were read, and how backup mode ended; null for the other kinds.
+            'live': self._live_summary(),
+            'in_place': self.in_place,
+            'files': dict(self.files),
+            'directories': self.directory_count,
+            'files_digest': (self.files_digest.hexdigest()
+                             if self.file_count is not None and self.files_digest.count == self.file_count
+                             else None),
+            'pages': dict(self.pages),
+            'nodes': dict(self.nodes),
+            'high_churn_files': self.high_churn_files,
+            # LEAF_REQUEST frames sent: the leaf round trips a window may hide (EXP-13).
+            'leaf_requests': self.leaf_requests,
+            # EXP-13: the connect, the waits for the receiver (each split into busy and idle by the send
+            # queue), and the time blocked sending (pgdelta.waits). Like timings, they vary from run to run.
+            'protocol_timers': self.waits.summary(getattr(self.channel, 'connect_seconds', None)),
+            'bytes_source_to_dest': self.channel.sent.summary(),
+            'bytes_dest_to_source': self.channel.received.summary(),
+            'timings_seconds': {key: None if value is None else round(value, 6)
+                                for key, value in timings.items()},
+            'receiver': self.receiver_stats,
+            # --compress: what was asked, what the receiver accepted, and what it saved; absent without it.
+            **({'compress': {'requested': self.compress, 'used': None if self.codec is None else self.compress,
+                             'backend': None if self.codec is None else self.codec.backend,
+                             **self.compress_counts}} if self.compress is not None else {}),
+            **({'subpage': {'requested': True, 'used': self.subpage_used,
+                            **{k: round(v, 6) if isinstance(v, float) else v for k, v in self.subpage_counts.items()}}}
+               if self.subpage else {}),
+        }
+
+
+def run_sender(channel, source, *, identity=None, block=None, node_blocks=NODE_BLOCKS,
+               high_churn_node_fraction=None, window=DEFAULT_WINDOW, key=None, jobs=DEFAULT_JOBS,
+               hash_backend=DEFAULT_BACKEND, source_kind=datadir.DEFAULT_SOURCE_KIND, pg_controldata=None,
+               busy_inflight_bytes=None, pg_conn=None, psql=None, live_timeout=None,
+               hash_algorithm=DEFAULT_ALGORITHM, compress=None, checkpoint=live.DEFAULT_CHECKPOINT, subpage=False,
+               read_ahead=0, hash_ahead=DEFAULT_HASH_AHEAD, events=None):
+    """Run one session as the sender and return the statistics dict.
+
+    On failure the raised PgDeltaError carries partial statistics in
+    `pgdelta_stats`. `block=None` takes the block size from the source
+    identity, or 8192 when the identity is unknown. `jobs` worker processes
+    (threads with hash_backend="thread") hash S; jobs=1 hashes in this
+    thread. The digests, and so everything sent, are the same for any value.
+    With jobs > 1, a program calling this must guard its main module
+    (`if __name__ == '__main__':`), as multiprocessing's spawn requires.
+    `source_kind` "datadir" reads a cleanly stopped data directory directly
+    (pgdelta.datadir) and needs `pg_controldata`; its identity is then read
+    from it unless `identity` is given. `source_kind` "live" reads a running
+    cluster's data directory in backup mode (pgdelta.live): it needs
+    `pg_controldata` and `pg_conn`, a psql connection string to that
+    server, and runs `psql` (default: beside pg_controldata, else on PATH).
+    While its replication slot is held, a receiver that makes no progress
+    for `live_timeout` seconds (default pgdelta.live.DEFAULT_TIMEOUT) fails
+    the run (StallWatch). A run with one of EXP-25's broken test variants
+    (PGDELTA_TEST_READ_BEFORE_START) raises VerificationError (exit 4) even
+    when the receiver published, its statistics attached as on failure.
+    `window` files are hashed ahead of the one being sent (at least 1): it
+    changes the order of the frames on the wire, never what they hold.
+    `busy_inflight_bytes` (EXP-13): over TCP on Linux, a wait counts as busy
+    while bytes are unsent, or while more than this many are in flight;
+    without it, only unsent bytes do (pgdelta.waits). Only the statistics
+    change. `compress` "zstd" offers zstd for the pages sent (pgdelta.compress);
+    a receiver that can't use it accepts without, and the pages go plain.
+    `checkpoint` ("fast" or "spread") is pg_backup_start's for a live source.
+    `subpage` offers sub-page deltas (pgdelta.subpage): with them accepted, each page sent carries only its
+    512-byte blocks that differ from B's.
+    `hash_ahead` bytes (EXP-91): S's files are hashed on a thread of their own, up to that many bytes of files ahead
+    of the one being sent, so S is read while a send blocks (_Planner); `read_ahead` threads then read the pages
+    each file sends. 0 hashes on the sending thread, `window` files ahead. Only the order of the frames changes.
+    """
+    session = _Sender(channel, source, identity, block, node_blocks, high_churn_node_fraction,
+                      window, key, jobs, hash_backend, source_kind, pg_controldata, busy_inflight_bytes,
+                      pg_conn, psql, live_timeout, hash_algorithm, compress, checkpoint, subpage, read_ahead,
+                      hash_ahead)
+    session.events_path = events
+    return session.run()

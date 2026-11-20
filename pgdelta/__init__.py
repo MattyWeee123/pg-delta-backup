@@ -1,7 +1,8 @@
-"""pgdelta: refresh an old copy of a PostgreSQL data directory by sending only the chunks that differ.
+"""pgdelta: refresh an older physical copy of a PostgreSQL cluster.
 
-This is the naive starting version: one thread, one TCP connection, and one round trip per chunk
-("stop and wait"). See pgdelta/README.md for how it works and the roadmap issues for what comes next.
+Only pages whose keyed hash differs cross the link; every output file is
+re-hashed against the source before the output directory is published.
+See pgdelta/README.md for the protocol and docs/SPEC.md for the design.
 """
 
 __version__ = '0.1.0'

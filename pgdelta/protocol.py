@@ -1,168 +1,335 @@
-"""The wire format: framed messages over one byte stream, with bytes counted per message type.
+"""Framed messages over a byte stream, with per-type byte accounting.
 
-Every frame is a 5-byte header (payload length as a 4-byte big-endian integer, then a 1-byte type)
-followed by the payload.
+Frame: 4-byte big-endian payload length, 1-byte message type, payload.
+Control messages carry UTF-8 JSON; digests and pages travel as raw bytes.
+Every frame (header included) is counted per direction and per type, so a
+run can report exactly how many bytes crossed the link and why.
 """
 from __future__ import annotations
 
 import json
-import socket
 import struct
-from collections import Counter
+import threading
+import time
 
+from pgdelta.errors import ProtocolError, TransferError
 from pgdelta.hashing import DIGEST_SIZE
 
-VERSION = 3
+PROTOCOL_VERSION = 1
 HEADER = struct.Struct('>IB')
-MAX_PAYLOAD = 64 << 20
+MAX_FRAME = 64 << 20
 
-# Message types, in the order a session uses them. 3, 4, 10 and 11 are retired: the per-chunk
-# CHUNK_HASH/VERDICT, then the batched CHUNK_HASHES/VERDICTS. Nothing is asked for any more --
-# the receiver volunteers B's digests and the sender decides on its own side.
-HELLO = 1        # sender -> receiver: JSON {version, chunk_size, key, entries}
-ACCEPT = 2       # receiver -> sender: JSON {basis_sizes: [[file index, size], ...]}
-CHUNK_DATA = 5   # sender -> receiver: file index, chunk index, the chunk's bytes
-FILE_DONE = 6    # sender -> receiver: file index, size, digest of S's whole file
-COMPLETE = 7     # sender -> receiver: every file has been sent
-RESULT = 8       # receiver -> sender: JSON {ok, stats}
-ERROR = 9        # either way: JSON {message}
-BASIS_DIGESTS = 12  # receiver -> sender: unasked, file index, first chunk index, count, B's digests
-CHUNK_COPY = 13      # sender -> receiver: file index, first chunk index, count, a run-length copy instruction
+HELLO, ACCEPT, BASIS_NODES, LEAF_REQUEST, LEAF_DIGESTS, PAGE_DATA, FILE_DONE, COMPLETE, ERROR = range(1, 10)
+# A live source (--source-kind live, pgdelta.live) learns which WAL segments and what backup_label to send only
+# after pg_backup_stop, when every listed file has been sent. Its HELLO says so ("appends": true), and APPEND
+# then lists those files once, before COMPLETE. No other session sends either, so their bytes are unchanged.
+APPEND = 10
+# --compress zstd (pgdelta.compress): a run of pages compressed, its head as PAGE_DATA's. Sent only after the
+# receiver accepted the HELLO's compress_offer, so no other session's bytes change.
+PAGE_DATA_ZSTD = 11
+# --subpage (pgdelta.subpage): after each LEAF_DIGESTS, B's 512-byte block digests for the same nodes; then runs as
+# a bitmap and the changed blocks per page, plain or compressed. Sent only after the receiver accepted the HELLO's
+# subpage_offer, so no other session's bytes change.
+BLOCK_DIGESTS = 12
+PAGE_DELTA = 13
+PAGE_DELTA_ZSTD = 14
+# 15-18: the archived WAL-summary fast path's messages (branch archive/fast-path); do not reuse.
+MESSAGES = {
+    HELLO: ('HELLO', 'control'),
+    ACCEPT: ('ACCEPT', 'control'),
+    BASIS_NODES: ('BASIS_NODES', 'node_digests'),
+    LEAF_REQUEST: ('LEAF_REQUEST', 'leaf_digests'),
+    LEAF_DIGESTS: ('LEAF_DIGESTS', 'leaf_digests'),
+    PAGE_DATA: ('PAGE_DATA', 'page_data'),
+    FILE_DONE: ('FILE_DONE', 'control'),
+    COMPLETE: ('COMPLETE', 'control'),
+    ERROR: ('ERROR', 'control'),
+    APPEND: ('APPEND', 'control'),
+    PAGE_DATA_ZSTD: ('PAGE_DATA_ZSTD', 'page_data'),
+    BLOCK_DIGESTS: ('BLOCK_DIGESTS', 'leaf_digests'),
+    PAGE_DELTA: ('PAGE_DELTA', 'page_data'),
+    PAGE_DELTA_ZSTD: ('PAGE_DELTA_ZSTD', 'page_data'),
+}
+CATEGORIES = ('control', 'node_digests', 'leaf_digests', 'page_data')
 
-NAMES = {HELLO: 'HELLO', ACCEPT: 'ACCEPT',
-         CHUNK_DATA: 'CHUNK_DATA', FILE_DONE: 'FILE_DONE', COMPLETE: 'COMPLETE', RESULT: 'RESULT',
-         ERROR: 'ERROR', BASIS_DIGESTS: 'BASIS_DIGESTS', CHUNK_COPY: 'CHUNK_COPY'}
-
-CHUNK_DATA_HEAD = struct.Struct('>IQ')
-FILE_DONE_BODY = struct.Struct('>IQ16s')
-BASIS_DIGESTS_HEAD = struct.Struct('>IQI')
-CHUNK_COPY_BODY = struct.Struct('>IQI')
-
-# The chunk size both sides agree on, which arrives in HELLO and so is peer-supplied. It lives here
-# rather than in sender.py because the receiver has to check it before it starts hashing B, and must
-# not import the sender to do so.
-MIN_CHUNK_SIZE, MAX_CHUNK_SIZE = 512, 16 << 20
-
-# How many digests the receiver's generator puts in one BASIS_DIGESTS frame.
-DIGESTS_PER_FRAME = 1024
-# The most digests a BASIS_DIGESTS payload can hold without exceeding MAX_PAYLOAD.
-MAX_DIGESTS_PER_FRAME = (MAX_PAYLOAD - BASIS_DIGESTS_HEAD.size) // DIGEST_SIZE
+_INDEX = struct.Struct('>I')
+_INDEX_U64 = struct.Struct('>IQ')
+_NODE_HEAD = struct.Struct('>II')
+_FILE_DONE = struct.Struct(f'>IQ{DIGEST_SIZE}s')
+PAGE_HEAD_SIZE = _INDEX_U64.size
 
 
-class ProtocolError(Exception):
-    """The peer sent something this version doesn't expect."""
+def name(code):
+    return MESSAGES[code][0] if code in MESSAGES else f'type {code}'
 
 
-class PeerError(Exception):
-    """The peer reported an error (an ERROR frame)."""
+class ChannelClosed(TransferError):
+    """The stream failed or the peer went away."""
 
 
-class Closed(Exception):
-    """The stream ended where a frame was expected."""
+class Counter:
+    def __init__(self):
+        self.frames = dict.fromkeys(MESSAGES, 0)
+        self.bytes = dict.fromkeys(MESSAGES, 0)
+
+    def add(self, code, size):
+        self.frames[code] += 1
+        self.bytes[code] += size
+
+    @property
+    def total(self):
+        return sum(self.bytes.values())
+
+    def summary(self):
+        result = {'total': self.total, **dict.fromkeys(CATEGORIES, 0)}
+        for code, (_, category) in MESSAGES.items():
+            result[category] += self.bytes[code]
+        result['by_message_type'] = {
+            label: {'frames': self.frames[code], 'bytes': self.bytes[code]}
+            for code, (label, _) in MESSAGES.items() if self.frames[code]}
+        return result
 
 
 class Channel:
-    """One framed connection. Counts the bytes sent and received per message type."""
+    """One bidirectional session stream. send() is thread-safe; recv() has one caller.
 
-    def __init__(self, sock: socket.socket):
+    `sock` is the TCP socket under the stream (None over pipes), whose send
+    queue the sender reads while it waits (pgdelta.waits); `connect_seconds`
+    is how long connecting it took, when this end connected.
+
+    `sending_since` is the time.monotonic() at which the send() in progress
+    began (None between sends), so another thread can tell a send that the
+    peer has stopped taking. abort() ends the stream at once from any
+    thread through `aborter` (a TCP socket: shut it down; a child process:
+    kill it), so a send or receive blocked on the peer fails, and every
+    later send fails without writing.
+    """
+    connect_seconds = None
+
+    def __init__(self, reader, writer, *, closer=None, max_frame=MAX_FRAME, sock=None, aborter=None):
+        self._reader, self._writer, self._closer = reader, writer, closer
+        self.max_frame = max_frame
         self.sock = sock
-        self.sent = Counter()
-        self.received = Counter()
+        self.sent, self.received = Counter(), Counter()
+        self._lock = threading.Lock()
+        self._closed = self._broken = False
+        self._aborter = aborter
+        self.aborted = False
+        self.sending_since = None
 
-    def send(self, kind: int, payload: bytes = b'') -> None:
-        if len(payload) > MAX_PAYLOAD:
-            raise ProtocolError(f'{NAMES.get(kind, kind)} payload of {len(payload)} bytes is too large')
-        self.sock.sendall(HEADER.pack(len(payload), kind) + payload)
-        self.sent[NAMES.get(kind, str(kind))] += HEADER.size + len(payload)
+    def send(self, code, *parts):
+        if code not in MESSAGES:
+            raise ProtocolError(f'refusing to send unknown message type {code}')
+        size = sum(len(part) for part in parts)
+        if size > self.max_frame:
+            raise ProtocolError(f'{name(code)} payload of {size} bytes exceeds the {self.max_frame} byte frame limit')
+        with self._lock:
+            if self.aborted:
+                raise ChannelClosed(f'cannot send {name(code)}: the connection was aborted')
+            if self._broken:
+                raise ChannelClosed(f'cannot send {name(code)}: an earlier frame was cut off')
+            self.sending_since = time.monotonic()
+            try:
+                self._writer.write(HEADER.pack(size, code))
+                for part in parts:
+                    self._writer.write(part)
+                self._writer.flush()
+            except BaseException as exc:
+                # A partly written frame desynchronizes the stream; send nothing more.
+                self._broken = True
+                if isinstance(exc, (OSError, ValueError)):
+                    raise ChannelClosed(f'cannot send {name(code)}: {exc}') from exc
+                raise
+            finally:
+                self.sending_since = None
+            self.sent.add(code, HEADER.size + size)
 
-    def send_json(self, kind: int, value) -> None:
-        self.send(kind, json.dumps(value, separators=(',', ':')).encode())
+    def abort(self):
+        """End the stream now, from any thread: what is blocked on the peer fails, and nothing more is sent."""
+        if self.aborted:
+            return
+        self.aborted = True
+        if self._aborter is not None:
+            try:
+                self._aborter()
+            except OSError:
+                pass
 
-    def recv(self) -> tuple[int, bytes]:
-        length, kind = HEADER.unpack(self._exact(HEADER.size))
-        if length > MAX_PAYLOAD:
-            raise ProtocolError(f'frame of {length} bytes is too large')
-        payload = self._exact(length)
-        self.received[NAMES.get(kind, str(kind))] += HEADER.size + length
-        return kind, payload
+    def send_json(self, code, value):
+        self.send(code, json.dumps(value, separators=(',', ':'), allow_nan=False).encode('utf-8'))
 
-    def expect(self, kind: int) -> bytes:
-        """The next frame's payload, which must be of type `kind`. An ERROR frame raises PeerError."""
-        got, payload = self.recv()
-        if got == ERROR:
-            raise PeerError(json.loads(payload).get('message', 'unknown error'))
-        if got != kind:
-            raise ProtocolError(f'expected {NAMES[kind]}, got {NAMES.get(got, got)}')
-        return payload
+    def recv(self):
+        """Return (type, payload), or None on a clean end of stream between frames."""
+        header = self._read_exact(HEADER.size, allow_eof=True)
+        if header is None:
+            return None
+        size, code = HEADER.unpack(header)
+        if code not in MESSAGES:
+            raise ProtocolError(f'unknown message type {code}')
+        if size > self.max_frame:
+            raise ProtocolError(f'{name(code)} frame of {size} bytes exceeds the {self.max_frame} byte limit')
+        payload = self._read_exact(size)
+        self.received.add(code, HEADER.size + size)
+        return code, payload
 
-    def _exact(self, n: int) -> bytes:
-        parts, left = [], n
-        while left:
-            part = self.sock.recv(min(left, 1 << 20))
-            if not part:
-                raise Closed('the peer closed the connection')
-            parts.append(part)
-            left -= len(part)
-        return b''.join(parts)
+    def _read_exact(self, size, allow_eof=False):
+        buffer = bytearray(size)
+        view = memoryview(buffer)
+        filled = 0
+        while filled < size:
+            try:
+                count = self._reader.readinto(view[filled:])
+            except (OSError, ValueError) as exc:
+                raise ChannelClosed(f'connection failed: {exc}') from exc
+            if not count:
+                if filled == 0 and allow_eof:
+                    return None
+                raise ChannelClosed('connection closed in the middle of a frame')
+            filled += count
+        return buffer
 
-
-def comparable(chunk: int, chunk_size: int, source_size: int, basis_size: int) -> bool:
-    """Whether this chunk of S can be compared against B: B has to hold the whole of the range S's
-    chunk covers, since two digests are only comparable over identical ranges. Both sides decide it
-    with this one function -- the receiver's generator hashes exactly these chunks of B, and the
-    sender waits for exactly these digests.
-
-    `offset + length` is `min(offset + chunk_size, source_size)`, which only increases as a file is
-    walked, so within one file this can go true -> false at most once and never back: the chunks a
-    file compares are always the contiguous run 0..k-1. The wire format relies on that -- a digest
-    frame carries only its first chunk index, not one index per digest.
-    """
-    offset = chunk * chunk_size
-    if offset >= source_size:
-        return False
-    return offset + min(chunk_size, source_size - offset) <= basis_size
-
-
-def unpack_digest_frame(payload: bytes) -> tuple[int, int, list[bytes]]:
-    """Unpack a BASIS_DIGESTS frame: (file index, first chunk, count) + digests.
-
-    Validates against the payload's actual length before `count` sizes anything, so a peer-supplied
-    count can never drive an allocation before it is checked.
-    """
-    if len(payload) < BASIS_DIGESTS_HEAD.size:
-        raise ProtocolError('digest frame payload too short for header')
-    file_index, first_chunk, count = BASIS_DIGESTS_HEAD.unpack(payload[:BASIS_DIGESTS_HEAD.size])
-    if count == 0:
-        raise ProtocolError('digest frame count must be nonzero')
-    if count > MAX_DIGESTS_PER_FRAME:
-        raise ProtocolError(f'digest frame count {count} exceeds the cap of {MAX_DIGESTS_PER_FRAME}')
-    body = payload[BASIS_DIGESTS_HEAD.size:]
-    if len(body) != count * DIGEST_SIZE:
-        raise ProtocolError(
-            f'digest frame body is {len(body)} bytes, expected {count * DIGEST_SIZE} for count {count}')
-    digests = [body[i * DIGEST_SIZE:(i + 1) * DIGEST_SIZE] for i in range(count)]
-    return file_index, first_chunk, digests
-
-
-def hang_up(sock: socket.socket) -> None:
-    """Shut the connection down so that a thread blocked on `sock` -- in a send the peer will never
-    drain, or in a recv -- wakes with an error or end of stream.
-
-    Both directions where the system allows it. macOS refuses SHUT_RDWR (and SHUT_RD) with ENOTCONN
-    once the peer has shut its own write side down; reads already end there, so shutting the write
-    side is all that is left to do, and it is what fails a blocked send."""
-    try:
-        sock.shutdown(socket.SHUT_RDWR)
-    except OSError:
+    def discard_input(self):
+        """Read and drop everything until the peer closes its side."""
         try:
-            sock.shutdown(socket.SHUT_WR)
-        except OSError:
+            while self._reader.read1(1 << 16):
+                pass
+        except (OSError, ValueError):
             pass
 
+    def close(self):
+        """Close the write side first so the peer sees end of stream even if a reader is blocked."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._closer is not None:
+            self._closer(self._reader, self._writer)
+            return
+        for stream in (self._writer, self._reader):
+            try:
+                stream.close()
+            except (OSError, ValueError):
+                pass
 
-def tune(sock: socket.socket) -> socket.socket:
-    """TCP_NODELAY on: both directions send small frames (a CHUNK_COPY is 21 bytes), and Nagle's
-    algorithm would hold each one back."""
-    if sock.family in (socket.AF_INET, socket.AF_INET6):
-        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    return sock
+
+def decode_json(payload, what):
+    try:
+        value = json.loads(bytes(payload).decode('utf-8'))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ProtocolError(f'{what} is not valid UTF-8 JSON') from exc
+    if not isinstance(value, dict):
+        raise ProtocolError(f'{what} must be a JSON object')
+    return value
+
+
+def encode_basis_nodes(index, size, node_blob):
+    return _INDEX_U64.pack(index, size) + node_blob
+
+
+def decode_basis_nodes(payload):
+    if len(payload) < _INDEX_U64.size or (len(payload) - _INDEX_U64.size) % DIGEST_SIZE:
+        raise ProtocolError('malformed BASIS_NODES')
+    index, size = _INDEX_U64.unpack_from(payload)
+    return index, size, bytes(payload[_INDEX_U64.size:])
+
+
+def encode_leaf_request(index, nodes):
+    return _INDEX.pack(index) + struct.pack(f'>{len(nodes)}I', *nodes)
+
+
+def decode_leaf_request(payload):
+    if len(payload) < _INDEX.size + 4 or (len(payload) - _INDEX.size) % 4:
+        raise ProtocolError('malformed LEAF_REQUEST')
+    count = (len(payload) - _INDEX.size) // 4
+    return _INDEX.unpack_from(payload)[0], list(struct.unpack_from(f'>{count}I', payload, _INDEX.size))
+
+
+def encode_leaf_digests(index, entries):
+    """entries: (node index, concatenated basis leaf digests of that node) pairs."""
+    parts = [_INDEX.pack(index)]
+    for node, blob in entries:
+        parts += [_NODE_HEAD.pack(node, len(blob) // DIGEST_SIZE), blob]
+    return b''.join(parts)
+
+
+def decode_leaf_digests(payload):
+    if len(payload) < _INDEX.size:
+        raise ProtocolError('malformed LEAF_DIGESTS')
+    index = _INDEX.unpack_from(payload)[0]
+    offset, entries = _INDEX.size, []
+    while offset < len(payload):
+        if offset + _NODE_HEAD.size > len(payload):
+            raise ProtocolError('truncated LEAF_DIGESTS entry')
+        node, count = _NODE_HEAD.unpack_from(payload, offset)
+        offset += _NODE_HEAD.size
+        end = offset + count * DIGEST_SIZE
+        if end > len(payload):
+            raise ProtocolError('truncated LEAF_DIGESTS entry')
+        entries.append((node, bytes(payload[offset:end])))
+        offset = end
+    return index, entries
+
+
+def encode_block_digests(index, entries):
+    """entries: (node index, the block digests of B's pages in that node, concatenated) pairs."""
+    parts = [_INDEX.pack(index)]
+    for node, blob in entries:
+        parts += [_NODE_HEAD.pack(node, len(blob)), blob]
+    return b''.join(parts)
+
+
+def decode_block_digests(payload):
+    if len(payload) < _INDEX.size:
+        raise ProtocolError('malformed BLOCK_DIGESTS')
+    index = _INDEX.unpack_from(payload)[0]
+    offset, entries = _INDEX.size, []
+    while offset < len(payload):
+        if offset + _NODE_HEAD.size > len(payload):
+            raise ProtocolError('truncated BLOCK_DIGESTS entry')
+        node, length = _NODE_HEAD.unpack_from(payload, offset)
+        offset += _NODE_HEAD.size
+        if offset + length > len(payload):
+            raise ProtocolError('truncated BLOCK_DIGESTS entry')
+        entries.append((node, bytes(payload[offset:offset + length])))
+        offset += length
+    return index, entries
+
+
+def page_data_head(index, first_page):
+    return _INDEX_U64.pack(index, first_page)
+
+
+def decode_page_data(payload):
+    if len(payload) <= PAGE_HEAD_SIZE:
+        raise ProtocolError('malformed PAGE_DATA')
+    index, first_page = _INDEX_U64.unpack_from(payload)
+    return index, first_page, memoryview(payload)[PAGE_HEAD_SIZE:]
+
+
+def encode_file_done(index, size, digest):
+    return _FILE_DONE.pack(index, size, digest)
+
+
+def decode_file_done(payload):
+    if len(payload) != _FILE_DONE.size:
+        raise ProtocolError('malformed FILE_DONE')
+    return _FILE_DONE.unpack(payload)
+
+
+MIN_BLOCK, MAX_BLOCK = 512, 1 << 20
+MAX_NODE_BLOCKS = 1 << 16
+MAX_NODE_BYTES = 64 << 20
+
+
+def check_parameters(block, node_blocks, error=ProtocolError):
+    if type(block) is not int or not MIN_BLOCK <= block <= MAX_BLOCK:
+        raise error(f'block size {block!r} must be an integer from {MIN_BLOCK} to {MAX_BLOCK}')
+    if (type(node_blocks) is not int or not 1 <= node_blocks <= MAX_NODE_BLOCKS
+            or block * node_blocks > MAX_NODE_BYTES):
+        raise error(f'node_blocks {node_blocks!r} must be 1 to {MAX_NODE_BLOCKS} '
+                    f'with nodes of at most {MAX_NODE_BYTES} bytes')
+
+
+def max_nodes_per_request(node_blocks, max_frame=MAX_FRAME):
+    """Nodes per LEAF_REQUEST so that the LEAF_DIGESTS reply fits comfortably in one frame."""
+    per_node = _NODE_HEAD.size + node_blocks * DIGEST_SIZE
+    return max(1, min(4096, (max_frame // 2) // per_node))
