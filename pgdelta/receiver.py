@@ -148,10 +148,7 @@ def run_receiver(channel: Channel, basis: Path, output: Path) -> dict:
             # The sender may be waiting for a digest that will now never come, and the main loop
             # for a frame the sender will never send: break the connection so both raise rather
             # than wait forever.
-            try:
-                channel.sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
+            protocol.hang_up(channel.sock)
 
     files = {}  # index -> (output fd, basis fd or None), for the file being written
     done = set()
