@@ -43,14 +43,17 @@ See [pgdelta/README.md](pgdelta/README.md) for every option.
 
 ## Where it stands
 
-Same-session race on two `n2-standard-4` VMs in two zones of us-central1, link capped at 1 Gbit/s, pgbench scale 20, every lane timed on the VM, two runs each, every copy started and checked:
+Two `n2-standard-4` VMs in two zones of us-central1 (50 GB pd-balanced disks), pgbench, every lane timed on the VM with the receiver started cold, two runs each, every pgdelta copy started and checked (runs of Nov 20; time, then MB sent):
 
-| Time vs `pg_basebackup` | Hot change (1% of rows, one range) | Uniform change (every 100th row) |
-|---|---|---|
-| pgdelta, in place | **0.55×** (2.85 s, 23 MB sent) | 1.12× (6.17 s, 229 MB) |
-| pgdelta, new copy | 0.92× (4.76 s, 23 MB) | 1.12× (6.17 s, 229 MB) |
-| the November rebuild (#44), new copy | 1.74× (9.02 s, 293 MB) | 1.65× (9.08 s, 498 MB) |
-| `pg_basebackup` | 1.00× (5.18 s, 341 MB) | 1.00× (5.50 s, 340 MB) |
+| Time vs `pg_basebackup` | 1 Gbit/s, hot | 1 Gbit/s, uniform | 100 Mbit/s, hot | 100 Mbit/s, uniform | 1 Gbit/s, hot, scale 200 |
+|---|---|---|---|---|---|
+| pgdelta, in place | **0.55×** (2.87 s, 23 MB) | 1.12× (6.06 s, 229 MB) | **0.14×** (4.27 s, 24 MB) | 0.71× (21.5 s, 229 MB) | **0.55×** (19.95 s, 80 MB) |
+| pgdelta, new copy | 0.88× (4.59 s, 23 MB) | 1.11× (5.97 s, 229 MB) | 0.20× (5.93 s, 24 MB) | 0.72× (21.8 s, 229 MB) | 0.75× (27.2 s, 80 MB) |
+| `pg_basebackup` | 1.00× (5.22 s, 341 MB) | 1.00× (5.39 s, 340 MB) | 1.00× (30.3 s, 341 MB) | 1.00× (30.2 s, 340 MB) | 1.00× (36.5 s, 3,192 MB) |
+
+Scale 20 unless noted. Hot changes 1% of rows in one range; uniform changes every 100th row. Earlier published figures are superseded: they let the receiver read the old copy before its clock started. The November rebuild (#44) measured 9.02 s (hot) and 9.08 s (uniform) at 1 Gbit/s in runs of Nov 19 on another VM pair.
+
+What limits each tool, from 0.1 s samples on both VMs against the hardware's measured ceilings (disk 168 MB/s, capped link 119.5 MB/s): pgdelta in place is bound by reading both copies (at scale 200 both disks sat at their ceiling 93–94% of the run, and the run took 1.04× the read floor). `pg_basebackup` is bound by the link, then by flushing its copy to disk. Where pgdelta loses (uniform, 1 Gbit/s), reading, sending and writing run one after another, because pages are planned a whole file at a time.
 
 ## Who built what
 

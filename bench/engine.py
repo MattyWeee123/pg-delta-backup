@@ -4,7 +4,8 @@
   a worker (`--fsync worker`), and re-reads O to verify it (verifying as written needs `--in-place`).
 - `pgdelta-inplace` patches a fresh copy of B in place and verifies as it writes
   (`--verify-scope as-written`): EXP-92's `hashAVw` (docs/PAST-RESULTS.md).
-Both hash with BLAKE2b on 4 worker processes a side (`--jobs 4`), read the stopped source directly
+Both hash with BLAKE2b on 4 worker processes a side (`--jobs 4`), start the receiver cold (`--prefetch-basis off`,
+so all of its reading of B is inside the timed window), read the stopped source directly
 (`--source-kind datadir`, which leaves out what pg_basebackup leaves out, old WAL among it), and write
 progress events for python -m viz (`--events`).
 """
@@ -24,14 +25,18 @@ def sender_args(controldata: str) -> list[str]:
 
 
 def receiver_args(method: str, controldata: str) -> list[str]:
-    args = ['--basis-pg-controldata', controldata, '--jobs', '4', '--fsync', 'worker']
+    # --prefetch-basis off: by default the receiver reads B into memory while it waits for the sender, which
+    # puts that read before the clock starts (the sender's start) and flatters pgdelta against pg_basebackup.
+    # Found Nov 20: in every such lane the receiver had read all of B (354 MB) before t0.
+    args = ['--basis-pg-controldata', controldata, '--jobs', '4', '--fsync', 'worker', '--prefetch-basis', 'off']
     return args + (['--in-place', '--verify-scope', 'as-written'] if method == 'pgdelta-inplace' else [])
 
 
 def local_args(method: str, source, basis, output, controldata: str) -> list[str]:
     """`python -m pgdelta local` arguments for one arm (basis is patched in place for the in-place arm)."""
     target = [] if method == 'pgdelta-inplace' else ['--output', str(output)]
-    receiver = [a for a in receiver_args(method, controldata) if a not in ('--jobs', '4')]
+    # local starts its receiver with the sender (no wait to read ahead in), and takes neither flag twice
+    receiver = [a for a in receiver_args(method, controldata) if a not in ('--jobs', '4', '--prefetch-basis', 'off')]
     return ['local', '--source', str(source), '--basis', str(basis), *target, *sender_args(controldata), *receiver]
 
 
