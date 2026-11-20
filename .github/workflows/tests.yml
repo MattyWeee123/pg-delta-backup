@@ -25,7 +25,7 @@ jobs:
   # Most of the team develops on Macs, where socket buffers and shutdown() behave differently from
   # Linux: three stream tests once hung there while passing here.
   test-macos:
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
