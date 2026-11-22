@@ -1,0 +1,83 @@
+{
+  "name": "laptop-20261113-173942",
+  "title": "pg_basebackup vs pgdelta, scale 50, hot change (laptop)",
+  "created": "2026-11-13 17:39:42",
+  "finished": true,
+  "lanes": [
+    {
+      "id": "pg_basebackup",
+      "label": "pg_basebackup (copies everything)",
+      "events": "events-pg_basebackup.jsonl"
+    },
+    {
+      "id": "pgdelta",
+      "label": "pgdelta (sends what differs)",
+      "events": "events-pgdelta.jsonl"
+    }
+  ],
+  "setup": {
+    "where": "laptop",
+    "scale": 50,
+    "change": "1% of rows, hot",
+    "repeats": 1
+  },
+  "config": {
+    "name": "laptop-20261113-173942",
+    "where": "laptop",
+    "methods": [
+      "pg_basebackup",
+      "pgdelta"
+    ],
+    "scale": 50,
+    "change": "hot",
+    "repeats": 1,
+    "chunk_size": 8192,
+    "link": "full",
+    "machine": "n2-standard-4",
+    "disk_type": "pd-balanced",
+    "disk_gb": 50,
+    "region": "us-central1",
+    "zones": [
+      "us-central1-a",
+      "us-central1-b"
+    ],
+    "ttl_minutes": 120,
+    "notes": ""
+  },
+  "estimate": null,
+  "facts": {
+    "postgres": "18.6",
+    "machine": "arm64",
+    "cpus": 15,
+    "lanes": {
+      "pg_basebackup": {
+        "elapsed": 1.3482,
+        "bytes_sent": 816555008,
+        "total_bytes": 816555008
+      },
+      "pgdelta": {
+        "elapsed": 11.927754,
+        "bytes_sent": 21846367,
+        "total_bytes": 1386785677,
+        "round_trips": 168340,
+        "chunks_changed": 1014,
+        "chunks_same": 167326,
+        "chunks_new": 958,
+        "ok": true
+      }
+    },
+    "database_bytes": 1436987016,
+    "verify": {
+      "source": "5000000|350000",
+      "copy": "5000000|350000",
+      "match": true,
+      "checked": true
+    }
+  },
+  "verify": {
+    "source": "5000000|350000",
+    "copy": "5000000|350000",
+    "match": true,
+    "checked": true
+  }
+}

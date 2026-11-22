@@ -1,0 +1,89 @@
+{
+ "created": 1794609582.955359,
+ "host": "89e954bc39",
+ "config": {
+  "name": "laptop-20261113-173942",
+  "where": "laptop",
+  "methods": [
+   "pg_basebackup",
+   "pgdelta"
+  ],
+  "scale": 50,
+  "change": "hot",
+  "repeats": 1,
+  "chunk_size": 8192,
+  "link": "full",
+  "machine": "n2-standard-4",
+  "disk_type": "pd-balanced",
+  "disk_gb": 50,
+  "region": "us-central1",
+  "zones": [
+   "us-central1-a",
+   "us-central1-b"
+  ],
+  "ttl_minutes": 120,
+  "notes": ""
+ },
+ "dollars_per_hour": 0,
+ "steps": [
+  {
+   "id": "build",
+   "kind": "build",
+   "label": "Build the database",
+   "lane": null,
+   "expect": 4.4,
+   "basis": "measured in laptop-20261113-173854",
+   "started": 1794609583.3098502,
+   "finished": 1794609587.5607092
+  },
+  {
+   "id": "copy",
+   "kind": "copy",
+   "label": "Take the old copy, then change 1% of rows",
+   "lane": null,
+   "expect": 1.8,
+   "basis": "measured in laptop-20261113-173854",
+   "started": 1794609587.5616362,
+   "finished": 1794609588.828659
+  },
+  {
+   "id": "lane:pg_basebackup",
+   "kind": "lane:pg_basebackup",
+   "label": "pg_basebackup (copies everything)",
+   "lane": "pg_basebackup",
+   "expect": 1.6,
+   "basis": "measured in laptop-20261113-173854",
+   "started": 1794609588.830854,
+   "finished": 1794609590.179583
+  },
+  {
+   "id": "lane:pgdelta",
+   "kind": "lane:pgdelta",
+   "label": "pgdelta (sends what differs)",
+   "lane": "pgdelta",
+   "expect": 11.6,
+   "basis": "measured in laptop-20261113-173854",
+   "started": 1794609590.180338,
+   "finished": 1794609602.307179
+  },
+  {
+   "id": "check",
+   "kind": "check",
+   "label": "Check the refreshed copy matches",
+   "lane": null,
+   "expect": 0.7,
+   "basis": "measured in laptop-20261113-173854",
+   "started": 1794609602.307887,
+   "finished": 1794609602.943725
+  },
+  {
+   "id": "publish",
+   "kind": "publish",
+   "label": "Commit the run and open a pull request",
+   "lane": null,
+   "expect": 3.8,
+   "basis": "measured in laptop-20261113-173854",
+   "started": 1794609602.9492218
+  }
+ ]
+}
