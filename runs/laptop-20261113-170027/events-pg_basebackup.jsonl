@@ -1,0 +1,4 @@
+{"t":0.0,"kind":"start","method":"pg_basebackup"}
+{"t":0.0373,"kind":"progress","method":"pg_basebackup","bytes_sent":0,"total_bytes":0}
+{"t":1.0365,"kind":"progress","method":"pg_basebackup","bytes_sent":806468608,"total_bytes":816543744}
+{"t":1.1174,"kind":"done","method":"pg_basebackup","ok":true,"elapsed":1.1174,"bytes_sent":816555008,"total_bytes":816555008}
