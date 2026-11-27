@@ -1,0 +1,22 @@
+{
+  "name": "small-check",
+  "source": "pgd-mega-src",
+  "destination": "pgd-mega-dst",
+  "driver": "pgd-mega-driver",
+  "zones": ["us-central1-a", "us-central1-b", "us-central1-a"],
+  "hammerdb_image": "tpcorg/hammerdb@sha256:REPLACE_WITH_REAL_DIGEST",
+  "warehouses": 2,
+  "build_vu": 2,
+  "vu": 2,
+  "rampup": 1,
+  "duration": 2,
+  "churn_minutes": 1,
+  "repeats": 1,
+  "warmups": 0,
+  "links": ["100mbit"],
+  "methods": ["pg_basebackup", "pgdelta", "pgdelta-inplace", "native-incremental"],
+  "jobs": 2,
+  "hash_ahead": "1G",
+  "cache": "cold",
+  "timeout": 3600
+}

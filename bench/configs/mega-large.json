@@ -1,0 +1,22 @@
+{
+  "name": "large-1000w",
+  "source": "pgd-mega-src",
+  "destination": "pgd-mega-dst",
+  "driver": "pgd-mega-driver",
+  "zones": ["us-central1-a", "us-central1-b", "us-central1-a"],
+  "hammerdb_image": "tpcorg/hammerdb@sha256:REPLACE_WITH_REAL_DIGEST",
+  "warehouses": 1000,
+  "build_vu": 8,
+  "vu": 16,
+  "rampup": 2,
+  "duration": 60,
+  "churn_minutes": 10,
+  "repeats": 3,
+  "warmups": 1,
+  "links": ["1gbit"],
+  "methods": ["pg_basebackup", "pgdelta", "pgdelta-inplace", "native-incremental"],
+  "jobs": 2,
+  "hash_ahead": "1G",
+  "cache": "cold",
+  "timeout": 21600
+}

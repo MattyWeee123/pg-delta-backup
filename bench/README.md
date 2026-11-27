@@ -1,5 +1,10 @@
 # bench: run a benchmark, record everything, publish it as a pull request
 
+For a three-host **live HammerDB** comparison prioritizing directional backup
+traffic and verified-backup time, see [the mega benchmark runbook](MEGA.md).
+It includes a small acceptance configuration and a gated large-scale configuration;
+planning is the default and real execution requires `--execute`.
+
 One command runs a benchmark on your laptop or on two Google Cloud VMs, records everything about it, and (with `--publish`) commits it to its own branch and opens a pull request. Or use the launcher page instead of a terminal: `python -m viz serve`, then click **New run →**.
 
 ```bash
